@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+"""Utility for the TE layer tests"""
 
 import functools
 import math
@@ -28,6 +29,9 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
 def is_devices_enough(required):
+    """
+    Check if the available GPUs is enough
+    """
     return len(jax.devices()) >= required
 
 
@@ -426,8 +430,8 @@ class MultiHeadAttention(nn.Module):
         #       1/sqrt(depth_kq)!  This is folded into the initializers of the
         #       linear transformations, which is equivalent under Adafactor
         depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-        query_init = lambda *args: self.kernel_init(*args) / (    # pylint: disable=unnecessary-lambda-assignment
-            depth_scaling if self.scaled_query_init else 1.0)
+        query_init = lambda *args: self.kernel_init(*args) / (depth_scaling
+                                                              if self.scaled_query_init else 1.0)
 
         # Project inputs_q to multi-headed q/k/v
         # dimensions are then [batch, length, num_heads, head_dim]
@@ -440,8 +444,8 @@ class MultiHeadAttention(nn.Module):
             v_shape = (shape[0], shape[1] // 3)
 
             q_kernel = query_init(key, q_shape, dtype)
-            k_kernel = self.kernel_init(key, k_shape, dtype)    # pylint: disable=too-many-function-args
-            v_kernel = self.kernel_init(key, v_shape, dtype)    # pylint: disable=too-many-function-args
+            k_kernel = self.kernel_init(key, k_shape, dtype)
+            v_kernel = self.kernel_init(key, v_shape, dtype)
 
             return jnp.concatenate([q_kernel, k_kernel, v_kernel], axis=-1, dtype=dtype)
 
@@ -503,7 +507,7 @@ class MultiHeadAttention(nn.Module):
             # fusion optimization. This also enables the "scatter via one-hot
             # broadcast" trick, which means we do a one-hot broadcast instead of a
             # scatter/gather operations, resulting in a 3-4x speedup in practice.
-            swap_dims = lambda x: x[:-3] + tuple(x[i] for i in [-2, -1, -3])    # pylint: disable=unnecessary-lambda-assignment
+            swap_dims = lambda x: x[:-3] + tuple(x[i] for i in [-2, -1, -3])
             cached_key = self.variable('cache', 'cached_key', jnp.zeros, swap_dims(key.shape),
                                        key.dtype)
             cached_value = self.variable('cache', 'cached_value', jnp.zeros, swap_dims(value.shape),
@@ -1054,6 +1058,9 @@ class DecoderLayer(nn.Module):
 
 
 def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
+    """
+    Generate causal mask
+    """
     shape = (batch, seqlen)
     idxs = jnp.broadcast_to(jnp.arange(shape[-1], dtype=jnp.int32), shape)
 
@@ -1064,6 +1071,9 @@ def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
 
 
 def make_self_mask(batch, seqlen, dtype=jnp.uint8):
+    """
+    Generate attention mask
+    """
     shape = (batch, seqlen)
     mask = jnp.ones((*shape, shape[-1]))
     mask = jnp.expand_dims(mask, axis=-3)
@@ -1099,7 +1109,7 @@ def assert_allclose(
             dtype = actual.dtype
 
     # Determine tolerances
-    tols = dict()
+    tols = {}
     if rtol is None or atol is None:
         tols = dtype_tols(dtype)
     if rtol is not None:

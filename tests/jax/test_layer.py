@@ -9,12 +9,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from transformer_engine.common.recipe import Format
-from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
-from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from utils import assert_allclose
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
+
+from transformer_engine.common.recipe import Format
+from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 
 is_fp8_supported, reason = is_fp8_available()
 
@@ -145,7 +146,7 @@ ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 class TestEncoderLayer:
 
     @staticmethod
-    def sync_params(ref, target, attrs):
+    def sync_params(ref, target):
         unfreeze_target = flax.core.unfreeze(target)
         unfreeze_attn_scope = unfreeze_target['attention']
         ref_attn_scope = ref['attention']
@@ -196,7 +197,7 @@ class TestEncoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
 
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
@@ -242,7 +243,7 @@ class TestEncoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):
@@ -353,7 +354,7 @@ class TestEncoderLayer:
 class TestDecoderLayer:
 
     @staticmethod
-    def sync_params(ref, target, attrs):
+    def sync_params(ref, target):
         unfreeze_target = flax.core.unfreeze(target)
         for scope in ['self_attention', 'encoder_decoder_attention']:
             unfreeze_scope = unfreeze_target[scope]
@@ -405,7 +406,7 @@ class TestDecoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
 
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
@@ -452,7 +453,7 @@ class TestDecoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):

@@ -121,6 +121,9 @@ def jax_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
 
 
 def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
+    """
+    TE customcall dot product attention implementation
+    """
     attn_mask_type = kwargs['attn_mask_type']
     if is_causal_mask(attn_mask_type):
         mask = make_decoder_mask(q_token, kv_token)
@@ -145,6 +148,9 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
 
 @dataclass
 class FusedAttnRunner:
+    """
+    Fused attention runner
+    """
     batch_size: int
     max_seqlen_q: int
     max_seqlen_kv: int
@@ -205,6 +211,9 @@ class FusedAttnRunner:
         self.scaling_factor = 1. / sqrt(self.head_dim)
 
     def test_forward(self):
+        """
+        Test forward without JIT
+        """
         self._setup_inputs()
 
         args = [self.q, self.k, self.v, self.bias, self.token_q, self.token_kv, self.dropout_rng]
@@ -232,6 +241,9 @@ class FusedAttnRunner:
         np.testing.assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid))
 
     def test_backward(self):
+        """
+        Test value_and_grad with JIT, which includes both forward and backward
+        """
         if not self.is_training:
             pytest.skip("Backward doesn't support inference")
 
@@ -338,15 +350,26 @@ class FusedAttnRunner:
                           pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-cross'),
                           pytest.param(4, 2048, 2048, 12, 6, 64, id='4-2048-2048-12-6-64-GQA')])
 class TestFusedAttn:
+    """
+    Fused attention tester
+    """
 
-    def test_forward(self, b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+    @staticmethod
+    def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
                      dtype, is_training, qkv_layout):
+        """
+        Test forward with parameterized configs
+        """
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                                  dropout_prob, dtype, is_training, qkv_layout)
         runner.test_forward()
 
-    def test_backward(self, b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                      dropout_prob, dtype, is_training, qkv_layout):
+    @staticmethod
+    def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+                      dtype, is_training, qkv_layout):
+        """
+        Test backward with parameterized configs
+        """
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                                  dropout_prob, dtype, is_training, qkv_layout)
         runner.test_backward()
