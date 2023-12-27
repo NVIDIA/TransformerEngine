@@ -713,6 +713,75 @@ class TestLayerNormMLP:
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,hidden_size,ffn_hidden_size', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_layernorm_mlp_fp8_microbatch(bs, hidden_size, ffn_hidden_size, activation_dtype,
+                                          num_microbatch):
+        """
+        Test FP8 LayerNormMLP Layer
+        """
+        paddle.set_default_dtype(activation_dtype)
+        rtol = 1e-5
+        atol = 1e-5
+        eps = 1e-3
+
+        recipe = DelayedScaling()
+
+        layer_cached = te.LayerNormMLP(
+            hidden_size=hidden_size,
+            ffn_hidden_size=ffn_hidden_size,
+            eps=eps,
+        )
+
+        layer_normal = te.LayerNormMLP(
+            hidden_size=hidden_size,
+            ffn_hidden_size=ffn_hidden_size,
+            eps=eps,
+        )
+        layer_normal.ln_weight.copy_(layer_cached.ln_weight, True)
+        layer_normal.ln_bias.copy_(layer_cached.ln_bias, True)
+        layer_normal.fc1_weight.copy_(layer_cached.fc1_weight, True)
+        layer_normal.fc2_weight.copy_(layer_cached.fc2_weight, True)
+        layer_normal.fc1_bias.copy_(layer_cached.fc1_bias, True)
+        layer_normal.fc2_bias.copy_(layer_cached.fc2_bias, True)
+
+        # Calibration to make sure weight scale is the same
+        input_tensor = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+        with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+            _ = layer_cached(input_tensor)
+
+        with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+            _ = layer_normal(input_tensor)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.ln_weight.grad,
+                            layer_normal.ln_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.fc1_weight.grad,
+                            layer_normal.fc1_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.fc2_weight.grad,
+                            layer_normal.fc2_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+
 
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])

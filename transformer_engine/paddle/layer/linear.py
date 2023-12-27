@@ -157,6 +157,7 @@ def _linear_fwd_non_fp8(
         # amax of weight
         fp8_meta["scaling_fwd"].amax_history[0, weight_fp8_index.value] = \
             paddle.max(paddle.abs(weight)).item()
+        fp8_meta["update_amax_and_scale_fwd"] = True
 
     outputs = gemm(weight,
                    inputmat_total,
