@@ -5,7 +5,7 @@
 
 import math
 import os
-from utils import assert_allclose
+from utils import assert_allclose, is_fused_attention_supported
 
 import paddle
 import pytest
@@ -13,8 +13,6 @@ import pytest
 from transformer_engine.common.recipe import DelayedScaling
 import transformer_engine.paddle as te
 from transformer_engine.paddle.fp8 import is_fp8_available, fp8_autocast
-
-from utils import is_fused_attention_supported
 
 is_fp8_supported, reason = is_fp8_available()
 LINEAR_CASES = [(16, 16, 32), (32, 32, 64)]
@@ -199,6 +197,50 @@ class TestLinear:
             assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
+
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype, num_microbatch):
+        """
+        Test FP8 Linear
+        """
+        rtol = 0.1
+        atol = 0.1
+
+        recipe = DelayedScaling()
+
+        paddle.set_default_dtype(activation_dtype)
+        layer_cached = te.Linear(
+            in_features=in_features,
+            out_features=out_features,
+        )
+        layer_normal = te.Linear(
+            in_features=in_features,
+            out_features=out_features,
+        )
+        layer_cached.weight.copy_(layer_normal.weight, True)
+        layer_cached.bias.copy_(layer_normal.bias, True)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.weight.grad,
+                            layer_normal.weight.grad,
+                            rtol=rtol,
+                            atol=atol)
 
 
 @pytest.mark.parametrize('bs,hidden_size', NORM_CASES)
@@ -634,16 +676,16 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        num_heads=num_heads,
-        num_gqa_groups=num_heads,
-        q_seqlen=q_seqlen,
-        kv_seqlen=kv_seqlen,
-        head_size=head_size,
-        dtype=math_dtype,
-        dropout=0.0,
-        qkv_layout="bs3hd" if attn_type == "self" else "bshd_bs2hd",
-        bias_type="no_bias",
-        mask_type=mask_type,
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=head_size,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd" if attn_type == "self" else "bshd_bs2hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
@@ -764,16 +806,16 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        num_heads=num_heads,
-        num_gqa_groups=num_heads,
-        q_seqlen=q_seqlen,
-        kv_seqlen=kv_seqlen,
-        head_size=hidden_size // num_heads,
-        dtype=math_dtype,
-        dropout=0.0,
-        qkv_layout="bs3hd",
-        bias_type="no_bias",
-        mask_type=mask_type,
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
@@ -944,29 +986,29 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        num_heads=num_heads,
-        num_gqa_groups=num_heads,
-        q_seqlen=q_seqlen,
-        kv_seqlen=kv_seqlen,
-        head_size=hidden_size // num_heads,
-        dtype=math_dtype,
-        dropout=0.0,
-        qkv_layout="bs3hd",
-        bias_type="no_bias",
-        mask_type=mask_type,
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
     if not is_fused_attention_supported(
-        head_size=hidden_size // num_heads,
-        num_heads=num_heads,
-        num_gqa_groups=num_heads,
-        q_seqlen=q_seqlen,
-        kv_seqlen=kv_seqlen,
-        dtype=math_dtype,
-        dropout=0.0,
-        qkv_layout="bshd_bs2hd",
-        bias_type="no_bias",
-        mask_type=mask_type,
+            head_size=hidden_size // num_heads,
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bs2hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 

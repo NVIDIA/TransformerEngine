@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Linear API"""
 
+import warnings
 from typing import Union, Tuple, Dict, Any, Optional
 
 import paddle
@@ -49,6 +50,8 @@ def _linear_fwd_fp8(
     inputmat: paddle.Tensor,
     inputmat_fp8_index: FP8FwdTensors,
     weight: paddle.Tensor,
+    weight_fp8: Optional[paddle.Tensor],
+    weight_t_fp8: Optional[paddle.Tensor],
     weight_fp8_index: FP8FwdTensors,
     bias: paddle.Tensor,
     use_bias: bool,
@@ -59,6 +62,7 @@ def _linear_fwd_fp8(
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
+    is_first_microbatch: bool = None,
 ):
     """FP8 path of Linear Fwd"""
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -70,21 +74,27 @@ def _linear_fwd_fp8(
     else:
         inputmat_total = inputmat
 
+    update_fp8_weights = is_first_microbatch is None or is_first_microbatch
     if is_grad_enabled:
-        weight_fp8, weight_t_fp8 = cast_transpose(
-            weight,
-            fp8_meta["scaling_fwd"],
-            weight_fp8_index,
-            fp8_dtype_forward,
-        )
+        if update_fp8_weights:
+            weight_fp8, weight_t_fp8 = cast_transpose(
+                weight,
+                fp8_meta["scaling_fwd"],
+                weight_fp8_index,
+                fp8_dtype_forward,
+                cast_out=weight_fp8,
+                transpose_out=weight_t_fp8,
+            )
     else:
         weight_t_fp8 = None
-        weight_fp8 = cast_to_fp8(
-            weight,
-            fp8_meta["scaling_fwd"],
-            weight_fp8_index,
-            fp8_dtype_forward,
-        )
+        if update_fp8_weights:
+            weight_fp8 = cast_to_fp8(
+                weight,
+                fp8_meta["scaling_fwd"],
+                weight_fp8_index,
+                fp8_dtype_forward,
+                out=weight_fp8,
+            )
 
     out = fp8_gemm(
         weight_fp8,
@@ -173,6 +183,8 @@ def _linear_fwd(
     inputmat: paddle.Tensor,
     inputmat_fp8_index: FP8FwdTensors,
     weight: paddle.Tensor,
+    weight_fp8: Optional[paddle.Tensor],
+    weight_t_fp8: Optional[paddle.Tensor],
     weight_fp8_index: FP8FwdTensors,
     bias: paddle.Tensor,
     use_bias: bool,
@@ -185,12 +197,15 @@ def _linear_fwd(
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
+    is_first_microbatch: bool = None,
 ):
     if fp8_enabled:
         out, weight_t_fp8 = _linear_fwd_fp8(
             inputmat,
             inputmat_fp8_index,
             weight,
+            weight_fp8,
+            weight_t_fp8,
             weight_fp8_index,
             bias,
             use_bias,
@@ -201,6 +216,7 @@ def _linear_fwd(
             sequence_parallel,
             tp_group,
             is_grad_enabled,
+            is_first_microbatch,
         )
     else:
         out = _linear_fwd_non_fp8(
@@ -451,6 +467,8 @@ class _Linear(paddle.autograd.PyLayer):
     def forward(
         ctx,
         weight: paddle.Tensor,
+        weight_fp8: Optional[paddle.Tensor],
+        weight_t_fp8: Optional[paddle.Tensor],
         inp: paddle.Tensor,
         bias: paddle.Tensor,
         use_bias: bool,
@@ -464,6 +482,7 @@ class _Linear(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        is_first_microbatch: bool,
     ) -> paddle.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -500,6 +519,8 @@ class _Linear(paddle.autograd.PyLayer):
             inputmat,
             FP8FwdTensors.GEMM1_INPUT,
             weight,
+            weight_fp8,
+            weight_t_fp8,
             FP8FwdTensors.GEMM1_WEIGHT,
             bias,
             use_bias,
@@ -512,6 +533,7 @@ class _Linear(paddle.autograd.PyLayer):
             sequence_parallel,
             tp_group,
             is_grad_enabled,
+            is_first_microbatch,
         )
 
         if is_grad_enabled:
@@ -541,6 +563,7 @@ class _Linear(paddle.autograd.PyLayer):
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
+            ctx.is_first_microbatch = is_first_microbatch
 
         return out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
 
@@ -596,14 +619,22 @@ class _Linear(paddle.autograd.PyLayer):
                 # bgrad is fused with gemm for non-FP8 path
                 bgrad = bgrad_
 
+            if ctx.is_first_microbatch is None:
+                weight_cache_grad = ()
+            else:
+                # weight_fp8 and weight_t_fp8 are stop_gradient tensors
+                weight_cache_grad = (None, None)
+
             if not ctx.use_bias:
                 return (
                     wgrad if ctx.requires_wgrad else None,
+                    *weight_cache_grad,
                     dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 )
 
             return (
                 wgrad if ctx.requires_wgrad else None,
+                *weight_cache_grad,
                 dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 bgrad if ctx.requires_bgrad else None,
             )
@@ -704,6 +735,8 @@ class Linear(TransformerEngineBaseLayer):
         else:
             self.bias = None
 
+        self.fp8_weight_shapes.append(self.weight.shape)
+
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.parallel_mode == "row" and self.tensor_parallel and self.has_bias:
@@ -714,17 +747,24 @@ class Linear(TransformerEngineBaseLayer):
     def _te_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """
         Apply the linear transformation to the input.
         """
-        with self.prepare_forward(inp) as inp:
+        with self.prepare_forward(inp, is_first_microbatch=is_first_microbatch) as inp:
             # Layer input should be casted outside PyLayer, as performing
             # inplace cast to input tensors may cause problems when used
             # together with Paddle native layers.
             inp = cast_if_needed(inp, self.activation_dtype)
+
+            # Get persistent fp8 weight buffer. None if buffer does not exist.
+            weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+
             out = _Linear.apply(
                 self.weight,
+                weight1_fp8,
+                weight1_t_fp8,
                 inp,
                 self.bias if self.gemm_bias_fused_add else None,
                 self.has_bias and self.gemm_bias_fused_add,
@@ -738,6 +778,7 @@ class Linear(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                is_first_microbatch,
             )
 
         if not self.gemm_bias_fused_add:
@@ -748,8 +789,12 @@ class Linear(TransformerEngineBaseLayer):
     def _pd_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
+        if is_first_microbatch is not None:
+            warnings.warn(
+                "`is_first_microbatch` is not supported for paddle backend and is ignored.")
         if self.parallel_mode == 'column' and self.tensor_parallel:
             inp = identity(inp, self.tp_group)
         out = F.linear(inp, self.weight, self.bias if self.gemm_bias_fused_add else None)
@@ -764,8 +809,18 @@ class Linear(TransformerEngineBaseLayer):
 
         Parameters
         ----------
-        inp : torch.Tensor
+        inp : paddle.Tensor
              Input tensor.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)
