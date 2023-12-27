@@ -620,7 +620,7 @@ class _Linear(paddle.autograd.PyLayer):
                 # bgrad is fused with gemm for non-FP8 path
                 bgrad = bgrad_
 
-            if ctx.is_first_microbatch is None:
+            if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
                 weight_cache_grad = ()
             else:
                 # weight_fp8 and weight_t_fp8 are stop_gradient tensors

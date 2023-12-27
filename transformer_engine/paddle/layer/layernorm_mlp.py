@@ -566,7 +566,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             fc1_bgrad_out = (fc1_bgrad,) if ctx.use_fc1_bias else ()
             fc2_bgrad_out = (fc2_bgrad,) if ctx.use_fc2_bias else ()
 
-            if ctx.is_first_microbatch is None:
+            if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
                 fc1_weight_cache_grad = ()
                 fc2_weight_cache_grad = ()
             else:

@@ -435,7 +435,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         Fetch the fp8 weight tensor placeholders if they exist (when
         `is_first_microbatch` is not `None`)
         """
-        if is_first_microbatch is None:
+        if not self.fp8_enabled or is_first_microbatch is None:
             return [None, None] * len(self.fp8_weight_shapes)
 
         out_list = []

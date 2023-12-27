@@ -329,7 +329,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             bgrad = bgrad if ctx.requires_bgrad else None
             bgrad_out = (bgrad,) if ctx.use_bias else ()
 
-            if ctx.is_first_microbatch is None:
+            if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
                 weight_cache_grad = ()
             else:
                 # weight_fp8 and weight_t_fp8 are stop_gradient tensors
