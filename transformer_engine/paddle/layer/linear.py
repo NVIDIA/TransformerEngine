@@ -759,12 +759,12 @@ class Linear(TransformerEngineBaseLayer):
             inp = cast_if_needed(inp, self.activation_dtype)
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
-            weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
 
             out = _Linear.apply(
                 self.weight,
-                weight1_fp8,
-                weight1_t_fp8,
+                weight_fp8,
+                weight_t_fp8,
                 inp,
                 self.bias if self.gemm_bias_fused_add else None,
                 self.has_bias and self.gemm_bias_fused_add,

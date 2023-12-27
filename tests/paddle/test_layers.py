@@ -453,6 +453,62 @@ class TestLayerNormLinear:
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_layernorm_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype,
+                                             num_microbatch):
+        """
+        Test FP8 LayerNormLinear Layer
+        """
+        paddle.set_default_dtype(activation_dtype)
+        eps = 1e-3
+        rtol = 0.5
+        atol = 0.5
+
+        recipe = DelayedScaling()
+
+        layer_cached = te.LayerNormLinear(
+            in_features=in_features,
+            out_features=out_features,
+            eps=eps,
+        )
+
+        layer_normal = te.LayerNormLinear(
+            in_features=in_features,
+            out_features=out_features,
+            eps=eps,
+        )
+
+        layer_cached.ln_weight.copy_(layer_normal.ln_weight, True)
+        layer_cached.ln_bias.copy_(layer_normal.ln_bias, True)
+        layer_cached.weight.copy_(layer_normal.weight, True)
+        layer_cached.bias.copy_(layer_normal.bias, True)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.weight.grad,
+                            layer_normal.weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.ln_weight.grad,
+                            layer_normal.ln_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+
 
 class TestLayerNormMLP:
     """
