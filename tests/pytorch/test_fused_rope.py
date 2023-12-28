@@ -54,6 +54,7 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("seq_length", [2048, 4096])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
+@pytest.mark.parametrize("margin", [0, 10])
 @pytest.mark.parametrize("transpose", [None, (0, 1), (2, 3)])
 @pytest.mark.parametrize("transpose_output_memory", [False, True])
 @pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
@@ -63,6 +64,7 @@ def test_fused_rope(
     seq_length: int,
     hidden_size: int,
     rotary_percent: float,
+    margin: int,
     transpose: Union[Tuple, None],
     transpose_output_memory: bool,
     qkv_format: str,
@@ -71,7 +73,7 @@ def test_fused_rope(
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     t = torch.rand(
-        (seq_length, batch_size, head_num, hidden_size),
+        (seq_length - margin, batch_size, head_num, hidden_size),
         dtype=dtype,
         device=device,
     )
@@ -87,10 +89,12 @@ def test_fused_rope(
     # unfused
     # TODO: use qkv_format as an argument when https://github.com/NVIDIA/TransformerEngine/pull/557 is merged.
     if qkv_format == "sbhd":
-        output_unfused = apply_rotary_pos_emb(t, emb, fused=False)
+        output_unfused = apply_rotary_pos_emb(
+            t, emb[: seq_length - margin], fused=False
+        )
     else:
         output_unfused = apply_rotary_pos_emb(
-            t.transpose(0, 1), emb, fused=False
+            t.transpose(0, 1), emb[: seq_length - margin], fused=False
         ).transpose(0, 1)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()

@@ -931,19 +931,20 @@ def apply_rotary_pos_emb(
     t: torch.Tensor
         Tensor of shape [s, b, h, d] or [t, h, d].
     freqs: torch.Tensor
-        Rotary positional embedding tensor of shape [s, 1, 1, d] and dtype 'float'.
+        Rotary positional embedding tensor of shape [s2, 1, 1, d2] and dtype 'float',
+        with s2 >= s and d2 <= d.
     fused: bool, default = False
         Whether to use a fused applying RoPE implementation.
     transpose_output_memory: bool, default = False
         Whether to transpose the 's' and 'b' dimension of the output's underlying memory format.
         This is very helpful when you want to get a contiguous tensor after calling
-        `output.transpose(0, 1)`. It's only supported when `fused` = True and
-        `qkv_format` = 'sbhd'.
+        `output.transpose(0, 1)`. It's only supported when `fused` is True and
+        `qkv_format` is 'sbhd' or 'bshd'.
     qkv_format: str, default = 'sbhd'.
-        It could be 'sbhd', 'bshd' or 'thd', and 'thd' is only supported when `fused` = True.
+        It could be 'sbhd', 'bshd' or 'thd', and 'thd' is only supported when `fused` is True.
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-        dtype torch.int32. Only valid when `qkv_format` = 'thd'.
+        dtype torch.int32. Only valid when `qkv_format` is 'thd'.
     """
     if fused:
         assert not (

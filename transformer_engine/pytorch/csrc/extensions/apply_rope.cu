@@ -11,8 +11,8 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(input.size(0) == freqs.size(0),
-              "expected input and freqs tensor have the same sequence length");
+  TORCH_CHECK(input.size(0) <= freqs.size(0),
+              "expected freqs tensor has a longer sequence length than input");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
   TORCH_CHECK(input.size(3) >= freqs.size(3),
@@ -72,8 +72,8 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads,
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(
-      output_grads.size(0) == freqs.size(0),
-      "expected output_grads and freqs tensor have the same sequence length");
+      output_grads.size(0) <= freqs.size(0),
+      "expected freqs tensor has a longer sequence length than output_grads");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
   TORCH_CHECK(output_grads.size(3) >= freqs.size(3),
