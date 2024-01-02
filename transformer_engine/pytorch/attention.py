@@ -1398,20 +1398,24 @@ class FlashAttention(torch.nn.Module):
                     query_layer_packed, key_layer_packed, value_layer_packed)
                 cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
             else:
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = torch.arange(
-                            0,
-                            (batch_size + 1) * max_seqlen_q,
-                            step=max_seqlen_q,
-                            dtype=torch.int32,
-                            device=query_layer.device)
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = torch.arange(
-                            0,
-                            (batch_size + 1) * max_seqlen_kv,
-                            step=max_seqlen_kv,
-                            dtype=torch.int32,
-                            device=key_layer.device)
+                if self.layer_number == 1:
+                    if cu_seqlens_q is None:
+                        cu_seqlens_q = torch.arange(
+                                0,
+                                (batch_size + 1) * max_seqlen_q,
+                                step=max_seqlen_q,
+                                dtype=torch.int32,
+                                device=query_layer.device)
+                    if cu_seqlens_kv is None:
+                        cu_seqlens_kv = torch.arange(
+                                0,
+                                (batch_size + 1) * max_seqlen_kv,
+                                step=max_seqlen_kv,
+                                dtype=torch.int32,
+                                device=key_layer.device)
+                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
+                else:
+                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format is not supported for context parallelism!"
             assert (_flash_attn_2_available
