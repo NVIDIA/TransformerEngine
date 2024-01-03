@@ -6,17 +6,6 @@ from test_fused_attn_with_cp import model_configs
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}
 
-def errors(Y, Y_hat, print_=True, prefix=''):
-    Y = Y.float()
-    Y_hat = Y_hat.float()
-    diff = (Y - Y_hat)
-    mae = diff.abs().mean().item()
-    rmse = torch.sqrt(diff.square().mean()).item()
-    rel = (diff.abs().sum() / Y.abs().sum()).item()
-    if print_:
-        print(prefix + f'mae={mae:.4e} rmse={rmse:.4e} relerr={rel:.4e}\n')
-    return mae, rmse, rel
-
 def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd'):
     """Test DotProductAttention module with context parallelism"""
 
@@ -63,7 +52,7 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd'):
         kv_input_shape = (config.max_seqlen_kv, config.batch_size, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.max_seqlen_q, config.batch_size, config.num_heads*config.head_dim)
     else:
-        assert False, f"{qkv_format} is an unsupported qkv_format."
+        assert False, f"{qkv_format} is an unsupported qkv_format!"
     q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
     k = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
@@ -97,29 +86,34 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd'):
         assert(torch.all(~torch.isinf(x)))
 
     # compare results with and without CP
+    tols = dict(atol=2.5e-4, rtol=2.5e-3)
+    if dtype == 'bf16':
+        tols = dict(atol=2.5e-3, rtol=2.5e-2)
     dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
         for x in [q.grad, k.grad, v.grad, out]]
     dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
     dq_, dk_, dv_, out_ = [x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim]//2, *x.shape[(seq_dim+1):]) \
         for x in [q_.grad, k_.grad, v_.grad, out_]]
     if qkv_format == "bshd":
-        errors(out[:, 0], out_[:, 0], prefix=f'rank_{rank} out_0: ')
-        errors(dq[:, 0], dq_[:, 0], prefix=f'rank_{rank} dq_0: ')
-        errors(dk[:, 0], dk_[:, 0], prefix=f'rank_{rank} dk_0: ')
-        errors(dv[:, 0], dv_[:, 0], prefix=f'rank_{rank} dv_0: ')
-        errors(out[:, 1], out_[:, 1], prefix=f'rank_{rank} out_1: ')
-        errors(dq[:, 1], dq_[:, 1], prefix=f'rank_{rank} dq_1: ')
-        errors(dk[:, 1], dk_[:, 1], prefix=f'rank_{rank} dk_1: ')
-        errors(dv[:, 1], dv_[:, 1], prefix=f'rank_{rank} dv_1: ')
-    if qkv_format == "sbhd":
-        errors(out[0], out_[0], prefix=f'rank_{rank} out_0: ')
-        errors(dq[0], dq_[0], prefix=f'rank_{rank} dq_0: ')
-        errors(dk[0], dk_[0], prefix=f'rank_{rank} dk_0: ')
-        errors(dv[0], dv_[0], prefix=f'rank_{rank} dv_0: ')
-        errors(out[1], out_[1], prefix=f'rank_{rank} out_1: ')
-        errors(dq[1], dq_[1], prefix=f'rank_{rank} dq_1: ')
-        errors(dk[1], dk_[1], prefix=f'rank_{rank} dk_1: ')
-        errors(dv[1], dv_[1], prefix=f'rank_{rank} dv_1: ')
+        torch.testing.assert_close(out_[:, 0], out[:, 0], **tols)
+        torch.testing.assert_close(dq_[:, 0], dq[:, 0], **tols)
+        torch.testing.assert_close(dk_[:, 0], dk[:, 0], **tols)
+        torch.testing.assert_close(dv_[:, 0], dv[:, 0], **tols)
+        torch.testing.assert_close(out_[:, 1], out[:, 1], **tols)
+        torch.testing.assert_close(dq_[:, 1], dq[:, 1], **tols)
+        torch.testing.assert_close(dk_[:, 1], dk[:, 1], **tols)
+        torch.testing.assert_close(dv_[:, 1], dv[:, 1], **tols)
+    elif qkv_format == "sbhd":
+        torch.testing.assert_close(out_[0], out[0], **tols)
+        torch.testing.assert_close(dq_[0], dq[0], **tols)
+        torch.testing.assert_close(dk_[0], dk[0], **tols)
+        torch.testing.assert_close(dv_[0], dv[0], **tols)
+        torch.testing.assert_close(out_[1], out[1], **tols)
+        torch.testing.assert_close(dq_[1], dq[1], **tols)
+        torch.testing.assert_close(dk_[1], dk[1], **tols)
+        torch.testing.assert_close(dv_[1], dv[1], **tols)
+    else:
+        assert False, f"{qkv_format} is an unsupported qkv_format!"
 
 def main(**kwargs):
     run_dpa_with_cp(**kwargs)

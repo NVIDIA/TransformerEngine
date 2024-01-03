@@ -13,9 +13,9 @@ def get_bash_arguments(**kwargs):
         args.append(f"{k}={v}")
     return args
 
-@pytest.mark.parametrize("dtype", ['bf16'])
+@pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("qkv_format", ['bshd'])
+@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'])
 def test_dpa_with_cp(dtype, model, qkv_format):
     subprocess.run(
         get_bash_arguments(
