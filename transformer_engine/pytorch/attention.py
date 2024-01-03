@@ -2006,7 +2006,8 @@ class DotProductAttention(torch.nn.Module):
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
         self.device_compute_capability = get_device_compute_capability()
-        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))) \
+                             or torch.are_deterministic_algorithms_enabled()
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
