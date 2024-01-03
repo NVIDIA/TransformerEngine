@@ -57,6 +57,7 @@ _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("2.0.6")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
+_flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= packaging.version.Version("2.4.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
@@ -477,6 +478,12 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
                     kv_inputs[i%2] = p2p_comm_buffers[i]
                     if causal:
+                        fa_forward_kwargs = {}
+                        if _flash_attn_2_3_plus:
+                            fa_forward_kwargs["window_size"] = (-1, -1)
+                        if _flash_attn_2_4_plus:
+                            fa_forward_kwargs["alibi_slopes"] = None
+                        fa_forward_kwargs["return_softmax"]=False
                         if i == 0:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
@@ -486,7 +493,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                 q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                 cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                                dropout_p, softmax_scale, causal=True, return_softmax=False,
+                                dropout_p, softmax_scale, causal=True, **fa_forward_kwargs,
                             )
                         elif i <= rank:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -498,7 +505,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                 q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                 cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
-                                dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                dropout_p, softmax_scale, causal=False, **fa_forward_kwargs,
                             )
                         else:
                             # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -509,7 +516,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                 q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                 cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
-                                dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                dropout_p, softmax_scale, causal=False, **fa_forward_kwargs,
                             )
                     else:
                         assert False, "Not implemented yet!"
@@ -620,6 +627,14 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
             kv = p2p_comm_buffers[i%2][0]
             # In reversed order of fwd
             if ctx.causal:
+                fa_backward_kwargs = {}
+                if _flash_attn_2_3_plus:
+                    fa_backward_kwargs["window_size"] = (-1, -1)
+                if _flash_attn_2_4_plus:
+                    fa_backward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_4_1_plus:
+                    fa_backward_kwargs["deterministic"] = ctx.deterministic
+                fa_backward_kwargs["rng_state"]=ctx.rng_states[cp_size-i-1]
                 if i == (cp_size-1):
                     # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                     q_ = q.view(-1, *q.shape[-2:])
@@ -635,7 +650,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True,
-                        rng_state=ctx.rng_states[cp_size-i-1],
+                        **fa_backward_kwargs,
                     )
                 elif i >= (cp_size-rank-1):
                     # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -652,7 +667,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k//2,
                         ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False,
-                        rng_state=ctx.rng_states[cp_size-i-1],
+                        **fa_backward_kwargs,
                     )
                 else:
                     # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -669,7 +684,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
                         ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False,
-                        rng_state=ctx.rng_states[cp_size-i-1],
+                        **fa_backward_kwargs,
                     )
 
                 if i >= (cp_size-rank-1):
@@ -1418,7 +1433,7 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=1.0/self.norm_factor, causal="causal" in attn_mask_type,
-                    **fa_optional_forward_kwargs
+                    **fa_optional_forward_kwargs,
                 )
 
         if 'padding' in attn_mask_type:
