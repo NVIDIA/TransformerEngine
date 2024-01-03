@@ -54,19 +54,16 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_version_required = packaging.version.Version("1.0.6")
-_flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+_flash_attn_version_required = packaging.version.Version("2.0.6")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
+_flash_attn_2_4_1_plus = _flash_attn_version >= packaging.version.Version("2.4.1")
 
-if _flash_attn_2_available:
+if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
-else:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
-    from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
 
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
@@ -442,8 +439,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
         # [b, s, np, hn] -> [b, 2, s//2, np, hn]
         q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
-        if _flash_attn_2_available:
-            assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
+        assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
+
         # Flash Attn inputs
         q_inputs = [None, None]
         kv_inputs = [None, None]
@@ -485,62 +482,35 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
                             # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                                    dropout_p, softmax_scale, causal=True, return_softmax=False,
-                                )
-                            else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k,
-                                    max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
-                                    causal=True, return_softmax=False,
-                                )
+                            _, _, _, _, out_per_step[i], \
+                            softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                                dropout_p, softmax_scale, causal=True, return_softmax=False,
+                            )
                         elif i <= rank:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
                             # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
-                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
-                                )
-                            else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k//2,
-                                    max_seqlen_q, max_seqlen_k//2, dropout_p, softmax_scale,
-                                    causal=False, return_softmax=False,
-                                )
+                            _, _, _, _, out_per_step[i], \
+                            softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                                dropout_p, softmax_scale, causal=False, return_softmax=False,
+                            )
                         else:
                             # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
                             q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
                             # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
-                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
-                                )
-                            else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q//2, cu_seqlens_k,
-                                    max_seqlen_q//2, max_seqlen_k, dropout_p, softmax_scale,
-                                    causal=False, return_softmax=False,
-                                )
+                            _, _, _, _, out_per_step[i], \
+                            softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                                dropout_p, softmax_scale, causal=False, return_softmax=False,
+                            )
                     else:
                         assert False, "Not implemented yet!"
 
@@ -625,10 +595,6 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
 
-        fa_optional_backward_kwargs = {}
-        if not _flash_attn_2_available:
-            fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
-
         for i in range(cp_size):
             # wait until KV is received
             for req in send_recv_reqs:
@@ -670,7 +636,6 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
                     )
                 elif i >= (cp_size-rank-1):
                     # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -688,7 +653,6 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
                     )
                 else:
                     # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -706,7 +670,6 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
                     )
 
                 if i >= (cp_size-rank-1):
@@ -1420,8 +1383,6 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format is not supported for context parallelism!"
-            assert (_flash_attn_2_available
-                ), "flash-attn v2 is required for variable sequence length support!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             if max_seqlen_q is None:
@@ -1448,10 +1409,10 @@ class FlashAttention(torch.nn.Module):
         else:
             with self.attention_dropout_ctx():
                 fa_optional_forward_kwargs = {}
-                if not _flash_attn_2_available:
-                    fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 if _flash_attn_2_3_plus:
                     fa_optional_forward_kwargs["window_size"] = window_size
+                if _flash_attn_2_4_1_plus:
+                    fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 output = flash_attn_forward_func(
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
@@ -1730,7 +1691,6 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_type = attention_type
         self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
-                        and _flash_attn_2_available
                         and get_device_compute_capability() == (9, 0))
         self.layer_number = 1 if layer_number is None else layer_number
         if deterministic:
@@ -1877,7 +1837,7 @@ class DotProductAttention(torch.nn.Module):
     .. warning::
 
         FlashAttention uses a non-deterministic algorithm for optimal performance. To observe
-        deterministic behavior at the cost of performance, use FlashAttention version < `2.0.0`
+        deterministic behavior at the cost of performance, use FlashAttention version >= `2.4.1`
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
@@ -2013,12 +1973,12 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and self.device_compute_capability >= (8, 0)
         )
-        if _flash_attn_2_available and self.deterministic:
+        if not _flash_attn_2_4_1_plus and self.deterministic:
             self.use_flash_attention = False
             warnings.warn(
-                "Disabling usage of FlashAttention since version 2 does not support deterministic "
-                "execution. In order to use FA with deterministic behavior, please install "
-                "FlashAttention version 1."
+                "Disabling usage of FlashAttention since version <2.4.1 does not support "
+                "deterministic execution. In order to use FA with deterministic behavior,"
+                " please install FlashAttention version >=2.4.1."
             )
 
         self.use_fused_attention = (
@@ -2299,24 +2259,16 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         # Filter: Device and dimensions.
-        # FAv1 supports head_dim <= 128, and for >64 requires sm80/sm90
         # FAv2 supports head_dim <= 256, and for >192 requires sm80/sm90
-        # Both FAv1 and FAv2 require head_dim % 8 == 0
-        if not _flash_attn_2_available:
-            if (key_layer.shape[-1] > 128
-                or key_layer.shape[-1] % 8 != 0
-                or (key_layer.shape[-1] > 64
-                    and self.device_compute_capability not in ((8, 0), (9, 0)))):
-                use_flash_attention = False
-        if _flash_attn_2_available:
-            if (key_layer.shape[-1] > 256
-                or key_layer.shape[-1] % 8 != 0
-                or (key_layer.shape[-1] > 192
-                    and self.device_compute_capability not in ((8, 0), (9, 0)))):
-                use_flash_attention = False
+        # FAv2 requires head_dim % 8 == 0
+        if (key_layer.shape[-1] > 256
+            or key_layer.shape[-1] % 8 != 0
+            or (key_layer.shape[-1] > 192
+                and self.device_compute_capability not in ((8, 0), (9, 0)))):
+            use_flash_attention = False
 
         # Filter: MQA/GQA.
-        if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
+        if self.num_gqa_groups != self.num_attention_heads:
             use_flash_attention = False
 
         # Filter: cross attention + causal mask.
