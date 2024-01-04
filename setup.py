@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from subprocess import CalledProcessError
 import sys
+import sysconfig
 import tempfile
 from typing import List, Optional, Tuple, Union
 
@@ -327,6 +328,8 @@ class CMakeExtension(setuptools.Extension):
             cmake_path,
             "-B",
             build_dir,
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
