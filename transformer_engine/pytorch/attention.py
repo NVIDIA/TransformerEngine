@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -1304,6 +1304,8 @@ class FlashAttention(torch.nn.Module):
         qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         cp_group: Optional[dist_group_type] = None,
@@ -1346,10 +1348,10 @@ class FlashAttention(torch.nn.Module):
                 for x in (query_layer, key_layer, value_layer)]
 
         global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
-        batch_size, max_seqlen_q, max_seqlen_kv = (
-                query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
+        batch_size = query_layer.shape[0]
 
         if qkv_format in ['sbhd', 'bshd']:
+            max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
             if not context_parallel:
                 # [b * s, h, d]
                 query_layer, key_layer, value_layer = [
@@ -1398,30 +1400,36 @@ class FlashAttention(torch.nn.Module):
                     query_layer_packed, key_layer_packed, value_layer_packed)
                 cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
             else:
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = torch.arange(
-                            0,
-                            (batch_size + 1) * max_seqlen_q,
-                            step=max_seqlen_q,
-                            dtype=torch.int32,
-                            device=query_layer.device)
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = torch.arange(
-                            0,
-                            (batch_size + 1) * max_seqlen_kv,
-                            step=max_seqlen_kv,
-                            dtype=torch.int32,
-                            device=key_layer.device)
+                if self.layer_number == 1:
+                    if cu_seqlens_q is None:
+                        cu_seqlens_q = torch.arange(
+                                0,
+                                (batch_size + 1) * max_seqlen_q,
+                                step=max_seqlen_q,
+                                dtype=torch.int32,
+                                device=query_layer.device)
+                    if cu_seqlens_kv is None:
+                        cu_seqlens_kv = torch.arange(
+                                0,
+                                (batch_size + 1) * max_seqlen_kv,
+                                step=max_seqlen_kv,
+                                dtype=torch.int32,
+                                device=key_layer.device)
+                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
+                else:
+                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format is not supported for context parallelism!"
             assert (_flash_attn_2_available
                 ), "flash-attn v2 is required for variable sequence length support!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
-            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-            max_seqlen_q = seqlens_q.max().item()
-            max_seqlen_kv = seqlens_kv.max().item()
+            if max_seqlen_q is None:
+                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                max_seqlen_q = seqlens_q.max().item()
+            if max_seqlen_kv is None:
+                seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                max_seqlen_kv = seqlens_kv.max().item()
 
         if context_parallel:
             assert (
@@ -1750,6 +1758,8 @@ class FusedAttention(torch.nn.Module):
         qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         fused_attention_backend:
@@ -1996,7 +2006,8 @@ class DotProductAttention(torch.nn.Module):
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
         self.device_compute_capability = get_device_compute_capability()
-        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))) \
+                             or torch.are_deterministic_algorithms_enabled()
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -2100,6 +2111,8 @@ class DotProductAttention(torch.nn.Module):
         qkv_format: Optional[str] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         checkpoint_core_attention: bool = False,
@@ -2172,6 +2185,12 @@ class DotProductAttention(torch.nn.Module):
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths in a batch for `key_layer` and `value_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
+        max_seqlen_q: Optional[int], default = `None`
+                      Maximum sequence length in `query_layer`.
+                      Calculated from `cu_seqlens_q` if not provided.
+        max_seqlen_kv: Optional[int], default = `None`
+                       Maximum sequence length in `key_layer` and `value_layer`.
+                       Calculated from `cu_seqlens_kv` if not provided.
         attn_mask_type: {`no_mask`, `padding`, `causal`, `padding,causal`, `causal,padding`,
                        `arbitrary`}, default = `None`. Type of attention mask passed into
                        softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
@@ -2234,10 +2253,12 @@ class DotProductAttention(torch.nn.Module):
             assert (cu_seqlens_q.dtype == torch.int32
                 and cu_seqlens_kv.dtype == torch.int32
                 ), "cu_seqlens_q and cu_seqlens_q must both be in dtype torch.int32!"
-            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-            max_seqlen_q = seqlens_q.max().item()
-            max_seqlen_kv = seqlens_kv.max().item()
+            if max_seqlen_q is None:
+                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                max_seqlen_q = seqlens_q.max().item()
+            if max_seqlen_kv is None:
+                seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                max_seqlen_kv = seqlens_kv.max().item()
 
         if qkv_format in ['sbhd', 'bshd']:
             assert (all(len(x.shape) == 4 for x in (query_layer, key_layer, value_layer))
@@ -2401,7 +2422,9 @@ class DotProductAttention(torch.nn.Module):
                                         window_size=window_size,
                                         cp_group=self.cp_group,
                                         cp_global_ranks=self.cp_global_ranks,
-                                        cp_stream=self.cp_stream)
+                                        cp_stream=self.cp_stream,
+                                        max_seqlen_q=max_seqlen_q,
+                                        max_seqlen_kv=max_seqlen_kv)
 
         assert (
             self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
@@ -2424,7 +2447,9 @@ class DotProductAttention(torch.nn.Module):
                               fused_attention_backend = fused_attention_backend,
                               core_attention_bias_type = core_attention_bias_type,
                               core_attention_bias = core_attention_bias,
-                              fast_zero_fill = fast_zero_fill)
+                              fast_zero_fill = fast_zero_fill,
+                              max_seqlen_q=max_seqlen_q,
+                              max_seqlen_kv=max_seqlen_kv)
             return self.fused_attention(query_layer, key_layer, value_layer,
                               qkv_layout = qkv_layout,
                               cu_seqlens_q = cu_seqlens_q,
@@ -2434,7 +2459,9 @@ class DotProductAttention(torch.nn.Module):
                               fused_attention_backend = fused_attention_backend,
                               core_attention_bias_type = core_attention_bias_type,
                               core_attention_bias = core_attention_bias,
-                              fast_zero_fill = fast_zero_fill)
+                              fast_zero_fill = fast_zero_fill,
+                              max_seqlen_q=max_seqlen_q,
+                              max_seqlen_kv=max_seqlen_kv)
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
