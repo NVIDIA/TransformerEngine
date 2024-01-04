@@ -30,8 +30,9 @@ RUN pip install ninja pybind11
 # installing will reinstall JAX.
 RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" =~ jax|all ]] \
-  && pip install fiddle \
-  && SKIP_HEAD_INSTALLS=1 pip install git+https://github.com/google/praxis \
+  && SKIP_HEAD_INSTALLS=1 \
+     pip install \
+     fiddle chex>=0.1.83 git+https://github.com/google/praxis \
   || [[ ! "${FRAMEWORK}" =~ jax|all ]]
 EOF
 
