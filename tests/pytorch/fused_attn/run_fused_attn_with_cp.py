@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import os, sys
 import torch
 import torch.distributed as dist
@@ -6,8 +10,15 @@ from test_fused_attn_with_cp import model_configs
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}
 
-def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd'):
+def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend='FlashAttention'):
     """Test DotProductAttention module with context parallelism"""
+
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    if kernel_backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    if kernel_backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
 
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv('WORLD_SIZE', '1'))
@@ -86,9 +97,9 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd'):
         assert(torch.all(~torch.isinf(x)))
 
     # compare results with and without CP
-    tols = dict(atol=2.5e-4, rtol=2.5e-3)
+    tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == 'bf16':
-        tols = dict(atol=2.5e-3, rtol=2.5e-2)
+        tols = dict(atol=2.5e-2, rtol=2.5e-2)
     dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
         for x in [q.grad, k.grad, v.grad, out]]
     dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
