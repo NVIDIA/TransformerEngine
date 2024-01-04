@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -228,6 +228,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
+* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!
 
 
 Contributing
