@@ -58,6 +58,8 @@ _flash_attn_version_required = packaging.version.Version("1.0.6")
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
+_flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
+_flash_attn_2_4_1_plus = _flash_attn_version >= packaging.version.Version("2.4.1")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
@@ -449,6 +451,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         fa_optional_forward_kwargs = {}
         if _flash_attn_2_3_plus:
             fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+        if _flash_attn_2_4_plus:
+            fa_optional_forward_kwargs["alibi_slopes"] = None
 
         # Flash Attn inputs
         q_inputs = [None, None]
@@ -719,6 +723,10 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         fa_optional_backward_kwargs = {}
         if not _flash_attn_2_available:
             fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+        if _flash_attn_2_4_plus:
+            fa_optional_backward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_4_1_plus:
+            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(cp_size):
             # wait until KV is received
