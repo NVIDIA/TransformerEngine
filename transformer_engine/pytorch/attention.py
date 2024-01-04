@@ -2282,10 +2282,6 @@ class DotProductAttention(torch.nn.Module):
                 and self.device_compute_capability not in ((8, 0), (9, 0)))):
             use_flash_attention = False
 
-        # Filter: MQA/GQA.
-        if self.num_gqa_groups != self.num_attention_heads:
-            use_flash_attention = False
-
         # Filter: cross attention + causal mask.
         if (_flash_attn_2_1_plus
             and "causal" in attn_mask_type
