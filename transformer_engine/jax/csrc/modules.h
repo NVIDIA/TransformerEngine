@@ -125,6 +125,15 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
+
 void GatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void GatedGeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);

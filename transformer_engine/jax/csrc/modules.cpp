@@ -145,6 +145,123 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
                         input_cast_trans_tensor.data(), stream);
 }
 
+void GeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
+              cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+    auto input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+
+    auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
+                                       scale, scale_inverse);
+
+    nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
+}
+
+void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *output = buffers[1];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GeluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr, output);
+}
+
+void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    assert(amax == amax_out);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GeluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
+             output);
+}
+
+void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *gelu_input = buffers[1];
+    auto *output = buffers[2];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto gelu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto gelu_input_tensor = TensorWrapper(gelu_input, gelu_input_shape, desc.in_dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
+
+    nvte_dgelu(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(), stream);
+}
+
+void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *gelu_input = buffers[1];
+    float *amax = reinterpret_cast<float *>(buffers[2]);
+    float *scale = reinterpret_cast<float *>(buffers[3]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[4]);
+    auto *output = buffers[5];
+    auto *output_trans = buffers[6];
+    auto *dbias = buffers[7];
+    float *amax_out = reinterpret_cast<float *>(buffers[8]);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = desc.shape.to_vector();
+    auto gelu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+    auto output_trans_shape = std::vector<size_t>{n, m};
+    auto dbias_shape = std::vector<size_t>{n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto gelu_input_tensor = TensorWrapper(gelu_input, gelu_input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
+
+    // Create uninitialized workspace, and init them on the first
+    TensorWrapper dummy_workspace;
+
+    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), dummy_workspace.data(), stream);
+
+    size_t workspace_size = dummy_workspace.shape().data[0] * typeToSize(dummy_workspace.dtype());
+    void *workspace_ptr = WorkspaceManager::Instance().GetWorkspace(workspace_size);
+
+    auto workspace = TensorWrapper(workspace_ptr, dummy_workspace.shape(), dummy_workspace.dtype());
+
+    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), workspace.data(), stream);
+}
+
 void GatedGeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
                    cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
     auto input_shape = std::vector<size_t>{m, n * 2};
@@ -745,8 +862,8 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             size_t head_dim) {
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_num_heads, kv_num_heads,
-        q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, q_num_heads, kv_num_heads, q_max_seqlen, kv_max_seqlen,
+        head_dim);
     return backend;
 }
 
@@ -801,8 +918,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_head, num_head,
-        q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, num_head, num_head, q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
@@ -978,8 +1094,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_head, num_head,
-        q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, num_head, num_head, q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;

@@ -132,6 +132,13 @@ ATTRS = [{
     _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_SCALE_ATTN_LOGITS: True,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_MLP_ACTIVATIONS: (('gelu',)),
+    _KEY_OF_FUSE_MLP_WI: True
+}, {
+    _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,

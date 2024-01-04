@@ -23,6 +23,7 @@ from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
 from ..mlp import layernrom_geglu_fp8_mlp, geglu
+from ..mlp import layernrom_gelu_fp8_mlp, gelu
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -823,8 +824,22 @@ class LayerNormMLP(TransformerEngineBase):
                 normalize_acts.append(act.lower())
             return tuple(normalize_acts) in geglu_act_pool
 
-        use_fused_ln_mlp = fuse_layernorm \
+        def is_gelu(acts):
+            geglu_act_pool = [('gelu',)]
+
+            normalize_acts = []
+            for act in acts:
+                if not isinstance(act, str):
+                    return False
+                normalize_acts.append(act.lower())
+            return tuple(normalize_acts) in geglu_act_pool
+
+        use_fused_ln_geglu_mlp = fuse_layernorm \
             and (not self.use_bias) and is_geglu(self.activations) \
+                and (self.intermediate_dropout_rate < 1e-3)
+
+        use_fused_ln_gelu_mlp = fuse_layernorm \
+            and self.use_bias and is_gelu(self.activations) \
                 and (self.intermediate_dropout_rate < 1e-3)
 
         # LayerNorm
@@ -895,7 +910,7 @@ class LayerNormMLP(TransformerEngineBase):
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
         contract_ind = tuple(range(0, len(axis)))
 
-        if use_fused_ln_mlp:
+        if use_fused_ln_geglu_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
             out = layernrom_geglu_fp8_mlp(y,
@@ -908,7 +923,33 @@ class LayerNormMLP(TransformerEngineBase):
                                           layernorm_input_axes=self.layernorm_input_axes,
                                           dot_1_input_axes=self.dot_1_input_axes,
                                           dot_2_input_axes=self.dot_2_input_axes)
-        else:    # not use_fused_ln_mlp
+        elif use_fused_ln_gelu_mlp:
+            assert self.axis == -1    # Only support axis = =-1 at this moment
+
+            bias_1 = nn_partitioning.param_with_axes('wi_bias',
+                                                     self.bias_init,
+                                                     intermediate_dim,
+                                                     jnp.float32,
+                                                     axes=self.bias_axes_1)
+            bias_1 = bias_1.astype(self.dtype)
+
+            bias_2 = nn_partitioning.param_with_axes('wo_bias',
+                                                     self.bias_init, (hidden_size,),
+                                                     jnp.float32,
+                                                     axes=self.bias_axes_2)
+            bias_2 = bias_2.astype(self.dtype)
+
+            out = layernrom_gelu_fp8_mlp(y,
+                                         scale,
+                                         ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
+                                         fp8_meta_package,
+                                         self.layernorm_type,
+                                         zero_centered_gamma=self.zero_centered_gamma,
+                                         epsilon=self.epsilon,
+                                         layernorm_input_axes=self.layernorm_input_axes,
+                                         dot_1_input_axes=self.dot_1_input_axes,
+                                         dot_2_input_axes=self.dot_2_input_axes)
+        else:    # not use_fused_ln_geglu_mlp
 
             # DenseGeneral 1
             gemm1_fp8_meta_package = None if fp8_meta_package is None \
@@ -947,6 +988,9 @@ class LayerNormMLP(TransformerEngineBase):
             activations = []
             if is_geglu(self.activations):
                 z = geglu(x)
+            elif is_gelu(self.activations):
+                z = gelu(x)
+                z = jnp.reshape(z, (*z.shape[:-2], -1))
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
