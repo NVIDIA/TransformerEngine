@@ -807,12 +807,14 @@ class TransformerLayerAttr:
     LYR_TYPE = 'layer_type'
     ZERO_CEN = 'zero_centered_gamma'
     TRANSPOSE_BS = 'transpose_batch_sequence'
+    ENABLE_ROPE = 'enable_rope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -820,6 +822,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -827,6 +830,7 @@ class TransformerLayerAttr:
         ZERO_CEN: True,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -834,6 +838,7 @@ class TransformerLayerAttr:
         ZERO_CEN: True,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -841,6 +846,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -848,6 +854,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -855,6 +862,7 @@ class TransformerLayerAttr:
         ZERO_CEN: True,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -862,6 +870,7 @@ class TransformerLayerAttr:
         ZERO_CEN: True,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -869,6 +878,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -876,6 +886,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -883,6 +894,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -890,6 +902,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -897,6 +910,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -904,6 +918,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -911,6 +926,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -918,6 +934,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -925,6 +942,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -932,6 +950,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -939,6 +958,7 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -946,6 +966,15 @@ class TransformerLayerAttr:
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
+        TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: True,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: True,
         TRANSPOSE_BS: False
     }]
 
@@ -973,6 +1002,7 @@ class TestTransformer(TestLayer):
         use_bias = attrs[TransformerLayerAttr.USE_BIAS]
         bias_init = WeightInit.Constant(0.0)
         layer_type = attrs[TransformerLayerAttr.LYR_TYPE]
+        enable_rope = attrs[TransformerLayerAttr.ENABLE_ROPE]
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
                                                num_attention_heads=num_attention_heads)
@@ -1008,6 +1038,7 @@ class TestTransformer(TestLayer):
                                      bias_init=bias_init,
                                      layer_type=layer_type,
                                      enable_relative_embedding=enable_relative_embedding,
+                                     enable_rope=enable_rope,
                                      relative_embedding=relative_embedding,
                                      drop_path=drop_path,
                                      transpose_batch_sequence=transpose_batch_sequence)
@@ -1029,6 +1060,7 @@ class TestTransformer(TestLayer):
                            bias_init=TransformerEngineBaseLayer.generate_params_init(
                                "bias", bias_init),
                            layer_type=layer_type,
+                           enable_rope=enable_rope,
                            enable_relative_embedding=enable_relative_embedding,
                            relative_embedding=relative_embedding_flax_module,
                            drop_path=drop_path,
