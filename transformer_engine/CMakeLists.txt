@@ -22,7 +22,12 @@ endif()
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
 find_package(CUDNN REQUIRED cudnn)
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+
+if(${CMAKE_VERSION} VERSION_LESS "3.18.0")
+  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+else()
+  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+endif()
 
 include_directories(${PROJECT_SOURCE_DIR})
 
