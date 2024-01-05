@@ -423,7 +423,7 @@ def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     softmax_lse.log_()
 
 
-class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
+class AttnFuncWithCP(torch.autograd.Function):
     """
     Flash Attention implementation with context parallelism.
     Split flash attention compute into multiple steps, and overlap current-step
@@ -979,13 +979,13 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
 
 
-def flash_attn_forward_func_with_cp(
+def attn_forward_func_with_cp(
     is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
     dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, causal=False,
     deterministic=False, use_fused_attention=False
 ) -> torch.Tensor:
     """Flash Attention implementation with context parallelism"""
-    out = FlashAttnUnpaddedFuncWithCP.apply(
+    out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal,
         deterministic, use_fused_attention
@@ -1650,7 +1650,7 @@ class FlashAttention(torch.nn.Module):
                 window_size in ((-1, -1), (-1, 0))
                 ), "Sliding window attention is not supported with context parallelism."
             with self.attention_dropout_ctx():
-                output = flash_attn_forward_func_with_cp(
+                output = attn_forward_func_with_cp(
                     self.training, query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
@@ -2073,7 +2073,7 @@ class FusedAttention(torch.nn.Module):
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                     for x in (query_layer, key_layer, value_layer)]
             with self.attention_dropout_ctx():
-                output = flash_attn_forward_func_with_cp(
+                output = attn_forward_func_with_cp(
                     self.training,
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv,
