@@ -14,7 +14,6 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
 from ..export import is_in_onnx_export_mode
@@ -742,39 +741,44 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self,
-        buffer_name: str,
-        pnames: List[str],
-        parameters_split: Dict[str, int]
-        ) -> torch.Tensor:
-        """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
-           the same memory region. If this is not the case, then the split parameters
-           are concatenated and the buffer is overwritten. The parameters' memory is then
-           re-assigned to point to the buffer to avoid subsequent concatenations.
+    def noop_cat(
+        self,
+        tensors: List[torch.Tensor],
+        *,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        """Concatenate tensors along dim 0, doing no-op if possible
+
+        If the output tensor is already the concatenation of the input
+        tensors, i.e. they occupy the same memory region with the
+        correct offsets, then no copies are performed. Otherwise the
+        memory in the input and output tensors are reallocated so that
+        another call would result in a no-op.
+
+        In the backward pass, gradients will just be tensor views.
+
         """
 
-        assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
-        full_param_buffer = getattr(self, buffer_name)
-        params = [getattr(self, name) for name in pnames]
-        slice_begin = 0
-        for i, p in enumerate(params):
-            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
-            slice_end = slice_begin + slice_size
-            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
-                with torch.no_grad():
-                    setattr(self, buffer_name, torch.cat(params))
-                    slice_begin_j = 0
-                    for pname in pnames:
-                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
-                        slice_end_j = slice_begin_j + slice_size_j
-                        full_param_buffer = getattr(self, buffer_name)
-                        setattr(self, pname,
-                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
-                        slice_begin_j = slice_end_j
-                break
-            slice_begin = slice_end
+        # Determine split points
+        split_ranges = []
+        split_start = 0
+        for tensor in tensors:
+            split_end = split_start + tensor.size(0)
+            split_ranges.append((split_start, split_end))
+            split_start = split_end
 
-        return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
+        # Reallocate output buffer if needed
+        for tensor, (split_start, _) in zip(tensors, split_ranges):
+            if tensor.data_ptr() == out[split_start].data_ptr():
+                continue
+            with torch.no_grad():
+                out.data = torch.cat(tensors)
+                for tensor, (split_start, split_end) in zip(tensor, split_ranges):
+                    tensor.data = out[split_start:split_end]
+            break
+
+        # Perform no-op concatenation
+        return _NoopCat.apply(out, *tensors)
 
     def get_fp8_weights_empty_tensors(
         self,
