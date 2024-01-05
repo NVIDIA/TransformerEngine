@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -57,6 +57,19 @@
     if (status_NVTE_CHECK_CUDNN != CUDNN_STATUS_SUCCESS) {              \
       NVTE_ERROR("cuDNN Error: ",                                       \
                  cudnnGetErrorString(status_NVTE_CHECK_CUDNN),          \
+                 ". "                                                   \
+                 "For more information, enable cuDNN error logging "    \
+                 "by setting CUDNN_LOGERR_DBG=1 and "                   \
+                 "CUDNN_LOGDEST_DBG=stderr in the environment.");       \
+    }                                                                   \
+  } while (false)
+
+#define NVTE_CHECK_CUDNN_FE(expr)                                       \
+  do {                                                                  \
+    const auto error = (expr);                                          \
+    if (error.is_bad()) {                                               \
+      NVTE_ERROR("cuDNN Error: ",                                       \
+                 error.err_msg,                                         \
                  ". "                                                   \
                  "For more information, enable cuDNN error logging "    \
                  "by setting CUDNN_LOGERR_DBG=1 and "                   \

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -152,9 +152,15 @@ def _is_flash_attention_2_available() -> bool:
 
 @functools.cache
 def _is_flash_attention_2_1() -> bool:
-    """Check if flash-attn 2.0+ is available"""
+    """Check if flash-attn 2.1+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2.1")
+
+@functools.cache
+def _is_flash_attention_2_3() -> bool:
+    """Check if flash-attn 2.3+ is available"""
+    Version = packaging.version.Version
+    return Version(version("flash-attn")) >= Version("2.3")
 
 def _is_flash_attention_supported(config: ModelConfig) -> bool:
     """Check if FlashAttention supports a model configuration"""
@@ -192,6 +198,17 @@ if torch.cuda.is_bf16_supported():
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+def get_swa(seq_q, seq_kv, w=None):
+    """Generate a random sliding window size (left, right) if w is None,
+    and create its equivalent attention mask in [seq_q, seq_kv] shape"""
+    if w is None:
+        w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
+    m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
+    mu = torch.triu(m, diagonal=seq_kv-seq_q-w[0])
+    ml = torch.tril(mu, diagonal=seq_kv-seq_q+w[1])
+    ml = ~ ml
+    return w, ml
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
@@ -199,7 +216,8 @@ param_types_lean = [torch.bfloat16]
 @pytest.mark.parametrize("ckpt_attn", [False])
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
-def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout):
+@pytest.mark.parametrize("swa", [False])
+def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa):
     """Test DotProductAttention module"""
 
     # Get configs
@@ -224,36 +242,43 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config, dtype, qkv_layout=qkv_layout,
     )
+    if swa:
+        fused_attn_supported = False
     flash_attn_supported = _is_flash_attention_supported(config)
     if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
+        if swa:
+            attn_mask_type = config.attn_mask_type
+            config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, config, "UnfusedDotProductAttention", ckpt_attn, qkv_layout, workspace_opt,
+            dtype, config, "UnfusedDotProductAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
         )
+        if swa:
+            config.attn_mask_type = attn_mask_type
 
     # FusedAttention backend
     if fused_attn_supported:
         if len(fused_attn_backend) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
             )
         if len(fused_attn_backend) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
             )
 
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype, config, "FlashAttention", ckpt_attn, qkv_layout, workspace_opt,
+            dtype, config, "FlashAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -279,7 +304,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None)
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False)
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
@@ -303,7 +328,7 @@ model_configs_mask = {
 @pytest.mark.parametrize("model", model_configs_mask.keys())
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
 
 model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
@@ -339,7 +364,22 @@ model_configs_bias = {
 @pytest.mark.parametrize("model", model_configs_bias.keys())
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+
+model_configs_swa = {
+    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    "swa_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "no_mask",          "no_bias"),
+    "swa_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "no_mask",          "no_bias"),
+    "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",          "no_bias"),
+    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",          "no_bias"),
+}
+@pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_swa])
+@pytest.mark.parametrize("model", model_configs_swa.keys())
+def test_dpa_sliding_window(dtype, model_configs, model):
+    """Test DotProductAttention module with sliding window attention"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, True)
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
@@ -367,7 +407,7 @@ model_configs_layout = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
 
 def _run_dot_product_attention(
         dtype: torch.dtype,
@@ -376,6 +416,7 @@ def _run_dot_product_attention(
         ckpt_attn: bool,
         qkv_layout: str,
         workspace_opt: bool,
+        swa: bool,
         ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
 
@@ -433,6 +474,10 @@ def _run_dot_product_attention(
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = (
                     attention_mask_q.to(device="cuda"), attention_mask_kv.to(device="cuda"))
+    if swa:
+        window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
+    else:
+        window_size, attention_mask = None, None
 
     # Create input tensors
     dim_to_num = {
@@ -515,6 +560,7 @@ def _run_dot_product_attention(
 
     # Run a forward and backward pass
     out = block(inp[0], inp[1], inp[2],
+            window_size=window_size,
             attention_mask=attention_mask,
             qkv_format=qkv_format,
             cu_seqlens_q=cu_seqlens_q,
