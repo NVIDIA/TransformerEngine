@@ -468,6 +468,10 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[0]
     assert kernel_1.shape[-1] == kernel_2.shape[0]
 
+    # Squeeze act axis
+    # (hidden_in, 1, hidden_out) -> (hidden_in, hidden_out)
+    kernel_1 = jnp.squeeze(kernel_1, axis=-2)
+
     amax = FP8Helper.update_amax_history(amax)
 
     gemm1_x_idx, gemm1_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
@@ -514,7 +518,7 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
 
     ln_out = with_sharding_constraint_by_logical_axes(ln_out, dot_1_input_axes)
 
-    # (batch..., hidden_in) x (hidden_in, 2, hidden_out)
+    # (batch..., hidden_in) x (hidden_in, hidden_out)
     dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
                                 (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
@@ -532,8 +536,6 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
     casted_gelu_out, updated_gelu_amax = gelu_fp8(dot_1_output, gelu_out_amax, gelu_out_scale,
                                                   gelu_out_scale_inv, fwd_dtype)
 
-    # Squeeze act axis.
-    casted_gelu_out = jax.numpy.squeeze(casted_gelu_out, axis=-2)
     casted_gelu_out = with_sharding_constraint_by_logical_axes(casted_gelu_out, dot_2_input_axes)
 
     kernel_2_scale = scale[gemm2_kernel_idx]
@@ -614,8 +616,6 @@ def _layernrom_gelu_fp8_mlp_bwd_rule(
     dgelu_scale = scale[gemm1_grad_idx]
     dgelu_scale_inv = scale_inv[gemm1_grad_idx]
 
-    dgrad_2 = jnp.reshape(dgrad_2, dot_1_output.shape)
-
     casted_dgelu, casted_dgelu_t, dbias_1, updated_dgelu_amax = dgelu_dbias_cast_transpose(
         dgrad_2,
         dot_1_output,
@@ -624,25 +624,24 @@ def _layernrom_gelu_fp8_mlp_bwd_rule(
         dgelu_scale_inv,
         bwd_dtype,
         static_axis_boundary=-1,
-        transpose_axis_boundary=-2)
+        transpose_axis_boundary=-1)
 
     dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
-    # (hidden, batch...) x (2, hidden, batch...)
-    xt_batch_dims_plus_act_dim = tuple(i + 1 for i in xt_batch_dims)
+    # (hidden, batch...) x (hidden, batch...)
     gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dgelu_t, gemm1_x_scale_inv, dgelu_scale_inv, grad.dtype,
-                           (xt_batch_dims, xt_batch_dims_plus_act_dim),
+                           (xt_batch_dims, xt_batch_dims),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
+    # Expand act axis to match the shape with the given kernel_1
+    wgrad_1 = jnp.expand_dims(wgrad_1, axis=-2)
 
-    # (batch..., 2, hidden_out) x (hidden_in, 2, hidden_out)
-    x_contracting_dims_plus_act_dim = (min(x_contracting_dims),) + tuple(
-        i + 1 for i in x_contracting_dims)
+    # (batch..., hidden_out) x (hidden_in, hidden_out)
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
     dgrad_1 = fp8_dot_impl(casted_dgelu, casted_kernel_1, dgelu_scale_inv, kernel_1_scale_inv,
-                           grad.dtype, (x_contracting_dims_plus_act_dim, (1, 2)),
+                           grad.dtype, (x_contracting_dims, (1,)),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, layernorm_input_axes)
