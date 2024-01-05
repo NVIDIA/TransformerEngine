@@ -511,6 +511,7 @@ def test_sanity_gpt_126m():
         bias=True,
         activation="gelu",
         normalization="LayerNorm",
+        parallel_attention_mlp=False,
     )
 
 
