@@ -1121,6 +1121,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 
+
 def _get_qkv_layout(
         q: torch.Tensor,
         k: torch.Tensor,
@@ -1227,6 +1228,7 @@ def _get_qkv_layout(
 
     return qkv_layout, q, k, v
 
+
 def check_set_window_size(
         attn_mask_type: str,
         window_size: Tuple[int, int] = None,
@@ -1245,6 +1247,7 @@ def check_set_window_size(
         if window_size is None:
             window_size = (-1, -1)
     return window_size
+
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
@@ -1286,6 +1289,7 @@ class FlashAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
@@ -1411,6 +1415,9 @@ class FlashAttention(torch.nn.Module):
             assert (
                 window_size in ((-1, -1), (-1, 0))
                 ), "Sliding window attention is not supported with context parallelism."
+            assert (
+                alibi_slopes is None
+            ), "Alibi slope bias addition is not supported with context parallelism."
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
                     query_layer, key_layer, value_layer,
@@ -1426,6 +1433,8 @@ class FlashAttention(torch.nn.Module):
                 fa_optional_forward_kwargs = {}
                 if _flash_attn_2_3_plus:
                     fa_optional_forward_kwargs["window_size"] = window_size
+                if _flash_attn_2_4_plus:
+                    fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                 if _flash_attn_2_4_1_plus:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 output = flash_attn_forward_func(
@@ -1518,6 +1527,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
+
 class FusedAttnFunc_kvpacked(torch.autograd.Function):
     """Function for FusedAttention with packed KV input"""
 
@@ -1588,6 +1598,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         return (None, None, None, None, None, dq, dkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
+
 
 class FusedAttnFunc(torch.autograd.Function):
     """Function for FusedAttention with separate Q, K, V tensors"""
@@ -1661,6 +1672,7 @@ class FusedAttnFunc(torch.autograd.Function):
         return (None, None, None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
+
 
 class FusedAttention(torch.nn.Module):
     """Dot product attention, with multiple backends:
@@ -2090,6 +2102,7 @@ class DotProductAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -2171,6 +2184,10 @@ class DotProductAttention(torch.nn.Module):
                        softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
         window_size: Optional[Tuple[int, int]], default = `None`
                     sliding window size for local attention.
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     An fp32 bias of shape (nheads,) or (batch_size, nheads)
+                     (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                     is added to the attention score of query i and key j.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -2346,6 +2363,13 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = (use_fused_attention
                                   and is_backend_avail)
 
+        # Filter: Alibi slopes
+        if alibi_slopes is not None:
+            use_fused_attention = False
+            assert (
+                use_flash_attention
+            ), "Alibi slopes bias is only supported in the FlashAttention backend."
+
         # Filter: determinism.
         # backend                                  | deterministic
         # ---------------------------------------------------------
@@ -2383,6 +2407,7 @@ class DotProductAttention(torch.nn.Module):
                                         cu_seqlens_kv=cu_seqlens_kv,
                                         attn_mask_type=attn_mask_type,
                                         window_size=window_size,
+                                        alibi_slopes=alibi_slopes,
                                         cp_group=self.cp_group,
                                         cp_global_ranks=self.cp_global_ranks,
                                         cp_stream=self.cp_stream,
