@@ -7,7 +7,6 @@ import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
-from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
 
