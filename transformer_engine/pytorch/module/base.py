@@ -212,44 +212,6 @@ def get_ub(name: str):
     return _ub_communicators[name]
 
 
-class _NoopCat(torch.autograd.Function):
-    """This class is a no-op replacement for `torch.cat`."""
-
-    @staticmethod
-    def forward(ctx,
-                full_param_buffer: torch.Tensor,
-                *params_split: Tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
-        sum_params_shape = sum(p.shape[0] for p in params_split)
-        assert (
-            full_param_buffer.shape[0] == sum_params_shape
-        ), "Dimensions not compatible for concatenation"
-
-        param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.untyped_storage(),
-                        full_param_buffer.storage_offset(),
-                        full_param_buffer.size(),
-                        full_param_buffer.stride())
-        param_temp.requires_grad = True
-
-        ctx.save_for_backward(*params_split)
-        return param_temp
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        params_split = ctx.saved_tensors
-        grads = []
-        slice_begin = 0
-        for i, _ in enumerate(params_split):
-            slice_size = params_split[i].shape[0]
-            slice_end = slice_begin + slice_size
-            grads.append(grad_output[slice_begin:slice_end])
-            slice_begin = slice_end
-
-        return None, *grads
-
-
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -740,45 +702,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             grad_bias = None
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
-
-    def noop_cat(
-        self,
-        tensors: List[torch.Tensor],
-        *,
-        out: torch.Tensor,
-    ) -> torch.Tensor:
-        """Concatenate tensors along dim 0, doing no-op if possible
-
-        If the output tensor is already the concatenation of the input
-        tensors, i.e. they occupy the same memory region with the
-        correct offsets, then no copies are performed. Otherwise the
-        memory in the input and output tensors are reallocated so that
-        another call would result in a no-op.
-
-        In the backward pass, gradients will just be tensor views.
-
-        """
-
-        # Determine split points
-        split_ranges = []
-        split_start = 0
-        for tensor in tensors:
-            split_end = split_start + tensor.size(0)
-            split_ranges.append((split_start, split_end))
-            split_start = split_end
-
-        # Reallocate output buffer if needed
-        for tensor, (split_start, _) in zip(tensors, split_ranges):
-            if tensor.data_ptr() == out[split_start].data_ptr():
-                continue
-            with torch.no_grad():
-                out.data = torch.cat(tensors)
-                for tensor, (split_start, split_end) in zip(tensor, split_ranges):
-                    tensor.data = out[split_start:split_end]
-            break
-
-        # Perform no-op concatenation
-        return _NoopCat.apply(out, *tensors)
 
     def get_fp8_weights_empty_tensors(
         self,

@@ -20,6 +20,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ._common import _noop_cat
 from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
@@ -858,14 +859,14 @@ class Linear(TransformerEngineBaseModule):
                 weight_tensor = getattr(self, self.weight_names[0])
                 bias_tensor = getattr(self, self.bias_names[0])
             elif torch.is_grad_enabled():
-                weight_tensor = self.noop_cat(
+                weight_tensor = _noop_cat(
                     [getattr(self, name) for name in self.weight_names],
-                    out=self.weight_tensor,
+                    self.weight_tensor,
                 )
                 if self.use_bias:
-                    bias_tensor = self.noop_cat(
+                    bias_tensor = _noop_cat(
                         [getattr(self, name) for name in self.bias_names],
-                        out=self.bias_tensor,
+                        self.bias_tensor,
                     )
                 else:
                     bias_tensor = torch.Tensor().to(
