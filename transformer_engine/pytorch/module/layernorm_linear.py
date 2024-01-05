@@ -7,9 +7,7 @@ import os
 import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
-
 import torch
-from torch.nn.parameter import Parameter
 from torch.nn import init
 
 from .. import cpp_extensions as tex
@@ -751,12 +749,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         self.eps = eps
-        self.layer_norm_weight = Parameter(
+        self.layer_norm_weight = torch.nn.Parameter(
             torch.empty(in_features, device=device, dtype=params_dtype)
         )
         setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
         if self.normalization != "RMSNorm":
-            self.layer_norm_bias = Parameter(
+            self.layer_norm_bias = torch.nn.Parameter(
                 torch.empty(in_features, device=device, dtype=params_dtype)
             )
             setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
@@ -991,10 +989,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         self.bias_tensor,
                     )
                 else:
-                    bias_tensor = torch.Tensor().to(
-                        dtype=params_dtype,
-                        device=device,
-                    )
+                    bias_tensor = getattr(self, self.bias_names[0])  # Unused
             else:
                 weight_tensor = self.weight_tensor
                 bias_tensor = self.bias_tensor

@@ -111,6 +111,7 @@ class _NoopCatFunc(torch.autograd.Function):
         full_tensor: torch.Tensor,
         *tensors: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
+        # pylint: disable=unused-argument
         ctx.split_ranges = split_ranges
         assert not full_tensor.requires_grad, "Concatenated tensor should not require gradient"
         out = full_tensor.new()
@@ -173,14 +174,16 @@ def _noop_cat(
         )
 
     # Reallocate buffers if no-op concat isn't possible
+    need_to_reallocate = False
     for tensor, (split_start, _) in zip(tensors, split_ranges):
-        if tensor.data_ptr() == full_tensor[split_start].data_ptr():
-            continue
+        if tensor.data_ptr() != full_tensor[split_start].data_ptr():
+            need_to_reallocate = True
+            break
+    if need_to_reallocate:
         with torch.no_grad():
             full_tensor.data = torch.cat(tensors)
-            for tensor, (split_start, split_end) in zip(tensor, split_ranges):
+            for tensor, (split_start, split_end) in zip(tensors, split_ranges):
                 tensor.data = full_tensor[split_start:split_end]
-        break
 
     # Perform no-op concat
     return _NoopCatFunc.apply(split_ranges, full_tensor, *tensors)

@@ -869,10 +869,7 @@ class Linear(TransformerEngineBaseModule):
                         self.bias_tensor,
                     )
                 else:
-                    bias_tensor = torch.Tensor().to(
-                        dtype=params_dtype,
-                        device=device,
-                    )
+                    bias_tensor = getattr(self, self.bias_names[0])  # Unused
             else:
                 weight_tensor = self.weight_tensor
                 bias_tensor = self.bias_tensor
