@@ -432,8 +432,8 @@ class AttnFuncWithCP(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
-                use_fused_attention):
+                dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, attn_mask_type,
+                deterministic, use_fused_attention):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -442,6 +442,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         send_dst = cp_global_ranks[(rank + 1) % cp_size]
         recv_src = cp_global_ranks[(rank + cp_size - 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+
+        causal = (attn_mask_type == "causal")
 
         if causal:
             # [b, s, np, hn] -> [b, 2, s//2, np, hn]
@@ -980,14 +982,16 @@ class AttnFuncWithCP(torch.autograd.Function):
 
 
 def attn_forward_func_with_cp(
-    is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-    dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, causal=False,
+    is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+    cp_group, cp_global_ranks, cp_stream, softmax_scale=None, attn_mask_type="causal",
     deterministic=False, use_fused_attention=False
 ) -> torch.Tensor:
     """Attention implementation with context parallelism"""
+    assert (attn_mask_type in ["causal", "no_mask"]
+        ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-        dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal,
+        dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, attn_mask_type,
         deterministic, use_fused_attention
     )
     return out
@@ -1656,7 +1660,7 @@ class FlashAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
-                    causal="causal" in attn_mask_type,
+                    attn_mask_type=attn_mask_type,
                     deterministic=self.deterministic
                 )
         else:
@@ -2081,7 +2085,7 @@ class FusedAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
-                    causal="causal" in attn_mask_type,
+                    attn_mask_type=attn_mask_type,
                     use_fused_attention=True,
                 )
             if qkv_format == 'sbhd':
