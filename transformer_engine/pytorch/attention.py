@@ -2737,6 +2737,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_split_ag=ub_split_ag,
                     normalization=normalization,
                     ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+                    ub_name="qkv",
                     **common_gemm_kwargs,
                 )
             else:
@@ -2768,6 +2769,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_split_ag=ub_split_ag,
                     normalization=normalization,
                     ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+                    ub_name="qkv",
                     **common_gemm_kwargs,
                 )
             else:
@@ -2816,6 +2818,7 @@ class MultiheadAttention(torch.nn.Module):
             ub_split_ag=ub_split_ag,
             ub_atomic_gemm_rs=ub_atomic_gemm_rs,
             ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+            ub_name="proj",
             **common_gemm_kwargs,
         )
 
