@@ -1749,7 +1749,7 @@ class FusedAttention(torch.nn.Module):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-    @no_torch_dynamo()
+    # @no_torch_dynamo()
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -2101,7 +2101,7 @@ class DotProductAttention(torch.nn.Module):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
-    @no_torch_dynamo(recursive=False)
+    # @no_torch_dynamo(recursive=False)
     def forward(
         self,
         query_layer: torch.Tensor,

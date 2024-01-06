@@ -14,10 +14,16 @@ if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda func: func
+
+# no_torch_dynamo = lambda recursive=True: lambda func: func
+# if torch.__version__ >= "2":
+#     import torch._dynamo
+#     no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+
+no_torch_dynamo = lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
-    no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+    no_torch_dynamo = torch._dynamo.disable
 
 
 def set_jit_fusion_options() -> None:
