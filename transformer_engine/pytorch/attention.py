@@ -2580,12 +2580,12 @@ class DotProductAttention(torch.nn.Module):
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
             use_flash_attention = False
 
+        context_parallel = (self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1)
+
         # Filter: sliding window attention.
         # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
         if window_size not in ((-1, -1), (-1, 0)):
             use_fused_attention = False
-            context_parallel = (self.cp_group is not None
-                and get_distributed_world_size(self.cp_group) != 1)
             if (not _flash_attn_2_3_plus) or context_parallel:
                 use_flash_attention = False
 
@@ -2626,8 +2626,9 @@ class DotProductAttention(torch.nn.Module):
             # DPA does not support FP8; for FP8, use cpp_extensions modules directly
             is_backend_avail = (fused_attention_backend in
                 [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
-            use_fused_attention = (use_fused_attention
-                                  and is_backend_avail)
+            use_fused_attention = (use_fused_attention and is_backend_avail and \
+                                   (not context_parallel or \
+                                    fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
 
         # Filter: determinism.
         # backend                                  | deterministic
@@ -2713,9 +2714,7 @@ class DotProductAttention(torch.nn.Module):
                                         max_seqlen_q=max_seqlen_q,
                                         max_seqlen_kv=max_seqlen_kv)
 
-        assert (
-            self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
-        ), "Context parallelism is only implemented with Flash Attention and Fused Attention!"
+        assert (not context_parallel), "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
