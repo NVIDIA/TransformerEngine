@@ -7,6 +7,10 @@
 #include "common.h"
 #include "common/common.h"
 
+/***************************************************************************************************
+ * Attention
+ **************************************************************************************************/
+
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
@@ -149,8 +153,11 @@ std::vector<at::Tensor> fused_attn_bwd(
                 c10::optional<at::Tensor> amax_dQKV);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
-
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+/***************************************************************************************************
+ * GEMM
+ **************************************************************************************************/
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -201,6 +208,10 @@ void te_atomic_gemm(at::Tensor A,
                     bool gemm_producer,
                     at::Tensor counter
 );
+
+/***************************************************************************************************
+ * Transpose
+ **************************************************************************************************/
 
 void fused_cast_transpose(at::Tensor input,
                           at::Tensor scale,
@@ -484,6 +495,9 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 );
 
+/***************************************************************************************************
+ * Softmax
+ **************************************************************************************************/
 
 at::Tensor scaled_softmax_forward(at::Tensor input,
                                   float scale_factor
@@ -517,6 +531,24 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
                                                        float scale_factor
 );
+
+/***************************************************************************************************
+ * FP8
+ **************************************************************************************************/
+
+void fused_scale_update(const at::Tensor& amax,
+                        const at::Tensor& old_scale,
+                        const at::Tensor& old_scale_inv,
+                        const at::Tensor& non_weight_mask,
+                        at::Tensor scale,
+                        at::Tensor scale_inv,
+                        float fp8_max,
+                        float margin,
+                        bool update_weight_scale_inv);
+
+/***************************************************************************************************
+ * Miscellaneous
+ **************************************************************************************************/
 
 size_t get_cublasLt_version();
 

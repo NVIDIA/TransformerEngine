@@ -644,23 +644,22 @@ def _fused_amax_and_scale_update(
         amax_compute_algo,
     )
 
-    # Calculate new scaling factor.
-    scale = _default_sf_compute(
+    # Calculate new scaling factor and scale inverse
+    new_scale = torch.empty_like(scale)
+    new_scale_inv = torch.empty_like(scale)
+    tex.fused_scale_update(
         amax,
-        scale,
-        fp8_max,
-        margin,
-    )
-
-    # Calculate new inverse of scaling factor.
-    scale_inv = _compute_scaling_factor_inverse(
         scale,
         scale_inv,
         non_weight_mask,
+        new_scale,
+        new_scale_inv,
+        fp8_max,
+        margin,
         update_weight_scale_inv,
     )
 
-    return amax_history, scale, scale_inv
+    return amax_history, new_scale, new_scale_inv
 
 
 def _compute_amax(
