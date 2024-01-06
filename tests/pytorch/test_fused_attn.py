@@ -842,7 +842,7 @@ param_types_fp8 = [torch.float16]
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability != (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8.keys())
 def test_dpa_fp8(dtype, model):
