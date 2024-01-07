@@ -33,6 +33,20 @@ from ..recompute import recompute
 __all__ = ["DotProductAttention", "MultiHeadAttention"]
 
 
+def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
+    """
+    Used to repeat the key and value states for GQA.
+    The hidden states go from (batch, seqlen, num_gqa_groups, head_size)
+    to (batch, seqlen, num_heads, head_size)
+    """
+    batch, seqlen, num_gqa_groups, head_size = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+
+    hidden_states = hidden_states.unsqueeze(-2).tile([1, 1, 1, n_rep, 1])
+    return hidden_states.reshape([batch, seqlen, num_gqa_groups * n_rep, head_size])
+
+
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
     """Function for FusedAttention with packed QKV input"""
 
@@ -189,31 +203,51 @@ class DotProductAttention(paddle.nn.Layer):
 
     Parameters
     ----------
-    norm_factor : float
-                    normalization factor for the attention scores.
+    num_attention_heads: int
+            number of attention heads in the transformer layer.
+    kv_channels: int
+            number of channels in the key and value tensors.
+    num_gqa_groups : Optional[int] = None
+                    number of GQA groups in the transformer layer.
+                    Grouped Query Attention is described in
+                    `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                    This only affects the keys and values, not the queries.
+                    GQA-1 is equivalent to Multi-Query Attention
+                    (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     attention_dropout: float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation.
     attention_type: {'self', 'cross'}, default = `self`
                     type of attention operation.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
              backend to use for attention operation.
     """
 
     def __init__(self,
-                 norm_factor: float,
+                 num_attention_heads: int,
+                 kv_channels: int,
+                 num_gqa_groups: Optional[int] = None,
                  attention_dropout: float = 0.1,
                  attn_mask_type: str = "causal",
                  attention_type: str = "self",
+                 tp_size: int = 1,
                  backend: str = 'transformer_engine') -> None:
         super().__init__()
 
-        self.norm_factor = norm_factor
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
         self.qkv_layout = "bshd_bshd_bshd"
+        self.hidden_size_per_attention_head = kv_channels
+        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        self.tp_size = tp_size
+        self.num_gqa_groups = (num_attention_heads if num_gqa_groups is None else num_gqa_groups)
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.num_queries_per_key_value = num_attention_heads // self.num_gqa_groups
 
         self.backend = backend
 
@@ -246,26 +280,15 @@ class DotProductAttention(paddle.nn.Layer):
             Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
             is set to `"causal"`.
 
-        .. note::
-
-            For self attention, :attr:`query_layer` is the `[query, key, value]` tensor
-            stacked along the 2nd dimension, which must be of shape (:attr:`batch_size`,
-            :attr:`seq_length`, 3, :attr:`num_attention_heads`, :attr:`size_per_head`).
-            And :attr:`key_value_layer` is `None`.
-            For cross attention, :attr:`query_layer` is the `[query]` tensor, which must
-            be of shape (:attr:`batch_size`, :attr:`seq_length`, :attr:`num_attention_heads`,
-            :attr:`size_per_head`). And :attr:`key_value_layer` is the `[key, value]` tensor,
-            which must be of shape (:attr:`batch_size`, :attr:`seq_length`, 2,
-            :attr:`num_attention_heads`, :attr:`size_per_head`).
-
-
 
         Parameters
         ----------
         query_layer : paddle.Tensor
                       Query tensor.
-        key_value_layer : paddle.Tensor
-                          Key tensor.
+        key_layer : paddle.Tensor
+                      Key tensor.
+        value_layer : paddle.Tensor
+                      Value tensor.
         attention_mask : Optional[paddle.Tensor], default = `None`
                          Boolean tensor used to mask out softmax input when not using attention.
         core_attention_bias_type: str, default = `no_bias`
@@ -277,6 +300,10 @@ class DotProductAttention(paddle.nn.Layer):
         """
 
         backend = self.backend
+
+        assert (key_layer.shape == value_layer.shape), "Keys and values must have the same shape!"
+        assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
+               ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
 
         if backend == 'transformer_engine':
             max_s_q = query_layer.shape[1]
@@ -371,8 +398,8 @@ class DotProductAttention(paddle.nn.Layer):
     ) -> paddle.Tensor:
 
         q = query_layer
-        k = key_layer
-        v = value_layer
+        k = repeat_kv(key_layer, self.num_queries_per_key_value)
+        v = repeat_kv(value_layer, self.num_queries_per_key_value)
 
         q = paddle.transpose(x=q, perm=[0, 2, 1, 3])
         k = paddle.transpose(x=k, perm=[0, 2, 1, 3])
@@ -439,6 +466,14 @@ class MultiHeadAttention(paddle.nn.Layer):
                        if set to `True`, uses sequence parallelism.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
+    num_gqa_groups : int, default = `None`
+                     number of GQA groups in the transformer layer.
+                     Grouped Query Attention is described in
+                     `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                     This only affects the keys and values, not the querys.
+                     GQA-1 is equivalent to Multi-Query Attention
+                     (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                     is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     rng_state_name : str, default = `local_seed`
                    Controls the rng state used for dropout on attention probs. The
                    specified rng should be set different seeds for different TP ranks.
@@ -465,6 +500,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         set_parallel_mode: bool = False,
         sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
+        num_gqa_groups: Optional[int] = None,
         rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
     ) -> None:
@@ -485,19 +521,25 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_size_per_attention_head = hidden_size // num_attention_heads
         self.num_attention_heads = num_attention_heads
-        norm_factor = math.sqrt(self.hidden_size_per_attention_head)
         self.set_parallel_mode = set_parallel_mode
         self.rng_state_name = rng_state_name
         self.backend = backend
 
         self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
+        self.num_gqa_groups = (num_attention_heads if num_gqa_groups is None else num_gqa_groups)
+        assert (self.num_attention_heads % self.num_gqa_groups == 0
+               ), "The number of attention heads must be divisible by the number of GQA groups!"
+        assert (self.num_gqa_groups % self.tp_size == 0
+               ), "The number of GQA groups must be divisible by tensor parallel size!"
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
+        self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // self.num_attention_heads)
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
         if self.attention_type == "self":
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
-                    3 * hidden_size,
+                    hidden_size + 2 * self.hidden_size_kv,
                     eps=layernorm_epsilon,
                     weight_attr=self.weight_attr,
                     bias_attr=self.bias_attr,
@@ -511,7 +553,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             else:
                 self.qkv = Linear(
                     hidden_size,
-                    3 * hidden_size,
+                    hidden_size + 2 * self.hidden_size_kv,
                     self.weight_attr,
                     self.bias_attr,
                     parallel_mode=qkv_parallel_mode,
@@ -548,7 +590,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                 )
             self.key_value = Linear(
                 hidden_size,
-                2 * hidden_size,
+                2 * self.hidden_size_kv,
                 self.weight_attr,
                 self.bias_attr,
                 parallel_mode=qkv_parallel_mode,
@@ -559,10 +601,13 @@ class MultiHeadAttention(paddle.nn.Layer):
 
         # Attention.
         self.core_attention = DotProductAttention(
-            norm_factor,
+            self.num_attention_heads,
+            self.hidden_size_per_attention_head,
+            self.num_gqa_groups,
             attention_dropout,
             attn_mask_type=attn_mask_type,
             attention_type=self.attention_type,
+            tp_size=self.tp_size,
             backend=self.backend,
         )
 
@@ -654,26 +699,28 @@ class MultiHeadAttention(paddle.nn.Layer):
                     is_first_microbatch=is_first_microbatch,
                 )
 
-            # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
+            num_queries_per_key_value = (self.num_attention_heads_per_partition //
+                                         self.num_gqa_groups_per_partition)
+
+            # [b, s_q, hidden_size+2*hidden_size_kv] --> [b, s_q, (h/ng+2), ng, d]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                -1, max_seq_len, 3, self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head
+                0, 0, (num_queries_per_key_value +
+                       2), self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
             ])
+
+            # [b, s_q, (h/ng+2), ng, d]
+            # --> [b, s_q, (h/ng), ng, d] [b, s_q, 1, ng, d] [b, s_q, 1, ng, d]
             query_layer, key_layer, value_layer = paddle.split(
                 mixed_qkv_layer,
-                num_or_sections=3,
+                num_or_sections=(num_queries_per_key_value, 1, 1),
                 axis=2,
             )
 
-            query_layer = query_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-            ])
-            key_layer = key_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-            ])
-            value_layer = value_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-            ])
+            # query: -> [b, s, h, d]
+            # key, value: -> [b, s, ng, d]
+            query_layer, key_layer, value_layer = (x.reshape(
+                shape=[x.shape[0], x.shape[1], -1, self.hidden_size_per_attention_head])
+                                                   for x in (query_layer, key_layer, value_layer))
 
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 if recompute_core_attention:
@@ -706,22 +753,16 @@ class MultiHeadAttention(paddle.nn.Layer):
             )
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
             mixed_kv_layer = mixed_kv_layer.reshape(shape=[
-                -1, max_seq_len, 2, self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head
+                0, 0, 2 * self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
             ])
 
+            # [b, s_kv, 2 * ng, head_size]
+            # --> 2 [b, s_kv, ng, head_size]
             key_layer, value_layer = paddle.split(
                 mixed_kv_layer,
                 num_or_sections=2,
                 axis=2,
             )
-
-            key_layer = key_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-            ])
-            value_layer = value_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-            ])
 
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
@@ -738,6 +779,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     is_first_microbatch=is_first_microbatch,
                 )
 
+            # [b, s, hidden_size] --> [b, s, h, d]
             query_layer = query_layer.reshape(shape=[
                 -1, max_seq_len, self.num_attention_heads_per_partition,
                 self.hidden_size_per_attention_head

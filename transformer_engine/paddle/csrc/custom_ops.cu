@@ -931,6 +931,7 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
 
     // allocate memory for workspace and auxiliary output tensors
     auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
+
     workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
 
     auto *output_s =
