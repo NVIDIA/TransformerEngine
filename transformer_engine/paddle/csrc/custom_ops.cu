@@ -218,6 +218,66 @@ std::vector<paddle::Tensor> te_gelu(const paddle::Tensor &input, int64_t otype) 
     return {output};
 }
 
+std::vector<paddle::Tensor> te_swiglu(const paddle::Tensor &input, int64_t otype) {
+    auto shape = GetShapeArray(input);
+    NVTE_CHECK(shape.size() == 2, "Expect the input to have 2 dimensions.");
+
+    size_t M = shape[0];
+    size_t N = shape[1];
+
+    auto output = paddle::empty({input.shape()[0], input.shape()[1] / 2},
+                                Nvte2PaddleDType(Int2NvteDType(otype)), input.place());
+
+    auto input_cu = MakeNvteTensor(input);
+    auto output_cu = MakeNvteTensor(output.data(), GetShapeArray(output), Int2NvteDType(otype));
+
+    nvte_swiglu(input_cu.data(), output_cu.data(), input.stream());
+
+    return {output};
+}
+
+std::vector<paddle::Tensor> te_swiglu_fp8(const paddle::Tensor &input, const paddle::Tensor &scale,
+                                          paddle::Tensor &amax,       // NOLINT
+                                          paddle::Tensor &scale_inv,  // NOLINT
+                                          int64_t index, int64_t otype) {
+    auto shape = GetShapeArray(input);
+    NVTE_CHECK(shape.size() == 2, "Expect the input to have 2 dimensions.");
+
+    size_t M = shape[0];
+    size_t N = shape[1];
+
+    auto output = paddle::empty({input.shape()[0], input.shape()[1] / 2},
+                                Nvte2PaddleDType(Int2NvteDType(otype)), input.place());
+
+    auto input_cu = MakeNvteTensor(input);
+    auto output_cu = MakeNvteTensor(
+        output.data(), GetShapeArray(output), Int2NvteDType(otype), GetDataPtr<float>(amax, index),
+        const_cast<void *>(GetDataPtr<float>(scale, index)), GetDataPtr<float>(scale_inv, index));
+
+    nvte_swiglu(input_cu.data(), output_cu.data(), input.stream());
+
+    return {output};
+}
+
+std::vector<paddle::Tensor> te_dswiglu(const paddle::Tensor &grad, const paddle::Tensor &input,
+                                       int64_t otype) {
+    auto shape = GetShapeArray(input);
+    NVTE_CHECK(shape.size() == 2, "Expect the input to have 2 dimensions.");
+
+    size_t M = shape[0];
+    size_t N = shape[1];
+
+    auto output = paddle::empty_like(input, Nvte2PaddleDType(Int2NvteDType(otype)), input.place());
+
+    auto input_cu = MakeNvteTensor(input.data(), {M, N}, Paddle2NvteDType(input.dtype()));
+    auto grad_cu = MakeNvteTensor(grad.data(), {M, N / 2}, Paddle2NvteDType(grad.dtype()));
+    auto output_cu = MakeNvteTensor(output.data(), {M, N}, Paddle2NvteDType(output.dtype()));
+
+    nvte_dswiglu(grad_cu.data(), input_cu.data(), output_cu.data(), input.stream());
+
+    return {output};
+}
+
 std::vector<paddle::Tensor> te_cast_transpose_bgrad_dgelu(const paddle::Tensor &grad_output,
                                                           const paddle::Tensor &gelu_input,
                                                           const paddle::Tensor &scale,
@@ -406,7 +466,9 @@ std::vector<paddle::Tensor> te_layernorm_bwd(const paddle::Tensor &dz, const pad
 
 std::vector<paddle::Tensor> te_rmsnorm_fwd(const paddle::Tensor &input,
                                            const paddle::Tensor &weight, float eps, int64_t otype,
-                                           int64_t sm_margin) {
+                                           int64_t sm_margin, bool zero_centered_gamma) {
+    NVTE_CHECK(zero_centered_gamma == false,
+               "zero_centered_gamma is not supported yet for RMSNorm.");
     auto shape = GetShapeArray(input);
     NVTE_CHECK(shape.size() == 2, "Expect the grad_output to have 2 dimensions.");
 
@@ -448,14 +510,16 @@ std::vector<paddle::Tensor> te_rmsnorm_fwd_fp8(const paddle::Tensor &input,
                                                paddle::Tensor &amax,       // NOLINT
                                                paddle::Tensor &scale_inv,  // NOLINT
                                                float eps, int64_t index, int64_t otype,
-                                               int64_t sm_margin) {
+                                               int64_t sm_margin, bool zero_centered_gamma) {
+    NVTE_CHECK(zero_centered_gamma == false,
+               "zero_centered_gamma is not supported yet for RMSNorm.");
     auto shape = GetShapeArray(input);
     NVTE_CHECK(shape.size() == 2, "Expect the grad_output to have 2 dimensions.");
 
     size_t N = shape[0];
     size_t H = shape[1];
 
-    auto ln_out = paddle::empty_like(input, input.dtype(), input.place());
+    auto ln_out = paddle::empty_like(input, Nvte2PaddleDType(Int2NvteDType(otype)), input.place());
     auto rsigma =
         paddle::empty({static_cast<int64_t>(N)}, paddle::DataType::FLOAT32, input.place());
     auto input_cu = MakeNvteTensor(input);
@@ -487,7 +551,10 @@ std::vector<paddle::Tensor> te_rmsnorm_fwd_fp8(const paddle::Tensor &input,
 
 std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddle::Tensor &x,
                                            const paddle::Tensor &rsigma,
-                                           const paddle::Tensor &gamma, int64_t sm_margin) {
+                                           const paddle::Tensor &gamma, int64_t sm_margin,
+                                           bool zero_centered_gamma) {
+    NVTE_CHECK(zero_centered_gamma == false,
+               "zero_centered_gamma is not supported yet for RMSNorm.");
     auto dx = paddle::empty_like(x, x.dtype(), x.place());
     auto dgamma = paddle::empty_like(gamma, gamma.dtype(), gamma.place());
 
@@ -1397,6 +1464,25 @@ PD_BUILD_OP(te_gelu)
     .Attrs({"otype: int64_t"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_gelu));
 
+PD_BUILD_OP(te_swiglu)
+    .Inputs({"Input"})
+    .Outputs({"Output"})
+    .Attrs({"otype: int64_t"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_swiglu));
+
+PD_BUILD_OP(te_swiglu_fp8)
+    .Inputs({"Input", "Scale", "_Amax", "_ScaleInv"})
+    .Outputs({"Output", "Amax", "ScaleInv"})
+    .SetInplaceMap({{"_Amax", "Amax"}, {"_ScaleInv", "ScaleInv"}})
+    .Attrs({"index: int64_t", "otype: int64_t"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_swiglu_fp8));
+
+PD_BUILD_OP(te_dswiglu)
+    .Inputs({"Grad", "Input"})
+    .Outputs({"Output"})
+    .Attrs({"otype: int64_t"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_dswiglu));
+
 PD_BUILD_OP(te_cast_transpose_bgrad_dgelu)
     .Inputs({"GradOutput", "GeluInput", "Scale", "_Amax", "_ScaleInv"})
     .Outputs({"CastedDgelu", "TransposedDgelu", "Dbias", "Amax", "ScaleInv"})
@@ -1427,20 +1513,21 @@ PD_BUILD_OP(te_layernorm_bwd)
 PD_BUILD_OP(te_rmsnorm_fwd)
     .Inputs({"Input", "Weight"})
     .Outputs({"Output", "InvVariance"})
-    .Attrs({"eps: float", "otype: int64_t", "sm_margin: int64_t"})
+    .Attrs({"eps: float", "otype: int64_t", "sm_margin: int64_t", "zero_centered_gamma: bool"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_rmsnorm_fwd));
 
 PD_BUILD_OP(te_rmsnorm_fwd_fp8)
     .Inputs({"Input", "Weight", "Scale", "_Amax", "_ScaleInv"})
     .Outputs({"Output", "InvVariance", "Amax", "ScaleInv"})
     .SetInplaceMap({{"_Amax", "Amax"}, {"_ScaleInv", "ScaleInv"}})
-    .Attrs({"eps: float", "index: int64_t", "otype: int64_t", "sm_margin: int64_t"})
+    .Attrs({"eps: float", "index: int64_t", "otype: int64_t", "sm_margin: int64_t",
+            "zero_centered_gamma: bool"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_rmsnorm_fwd_fp8));
 
 PD_BUILD_OP(te_rmsnorm_bwd)
     .Inputs({"Dz", "X", "Rsigma", "Gamma"})
     .Outputs({"Dx", "Dgamma"})
-    .Attrs({"sm_margin: int64_t"})
+    .Attrs({"sm_margin: int64_t", "zero_centered_gamma: bool"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_rmsnorm_bwd));
 
 PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)

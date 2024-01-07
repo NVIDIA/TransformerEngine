@@ -301,8 +301,9 @@ class TestLayerNormLinear:
     @pytest.mark.parametrize('no_wgrad', [True, False])
     @pytest.mark.parametrize('return_ln_out', [True, False])
     @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
+    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
     def test_layernorm_linear_bf16(bs, in_features, out_features, has_bias, no_dbias, no_dgrad,
-                                   no_wgrad, return_ln_out, activation_dtype):
+                                   no_wgrad, return_ln_out, activation_dtype, normalization):
         """
         Test BF16 LayerNormLinear Layer
         """
@@ -314,11 +315,13 @@ class TestLayerNormLinear:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
         eps = 1e-3
+        has_ln_bias = normalization == 'LayerNorm'
 
         layer_te = te.LayerNormLinear(
             in_features=in_features,
             out_features=out_features,
             eps=eps,
+            normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
         )
@@ -327,23 +330,26 @@ class TestLayerNormLinear:
             in_features=in_features,
             out_features=out_features,
             eps=eps,
+            normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
             backend='paddle',
         )
 
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
-        layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+        if has_ln_bias:
+            layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
         layer_pd.weight.copy_(layer_te.weight.T, True)
         if has_bias:
             layer_pd.bias.copy_(layer_te.bias, True)
 
         layer_te.weight.stop_gradient = no_wgrad
         layer_te.ln_weight.stop_gradient = no_wgrad
-        layer_te.ln_bias.stop_gradient = no_dbias
         layer_pd.weight.stop_gradient = no_wgrad
         layer_pd.ln_weight.stop_gradient = no_wgrad
-        layer_pd.ln_bias.stop_gradient = no_dbias
+        if has_ln_bias:
+            layer_te.ln_bias.stop_gradient = no_dbias
+            layer_pd.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_te.bias.stop_gradient = no_dbias
             layer_pd.bias.stop_gradient = no_dbias
@@ -362,7 +368,8 @@ class TestLayerNormLinear:
             assert_allclose(layer_te.weight.grad, layer_pd.weight.grad.T, rtol=rtol, atol=atol)
             assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
         if not no_dbias:
-            assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
+            if has_ln_bias:
+                assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
                 assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
         if return_ln_out:
@@ -378,9 +385,10 @@ class TestLayerNormLinear:
     @pytest.mark.parametrize('do_calibration', [True, False])
     @pytest.mark.parametrize('return_ln_out', [True, False])
     @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
+    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
     def test_layernorm_linear_fp8(bs, in_features, out_features, has_bias, no_dbias, no_dgrad,
                                   no_wgrad, fp8_wgrad, do_calibration, return_ln_out,
-                                  activation_dtype):
+                                  activation_dtype, normalization):
         """
         Test FP8 LayerNormLinear Layer
         """
@@ -392,6 +400,7 @@ class TestLayerNormLinear:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
         eps = 1e-3
+        has_ln_bias = normalization == 'LayerNorm'
 
         recipe = DelayedScaling(override_linear_precision=(False, False, not fp8_wgrad))
 
@@ -399,6 +408,7 @@ class TestLayerNormLinear:
             in_features=in_features,
             out_features=out_features,
             eps=eps,
+            normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
         )
@@ -407,23 +417,26 @@ class TestLayerNormLinear:
             in_features=in_features,
             out_features=out_features,
             eps=eps,
+            normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
             backend='paddle',
         )
 
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
-        layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+        if has_ln_bias:
+            layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
         layer_pd.weight.copy_(layer_te.weight.T, True)
         if has_bias:
             layer_pd.bias.copy_(layer_te.bias, True)
 
         layer_te.weight.stop_gradient = no_wgrad
         layer_te.ln_weight.stop_gradient = no_wgrad
-        layer_te.ln_bias.stop_gradient = no_dbias
         layer_pd.weight.stop_gradient = no_wgrad
         layer_pd.ln_weight.stop_gradient = no_wgrad
-        layer_pd.ln_bias.stop_gradient = no_dbias
+        if has_ln_bias:
+            layer_te.ln_bias.stop_gradient = no_dbias
+            layer_pd.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_te.bias.stop_gradient = no_dbias
             layer_pd.bias.stop_gradient = no_dbias
@@ -444,7 +457,8 @@ class TestLayerNormLinear:
             assert_allclose(layer_te.weight.grad, layer_pd.weight.grad.T, rtol=rtol, atol=atol)
             assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
         if not no_dbias:
-            assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
+            if has_ln_bias:
+                assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
                 assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
         if return_ln_out:
@@ -523,8 +537,11 @@ class TestLayerNormMLP:
     @pytest.mark.parametrize('no_wgrad', [True, False])
     @pytest.mark.parametrize('return_ln_out', [True, False])
     @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
+    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
+    @pytest.mark.parametrize('activation', ['gelu', 'swiglu'])
     def test_layernorm_mlp_bf16(bs, hidden_size, ffn_hidden_size, has_bias, no_dbias, no_dgrad,
-                                no_wgrad, return_ln_out, activation_dtype):
+                                no_wgrad, return_ln_out, activation_dtype, normalization,
+                                activation):
         """
         Tests for TestLayerNormMLP layer
         """
@@ -536,11 +553,14 @@ class TestLayerNormMLP:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
         eps = 1e-3
+        has_ln_bias = normalization == 'LayerNorm'
 
         layer_te = te.LayerNormMLP(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             eps=eps,
+            normalization=normalization,
+            activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
         )
@@ -548,12 +568,15 @@ class TestLayerNormMLP:
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             eps=eps,
+            normalization=normalization,
+            activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
             backend='paddle',
         )
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
-        layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+        if has_ln_bias:
+            layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
         layer_pd.fc1_weight.copy_(layer_te.fc1_weight.T, True)
         layer_pd.fc2_weight.copy_(layer_te.fc2_weight.T, True)
         if has_bias:
@@ -563,11 +586,12 @@ class TestLayerNormMLP:
         layer_te.fc1_weight.stop_gradient = no_wgrad
         layer_te.fc2_weight.stop_gradient = no_wgrad
         layer_te.ln_weight.stop_gradient = no_wgrad
-        layer_te.ln_bias.stop_gradient = no_dbias
         layer_pd.fc1_weight.stop_gradient = no_wgrad
         layer_pd.fc2_weight.stop_gradient = no_wgrad
         layer_pd.ln_weight.stop_gradient = no_wgrad
-        layer_pd.ln_bias.stop_gradient = no_dbias
+        if has_ln_bias:
+            layer_te.ln_bias.stop_gradient = no_dbias
+            layer_pd.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_te.fc1_bias.stop_gradient = no_dbias
             layer_te.fc2_bias.stop_gradient = no_dbias
@@ -595,7 +619,8 @@ class TestLayerNormMLP:
                             rtol=rtol,
                             atol=atol)
         if not no_dbias:
-            assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
+            if has_ln_bias:
+                assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
                 assert_allclose(layer_te.fc1_bias.grad,
                                 layer_pd.fc1_bias.grad,
@@ -618,9 +643,11 @@ class TestLayerNormMLP:
     @pytest.mark.parametrize('do_calibration', [True, False])
     @pytest.mark.parametrize('return_ln_out', [True, False])
     @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
+    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
+    @pytest.mark.parametrize('activation', ['gelu', 'swiglu'])
     def test_layernorm_mlp_fp8(bs, hidden_size, ffn_hidden_size, has_bias, no_dbias, no_dgrad,
-                               no_wgrad, fp8_wgrad, do_calibration, return_ln_out,
-                               activation_dtype):
+                               no_wgrad, fp8_wgrad, do_calibration, return_ln_out, activation_dtype,
+                               normalization, activation):
         """
         Test FP8 LayerNormMLP Layer
         """
@@ -632,6 +659,7 @@ class TestLayerNormMLP:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
         eps = 1e-3
+        has_ln_bias = normalization == 'LayerNorm'
 
         recipe = DelayedScaling(override_linear_precision=(False, False, not fp8_wgrad))
 
@@ -639,6 +667,8 @@ class TestLayerNormMLP:
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             eps=eps,
+            normalization=normalization,
+            activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
         )
@@ -647,12 +677,15 @@ class TestLayerNormMLP:
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             eps=eps,
+            normalization=normalization,
+            activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
             backend='paddle',
         )
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
-        layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+        if has_ln_bias:
+            layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
         layer_pd.fc1_weight.copy_(layer_te.fc1_weight.T, True)
         layer_pd.fc2_weight.copy_(layer_te.fc2_weight.T, True)
         if has_bias:
@@ -662,11 +695,12 @@ class TestLayerNormMLP:
         layer_te.fc1_weight.stop_gradient = no_wgrad
         layer_te.fc2_weight.stop_gradient = no_wgrad
         layer_te.ln_weight.stop_gradient = no_wgrad
-        layer_te.ln_bias.stop_gradient = no_dbias
         layer_pd.fc1_weight.stop_gradient = no_wgrad
         layer_pd.fc2_weight.stop_gradient = no_wgrad
         layer_pd.ln_weight.stop_gradient = no_wgrad
-        layer_pd.ln_bias.stop_gradient = no_dbias
+        if has_ln_bias:
+            layer_te.ln_bias.stop_gradient = no_dbias
+            layer_pd.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_te.fc1_bias.stop_gradient = no_dbias
             layer_te.fc2_bias.stop_gradient = no_dbias
@@ -696,7 +730,8 @@ class TestLayerNormMLP:
                             rtol=rtol,
                             atol=atol)
         if not no_dbias:
-            assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
+            if has_ln_bias:
+                assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
                 assert_allclose(layer_te.fc1_bias.grad,
                                 layer_pd.fc1_bias.grad,
@@ -891,9 +926,11 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
 @pytest.mark.parametrize('output_layernorm', [True, False])
 @pytest.mark.parametrize('return_layernorm_output', [True, False])
+@pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
 def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
                                    has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
-                                   math_dtype, output_layernorm, return_layernorm_output):
+                                   math_dtype, output_layernorm, return_layernorm_output,
+                                   normalization):
     """
     Test Transformer Encoder Layer
     """
@@ -901,6 +938,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     rtol = 5e-2
     atol = 5e-2
     eps = 1e-3
+    has_ln_bias = normalization == 'LayerNorm'
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
@@ -945,6 +983,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
                                    apply_residual_connection_post_layernorm=return_layernorm_output,
                                    output_layernorm=output_layernorm,
                                    layer_type='encoder',
+                                   normalization=normalization,
                                    backend='transformer_engine')
     layer_pd = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
@@ -959,6 +998,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
                                    apply_residual_connection_post_layernorm=return_layernorm_output,
                                    output_layernorm=output_layernorm,
                                    layer_type='encoder',
+                                   normalization=normalization,
                                    backend='paddle')
 
     # MultiHeadAttention params
@@ -973,16 +1013,17 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     else:
         layer_pd.self_attention.layernorm_qkv.ln_weight.copy_(
             layer_te.self_attention.layernorm_qkv.ln_weight, True)
-        layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
-            layer_te.self_attention.layernorm_qkv.ln_bias, True)
         layer_pd.self_attention.layernorm_qkv.weight.copy_(
             layer_te.self_attention.layernorm_qkv.weight.T, True)
         layer_pd.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
-        layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         layer_pd.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
-        layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         layer_te.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
+        if has_ln_bias:
+            layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
+                layer_te.self_attention.layernorm_qkv.ln_bias, True)
+            layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
+            layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_pd.self_attention.layernorm_qkv.bias.copy_(
                 layer_te.self_attention.layernorm_qkv.bias, True)
@@ -999,17 +1040,18 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
 
     # LayerNorm MLP params
     layer_pd.layernorm_mlp.ln_weight.copy_(layer_te.layernorm_mlp.ln_weight, True)
-    layer_pd.layernorm_mlp.ln_bias.copy_(layer_te.layernorm_mlp.ln_bias, True)
     layer_pd.layernorm_mlp.fc1_weight.copy_(layer_te.layernorm_mlp.fc1_weight.T, True)
     layer_pd.layernorm_mlp.fc2_weight.copy_(layer_te.layernorm_mlp.fc2_weight.T, True)
     layer_pd.layernorm_mlp.ln_weight.stop_gradient = no_wgrad
-    layer_pd.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     layer_pd.layernorm_mlp.fc1_weight.stop_gradient = no_wgrad
     layer_pd.layernorm_mlp.fc2_weight.stop_gradient = no_wgrad
     layer_te.layernorm_mlp.ln_weight.stop_gradient = no_wgrad
-    layer_te.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     layer_te.layernorm_mlp.fc1_weight.stop_gradient = no_wgrad
     layer_te.layernorm_mlp.fc2_weight.stop_gradient = no_wgrad
+    if has_ln_bias:
+        layer_pd.layernorm_mlp.ln_bias.copy_(layer_te.layernorm_mlp.ln_bias, True)
+        layer_pd.layernorm_mlp.ln_bias.stop_gradient = no_dbias
+        layer_te.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     if has_bias:
         layer_pd.layernorm_mlp.fc1_bias.copy_(layer_te.layernorm_mlp.fc1_bias, True)
         layer_pd.layernorm_mlp.fc2_bias.copy_(layer_te.layernorm_mlp.fc2_bias, True)
@@ -1073,10 +1115,11 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
 @pytest.mark.parametrize('output_layernorm', [True, False])
 @pytest.mark.parametrize('return_layernorm_output', [True, False])
 @pytest.mark.parametrize('recompute_core_attention', [True, False])
+@pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
 def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
                                    has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
                                    math_dtype, output_layernorm, return_layernorm_output,
-                                   recompute_core_attention):
+                                   recompute_core_attention, normalization):
     """
     Test Transformer Decoder Layer
     """
@@ -1084,6 +1127,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     rtol = 5e-2
     atol = 6e-2
     eps = 1e-3
+    has_ln_bias = normalization == 'LayerNorm'
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
@@ -1137,6 +1181,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
                                    apply_residual_connection_post_layernorm=return_layernorm_output,
                                    output_layernorm=output_layernorm,
                                    layer_type='decoder',
+                                   normalization=normalization,
                                    backend='transformer_engine')
     layer_pd = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
@@ -1151,6 +1196,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
                                    apply_residual_connection_post_layernorm=return_layernorm_output,
                                    output_layernorm=output_layernorm,
                                    layer_type='decoder',
+                                   normalization=normalization,
                                    backend='paddle')
 
     # MultiHeadAttention params - self attn
@@ -1165,16 +1211,17 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     else:
         layer_pd.self_attention.layernorm_qkv.ln_weight.copy_(
             layer_te.self_attention.layernorm_qkv.ln_weight, True)
-        layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
-            layer_te.self_attention.layernorm_qkv.ln_bias, True)
         layer_pd.self_attention.layernorm_qkv.weight.copy_(
             layer_te.self_attention.layernorm_qkv.weight.T, True)
         layer_pd.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
-        layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         layer_pd.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
-        layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         layer_te.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
+        if has_ln_bias:
+            layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
+                layer_te.self_attention.layernorm_qkv.ln_bias, True)
+            layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
+            layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_pd.self_attention.layernorm_qkv.bias.copy_(
                 layer_te.self_attention.layernorm_qkv.bias, True)
@@ -1192,16 +1239,17 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     # MultiHeadAttention params - cross attn
     layer_pd.inter_attention.layernorm_query.ln_weight.copy_(
         layer_te.inter_attention.layernorm_query.ln_weight, True)
-    layer_pd.inter_attention.layernorm_query.ln_bias.copy_(
-        layer_te.inter_attention.layernorm_query.ln_bias, True)
     layer_pd.inter_attention.layernorm_query.weight.copy_(
         layer_te.inter_attention.layernorm_query.weight.T, True)
     layer_pd.inter_attention.layernorm_query.ln_weight.stop_gradient = no_wgrad
-    layer_pd.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
     layer_pd.inter_attention.layernorm_query.weight.stop_gradient = no_wgrad
     layer_te.inter_attention.layernorm_query.ln_weight.stop_gradient = no_wgrad
-    layer_te.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
     layer_te.inter_attention.layernorm_query.weight.stop_gradient = no_wgrad
+    if has_ln_bias:
+        layer_pd.inter_attention.layernorm_query.ln_bias.copy_(
+            layer_te.inter_attention.layernorm_query.ln_bias, True)
+        layer_pd.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
+        layer_te.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
     if has_bias:
         layer_pd.inter_attention.layernorm_query.bias.copy_(
             layer_te.inter_attention.layernorm_query.bias, True)
@@ -1225,17 +1273,18 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
 
     # LayerNorm MLP params
     layer_pd.layernorm_mlp.ln_weight.copy_(layer_te.layernorm_mlp.ln_weight, True)
-    layer_pd.layernorm_mlp.ln_bias.copy_(layer_te.layernorm_mlp.ln_bias, True)
     layer_pd.layernorm_mlp.fc1_weight.copy_(layer_te.layernorm_mlp.fc1_weight.T, True)
     layer_pd.layernorm_mlp.fc2_weight.copy_(layer_te.layernorm_mlp.fc2_weight.T, True)
     layer_pd.layernorm_mlp.ln_weight.stop_gradient = no_wgrad
-    layer_pd.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     layer_pd.layernorm_mlp.fc1_weight.stop_gradient = no_wgrad
     layer_pd.layernorm_mlp.fc2_weight.stop_gradient = no_wgrad
     layer_te.layernorm_mlp.ln_weight.stop_gradient = no_wgrad
-    layer_te.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     layer_te.layernorm_mlp.fc1_weight.stop_gradient = no_wgrad
     layer_te.layernorm_mlp.fc2_weight.stop_gradient = no_wgrad
+    if has_ln_bias:
+        layer_pd.layernorm_mlp.ln_bias.copy_(layer_te.layernorm_mlp.ln_bias, True)
+        layer_pd.layernorm_mlp.ln_bias.stop_gradient = no_dbias
+        layer_te.layernorm_mlp.ln_bias.stop_gradient = no_dbias
     if has_bias:
         layer_pd.layernorm_mlp.fc1_bias.copy_(layer_te.layernorm_mlp.fc1_bias, True)
         layer_pd.layernorm_mlp.fc2_bias.copy_(layer_te.layernorm_mlp.fc2_bias, True)
