@@ -785,7 +785,7 @@ class TestLayerNormMLP:
 
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
 @pytest.mark.parametrize('attn_type', ['self', 'cross'])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
@@ -808,24 +808,18 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
             head_size=head_size,
             dtype=math_dtype,
             dropout=0.0,
-            qkv_layout="bs3hd" if attn_type == "self" else "bshd_bs2hd",
+            qkv_layout="bshd_bshd_bshd",
             bias_type="no_bias",
             mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
-    self_attn_qkv_input = paddle.normal(mean=0.0,
-                                        std=0.02,
-                                        shape=(bs, q_seqlen, 3, num_heads,
-                                               head_size)).astype(math_dtype)
-    cross_attn_q_input = paddle.normal(mean=0.0,
-                                       std=0.02,
-                                       shape=(bs, q_seqlen, num_heads,
-                                              head_size)).astype(math_dtype)
-    cross_attn_kv_input = paddle.normal(mean=0.0,
-                                        std=0.02,
-                                        shape=(bs, kv_seqlen, 2, num_heads,
-                                               head_size)).astype(math_dtype)
+    attn_q_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, q_seqlen, num_heads, head_size)).astype(math_dtype)
+    attn_k_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
+    attn_v_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
 
     q_actual_seqlen = paddle.randint(low=20, high=q_seqlen, shape=(bs,), dtype='int32')
     kv_actual_seqlen = paddle.randint(low=20, high=kv_seqlen, shape=(bs,),
@@ -853,45 +847,22 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
                                       attention_type=attn_type,
                                       backend='paddle')
 
-    def calc_attn_output_and_grad(layer, q, kv, mask, dout):
+    def calc_attn_output_and_grad(layer, q, k, v, mask, dout):
         _q = paddle.to_tensor(q, stop_gradient=False)
-        _kv = paddle.to_tensor(kv, stop_gradient=False) if kv is not None else None
+        _k = paddle.to_tensor(k, stop_gradient=False)
+        _v = paddle.to_tensor(v, stop_gradient=False)
 
-        out = layer(_q, _kv, mask)
+        out = layer(_q, _k, _v, mask)
         out.backward(dout)
-        return out, _q.grad, _kv.grad if _kv is not None else None
+        return out, _q.grad, _k.grad, _v.grad
 
-    if attn_type == 'self':
-        out, qkv_grad, _ = calc_attn_output_and_grad(layer_te, self_attn_qkv_input, None, attn_mask,
-                                                     grad_out)
-        out_ref, qkv_grad_ref, _ = calc_attn_output_and_grad(layer_pd, self_attn_qkv_input, None,
-                                                             attn_mask, grad_out)
-        valid_out_ref = paddle.full_like(out_ref, 0)
-        for i in range(0, bs):
-            valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
-
-        q_grad = qkv_grad[:, :, 0]
-        k_grad = qkv_grad[:, :, 1]
-        v_grad = qkv_grad[:, :, 2]
-        q_grad_ref = qkv_grad_ref[:, :, 0]
-        k_grad_ref = qkv_grad_ref[:, :, 1]
-        v_grad_ref = qkv_grad_ref[:, :, 2]
-
-    else:
-        out, q_grad, kv_grad = calc_attn_output_and_grad(layer_te, cross_attn_q_input,
-                                                         cross_attn_kv_input, attn_mask, grad_out)
-        out_ref, q_grad_ref, kv_grad_ref = calc_attn_output_and_grad(layer_pd, cross_attn_q_input,
-                                                                     cross_attn_kv_input, attn_mask,
-                                                                     grad_out)
-
-        valid_out_ref = paddle.full_like(out_ref, 0)
-        for i in range(0, bs):
-            valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
-
-        k_grad = kv_grad[:, :, 0]
-        v_grad = kv_grad[:, :, 1]
-        k_grad_ref = kv_grad_ref[:, :, 0]
-        v_grad_ref = kv_grad_ref[:, :, 1]
+    out, q_grad, k_grad, v_grad = calc_attn_output_and_grad(layer_te, attn_q_input, attn_k_input,
+                                                            attn_v_input, attn_mask, grad_out)
+    out_ref, q_grad_ref, k_grad_ref, v_grad_ref = calc_attn_output_and_grad(
+        layer_pd, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out)
+    valid_out_ref = paddle.full_like(out_ref, 0)
+    for i in range(0, bs):
+        valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
 
     valid_q_grad_ref = paddle.full_like(q_grad_ref, 0)
     valid_k_grad_ref = paddle.full_like(k_grad_ref, 0)
@@ -938,7 +909,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
             head_size=hidden_size // num_heads,
             dtype=math_dtype,
             dropout=0.0,
-            qkv_layout="bs3hd",
+            qkv_layout="bshd_bshd_bshd",
             bias_type="no_bias",
             mask_type=mask_type,
     ):

@@ -864,6 +864,182 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
 }
 
+void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const paddle::Tensor &V,
+                       const paddle::Tensor &cu_seqlens_q, const paddle::Tensor &cu_seqlens_kv,
+                       const paddle::optional<paddle::Tensor> &Bias,
+                       paddle::Tensor &O,                              // NOLINT
+                       paddle::optional<paddle::Tensor> &softmax_aux,  // NOLINT
+                       paddle::Tensor &rng_state,                      // NOLINT
+                       int64_t b, int64_t h, int64_t d, int64_t max_seqlen_q, int64_t max_seqlen_kv,
+                       bool is_training, float attn_scale, float p_dropout,
+                       const std::string &qkv_layout, const std::string &bias_type,
+                       const std::string &attn_mask_type, const int64_t qkv_type,
+                       int64_t rng_elts_per_thread) {
+    if (is_training && !softmax_aux) {
+        NVTE_ERROR("softmax_aux must be provided when training. \n");
+    }
+
+    auto qkv_dtype = Int2NvteDType(qkv_type);
+    // construct NVTE tensors
+    TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias, te_cu_seqlens_q, te_cu_seqlens_kv;
+    if (qkv_dtype == DType::kBFloat16 || qkv_dtype == DType::kFloat16) {
+        // BF16 or FP16
+        te_Q = MakeNvteTensor(Q);
+        te_K = MakeNvteTensor(K);
+        te_V = MakeNvteTensor(V);
+        te_S = MakeNvteTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32);
+        te_O = MakeNvteTensor(O);
+    } else {  // TODO: support fp8
+        NVTE_ERROR("Fused attention only supports BF16/FP16 data types. \n");
+    }
+    if ((bias_type != "no_bias") && Bias) {
+        auto bias_shape = Bias->shape();
+        std::vector<size_t> shape{bias_shape.begin(), bias_shape.end()};
+        te_Bias = MakeNvteTensor(GetOptionalDataPtr(Bias), shape, DType::kFloat32);
+    }
+    te_cu_seqlens_q =
+        MakeNvteTensor(cu_seqlens_q.data(), {static_cast<size_t>(b + 1)}, DType::kInt32);
+    te_cu_seqlens_kv =
+        MakeNvteTensor(cu_seqlens_kv.data(), {static_cast<size_t>(b + 1)}, DType::kInt32);
+
+    // convert strings to enums
+    NVTE_QKV_Layout qkv_layout_enum = get_nvte_qkv_layout(qkv_layout);
+    NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
+    NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
+
+    // extract random number generator seed and offset
+    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
+    auto gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+
+    auto te_rng_state = MakeNvteTensor(rng_state);
+
+    // create auxiliary output tensors
+    NVTETensorPack nvte_aux_tensor_pack;
+    nvte_tensor_pack_create(&nvte_aux_tensor_pack);
+
+    // create workspace
+    TensorWrapper workspace;
+
+    // populate tensors with appropriate shapes and dtypes
+    nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
+                        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
+                        te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
+                        is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                        attn_mask_type_enum, workspace.data(), Q.stream());
+
+    // allocate memory for workspace and auxiliary output tensors
+    auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
+    workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
+
+    auto *output_s =
+        reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[0]);
+    output_s->data.dptr = GetOptionalDataPtr(softmax_aux);
+
+    // execute the kernel
+    nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
+                        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
+                        te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
+                        is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                        attn_mask_type_enum, workspace.data(), Q.stream());
+
+    // destroy tensor wrappers, but not allocated memory
+    nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
+}
+
+void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const paddle::Tensor &V,
+                       const paddle::Tensor &cu_seqlens_q, const paddle::Tensor &cu_seqlens_kv,
+                       const paddle::Tensor &O, const paddle::Tensor &dO,
+                       const paddle::Tensor &softmax_aux,
+                       paddle::Tensor &dQ,                       // NOLINT
+                       paddle::Tensor &dK,                       // NOLINT
+                       paddle::Tensor &dV,                       // NOLINT
+                       paddle::optional<paddle::Tensor> &dBias,  // NOLINT
+                       paddle::Tensor &rng_state,                // NOLINT
+                       int64_t b, int64_t h, int64_t d, int64_t max_seqlen_q, int64_t max_seqlen_kv,
+                       float attn_scale, float p_dropout, const std::string &qkv_layout,
+                       const std::string &bias_type, const std::string &attn_mask_type,
+                       int64_t qkv_type) {
+    TensorWrapper te_dBias;
+    if (bias_type != "no_bias" && dBias) {
+        auto bias_shape = dBias->shape();
+        std::vector<size_t> shape{bias_shape.begin(), bias_shape.end()};
+        te_dBias = MakeNvteTensor(GetOptionalDataPtr(dBias), shape, DType::kFloat32);
+    }
+
+    auto qkv_dtype = Int2NvteDType(qkv_type);
+    // construct NVTE tensors
+    TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
+    if (qkv_dtype == DType::kBFloat16 || qkv_dtype == DType::kFloat16) {
+        // BF16 or FP16
+        te_Q = MakeNvteTensor(Q);
+        te_K = MakeNvteTensor(K);
+        te_V = MakeNvteTensor(V);
+        te_O = MakeNvteTensor(O);
+        te_dO = MakeNvteTensor(dO);
+        te_S = MakeNvteTensor(nullptr, std::vector<size_t>(0), DType::kFloat32);
+        te_dP = MakeNvteTensor(nullptr, std::vector<size_t>(0), DType::kFloat32);
+        te_dQ = MakeNvteTensor(dQ);
+        te_dK = MakeNvteTensor(dK);
+        te_dV = MakeNvteTensor(dV);
+    } else {
+        NVTE_ERROR("Fused attention only supports BF16/FP16 data types. \n");
+    }
+
+    // convert strings to enums
+    NVTE_QKV_Layout qkv_layout_enum = get_nvte_qkv_layout(qkv_layout);
+    NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
+    NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
+
+    // convert auxiliary tensors from forward into NVTETensors
+    NVTETensorPack nvte_aux_tensor_pack;
+    nvte_tensor_pack_create(&nvte_aux_tensor_pack);
+
+    nvte_aux_tensor_pack.size = 2;
+    auto *output_s = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[0]);
+    auto *fwd_rng_state = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[1]);
+    output_s->data.shape = std::vector<size_t>({static_cast<size_t>(b), static_cast<size_t>(h),
+                                                static_cast<size_t>(max_seqlen_q),
+                                                static_cast<size_t>(max_seqlen_kv)});
+    output_s->data.dptr = const_cast<void *>(softmax_aux.data());
+    fwd_rng_state->data.shape = std::vector<size_t>({2});
+    fwd_rng_state->data.dptr = const_cast<void *>(rng_state.data());
+
+    // create cu_seqlens tensorwrappers
+    TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
+    te_cu_seqlens_q =
+        MakeNvteTensor(cu_seqlens_q.data(), {static_cast<size_t>(b + 1)}, DType::kInt32);
+    te_cu_seqlens_kv =
+        MakeNvteTensor(cu_seqlens_kv.data(), {static_cast<size_t>(b + 1)}, DType::kInt32);
+
+    // create workspace
+    TensorWrapper workspace;
+
+    // populate tensors with appropriate shapes and dtypes
+    nvte_fused_attn_bwd(te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(),
+                        te_S.data(), te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(),
+                        te_dK.data(), te_dV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
+                        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+                        qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(),
+                        Q.stream());
+
+    // allocate memory for workspace
+    auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
+    workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
+
+    // execute kernel
+    nvte_fused_attn_bwd(te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(),
+                        te_S.data(), te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(),
+                        te_dK.data(), te_dV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
+                        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+                        qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(),
+                        Q.stream());
+
+    // destroy tensor wrappers
+    nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
+}
+
 std::vector<paddle::Tensor> te_scaled_softmax_forward(const paddle::Tensor &input,
                                                       float scale_factor) {
     NVTE_CHECK(input.shape().size() == 4, "expected 4D tensor");
@@ -1315,6 +1491,33 @@ PD_BUILD_OP(te_fused_attn_bwd_kvpacked)
                     {"_dKV", "dKV"},
                     {paddle::Optional("_dBias"), paddle::Optional("dBias")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_bwd_kvpacked));
+
+PD_BUILD_OP(te_fused_attn_fwd)
+    .Inputs({"Q", "K", "V", "cu_seqlens_q", "cu_seqlens_kv", paddle::Optional("Bias"), "_O",
+             paddle::Optional("_softmax_aux"), "_rng_state"})
+    .Outputs({"O", paddle::Optional("softmax_aux"), "rng_state"})
+    .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "max_seqlen_q: int64_t",
+            "max_seqlen_kv: int64_t", "is_training: bool", "attn_scale: float", "p_dropout: float",
+            "qkv_layout: std::string", "bias_type: std::string", "attn_mask_type: std::string",
+            "qkv_type: int64_t", "rng_elts_per_thread: int64_t"})
+    .SetInplaceMap({{"_O", "O"},
+                    {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")},
+                    {"_rng_state", "rng_state"}})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd));
+
+PD_BUILD_OP(te_fused_attn_bwd)
+    .Inputs({"Q", "K", "V", "cu_seqlens_q", "cu_seqlens_kv", "O", "dO", "softmax_aux", "_dQ", "_dK",
+             "_dV", paddle::Optional("_dBias"), "rng_state"})
+    .Outputs({"dQ", "dK", "dV", paddle::Optional("dBias")})
+    .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "max_seqlen_q: int64_t",
+            "max_seqlen_kv: int64_t", "attn_scale: float", "p_dropout: float",
+            "qkv_layout: std::string", "bias_type: std::string", "attn_mask_type: std::string",
+            "qkv_type: int64_t"})
+    .SetInplaceMap({{"_dQ", "dQ"},
+                    {"_dK", "dK"},
+                    {"_dV", "dV"},
+                    {paddle::Optional("_dBias"), paddle::Optional("dBias")}})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_bwd));
 
 PD_BUILD_OP(te_scaled_softmax_forward)
     .Inputs({"input"})
