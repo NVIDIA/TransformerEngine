@@ -402,7 +402,7 @@ def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
     return send_recv_reqs
 
 
-@torch.jit.script
+@jit_fuser
 def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step):
     """Merge partial outputs of each step in Flash Attention with context parallelism"""
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).transpose(1, 2)
@@ -411,7 +411,7 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
     out.add_(out_corrected)
 
 
-@torch.jit.script
+@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Flash Attention with context parallelism"""
     softmax_lse.exp_()
