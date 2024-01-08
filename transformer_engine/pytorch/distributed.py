@@ -216,16 +216,8 @@ class CheckpointFunction(torch.autograd.Function):
             )
 
         # Store everything.
-        ctx.inputs = []
-        ctx.tensor_indices = []
-        tensor_inputs = []
-        for i, arg in enumerate(args):
-            if torch.is_tensor(arg):
-                tensor_inputs.append(arg)
-                ctx.tensor_indices.append(i)
-                ctx.inputs.append(None)
-            else:
-                ctx.inputs.append(arg)
+        ctx.inputs = [arg if not torch.is_tensor(arg) else None for arg in args]
+        tensor_inputs = [arg if torch.is_tensor(arg) else None for arg in args]
         ctx.save_for_backward(*tensor_inputs)
 
         ctx.get_cuda_rng_tracker = get_cuda_rng_tracker
@@ -245,14 +237,10 @@ class CheckpointFunction(torch.autograd.Function):
                 "please use .backward() if possible"
             )
 
-        inputs = list(ctx.inputs)
-        tensor_indices = ctx.tensor_indices
-        tensors = ctx.saved_tensors
-
-        # Fill in inputs with appropriate saved tensors.
-        for i, idx in enumerate(tensor_indices):
-            inputs[idx] = tensors[i]
-        inputs = tuple(inputs)
+        inputs = tuple(
+            t if t is not None else arg
+            for (t, arg) in zip(ctx.saved_tensors, ctx.inputs)
+        )
 
         get_cuda_rng_tracker = ctx.get_cuda_rng_tracker
 
