@@ -573,7 +573,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    const DType QKV_type = input_QKV->data.dtype;
+    const auto QKV_type = input_QKV->data.dtype;
     void *devPtrQKV = input_QKV->data.dptr;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
     size_t stride = 0;
@@ -677,7 +677,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    const DType QKV_type = input_QKV->data.dtype;
+    const auto QKV_type = input_QKV->data.dtype;
     void *devPtrQKV = input_QKV->data.dptr;
 
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -713,7 +713,6 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-    const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_attn_heads, num_attn_heads,
@@ -724,7 +723,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
-                                get_cudnn_fe_dtype(qkv_type), workspace->data.dptr,
+                                get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
@@ -751,7 +750,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    const DType QKV_type = input_Q->data.dtype;
+    const auto QKV_type = input_Q->data.dtype;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrKV = input_KV->data.dptr;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -861,7 +860,6 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
     using namespace transformer_engine;
 
     const auto QKV_type = input_Q->data.dtype;
-
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrKV = input_KV->data.dptr;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -936,7 +934,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    const DType QKV_type = input_Q->data.dtype;
+    const auto QKV_type = input_Q->data.dtype;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
