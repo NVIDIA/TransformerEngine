@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -767,6 +767,12 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        # Clean up weight and bias buffers
+        if self.parameters_split is None:
+            del self.weight_tensor
+            if self.use_bias:
+                del self.bias_tensor
+
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -791,7 +797,7 @@ class Linear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
