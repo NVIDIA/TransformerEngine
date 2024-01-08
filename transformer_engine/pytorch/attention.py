@@ -493,10 +493,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                                 q_inputs[i%2] = q.view(q.shape[0], -1, *q.shape[-2:])
                                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                                kv_inputs[i%2] = kv_inputs[i%2].view(2, k.shape[0], -1, *k.shape[-2:])
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
-                                    is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q, cu_seqlens_k,
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                kv_inputs[i%2] = kv_inputs[i%2].view(
+                                    2, k.shape[0], -1, *k.shape[-2:])
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = \
+                                fused_attn_fwd(
+                                    is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
+                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
+                                    kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="causal",
@@ -519,9 +522,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 q_inputs[i%2] = q.view(q.shape[0], -1, *q.shape[-2:])
                                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
-                                    is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q, cu_seqlens_k//2,
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = \
+                                fused_attn_fwd(
+                                    is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q,
+                                    cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
+                                    kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
@@ -529,8 +534,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                                 q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
-                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous().view(2, -1, *k.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
+                                # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
                                     fa_optional_forward_kwargs["window_size"] = [-1, -1]
                                 _, _, _, _, out_per_step[i], \
@@ -545,10 +552,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                                 q_inputs[i%2] = q[:, 1, ...].contiguous()
                                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                                kv_inputs[i%2] = kv_inputs[i%2].view(2, k.shape[0], -1, *k.shape[-2:])
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
-                                    is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2, cu_seqlens_k,
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                kv_inputs[i%2] = kv_inputs[i%2].view(
+                                    2, k.shape[0], -1, *k.shape[-2:])
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = \
+                                fused_attn_fwd(
+                                    is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2,
+                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
+                                    kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
@@ -569,9 +579,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 )
                     else:
                         if use_fused_attention:
-                            out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
-                                is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q, cu_seqlens_k,
-                                q, kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                            out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = \
+                            fused_attn_fwd(
+                                is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
+                                cu_seqlens_k, q, kv_inputs[i%2][0],
+                                kv_inputs[i%2][1], TE_DType[q.dtype],
                                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                 attn_scale=softmax_scale, dropout=dropout_p,
                                 qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
@@ -935,7 +947,8 @@ class AttnFuncWithCP(torch.autograd.Function):
             dq = dq.view(q.shape[0], -1, *q.shape[-2:])
             # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
             dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
-        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
+        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, \
+                None, None, None, None, None, None
 
 
 def attn_forward_func_with_cp(
@@ -2036,7 +2049,7 @@ class FusedAttention(torch.nn.Module):
         if context_parallel:
             assert (fused_attention_backend
                 == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-                ), "Context parallelism is only supported with backend of NVTE_F16_arbitrary_seqlen!"
+                ), f"{fused_attention_backend} does not work with context parallelism!"
             assert (core_attention_bias_type == "no_bias"), \
                 "Core attention bias has not been supported with context parallelism yet!"
             if qkv_format == 'sbhd':
@@ -2543,7 +2556,8 @@ class DotProductAttention(torch.nn.Module):
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
             use_flash_attention = False
 
-        context_parallel = (self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1)
+        context_parallel = (self.cp_group is not None and \
+            get_distributed_world_size(self.cp_group) != 1)
 
         # Filter: sliding window attention.
         # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
@@ -2589,9 +2603,10 @@ class DotProductAttention(torch.nn.Module):
             # DPA does not support FP8; for FP8, use cpp_extensions modules directly
             is_backend_avail = (fused_attention_backend in
                 [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
-            use_fused_attention = (use_fused_attention and is_backend_avail and \
-                                   (not context_parallel or \
-                                    fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
+            use_fused_attention = ( \
+                use_fused_attention and is_backend_avail and \
+                (not context_parallel or \
+                 fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
 
         # Filter: Alibi slopes
         if alibi_slopes is not None:
@@ -2649,43 +2664,46 @@ class DotProductAttention(torch.nn.Module):
                 print("[DotProductAttention]: using cuDNN fused attention (backend "
                     + str(int(fused_attention_backend)) + ")")
             if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.fused_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            qkv_layout=qkv_layout,
-                                                            cu_seqlens_q=cu_seqlens_q,
-                                                            cu_seqlens_kv=cu_seqlens_kv,
-                                                            attn_mask_type=attn_mask_type,
-                                                            attention_mask=attention_mask,
-                                                            fused_attention_backend=fused_attention_backend,
-                                                            core_attention_bias_type=core_attention_bias_type,
-                                                            core_attention_bias=core_attention_bias,
-                                                            fast_zero_fill=fast_zero_fill,
-                                                            cp_group=self.cp_group,
-                                                            cp_global_ranks=self.cp_global_ranks,
-                                                            cp_stream=self.cp_stream,
-                                                            max_seqlen_q=max_seqlen_q,
-                                                            max_seqlen_kv=max_seqlen_kv)
-            return self.fused_attention(query_layer,
-                                        key_layer,
-                                        value_layer,
-                                        qkv_layout=qkv_layout,
-                                        cu_seqlens_q=cu_seqlens_q,
-                                        cu_seqlens_kv=cu_seqlens_kv,
-                                        attn_mask_type=attn_mask_type,
-                                        attention_mask=attention_mask,
-                                        fused_attention_backend=fused_attention_backend,
-                                        core_attention_bias_type=core_attention_bias_type,
-                                        core_attention_bias=core_attention_bias,
-                                        fast_zero_fill=fast_zero_fill,
-                                        cp_group=self.cp_group,
-                                        cp_global_ranks=self.cp_global_ranks,
-                                        cp_stream=self.cp_stream,
-                                        max_seqlen_q=max_seqlen_q,
-                                        max_seqlen_kv=max_seqlen_kv)
+                return self._checkpointed_attention_forward(
+                    self.fused_attention,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_layout=qkv_layout,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    attn_mask_type=attn_mask_type,
+                    attention_mask=attention_mask,
+                    fused_attention_backend=fused_attention_backend,
+                    core_attention_bias_type=core_attention_bias_type,
+                    core_attention_bias=core_attention_bias,
+                    fast_zero_fill=fast_zero_fill,
+                    cp_group=self.cp_group,
+                    cp_global_ranks=self.cp_global_ranks,
+                    cp_stream=self.cp_stream,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv)
+            return self.fused_attention(
+                query_layer,
+                key_layer,
+                value_layer,
+                qkv_layout=qkv_layout,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                fused_attention_backend=fused_attention_backend,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
+                fast_zero_fill=fast_zero_fill,
+                cp_group=self.cp_group,
+                cp_global_ranks=self.cp_global_ranks,
+                cp_stream=self.cp_stream,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv)
 
-        assert (not context_parallel), "Context parallelism is only implemented with Flash Attention and Fused Attention!"
+        assert (not context_parallel), \
+            "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
