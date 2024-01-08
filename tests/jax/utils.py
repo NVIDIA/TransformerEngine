@@ -158,8 +158,8 @@ def dot_product_attention(query: Array,
     # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
     h_q, h_kv = query.shape[-2], key.shape[-2]
     assert (h_q % h_kv == 0) and (h_q >= h_kv)
-    num_groups = h_q // h_kv
-    grouped_query = query.reshape((*query.shape[:2], h_kv, num_groups, query.shape[-1]))
+    group_size = h_q // h_kv
+    grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
 
     if transpose_batch_sequence:
         attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
