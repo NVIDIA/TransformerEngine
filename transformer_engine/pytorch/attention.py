@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention."""
+import collections
 import os
 import warnings
 import math
@@ -402,7 +403,7 @@ def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
     return send_recv_reqs
 
 
-@torch.jit.script
+@jit_fuser
 def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step):
     """Merge partial outputs of each step in Flash Attention with context parallelism"""
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).transpose(1, 2)
@@ -411,7 +412,7 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
     out.add_(out_corrected)
 
 
-@torch.jit.script
+@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Flash Attention with context parallelism"""
     softmax_lse.exp_()
@@ -2705,9 +2706,13 @@ class MultiheadAttention(torch.nn.Module):
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
         if self.attention_type == "self":
-            parameters_split = {"query_": hidden_size,
-                                "key_": self.hidden_size_kv,
-                                "value_": self.hidden_size_kv} if not fuse_qkv_params else None
+            parameters_split = None
+            if not fuse_qkv_params:
+                parameters_split = collections.OrderedDict([
+                    ("query", hidden_size),
+                    ("key", self.hidden_size_kv),
+                    ("value", self.hidden_size_kv),
+                ])
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
@@ -2749,7 +2754,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    parameters_split=("query_",) if not fuse_qkv_params else None,
+                    parameters_split=("query",) if not fuse_qkv_params else None,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
@@ -2777,7 +2782,7 @@ class MultiheadAttention(torch.nn.Module):
                 bias=bias,
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
-                parameters_split=("key_", "value_") if not fuse_qkv_params else None,
+                parameters_split=("key", "value") if not fuse_qkv_params else None,
                 **common_gemm_kwargs,
             )
 
