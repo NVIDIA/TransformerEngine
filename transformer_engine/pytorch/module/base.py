@@ -630,7 +630,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         if gather_grad_output:
-            ub_overlap_ag = ctx.ub_split_ag or ctx.ub_atomic_gemm_ag
+            ub_overlap_ag = ctx.ub_split_ag_p2p or ctx.ub_atomic_gemm_ag_p2p
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8:
             if gather_grad_output:

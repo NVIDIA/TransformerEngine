@@ -80,9 +80,10 @@ class _Linear(torch.autograd.Function):
         is_grad_enabled: bool,
         primary_weights_in_fp8: bool,
         ub_split_rs: bool,
-        ub_split_ag: bool,
+        ub_split_rs_p2p: bool,
+        ub_split_ag_p2p: bool,
         ub_atomic_gemm_rs: bool,
-        ub_atomic_gemm_ag: bool,
+        ub_atomic_gemm_ag_p2p: bool,
         ub_name: str
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
@@ -94,13 +95,15 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(weight)
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        ub_rs = any([ub_split_rs, ub_split_rs_p2p, ub_atomic_gemm_rs])
 
-        if ub_split_rs or ub_atomic_gemm_rs:
+        if ub_rs:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
+                ub_split_rs_p2p = False
                 ub_atomic_gemm_rs = False
-        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag_p2p:
             assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
 
         # Cast input to expected dtype
@@ -180,7 +183,7 @@ class _Linear(torch.autograd.Function):
 
             proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                 None, None, None, activation_dtype)
-            if ub_split_rs or ub_atomic_gemm_rs:
+            if ub_rs:
                 ub_obj_projout = get_ub(ub_name+"_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
@@ -201,6 +204,7 @@ class _Linear(torch.autograd.Function):
 
             ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
             ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
+            ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P if ub_split_rs_p2p else ub_algo
             _ = fp8_gemm(
                 weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -217,8 +221,8 @@ class _Linear(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=out,
                 ub_algo=ub_algo,
-                ub=ub_obj_projout if (ub_split_rs or ub_atomic_gemm_rs) else None,
-                extra_output_tensor=rs_out if (ub_split_rs or ub_atomic_gemm_rs) else None,
+                ub=ub_obj_projout if ub_rs else None,
+                extra_output_tensor=rs_out if ub_rs else None,
                 out_index=proj_out_index,
                 fp8_meta_tensor = meta_tensor,
                 D_dtype = proj_out_tetype,
@@ -238,17 +242,21 @@ class _Linear(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
                     torch.max(-amin, amax).float()
 
-            if ub_split_rs:
+            is_ub_split_rs = True if (ub_split_rs or ub_split_rs_p2p) else False
+            if is_ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight.size(0)
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                ub_rs_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs \
+                    else tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                ub_rs_algo = None
 
             _ = gemm(
                 weight,
@@ -258,9 +266,9 @@ class _Linear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 out=out,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_projout if ub_split_rs else None,
-                extra_output_tensor=rs_out if ub_split_rs else None,
+                ub_algo=ub_rs_algo,
+                ub=ub_obj_projout if is_ub_split_rs else None,
+                extra_output_tensor=rs_out if is_ub_split_rs else None,
             )
 
         if is_grad_enabled:
@@ -307,14 +315,14 @@ class _Linear(torch.autograd.Function):
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
-            ctx.ub_split_ag = ub_split_ag
-            ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+            ctx.ub_split_ag_p2p = ub_split_ag_p2p
+            ctx.ub_atomic_gemm_ag_p2p = ub_atomic_gemm_ag_p2p
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
-        if ub_split_rs or ub_atomic_gemm_rs:
+        if ub_rs:
             out = rs_out
         elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -351,12 +359,12 @@ class _Linear(torch.autograd.Function):
                     update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
                 )
 
-            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
+            if ctx.ub_split_ag_p2p or ctx.ub_atomic_gemm_ag_p2p:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
-                    ctx.ub_split_ag = False
-                    ctx.ub_atomic_gemm_ag = False
-            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
+                    ctx.ub_split_ag_p2p = False
+                    ctx.ub_atomic_gemm_ag_p2p = False
+            if ctx.ub_split_ag_p2p or ctx.ub_atomic_gemm_ag_p2p:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ctx.ub_obj_gradout = get_ub(ctx.ub_name+"_dgrad")
@@ -397,8 +405,8 @@ class _Linear(torch.autograd.Function):
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
 
-            ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None
-            ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
+            ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ctx.ub_split_ag_p2p else None
+            ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P if ctx.ub_atomic_gemm_ag_p2p else ub_algo
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     dgrad, _ = fp8_gemm(
@@ -414,7 +422,7 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
                         ub_algo=ub_algo,
-                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag else None,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag_p2p or ctx.ub_atomic_gemm_ag_p2p else None,
                     )
                 else:
                     dgrad, _, _ = gemm(
@@ -424,8 +432,8 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         layout="NN",
                         grad=True,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
-                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ctx.ub_split_ag_p2p else None,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag_p2p else None,
                     )
 
                 # Overlap dgrad-RS/AR with wgrad
@@ -442,7 +450,7 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
+                        if ctx.ub_split_ag_p2p or ctx.ub_atomic_gemm_ag_p2p:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                         if inputmat_t_total is None:
                             inputmat_t_total = tex.fp8_transpose(inputmat_total, fp8_dtype_backward)
@@ -524,6 +532,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -630,9 +639,10 @@ class Linear(TransformerEngineBaseModule):
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         device: Union[torch.device, str] = "cuda",
         ub_split_rs: bool = False,
-        ub_split_ag: bool = False,
+        ub_split_rs_p2p: bool = False,
+        ub_split_ag_p2p: bool = False,
         ub_atomic_gemm_rs: bool = False,
-        ub_atomic_gemm_ag: bool = False,
+        ub_atomic_gemm_ag_p2p: bool = False,
         ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -646,10 +656,11 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.ub_split_rs = ub_split_rs
-        self.ub_split_ag = ub_split_ag
+        self.ub_split_rs_p2p = ub_split_rs_p2p
+        self.ub_split_ag_p2p = ub_split_ag_p2p
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
-        self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
-        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
+        self.ub_atomic_gemm_ag_p2p = ub_atomic_gemm_ag_p2p
+        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag_p2p]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -657,12 +668,12 @@ class Linear(TransformerEngineBaseModule):
             assert parameters_split is None, ("Cannot split module parameters "
                                               "on 'meta' device.")
 
-        if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
+        if any([ub_split_rs, ub_split_rs_p2p, ub_split_ag_p2p, ub_atomic_gemm_rs]):
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
 
-        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag_p2p:
             warnings.warn(
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
@@ -931,9 +942,10 @@ class Linear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.primary_weights_in_fp8,
                 self.ub_split_rs,
-                self.ub_split_ag,
+                self.ub_split_rs_p2p,
+                self.ub_split_ag_p2p,
                 self.ub_atomic_gemm_rs,
-                self.ub_atomic_gemm_ag,
+                self.ub_atomic_gemm_ag_p2p,
                 self.ub_name,
             )
             out = linear_fn(*args)
