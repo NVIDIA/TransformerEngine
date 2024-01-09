@@ -627,8 +627,8 @@ class Linear(TransformerEngineBaseModule):
         self.ub_name = ub_name
         self.get_rng_state_tracker = get_rng_state_tracker
         if device == 'meta':
-            assert self.parameters_split is None, ("Cannot split module parameters "
-                                                   "on 'meta' device.")
+            assert parameters_split is None, ("Cannot split module parameters "
+                                              "on 'meta' device.")
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -783,12 +783,6 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
-
-        # Clean up weight and bias buffers
-        if self.parameters_split is None:
-            del self.weight_tensor
-            if self.use_bias:
-                del self.bias_tensor
 
     def init_weight_tensor(self, weights: torch.Tensor) -> torch.Tensor:
         """
