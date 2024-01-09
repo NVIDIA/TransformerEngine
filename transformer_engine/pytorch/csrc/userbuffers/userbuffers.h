@@ -305,4 +305,8 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
 
 void destroy_communicator(communicator *comm);
 
+template <typename fp8type>
+void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,
+                            int intpu_size, cudaStream_t stream);
+
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

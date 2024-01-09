@@ -3666,3 +3666,33 @@ void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 grid(1);
   consumer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
 }
+
+template <typename fp8type>
+__global__ void __launch_bounds__(MAX_THREADS / 4)
+reduce_fp8_in_bf16_out_cuda(void *inputs, void *output, const float *scale,
+                            const int num_inputs, const int intpu_size) {
+  const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  fp8type *inputs_fp8 = reinterpret_cast<fp8type *>(inputs);
+  float accum_buf = (float) inputs_fp8[tid] * (*scale);
+  #pragma unroll
+  for (int i = 1; i < num_inputs; i++) {
+    accum_buf += (float) inputs_fp8[tid + intpu_size * i] * (*scale);
+  }
+  half *output_half = reinterpret_cast<half *>(output);
+  output_half[tid] = (half) accum_buf;
+}
+
+template <typename fp8type>
+void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_inputs,
+                            int intpu_size, cudaStream_t stream) {
+  size_t num_threads = MAX_THREADS / 4;
+  size_t num_blocks = (intpu_size +num_threads - 1) / num_threads;
+  dim3 block(num_threads);
+  dim3 grid(num_blocks);
+  reduce_fp8_in_bf16_out_cuda<fp8type><<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, intpu_size);
+}
+
+template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,
+                                                    int num_inputs, int intpu_size, cudaStream_t stream);
+template void reduce_fp8_in_bf16_out<__nv_fp8_e5m2>(void *inputs, void *output, float *scale,
+                                                    int num_inputs, int intpu_size, cudaStream_t stream);
