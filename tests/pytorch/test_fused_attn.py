@@ -705,7 +705,7 @@ def _run_transformer_layer(
         config: ModelConfig,
         backend: str,
         ckpt_attn: bool,
-        qkv_layout: str,
+        qkv_format: str,
         workspace_opt: bool,
         fused_qkv_params: bool,
         RoPE: bool,
@@ -726,7 +726,7 @@ def _run_transformer_layer(
             dtype=dtype, device="cuda", requires_grad = True)
     # In case the format to be tested is batch-first, need to transpose the
     # input tensor.
-    if qkv_layout == "bshd":
+    if qkv_format == "bshd":
             inp = inp.transpose(0,1)
 
     # Create seqlens
@@ -819,7 +819,7 @@ def _run_transformer_layer(
             qkv_weight_interleaved=False,
             ub_tp_comm_overlap=False,
             bias=True,
-            attn_input_format=qkv_layout,
+            attn_input_format=qkv_format,
         )
         .to(dtype=dtype, device="cuda")
     )
