@@ -1111,6 +1111,12 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
 
     grad_out = paddle.normal(mean=0.0, std=0.01,
                              shape=(bs, q_seqlen, hidden_size)).astype('float32')
+
+    # rounding to avoid numerical issues
+    encoder_input = paddle.round(encoder_input * 1000) / 1000
+    encoder_output = paddle.round(encoder_output * 1000) / 1000
+    grad_out = paddle.round(grad_out * 1000) / 1000
+
     for i in range(0, bs):
         grad_out[i, q_actual_seqlen[i]:, :] = 0
     grad_out = grad_out.astype(math_dtype)
@@ -1287,7 +1293,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
             assert_allclose(layer_te.self_attention.layernorm_qkv.weight.grad,
                             layer_pd.self_attention.layernorm_qkv.weight.grad.T,
                             rtol=rtol,
-                            atol=0.1)
+                            atol=atol)
             assert_allclose(layer_te.inter_attention.layernorm_query.weight.grad,
                             layer_pd.inter_attention.layernorm_query.weight.grad.T,
                             rtol=rtol,
