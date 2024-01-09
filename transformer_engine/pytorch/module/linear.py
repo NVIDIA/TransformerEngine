@@ -5,7 +5,6 @@
 """Linear API"""
 import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
-from dataclasses import dataclass
 
 import torch
 
@@ -40,7 +39,6 @@ from ..distributed import (
 from ..cpp_extensions import (
     fp8_gemm,
     gemm,
-    fp8_transpose,
     fp8_cast_transpose_fused,
     cast_to_fp8,
 )
@@ -792,7 +790,10 @@ class Linear(TransformerEngineBaseModule):
             if self.use_bias:
                 del self.bias_tensor
 
-    def init_weight_tensor(self, weights):
+    def init_weight_tensor(self, weights: torch.Tensor) -> torch.Tensor:
+        """
+        Initialize values for the given weight tensor if tensor lives on a real device.
+        """
         if weights.device == torch.device('meta'):
             return weights
 
@@ -809,7 +810,7 @@ class Linear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
             self.fp8_meta["update_amax_and_scale_fwd"] = True
-            weights = Float8Tensor.to_float8(
+            weights = Float8Tensor(
                 data=weights,
                 fp8_meta=self.fp8_meta,
                 fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -817,7 +818,12 @@ class Linear(TransformerEngineBaseModule):
 
         return weights
 
-    def reset_parameters(self, defer_init=False):
+    def reset_parameters(self, defer_init: bool = False) -> None:
+        """
+        Reset all module parameters to initial values. Unless deferred initialization
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        device before the values are reset to initial.
+        """
         if defer_init:
             return
 
