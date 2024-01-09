@@ -149,8 +149,9 @@ def get_alibi(
     for i in range(num_heads):
         bias[0,i,:,:] = m[i] * bias[0,i,:,:]
 
+    m = m.to(dtype=torch.float32, device="cuda")
     bias = bias.to(dtype=torch.float32, device="cuda")
-    return bias
+    return m, bias
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
@@ -1024,7 +1025,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                core_attention_bias = get_alibi(output_size[1], output_size[2], output_size[3])
+                _, core_attention_bias = get_alibi(output_size[1], output_size[2], output_size[3])
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -2311,9 +2312,12 @@ class DotProductAttention(torch.nn.Module):
             )
             use_flash_attention = False
 
-        # Filter: bias.
-        if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
-            use_flash_attention = False
+        ## Filter: bias.
+        #if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
+        #    use_flash_attention = False
+        if use_flash_attention and core_attention_bias_type == "alibi":
+            alibi_slopes, _ = get_alibi(query_layer.shape[-2], max_seqlen_q, max_seqlen_kv)
+            #print('alibi_slopes: ',alibi_slopes)
 
         # Filter: sliding window attention.
         # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
@@ -2364,12 +2368,12 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = (use_fused_attention
                                   and is_backend_avail)
 
-        # Filter: Alibi slopes
-        if alibi_slopes is not None:
-            use_fused_attention = False
-            assert (
-                use_flash_attention
-            ), "Alibi slopes bias is only supported in the FlashAttention backend."
+        ## Filter: Alibi slopes
+        #if alibi_slopes is not None:
+        #    use_fused_attention = False
+        #    assert (
+        #        use_flash_attention
+        #    ), "Alibi slopes bias is only supported in the FlashAttention backend."
 
         # Filter: determinism.
         # backend                                  | deterministic
