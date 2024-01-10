@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,7 +14,6 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
 from ..export import is_in_onnx_export_mode
@@ -211,44 +210,6 @@ def get_ub(name: str):
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
     return _ub_communicators[name]
-
-
-class _NoopCat(torch.autograd.Function):
-    """This class is a no-op replacement for `torch.cat`."""
-
-    @staticmethod
-    def forward(ctx,
-                full_param_buffer: torch.Tensor,
-                *params_split: Tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
-        sum_params_shape = sum(p.shape[0] for p in params_split)
-        assert (
-            full_param_buffer.shape[0] == sum_params_shape
-        ), "Dimensions not compatible for concatenation"
-
-        param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.untyped_storage(),
-                        full_param_buffer.storage_offset(),
-                        full_param_buffer.size(),
-                        full_param_buffer.stride())
-        param_temp.requires_grad = True
-
-        ctx.save_for_backward(*params_split)
-        return param_temp
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        params_split = ctx.saved_tensors
-        grads = []
-        slice_begin = 0
-        for i, _ in enumerate(params_split):
-            slice_size = params_split[i].shape[0]
-            slice_end = slice_begin + slice_size
-            grads.append(grad_output[slice_begin:slice_end])
-            slice_begin = slice_end
-
-        return None, *grads
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
@@ -741,40 +702,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             grad_bias = None
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
-
-    def noop_cat(self,
-        buffer_name: str,
-        pnames: List[str],
-        parameters_split: Dict[str, int]
-        ) -> torch.Tensor:
-        """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
-           the same memory region. If this is not the case, then the split parameters
-           are concatenated and the buffer is overwritten. The parameters' memory is then
-           re-assigned to point to the buffer to avoid subsequent concatenations.
-        """
-
-        assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
-        full_param_buffer = getattr(self, buffer_name)
-        params = [getattr(self, name) for name in pnames]
-        slice_begin = 0
-        for i, p in enumerate(params):
-            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
-            slice_end = slice_begin + slice_size
-            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
-                with torch.no_grad():
-                    setattr(self, buffer_name, torch.cat(params))
-                    slice_begin_j = 0
-                    for pname in pnames:
-                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
-                        slice_end_j = slice_begin_j + slice_size_j
-                        full_param_buffer = getattr(self, buffer_name)
-                        setattr(self, pname,
-                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
-                        slice_begin_j = slice_end_j
-                break
-            slice_begin = slice_end
-
-        return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
     def get_fp8_weights_empty_tensors(
         self,
