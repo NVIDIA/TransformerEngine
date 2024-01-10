@@ -24,3 +24,6 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsd
 #    [GPU-0] Post-FSDP memory use = 1073.774592MiB
 #    ...
 ```
+
+**NOTE:** This example has `fp8_autocast()` enabled by default. To run on GPUs without Fp8 support
+(e.g.: A100), add the `--no-fp8` option to the commands shown above.
