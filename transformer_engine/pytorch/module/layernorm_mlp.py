@@ -5,7 +5,7 @@
 """LayerNormMLP API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any, ContextManager
 
 import torch
 from torch.nn.parameter import Parameter
@@ -423,15 +423,15 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
             if cpu_offloading:
                 if fuse_wgrad_accumulation:
-                    fc1_weight.main_grad.avoid_offloading = True
-                    fc2_weight.main_grad.avoid_offloading = True
+                    fc1_weight.main_grad.weight_offloading = True
+                    fc2_weight.main_grad.weight_offloading = True
                 if fp8:
-                    fc1_weight_t_fp8.avoid_offloading = True
-                    fc2_weight_t_fp8.avoid_offloading = True
-                ln_weight.avoid_offloading = True
-                fc1_weight.avoid_offloading = True
-                fc2_weight.avoid_offloading = True
-                fc1_bias.avoid_offloading = True
+                    fc1_weight_t_fp8.weight_offloading = True
+                    fc2_weight_t_fp8.weight_offloading = True
+                ln_weight.weight_offloading = True
+                fc1_weight.weight_offloading = True
+                fc2_weight.weight_offloading = True
+                fc1_bias.weight_offloading = True
 
             ctx.save_for_backward(
                 inputmat,
@@ -1127,7 +1127,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        cpu_offloading: bool = False,
+        cpu_offloading_context: Optional[ContextManager] = None,
         params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         seq_length: Optional[int] = None,
@@ -1146,7 +1146,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        self.cpu_offloading = cpu_offloading
+        self.cpu_offloading = cpu_offloading_context is not None
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias

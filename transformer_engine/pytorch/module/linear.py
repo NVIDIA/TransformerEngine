@@ -4,7 +4,7 @@
 
 """Linear API"""
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any, ContextManager
 
 import torch
 from torch.nn.parameter import Parameter
@@ -274,10 +274,10 @@ class _Linear(torch.autograd.Function):
 
                 if cpu_offloading:
                     if fuse_wgrad_accumulation:
-                        weight.main_grad.avoid_offloading = True
+                        weight.main_grad.weight_offloading = True
                     if fp8:
-                        weight_t_fp8.avoid_offloading = True
-                    weight.avoid_offloading = True
+                        weight_t_fp8.weight_offloading = True
+                    weight.weight_offloading = True
 
             ctx.save_for_backward(
                 saved_inputmat,
@@ -611,7 +611,7 @@ class Linear(TransformerEngineBaseModule):
         out_features: int,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
-        cpu_offloading: bool = False,
+        cpu_offloading_context: Optional[ContextManager] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -634,7 +634,7 @@ class Linear(TransformerEngineBaseModule):
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        self.cpu_offloading = cpu_offloading
+        self.cpu_offloading = cpu_offloading_context is not None
         self.use_bias = bias
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias

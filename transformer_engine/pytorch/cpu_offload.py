@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import torch
 from typing import Any
 from contextlib import nullcontext
@@ -47,15 +51,17 @@ class CpuOffloadSavedTensorHook:
     """
 
     def __init__(self) -> None:
-        pass
+        self.inside_context = False
     
     def __enter__(self):
+        self.inside_context = True
         torch._C._autograd._push_saved_tensors_default_hooks(
             self.on_save_for_backward, 
             self.on_get_saved_tensor
             )
     
     def __exit__(self, *args: Any):
+        self.inside_context = False
         torch._C._autograd._pop_saved_tensors_default_hooks()
     
 
@@ -368,10 +374,25 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if self.current_group < self.num_offload_group:
             torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_group])
 
-def get_cpu_offload_context(cpu_offloading, cpu_offloading_num_layers):
+def get_cpu_offload_context(cpu_offloading, cpu_offloading_num_layers, cpu_offloading_activations, cpu_offloading_weights):
 
-   def tensor_need_offloading_checker(tensor):
-      return not hasattr(tensor,"avoid_offloading")
+   def tensor_need_offloading_checker_activations(tensor):
+      return not hasattr(tensor,"weight_offloading")
+
+   def tensor_need_offloading_checker_weights(tensor): #This includes the Gradient Accumulation Buffer
+      return hasattr(tensor,"weight_offloading")
+
+   def tensor_need_offloading_checker_all(tensor):
+      return True
+
+   if cpu_offloading_activations and cpu_offloading_weights:
+      tensor_need_offloading_checker = tensor_need_offloading_checker_all
+   elif cpu_offloading_activations:
+      tensor_need_offloading_checker = tensor_need_offloading_checker_activations
+   elif cpu_offloading_weights:
+      tensor_need_offloading_checker = tensor_need_offloading_checker_weights
+   else:
+      raise ValueError("CPU Offloading is enabled while it is not mentioned what to offload (weights/activations)")
 
    cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
                          num_offload_group=cpu_offloading_num_layers,

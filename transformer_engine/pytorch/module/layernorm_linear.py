@@ -5,7 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any, ContextManager
 
 
 import torch
@@ -244,10 +244,10 @@ class _LayerNormLinear(torch.autograd.Function):
         if is_grad_enabled:
             if cpu_offloading:
                 if fuse_wgrad_accumulation:
-                    weight.main_grad.avoid_offloading = True
+                    weight.main_grad.weight_offloading = True
                 if fp8:
-                    weight_t_fp8.avoid_offloading = True
-                ln_weight.avoid_offloading = True
+                    weight_t_fp8.weight_offloading = True
+                ln_weight.weight_offloading = True
 
             ctx.save_for_backward(
                 inputmat,
@@ -692,7 +692,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         eps: float = 1e-5,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
-        cpu_offloading: bool = False,
+        cpu_offloading_context: Optional[ContextManager] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -718,7 +718,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        self.cpu_offloading = cpu_offloading
+        self.cpu_offloading = cpu_offloading_context is not None
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
