@@ -70,6 +70,7 @@ if _flash_attn_version >= _flash_attn_version_required:
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+_num_heads, _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias = None, None, None, None, None
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -129,29 +130,37 @@ def get_alibi(
     """
     Generate ALiBi bias in the shape of [1, num_heads, max_seqlen_q, max_seqlen_kv].
     """
-    n = 2 ** math.floor(math.log2(num_heads))
-    m_0 = 2.0 ** (-8.0 / n)
-    m = torch.pow(m_0, torch.arange(1, 1 + n))
+    if any([_num_heads != num_heads,
+        _max_seqlen_q != max_seqlen_q,
+        _max_seqlen_kv != max_seqlen_kv,
+        _alibi_slopes is None,
+        _alibi_bias is None]):
+        print('run get alibi')
+        n = 2 ** math.floor(math.log2(num_heads))
+        m_0 = 2.0 ** (-8.0 / n)
+        m = torch.pow(m_0, torch.arange(1, 1 + n))
 
-    if n < num_heads:
-        m_hat_0 = 2.0 ** (-4.0 / n)
-        m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
-        m = torch.cat([m, m_hat])
+        if n < num_heads:
+            m_hat_0 = 2.0 ** (-4.0 / n)
+            m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
+            m = torch.cat([m, m_hat])
 
-    a = torch.ones(max_seqlen_q, max_seqlen_kv)
-    b = torch.triu(a,diagonal=1)
-    c = b.cumsum(dim=-1)
-    bb = torch.tril(a,diagonal=-1)
-    cc = bb.cumsum(dim=0)
-    d = c - cc
-    bias = d.repeat(1, num_heads, 1, 1)
+        a = torch.ones(max_seqlen_q, max_seqlen_kv)
+        b = torch.triu(a,diagonal=1)
+        c = b.cumsum(dim=-1)
+        bb = torch.tril(a,diagonal=-1)
+        cc = bb.cumsum(dim=0)
+        d = c - cc
+        bias = d.repeat(1, num_heads, 1, 1)
 
-    for i in range(num_heads):
-        bias[0,i,:,:] = m[i] * bias[0,i,:,:]
+        for i in range(num_heads):
+            bias[0,i,:,:] = m[i] * bias[0,i,:,:]
 
-    m = m.to(dtype=torch.float32, device="cuda")
-    bias = bias.to(dtype=torch.float32, device="cuda")
-    return m, bias
+        global _num_heads, _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias
+        _num_heads, _max_seqlen_q, _max_seqlen_kv = num_heads, max_seqlen_q, max_seqlen_kv
+        _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
+        _alibi_bias = bias.to(dtype=torch.float32, device="cuda")
+
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
@@ -1025,7 +1034,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                _, core_attention_bias = get_alibi(output_size[1], output_size[2], output_size[3])
+                get_alibi(output_size[1], output_size[2], output_size[3])
+                core_attention_bias = _alibi_bias
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -2316,7 +2326,8 @@ class DotProductAttention(torch.nn.Module):
         #if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
         #    use_flash_attention = False
         if use_flash_attention and core_attention_bias_type == "alibi":
-            alibi_slopes, _ = get_alibi(query_layer.shape[-2], max_seqlen_q, max_seqlen_kv)
+            get_alibi(query_layer.shape[-2], max_seqlen_q, max_seqlen_kv)
+            alibi_slopes = _alibi_slopes
             #print('alibi_slopes: ',alibi_slopes)
 
         # Filter: sliding window attention.
