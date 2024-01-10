@@ -38,6 +38,12 @@ constexpr size_t kCublasLtBackwardWorkspaceSize = 32 * 1024 * 1024;
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
+inline size_t calculate_wk_size(const NVTEShape &shape, const DType type) {
+    size_t total_size = std::accumulate(shape.data, shape.data + shape.ndim, typeToSize(type),
+                                        std::multiplies<size_t>());
+    return total_size;
+}
+
 template <typename T>
 pybind11::bytes PackOpaque(const T &descriptor) {
     auto str = std::string(reinterpret_cast<const char *>(&descriptor), sizeof(T));
@@ -231,7 +237,7 @@ void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *op
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto input_shape = desc.shape.to_vector();
+    auto input_shape = std::vector<size_t>{m, n};
     auto gelu_input_shape = std::vector<size_t>{m, n};
     auto output_shape = std::vector<size_t>{m, n};
     auto output_trans_shape = std::vector<size_t>{n, m};
@@ -252,7 +258,7 @@ void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *op
                                     output_tensor.data(), output_trans_tensor.data(),
                                     dbias_tensor.data(), dummy_workspace.data(), stream);
 
-    size_t workspace_size = dummy_workspace.shape().data[0] * typeToSize(dummy_workspace.dtype());
+    size_t workspace_size = calculate_wk_size(dummy_workspace.shape(), dummy_workspace.dtype());
     void *workspace_ptr = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
     auto workspace = TensorWrapper(workspace_ptr, dummy_workspace.shape(), dummy_workspace.dtype());
@@ -441,8 +447,8 @@ void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, flo
     }
 
     size_t workspace_size =
-        dummy_workspace_tensor.shape().data[0] * typeToSize(dummy_workspace_tensor.dtype()) +
-        dummy_barrier_tensor.shape().data[0] * typeToSize(dummy_barrier_tensor.dtype());
+        calculate_wk_size(dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype()) +
+        calculate_wk_size(dummy_barrier_tensor.shape(), dummy_barrier_tensor.dtype());
 
     void *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
@@ -523,12 +529,11 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
     }
 
     size_t workspace_size =
-        dummy_workspace_tensor.shape().data[0] * typeToSize(dummy_workspace_tensor.dtype());
+        calculate_wk_size(dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype());
     size_t barrier_size =
-        dummy_barrier_tensor.shape().data[0] * typeToSize(dummy_barrier_tensor.dtype());
-    size_t dgamma_part_size = dummy_dgamma_part_tensor.shape().data[0] *
-                              dummy_dgamma_part_tensor.shape().data[1] *
-                              typeToSize(dummy_dgamma_part_tensor.dtype());
+        calculate_wk_size(dummy_barrier_tensor.shape(), dummy_barrier_tensor.dtype());
+    size_t dgamma_part_size =
+        calculate_wk_size(dummy_dgamma_part_tensor.shape(), dummy_dgamma_part_tensor.dtype());
 
     auto [workspace, dgamma_part, dbeta_part, barrier] = WorkspaceManager::Instance().GetWorkspace(
         workspace_size, dgamma_part_size, dbeta_part_size, barrier_size);
