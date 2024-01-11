@@ -70,7 +70,7 @@ if _flash_attn_version >= _flash_attn_version_required:
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-_num_heads, _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias = None, None, None, None, None
+_num_heads, _alibi_slopes = None, None
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -122,20 +122,14 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
 
 @torch.no_grad()
-def get_alibi(
+def get_alibi_slopes(
     num_heads: int,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
 ) -> torch.Tensor:
     """
-    Generate ALiBi bias in the shape of [1, num_heads, max_seqlen_q, max_seqlen_kv].
+    Generate ALiBi slopes in FP32 and shape [num_heads].
     """
-    if any([_num_heads != num_heads,
-        _max_seqlen_q != max_seqlen_q,
-        _max_seqlen_kv != max_seqlen_kv,
-        _alibi_slopes is None,
-        _alibi_bias is None]):
-        print('run get alibi')
+    global _num_heads, _alibi_slopes
+    if _num_heads != num_heads or _alibi_slopes is None:
         n = 2 ** math.floor(math.log2(num_heads))
         m_0 = 2.0 ** (-8.0 / n)
         m = torch.pow(m_0, torch.arange(1, 1 + n))
@@ -145,21 +139,35 @@ def get_alibi(
             m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
             m = torch.cat([m, m_hat])
 
-        a = torch.ones(max_seqlen_q, max_seqlen_kv)
-        b = torch.triu(a,diagonal=1)
-        c = b.cumsum(dim=-1)
-        bb = torch.tril(a,diagonal=-1)
-        cc = bb.cumsum(dim=0)
-        d = c - cc
-        bias = d.repeat(1, num_heads, 1, 1)
-
-        for i in range(num_heads):
-            bias[0,i,:,:] = m[i] * bias[0,i,:,:]
-
-        global _num_heads, _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias
-        _num_heads, _max_seqlen_q, _max_seqlen_kv = num_heads, max_seqlen_q, max_seqlen_kv
+        _num_heads = num_heads
         _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
-        _alibi_bias = bias.to(dtype=torch.float32, device="cuda")
+
+
+@torch.no_grad()
+def get_alibi_bias(
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    alibi_slopes: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Generate ALiBi bias in FP32. If `alibi_slopes` is in shape [num_heads], then the generated bias
+    is in [1, num_heads, max_seqlen_q, max_seqlen_kv]. If `alibi_slopes` is in
+    [batch_size, num_heads], the bias is in [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
+    """
+    bias = torch.arange(
+        1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    bias = bias - torch.arange(
+        1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
+    bias = bias.abs().mul(-1)
+    slopes = alibi_slopes if alibi_slopes is not None else _alibi_slopes
+    assert slopes is not None, "ALiBi slopes can not be None!"
+    if slopes.dim() == 1:
+        slopes = slopes.view(1, slopes.shape[0], 1, 1)
+    if slopes.dim() == 2:
+        slopes = slopes.view(*slopes.shape[:], 1, 1)
+    bias = bias * slopes
+    bias = bias.to(dtype=torch.float32, device="cuda")
+    return bias
 
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
@@ -1243,8 +1251,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                get_alibi(output_size[1], output_size[2], output_size[3])
-                core_attention_bias = _alibi_bias
+                get_alibi_slopes(output_size[1])
+                core_attention_bias = get_alibi_bias(output_size[2], output_size[3])
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -2563,13 +2571,12 @@ class DotProductAttention(torch.nn.Module):
             )
             use_flash_attention = False
 
-        ## Filter: bias.
-        #if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
-        #    use_flash_attention = False
-        if use_flash_attention and core_attention_bias_type == "alibi":
-            get_alibi(query_layer.shape[-2], max_seqlen_q, max_seqlen_kv)
+        # Filter: bias.
+        if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
+            use_flash_attention = False
+        if core_attention_bias_type == "alibi" and use_flash_attention and alibi_slopes is None:
+            get_alibi_slopes(query_layer.shape[-2])
             alibi_slopes = _alibi_slopes
-            #print('alibi_slopes: ',alibi_slopes)
 
         context_parallel = (self.cp_group is not None and \
             get_distributed_world_size(self.cp_group) != 1)
