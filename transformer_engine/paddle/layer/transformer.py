@@ -4,6 +4,7 @@
 """Transformer"""
 
 from typing import Optional, Union
+import warnings
 
 import paddle
 from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
@@ -75,6 +76,8 @@ class TransformerLayer(paddle.nn.Layer):
                       if set to `True`, QKV and FC1 layers are used as Column Parallel
                       whereas PROJ and FC2 is used as Row Parallel as described
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
     attention_dropout_rng_state_name : str, default = `local_seed`
@@ -107,6 +110,7 @@ class TransformerLayer(paddle.nn.Layer):
                  zero_centered_gamma: bool = False,
                  activation: str = 'gelu',
                  set_parallel_mode: bool = False,
+                 sequence_parallel: bool = False,
                  tp_group: Optional[dist_group_type] = None,
                  attention_dropout_rng_state_name: str = 'local_seed',
                  hidden_dropout_rng_state_name: str = 'global_seed',
@@ -122,7 +126,13 @@ class TransformerLayer(paddle.nn.Layer):
         self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
+        # SP needs local seed for hidden dropout
+        if self.sequence_parallel and self.hidden_dropout_rng_state_name == 'global_seed':
+            warnings.warn("RNG state for hidden dropout needs to be different across TP ranks. "
+                          "Forcing hidden_dropout_rng_state_name to 'local_seed'")
+            self.hidden_dropout_rng_state_name = 'local_seed'
 
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -141,6 +151,7 @@ class TransformerLayer(paddle.nn.Layer):
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "zero_centered_gamma": zero_centered_gamma,
             "set_parallel_mode": set_parallel_mode,
+            "sequence_parallel": self.sequence_parallel,
             "tp_group": tp_group,
             "rng_state_name": attention_dropout_rng_state_name,
             "backend": backend,
@@ -173,6 +184,7 @@ class TransformerLayer(paddle.nn.Layer):
             return_layernorm_output=apply_residual_connection_post_layernorm,
             zero_centered_gamma=zero_centered_gamma,
             set_parallel_mode=set_parallel_mode,
+            sequence_parallel=self.sequence_parallel,
             tp_group=tp_group,
             backend=backend,
         )
@@ -186,6 +198,7 @@ class TransformerLayer(paddle.nn.Layer):
                 weight_attr,
                 bias_attr,
                 zero_centered_gamma=zero_centered_gamma,
+                sequence_parallel=self.sequence_parallel,
                 backend=backend,
             )
 
