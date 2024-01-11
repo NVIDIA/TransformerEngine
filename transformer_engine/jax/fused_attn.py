@@ -162,7 +162,7 @@ def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mas
 
     mask = jnp.logical_not(mask)
     q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-    if attn_mask_type != AttnMaskType.PADDING_CAUSAL_MASK:
+    if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
         kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
     else:
         # When mask is padding + causal, the actual seqlen is not the last row, use max to find it
