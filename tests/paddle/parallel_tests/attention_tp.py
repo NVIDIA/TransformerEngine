@@ -13,8 +13,8 @@ from utils import assert_allclose, set_random_seed, register_sequence_parallel_a
 import transformer_engine.paddle as te
 
 
-class TestTransformerTp(unittest.TestCase):
-    """Tests Transformer layer with model parallel in BF16"""
+class TestAttentionTp(unittest.TestCase):
+    """Tests MultiHeadAttention layer with model parallel in BF16"""
 
     def setUp(self):
         self.set_attr()
@@ -42,14 +42,12 @@ class TestTransformerTp(unittest.TestCase):
         self.batch_size = 16
         self.hidden_size = 1024
         self.num_heads = 16
-        self.ffn_hidden_size = 4096
         self.q_seqlen = 128
         self.kv_seqlen = 128
         self.mask_type = 'padding'
-        self.layer_type = 'encoder'
         self.global_dtype = 'bfloat16'
-        self.rtol = 5e-2
-        self.atol = 5e-2
+        self.rtol = 5e-3
+        self.atol = 5e-3
         self.eps = 1e-3
         self.fp8 = False
         self.sequence_parallel = False
@@ -77,23 +75,24 @@ class TestTransformerTp(unittest.TestCase):
     def test_parallel_layer(self):
         """Tests parallel Transformer"""
         set_random_seed(1024)
-        common_args = [
+        common_args = (
             self.hidden_size,
-            self.ffn_hidden_size,
             self.num_heads,
-        ]
+        )
         common_kwargs = {
             'layernorm_epsilon': self.eps,
-            'hidden_dropout': 0.0,
             'attention_dropout': 0.0,
-            'self_attn_mask_type': self.mask_type,
-            'layer_type': self.layer_type,
+            'attn_mask_type': self.mask_type,
+            'attention_type': 'self',
+            "tp_group": self.tp_group,
+            "input_layernorm": True,
         }
-        layer_tp = te.TransformerLayer(*common_args,
-                                       **common_kwargs,
-                                       set_parallel_mode=True,
-                                       sequence_parallel=self.sequence_parallel)
-        layer_single = te.TransformerLayer(*common_args, **common_kwargs, set_parallel_mode=False)
+
+        layer_tp = te.MultiHeadAttention(*common_args,
+                                         **common_kwargs,
+                                         set_parallel_mode=True,
+                                         sequence_parallel=self.sequence_parallel)
+        layer_single = te.MultiHeadAttention(*common_args, **common_kwargs, set_parallel_mode=False)
 
         def _get_total_weight(local_weight, tp_group, axis, interleave=False):
             total_weight = []
@@ -137,15 +136,9 @@ class TestTransformerTp(unittest.TestCase):
                     f"Shapes of src:{total_weight.shape} and dst:{weight_dst.shape} do not match."
             weight_dst.copy_(total_weight, True)
 
-        copy_weight(layer_tp, layer_single, None, ['self_attention', 'layernorm_qkv', 'ln_weight'])
-        copy_weight(layer_tp,
-                    layer_single,
-                    'column', ['self_attention', 'layernorm_qkv', 'weight'],
-                    interleave=True)
-        copy_weight(layer_tp, layer_single, 'row', ['self_attention', 'proj', 'weight'])
-        copy_weight(layer_tp, layer_single, None, ['layernorm_mlp', 'ln_weight'])
-        copy_weight(layer_tp, layer_single, 'column', ['layernorm_mlp', 'fc1_weight'])
-        copy_weight(layer_tp, layer_single, 'row', ['layernorm_mlp', 'fc2_weight'])
+        copy_weight(layer_tp, layer_single, None, ['layernorm_qkv', 'ln_weight'])
+        copy_weight(layer_tp, layer_single, 'column', ['layernorm_qkv', 'weight'], interleave=True)
+        copy_weight(layer_tp, layer_single, 'row', ['proj', 'weight'])
 
         if self.sequence_parallel:
             register_sequence_parallel_allreduce_hooks(layer_tp, accumulation_steps=1)
@@ -170,64 +163,58 @@ class TestTransformerTp(unittest.TestCase):
             assert_allclose(loss_tp, loss_single, rtol=self.rtol, atol=self.atol)
 
 
-class TestTransformerTpFp8(TestTransformerTp):
-    """Tests Transformer layer with tensor parallelism in FP8"""
+class TestAttentionTpFp8(TestAttentionTp):
+    """Tests MultiHeadAttention layer with model parallel in FP8"""
 
     def set_attr(self):
         """Set test configs"""
         self.batch_size = 16
         self.hidden_size = 1024
         self.num_heads = 16
-        self.ffn_hidden_size = 4096
         self.q_seqlen = 128
         self.kv_seqlen = 128
         self.mask_type = 'padding'
-        self.layer_type = 'encoder'
         self.global_dtype = 'bfloat16'
         self.rtol = 5e-2
-        self.atol = 0.5
+        self.atol = 5e-2
         self.eps = 1e-3
         self.fp8 = True
         self.sequence_parallel = False
 
 
-class TestTransformerSp(TestTransformerTp):
-    """Tests Transformer layer with sequence parallel in BF16"""
+class TestAttentionSp(TestAttentionTp):
+    """Tests MultiHeadAttention layer with sequence parallel in BF16"""
 
     def set_attr(self):
         """Set test configs"""
         self.batch_size = 16
         self.hidden_size = 1024
         self.num_heads = 16
-        self.ffn_hidden_size = 4096
         self.q_seqlen = 128
         self.kv_seqlen = 128
         self.mask_type = 'padding'
-        self.layer_type = 'encoder'
         self.global_dtype = 'bfloat16'
-        self.rtol = 5e-2
-        self.atol = 5e-2
+        self.rtol = 5e-3
+        self.atol = 5e-3
         self.eps = 1e-3
         self.fp8 = False
         self.sequence_parallel = True
 
 
-class TestTransformerSpFp8(TestTransformerSp):
-    """Tests Transformer layer with sequence parallelism in FP8"""
+class TestAttentionSpFp8(TestAttentionTp):
+    """Tests MultiHeadAttention layer with sequence parallel in FP8"""
 
     def set_attr(self):
         """Set test configs"""
         self.batch_size = 16
         self.hidden_size = 1024
         self.num_heads = 16
-        self.ffn_hidden_size = 4096
         self.q_seqlen = 128
         self.kv_seqlen = 128
         self.mask_type = 'padding'
-        self.layer_type = 'encoder'
         self.global_dtype = 'bfloat16'
         self.rtol = 5e-2
-        self.atol = 0.5
+        self.atol = 1e-1
         self.eps = 1e-3
         self.fp8 = True
         self.sequence_parallel = True

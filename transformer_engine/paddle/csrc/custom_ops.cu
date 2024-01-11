@@ -291,7 +291,7 @@ std::vector<paddle::Tensor> te_layernorm_fwd_fp8(const paddle::Tensor &input,
     size_t N = shape[0];
     size_t H = shape[1];
 
-    auto ln_out = paddle::empty_like(input, input.dtype(), input.place());
+    auto ln_out = paddle::empty_like(input, Nvte2PaddleDType(Int2NvteDType(otype)), input.place());
     auto mu = paddle::empty({static_cast<int64_t>(N)}, paddle::DataType::FLOAT32, input.place());
     auto rsigma =
         paddle::empty({static_cast<int64_t>(N)}, paddle::DataType::FLOAT32, input.place());
