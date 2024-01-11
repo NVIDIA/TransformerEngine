@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 # Basic Example for Using PyTorch Fully Sharded Data Parallel mode with Transformer Engine
 
 ```bash

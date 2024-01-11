@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_extensions as tex
+from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     get_default_fp8_recipe,
@@ -234,6 +235,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
+        self.param_init_meta = {}
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -745,6 +747,38 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
             )
         return fp8_weight_tensors
+
+    def register_parameter(self, name, param, **kwargs):
+        """
+        Thin wrapper around PyTorch parameter registration to stash additional parameter
+        metedata used in deferred initialization.
+        """
+        super().register_parameter(name, param)
+        self.param_init_meta[name] = _ParameterInitMeta(self, **kwargs)
+
+    def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
+        """
+        Reset all module parameters to initial values. Unless deferred initialization
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        device before the values are reset to initial.
+        """
+        if defer_init:
+            return
+
+        for name, param in self.named_parameters(recurse=False):
+            # Ensure parameter is on a real device
+            if param.device == torch.device('meta'):
+                param.to(device='cuda')
+
+            if 'weight' in name:
+                # Initialize weight values on device
+                param = self.param_init_meta[name].init_as_weight(param)
+            elif 'bias' in name:
+                # Reset biases to zero
+                param = self.param_init_meta[name].init_as_bias(param)
+
+            # Redo parameter wrap in case we broke it above
+            param = torch.nn.Parameter(param)
 
     @abstractmethod
     def forward(self):

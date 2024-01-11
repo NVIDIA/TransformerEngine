@@ -23,7 +23,6 @@ from ._common import _noop_cat
 from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
-    get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -32,7 +31,6 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
@@ -659,24 +657,16 @@ class Linear(TransformerEngineBaseModule):
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
 
-        self.param_init_fn = get_default_init_method() if init_method is None else init_method
-
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
-        temp_weight = torch.empty(
+        self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
             device=device, dtype=params_dtype)
-
-        self.weight_tensor = self.init_weight_tensor(temp_weight)
 
         if self.use_bias:
             self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
         else:
             self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
-
-        if self.bias_tensor.device != torch.device('meta'):
-            with torch.no_grad():
-                self.bias_tensor.zero_()
 
         # Configure parameter splits
         self.weight_names = []
@@ -742,7 +732,10 @@ class Linear(TransformerEngineBaseModule):
             if is_subview:
                 weight = weight[split_start:split_end]
             weight = torch.nn.Parameter(weight)
-            self.register_parameter(self.weight_names[i], weight)
+            self.register_parameter(self.weight_names[i], weight,
+                                    init_fn=init_method,
+                                    get_rng_state_tracker=get_rng_state_tracker,
+                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
 
             # Construct bias parameter if needed
             if self.use_bias:
@@ -783,57 +776,6 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
-
-    def init_weight_tensor(self, weights: torch.Tensor) -> torch.Tensor:
-        """
-        Initialize values for the given weight tensor if tensor lives on a real device.
-        """
-        if weights.device == torch.device('meta'):
-            return weights
-
-        # TODO(ksivaman): This functionality works with FP8 outside TE.
-        initialize_affine_weight_gpu(
-            weights,
-            self.param_init_fn,
-            self.get_rng_state_tracker,
-            partition_dim=1 if self.parallel_mode == "row" else 0,
-            stride=1,
-            set_tp_attributes=False,
-        )
-
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
-            weights = Float8Tensor(
-                data=weights,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-
-        return weights
-
-    def reset_parameters(self, defer_init: bool = False) -> None:
-        """
-        Reset all module parameters to initial values. Unless deferred initialization
-        is specified, all parameters on a 'meta' device are also materialized on a real cuda
-        device before the values are reset to initial.
-        """
-        if defer_init:
-            return
-
-        # materialize all parameters (move to real device, initialize values)
-        for wname, bname in zip(self.weight_names, self.bias_names):
-            if self._parameters[wname].device == torch.device('meta'):
-                self._parameters[wname].to(device='cuda')
-            self._parameters[wname] = torch.nn.Parameter(
-                self.init_weight_tensor(self._parameters[wname]))
-
-            if self.use_bias:
-                if self._parameters[bname].device == torch.device('meta'):
-                    self._parameters[bname].to(device='cuda')
-
-                with torch.no_grad():
-                    self._parameters[bname].zero_()
 
     def get_fp8_weights_scratchpad(
         self,
