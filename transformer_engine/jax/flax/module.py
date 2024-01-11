@@ -910,6 +910,9 @@ class LayerNormMLP(TransformerEngineBase):
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
         contract_ind = tuple(range(0, len(axis)))
 
+        ffn1_ckpt_name = 'ffn1'
+        ffn2_ckpt_name = 'ffn2'
+
         if use_fused_ln_geglu_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
@@ -922,7 +925,9 @@ class LayerNormMLP(TransformerEngineBase):
                                           epsilon=self.epsilon,
                                           layernorm_input_axes=self.layernorm_input_axes,
                                           dot_1_input_axes=self.dot_1_input_axes,
-                                          dot_2_input_axes=self.dot_2_input_axes)
+                                          dot_2_input_axes=self.dot_2_input_axes,
+                                          ffn1_ckpt_name=ffn1_ckpt_name,
+                                          ffn2_ckpt_name=ffn2_ckpt_name)
         elif use_fused_ln_gelu_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
@@ -948,7 +953,9 @@ class LayerNormMLP(TransformerEngineBase):
                                          epsilon=self.epsilon,
                                          layernorm_input_axes=self.layernorm_input_axes,
                                          dot_1_input_axes=self.dot_1_input_axes,
-                                         dot_2_input_axes=self.dot_2_input_axes)
+                                         dot_2_input_axes=self.dot_2_input_axes,
+                                         ffn1_ckpt_name=ffn1_ckpt_name,
+                                         ffn2_ckpt_name=ffn2_ckpt_name)
         else:    # not use_fused_ln_geglu_mlp
 
             # DenseGeneral 1
@@ -983,7 +990,7 @@ class LayerNormMLP(TransformerEngineBase):
                 bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
                 x += jnp.reshape(bias, bias_shape)
 
-            x = checkpoint_name(x, 'ffn1')
+            x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
             if is_geglu(self.activations):
@@ -1024,6 +1031,6 @@ class LayerNormMLP(TransformerEngineBase):
                 bias = bias.astype(self.dtype)
                 out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
 
-            out = checkpoint_name(out, 'ffn2')
+            out = checkpoint_name(out, ffn2_ckpt_name)
 
         return out, ln_output    # Output, layner_norm_output

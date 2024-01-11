@@ -8,6 +8,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 
 from .cpp_extensions import cast_fp8, transpose, cast_transpose
 from .cpp_extensions import gelu as te_gelu
@@ -101,7 +102,9 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
                             epsilon: float = 1e-6,
                             layernorm_input_axes: Tuple[str, ...] = None,
                             dot_1_input_axes: Tuple[str, ...] = None,
-                            dot_2_input_axes: Tuple[str, ...] = None) -> jnp.ndarray:
+                            dot_2_input_axes: Tuple[str, ...] = None,
+                            ffn1_ckpt_name: str = 'ffn1',
+                            ffn2_ckpt_name: str = 'ffn2') -> jnp.ndarray:
     """
     Layernorm + GEMM1 + GeGLU + GEMM2
     """
@@ -128,23 +131,25 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
     output = _layernrom_geglu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax, scale,
                                       scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
                                       zero_centered_gamma, epsilon, layernorm_input_axes,
-                                      dot_1_input_axes, dot_2_input_axes)
+                                      dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
+                                      ffn2_ckpt_name)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _layernrom_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_max: jnp.ndarray,
                              amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
                              fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype, layernorm_type: str,
                              zero_centered_gamma: bool, epsilon: float,
                              layernorm_input_axes: Tuple[str, ...],
-                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...]):
+                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
+                             ffn1_ckpt_name: str, ffn2_ckpt_name: str):
     output, _ = _layernrom_geglu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax,
                                                   scale, scale_inv, fwd_dtype, bwd_dtype,
                                                   layernorm_type, zero_centered_gamma, epsilon,
                                                   layernorm_input_axes, dot_1_input_axes,
-                                                  dot_2_input_axes)
+                                                  dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name)
     return output
 
 
@@ -165,7 +170,9 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
         epsilon,
         layernorm_input_axes,
         dot_1_input_axes,
-        dot_2_input_axes):
+        dot_2_input_axes,
+        ffn1_ckpt_name,
+        ffn2_ckpt_name):
 
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 2, Hidden_out)
@@ -230,6 +237,7 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
                                 (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
+    dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
 
@@ -254,6 +262,7 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kernel_2, geglu_out_scale_inv,
                                 kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
+    dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
@@ -271,6 +280,8 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
         layernorm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
+        ffn1_ckpt_name,    # pylint: disable=unused-argument
+        ffn2_ckpt_name,    # pylint: disable=unused-argument
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, \
@@ -385,7 +396,9 @@ def layernrom_gelu_fp8_mlp(x: jnp.ndarray,
                            epsilon: float = 1e-6,
                            layernorm_input_axes: Tuple[str, ...] = None,
                            dot_1_input_axes: Tuple[str, ...] = None,
-                           dot_2_input_axes: Tuple[str, ...] = None) -> jnp.ndarray:
+                           dot_2_input_axes: Tuple[str, ...] = None,
+                           ffn1_ckpt_name: str = 'ffn1',
+                           ffn2_ckpt_name: str = 'ffn2') -> jnp.ndarray:
     """
     Layernorm + GEMM1 + bias + GeLU + GEMM2 + bias
     """
@@ -414,23 +427,25 @@ def layernrom_gelu_fp8_mlp(x: jnp.ndarray,
     output = _layernrom_gelu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max,
                                      amax, scale, scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
                                      zero_centered_gamma, epsilon, layernorm_input_axes,
-                                     dot_1_input_axes, dot_2_input_axes)
+                                     dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
+                                     ffn2_ckpt_name)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18))
+@partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18, 19, 20))
 def _layernrom_gelu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                             kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, bias_1: jnp.ndarray,
                             bias_2: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
                             scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype,
                             bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
                             epsilon: float, layernorm_input_axes: Tuple[str, ...],
-                            dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...]):
+                            dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
+                            ffn1_ckpt_name: str, ffn2_ckpt_name: str):
     output, _ = _layernrom_gelu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
                                                  fp8_max, amax, scale, scale_inv, fwd_dtype,
                                                  bwd_dtype, layernorm_type, zero_centered_gamma,
                                                  epsilon, layernorm_input_axes, dot_1_input_axes,
-                                                 dot_2_input_axes)
+                                                 dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name)
     return output
 
 
@@ -453,7 +468,9 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
         epsilon,
         layernorm_input_axes,
         dot_1_input_axes,
-        dot_2_input_axes):
+        dot_2_input_axes,
+        ffn1_ckpt_name,
+        ffn2_ckpt_name):
 
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 1, Hidden_out)
@@ -525,6 +542,7 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
 
     bias_1_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1.shape
     dot_1_output += jnp.reshape(bias_1, bias_1_shape)
+    dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
 
@@ -551,6 +569,7 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
 
     bias_2_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2.shape
     dot_2_output += jnp.reshape(bias_2, bias_2_shape)
+    dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_gelu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_gelu_amax,
@@ -569,6 +588,8 @@ def _layernrom_gelu_fp8_mlp_bwd_rule(
         layernorm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
+        ffn1_ckpt_name,    # pylint: disable=unused-argument
+        ffn2_ckpt_name,    # pylint: disable=unused-argument
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_gelu_out, \
