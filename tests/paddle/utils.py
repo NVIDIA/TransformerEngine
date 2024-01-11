@@ -40,9 +40,15 @@ def assert_allclose(actual,
                     verbose=True):
     """Compare two input paddle tensors"""
     if isinstance(actual, paddle.Tensor):
-        actual = paddle.cast(actual, 'float32').numpy()
+        actual = paddle.cast(actual, 'float32')
     if isinstance(desired, paddle.Tensor):
-        desired = paddle.cast(desired, 'float32').numpy()
+        desired = paddle.cast(desired, 'float32')
+    if len(actual.shape) == 0:
+        actual = actual.item()
+        desired = desired.item()
+    else:
+        actual = actual.numpy()
+        desired = desired.numpy()
     np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
 
 
@@ -59,6 +65,7 @@ def is_devices_enough(required):
 
 def set_random_seed(seed):
     """Set random seed for reproducability."""
+    fleet.meta_parallel.model_parallel_random_seed(seed)
 
     hcg = fleet.get_hybrid_communicate_group()
     if paddle.distributed.get_world_size() > 1:
@@ -161,3 +168,46 @@ def is_fused_attention_supported(
         mask_type=mask_type,
     )
     return backend != FusedAttnBackend["No_Backend"]
+
+
+def register_sequence_parallel_allreduce_hooks(model, accumulation_steps) -> None:
+    """Register allreduce hooks for sequence parallel tensors"""
+
+    def is_sequence_parallel_parameter(parameter):
+        """If input tensor is marked as sequence parallel tensor"""
+        out = getattr(parameter, "sequence_parallel", False)
+        return out
+
+    def create_allreduce_gradient_hook(param, accumulation_steps):
+        """Create allreduce gradient hook"""
+        hcg = fleet.get_hybrid_communicate_group()
+        pg = hcg.get_model_parallel_group().process_group
+        step = [0]
+
+        @paddle.autograd.no_grad()
+        def __impl__():
+            step[0] += 1
+            if (step[0] % accumulation_steps) == 0:
+                if hasattr(param, "main_grad"):
+                    pg.allreduce(param.main_grad).wait()
+                else:
+                    pg.allreduce(param.grad).wait()
+
+        return __impl__
+
+    if accumulation_steps <= 0 or not paddle.distributed.is_initialized():
+        return
+
+    hcg = fleet.get_hybrid_communicate_group()
+    mp_group = hcg.get_model_parallel_group()
+    if mp_group.nranks <= 1:
+        return
+
+    params = []
+    for p in model.parameters():
+        if is_sequence_parallel_parameter(p):
+            params.append(p)
+
+    for p in params:
+        hook = create_allreduce_gradient_hook(p, accumulation_steps)
+        p._register_backward_hook(hook)

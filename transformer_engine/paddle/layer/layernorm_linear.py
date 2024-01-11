@@ -16,7 +16,6 @@ from ..cpp_extensions import (
     layernorm_fwd,
     layernorm_fwd_fp8,
     layernorm_bwd,
-    transpose,
 )
 
 from .base import TransformerEngineBaseLayer
@@ -29,6 +28,7 @@ from ..distributed import (
     track_rng_state,
     set_tensor_dist_attr,
     set_weight_tensor_dist_attr,
+    mark_as_sequence_parallel_parameter,
 )
 from ..fp8 import get_fp8_te_dtype
 from ..utils import (
@@ -145,6 +145,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         zero_centered_gamma: bool,
         parallel_mode: Union[str, None],
         tensor_parallel: bool,
+        sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
@@ -190,6 +191,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             is_grad_enabled,
         )
@@ -217,6 +219,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.parallel_mode = parallel_mode
             ctx.tensor_parallel = tensor_parallel
+            ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
@@ -256,29 +259,26 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 grad_output_c,
                 grad_output_t,
                 bgrad,
-            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0])
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0],
+                                                                  ctx.parallel_mode == "row")
 
             # Prepare ln_out for Linear bwd
-            ln_out_no_fp8, ln_out_t = None, None
+            linear_inputmat = ln_out
             if ctx.fp8_enabled:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
-                fp8_wgrad = not ctx.fp8_meta["recipe"].override_linear_precision.wgrad
-                if ctx.requires_wgrad:
-                    if fp8_wgrad:
-                        ln_out_t = transpose(ln_out, fp8_dtype_forward)
-                    else:
-                        ln_out_no_fp8 = cast_from_fp8(
-                            ln_out,
-                            ctx.fp8_meta["scaling_fwd"],
-                            FP8FwdTensors.GEMM1_INPUT,
-                            fp8_dtype_forward,
-                            TE_DType[ctx.activation_dtype],
-                        )
+                if ctx.requires_wgrad and ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                    linear_inputmat = cast_from_fp8(
+                        ln_out,
+                        ctx.fp8_meta["scaling_fwd"],
+                        FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                        TE_DType[ctx.activation_dtype],
+                    )
 
             # Linear Bwd
             dgrad, wgrad, bgrad_ = _linear_bwd(
-                ln_out_no_fp8 if ctx.fp8_enabled else ln_out,
-                ln_out_t,
+                linear_inputmat,
+                None,    # inputmat_t will be automatically computed if not provided
                 FP8FwdTensors.GEMM1_INPUT,
                 weight,
                 weight_t_fp8,
@@ -296,6 +296,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 ctx.activation_dtype,
                 ctx.parallel_mode,
                 ctx.tensor_parallel,
+                ctx.sequence_parallel,
                 ctx.tp_group,
             )
 
@@ -367,6 +368,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
                    When set to `None`, no communication is performed.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     """
 
     def __init__(
@@ -379,6 +382,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
         parallel_mode: Optional[str] = None,
+        sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
         backend: str = 'transformer_engine',
     ) -> None:
@@ -409,6 +413,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
 
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
+
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
             shape=[self.in_features],
@@ -424,6 +430,10 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             dtype=self._dtype,
             is_bias=True,
         )
+
+        if self.sequence_parallel:
+            mark_as_sequence_parallel_parameter(self.ln_weight)
+            mark_as_sequence_parallel_parameter(self.ln_bias)
 
         # Initialize Linear weight parameter
         with track_rng_state(enable=self.tensor_parallel):
@@ -451,6 +461,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             )
             if parallel_mode == "column":
                 set_tensor_dist_attr(self.bias, self.tensor_parallel, axis=0)
+            if parallel_mode == "row" and self.sequence_parallel:
+                mark_as_sequence_parallel_parameter(self.bias)
         else:
             self.bias = None
 
@@ -500,6 +512,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.zero_centered_gamma,
                 self.parallel_mode,
                 self.tensor_parallel,
+                self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
             )
