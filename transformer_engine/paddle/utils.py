@@ -121,3 +121,17 @@ def saved_tensor_allow_none(ctx) -> Tuple[Optional[paddle.Tensor]]:
             outputs.append(saved_tensors[index])
 
     return tuple(outputs)
+
+
+def clear_tensor_data(*tensors: Tuple[Optional[paddle.Tensor], ...]) -> None:
+    """
+    Free tensor buffer
+    """
+
+    def can_free(t):
+        return (t is not None and isinstance(t, paddle.Tensor) and t._is_initialized()
+                and t.inplace_version == 0)
+
+    for t in tensors:
+        if can_free(t):
+            t._clear_dataptr()
