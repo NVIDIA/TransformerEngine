@@ -10,9 +10,7 @@ from dataclasses import dataclass
 import torch
 
 from .. import cpp_extensions as tex
-from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
-from ..float8_tensor import Float8Tensor
-from ..distributed import initialize_affine_weight_gpu
+from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
 
 def _get_normalization_func(normalization: str,
@@ -195,47 +193,17 @@ def _noop_cat(
 
 @dataclass
 class _ParameterInitMeta:
+    """
+    Stores essential metadata needed to support deferred parameter initialization.
+    """
     parent: torch.nn.Module
     init_fn: Optional[Callable] = get_default_init_method()
     get_rng_state_tracker: Optional[Callable] = None
-    partition_dim: Optional[int] = 0,
-    stride: Optional[int] = 1,
     fp8_meta_index: Optional[int] = None
 
     def __post_init__(self):
+        """Safeguard reference to the parameter's parent module and initialization function."""
         assert self.parent is not None
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
 
-    def init_as_weight(self, param: torch.Tensor, set_tp_attributes: bool = False) -> torch.Tensor:
-        if param.device == torch.device('meta'):
-            return param
-
-        initialize_affine_weight_gpu(
-            param,
-            self.init_fn,
-            self.get_rng_state_tracker,
-            partition_dim=self.partition_dim,
-            stride=self.stride,
-            set_tp_attributes=set_tp_attributes
-        )
-
-        if FP8GlobalStateManager.with_fp8_parameters():
-            self.parent.init_fp8_metadata()
-            self.parent.fp8_meta["update_amax_and_scale_fwd"] = True
-            param = Float8Tensor.to_float8(
-                param,
-                fp8_meta=self.parent.fp8_meta,
-                fp8_meta_index=self.fp8_meta_index
-            )
-
-        return param
-
-    def init_as_bias(self, param: torch.Tensor) -> torch.Tensor:
-        if param.device == torch.device('meta'):
-            return param
-
-        with torch.no_grad():
-            param.zero_()
-
-        return param

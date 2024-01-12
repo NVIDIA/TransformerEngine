@@ -11,10 +11,30 @@
 $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py
 # Sample output on 8xL40S:
 #    [GPU-0] WORLD_SIZE = 8
-#    [GPU-0] Pre-FSDP memory use = 8590.196736MiB
-#    ...
-#    [GPU-0] Post-FSDP memory use = 1073.774592MiB
-#    ...
+#    [GPU-0] TransformerEngine Model:
+#    TransformerLayer(
+#    (self_attention): MultiheadAttention(
+#        (layernorm_qkv): LayerNormLinear()
+#        (core_attention): DotProductAttention(
+#        (flash_attention): FlashAttention()
+#        (fused_attention): FusedAttention()
+#        (unfused_attention): UnfusedDotProductAttention(
+#            (scale_mask_softmax): FusedScaleMaskSoftmax()
+#            (attention_dropout): Dropout(p=0.1, inplace=False)
+#        )
+#        )
+#        (proj): Linear()
+#    )
+#    (layernorm_mlp): LayerNormMLP()
+#    )
+#    [GPU-0] Pre-FSDP memory use = 83.935232MiB
+#    [GPU-0] Post-FSDP memory use = 10.491904MiB
+#    [GPU-0] Iter. 1
+#    [GPU-0] Iter. 2
+#    [GPU-0] Iter. 3
+#    [GPU-0] Training Time: 6.647654296875s
+#    [GPU-0] Avg. Iter. Time: 2.2158847656250003s
+#    [GPU-0] Peak memory use = 3000MiB
 
 # FSDP with deferred initialization:
 #    Modules initialized with empty paramaters via `device='meta'` option. Zero load on device
@@ -23,9 +43,9 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsd
 $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py --defer-init
 # Sample output on 8xL40S:
 #    [GPU-0] WORLD_SIZE = 8
-#    [GPU-0] Pre-FSDP memory use = 0.0MiB
 #    ...
-#    [GPU-0] Post-FSDP memory use = 1073.774592MiB
+#    [GPU-0] Pre-FSDP memory use = 0.0MiB
+#    [GPU-0] Post-FSDP memory use = 10.491904MiB
 #    ...
 ```
 

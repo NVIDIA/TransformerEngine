@@ -236,6 +236,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
         self.param_init_meta = {}
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -770,12 +771,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if param.device == torch.device('meta'):
                 param = param.to(device='cuda')
 
-            if 'weight' in name:
-                # Initialize weight values on device
-                param = self.param_init_meta[name].init_as_weight(param)
-            elif 'bias' in name:
-                # Reset biases to zero
-                param = self.param_init_meta[name].init_as_bias(param)
+            # Initialize the parameter values on device
+            init_fn = self.param_init_meta[name].init_fn
+            get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
+            if get_rng_state_tracker is None:
+                init_fn(param)
+            else:
+                with get_rng_state_tracker().fork():
+                    init_fn(param)
+
+            # If primary weights are in fp8, wrap the parameter as Float8Tensor
+            fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                param = Float8Tensor.to_float8(
+                    param,
+                    fp8_meta=self.fp8_meta,
+                    fp8_meta_index=fp8_meta_index
+                )
 
             # Redo parameter wrap in case we broke it above
             setattr(self, name, torch.nn.Parameter(param))

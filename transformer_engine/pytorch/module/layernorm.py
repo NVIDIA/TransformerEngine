@@ -4,6 +4,7 @@
 
 """LayerNorm API"""
 import os
+import warnings
 from typing import Union, Tuple, Optional
 
 import torch
@@ -139,7 +140,8 @@ class LayerNorm(torch.nn.Module):
         )
         setattr(self.weight, "sequence_parallel", sequence_parallel)
         setattr(self.bias, "sequence_parallel", sequence_parallel)
-        self.reset_layer_norm_parameters()
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -150,10 +152,22 @@ class LayerNorm(torch.nn.Module):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNorm.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.weight)
         else:
             init.zeros_(self.weight)
+        init.zeros_(self.bias)
+
+    def reset_parameters(self, defer_init=False) -> None:
+        if defer_init:
+            return
+        init.constant_(self.weight, float(not self.zero_centered_gamma))
         init.zeros_(self.bias)
 
     @no_torch_dynamo()
