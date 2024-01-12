@@ -166,7 +166,7 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
     """Check if FlashAttention supports a model configuration"""
     if get_device_compute_capability() < (8, 0):
         return False
-    if config.attn_bias_type != "no_bias":
+    if config.attn_bias_type not in ["no_bias", "alibi"]:
         return False
     if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
         return False
