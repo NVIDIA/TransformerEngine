@@ -394,7 +394,7 @@ def get_cpu_offload_context(enabled: bool = False,
 
     Usage:
 
-    ..code block:: Python
+    .. code-block:: python
 
         cpu_offload_context, cpu_offload_synchronizer = get_cpu_offload_context(enabled=True)
 
