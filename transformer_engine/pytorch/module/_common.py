@@ -223,7 +223,7 @@ class _ParameterInitMeta:
         if FP8GlobalStateManager.with_fp8_parameters():
             self.parent.init_fp8_metadata()
             self.parent.fp8_meta["update_amax_and_scale_fwd"] = True
-            param = Float8Tensor(
+            param = Float8Tensor.to_float8(
                 param,
                 fp8_meta=self.parent.fp8_meta,
                 fp8_meta_index=self.fp8_meta_index

@@ -768,7 +768,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         for name, param in self.named_parameters(recurse=False):
             # Ensure parameter is on a real device
             if param.device == torch.device('meta'):
-                param.to(device='cuda')
+                param = param.to(device='cuda')
 
             if 'weight' in name:
                 # Initialize weight values on device
@@ -778,7 +778,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param = self.param_init_meta[name].init_as_bias(param)
 
             # Redo parameter wrap in case we broke it above
-            param = torch.nn.Parameter(param)
+            setattr(self, name, torch.nn.Parameter(param))
 
     @abstractmethod
     def forward(self):
