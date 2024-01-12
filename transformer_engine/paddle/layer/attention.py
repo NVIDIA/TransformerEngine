@@ -237,8 +237,7 @@ class DotProductAttention(paddle.nn.Layer):
             self.fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
                 tex.get_nvte_qkv_layout(self.qkv_layout), AttnBiasType[core_attention_bias_type],
-                AttnMaskType[self.attn_mask_type], self.attention_dropout,
-                query_layer.shape[-2],
+                AttnMaskType[self.attn_mask_type], self.attention_dropout, query_layer.shape[-2],
                 key_value_layer.shape[-2] if key_value_layer is not None else query_layer.shape[-2],
                 max_s_q, max_s_kv, query_layer.shape[-1])
 
@@ -401,6 +400,8 @@ class MultiHeadAttention(paddle.nn.Layer):
                       if set to `True`, QKV and FC1 layers are used as Column Parallel
                       whereas PROJ and FC2 is used as Row Parallel as described
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
     rng_state_name : str, default = `local_seed`
@@ -427,6 +428,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         attention_type: str = "self",
         zero_centered_gamma: bool = False,
         set_parallel_mode: bool = False,
+        sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
         rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
@@ -445,7 +447,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
-
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_size_per_attention_head = hidden_size // num_attention_heads
         self.num_attention_heads = num_attention_heads
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -467,6 +469,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -477,6 +480,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     self.weight_attr,
                     self.bias_attr,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -492,6 +496,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -502,6 +507,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     self.weight_attr,
                     self.bias_attr,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -511,6 +517,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                 self.weight_attr,
                 self.bias_attr,
                 parallel_mode=qkv_parallel_mode,
+                sequence_parallel=self.sequence_parallel,
                 tp_group=self.tp_group,
                 backend=self.backend,
             )
@@ -531,6 +538,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             self.weight_attr,
             self.bias_attr,
             parallel_mode="row" if set_parallel_mode else None,
+            sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
             backend=self.backend,
         )
@@ -569,9 +577,20 @@ class MultiHeadAttention(paddle.nn.Layer):
                                   backprop.
         """
 
-        # hidden_states: [b, s_q, hidden_size]
         if self.attn_mask_type != "causal" and attention_mask is not None:
             assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
+
+        input_dim = len(hidden_states.shape)
+        if input_dim == 2:
+            # hidden_states: [b * s_q, hidden_size]
+            # need to get max_seq_len from attention_mask
+            assert attention_mask is not None
+            max_seq_len = attention_mask.shape[-1]
+        elif input_dim == 3:
+            # hidden_states: [b, s_q, hidden_size]
+            max_seq_len = hidden_states.shape[1]
+        else:
+            raise ValueError(f"hidden_states should have 2 or 3 dimensions, got {input_dim}.")
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -585,7 +604,8 @@ class MultiHeadAttention(paddle.nn.Layer):
 
             # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                0, 0, 3, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 3, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
@@ -614,7 +634,8 @@ class MultiHeadAttention(paddle.nn.Layer):
             mixed_kv_layer = self.key_value(encoder_output)
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
             mixed_kv_layer = mixed_kv_layer.reshape(shape=[
-                0, 0, 2, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 2, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             if self.input_layernorm:
@@ -627,7 +648,8 @@ class MultiHeadAttention(paddle.nn.Layer):
                 query_layer = self.query_layer(hidden_states)
 
             query_layer = query_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 if recompute_core_attention:
@@ -651,8 +673,13 @@ class MultiHeadAttention(paddle.nn.Layer):
                         set_zero=set_zero,
                     )
 
-        context_layer = paddle.reshape(context_layer,
-                                       [0, 0, context_layer.shape[2] * context_layer.shape[3]])
+        if input_dim == 3:
+            context_layer = paddle.reshape(
+                context_layer, [-1, max_seq_len, context_layer.shape[2] * context_layer.shape[3]])
+        else:    # input_dim == 2
+            context_layer = paddle.reshape(context_layer,
+                                           [-1, context_layer.shape[2] * context_layer.shape[3]])
+
         # Output. [b, s, hidden]
         attention_output = self.proj(context_layer)
 
