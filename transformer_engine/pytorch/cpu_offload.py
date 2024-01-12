@@ -6,6 +6,8 @@ import torch
 from typing import Any
 from contextlib import nullcontext
 
+__all__ = ['get_cpu_offload_context']
+
 CPUOffloadEnabled = False
 
 class CpuOffloadSavedTensorHook:
@@ -84,7 +86,7 @@ class CpuOffloadSavedTensorHook:
                                   "this class and implement your custom hooks")
 
 class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
-    """Contex-manager that offloads/recovers tensors through an offload hander.
+    """Context-manager that offloads/recovers tensors through an offload hander.
     
     The hook just offloads/recovers the tensor object to the handler through `tensor_push` and `tensor_pop` interface. 
     How the offload-handler manages the offloading, recovering or prefetching timing is transparent to this hook. 
@@ -110,7 +112,7 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
         return tensor
 
 class OffloadHandler:
-    """A base class for CPU offload-handler defining two methods."""
+    """A base class for CPU offload-handler."""
     def __init__(self) -> None:
         pass
 
@@ -382,7 +384,33 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if self.current_group < self.num_offload_group:
             torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_group])
 
-def get_cpu_offload_context(enabled, num_layers, offload_activations, offload_weights):
+def get_cpu_offload_context(enabled: bool = False, 
+    num_layers: int = 1, 
+    offload_activations: bool = True, 
+    offload_weights: bool = True):
+    """
+    This function returns the CPU Offload context and the synchronizer function that needs to be used after every transformer layer.
+    Returns nullcontext() if offloading not enabled.
+
+    Usage:
+
+    ..code block:: Python
+
+        with cpu_offload_context():
+            tf_layer.forward(inp_tensor)
+        cpu_offload_synchronizer()
+
+    Parameters:
+    ----------
+    enabled (bool): When set to True, CPU Offloading functionality is enabled. Defaults to False.
+
+    num_layers (int): Determines the number of transformer layers you want to offload activations/weights for. Defaults to 1.
+
+    offload_activations (bool): When set to True, offloads the activations for the TF layer. Defaults to True.
+
+    offload_weights (bool): When set to True, offloads the weights for the TF layer. Defaults to True.
+
+    """
 
    def tensor_need_offloading_checker_activations(tensor):
       return not hasattr(tensor,"weight_offloading")
