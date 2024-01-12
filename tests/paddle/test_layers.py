@@ -1341,6 +1341,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             atol=atol)
 
 
+@pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest.mark.parametrize('bs', [8])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128]])
