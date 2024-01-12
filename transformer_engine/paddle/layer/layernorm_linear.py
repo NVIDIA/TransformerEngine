@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """LayerNormLinear API"""
 
+import warnings
 import os
 from typing import Union, Tuple, Dict, Any, Optional
 
@@ -131,6 +132,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         ln_weight: paddle.Tensor,
         ln_bias: paddle.Tensor,
         weight: paddle.Tensor,
+        weight_fp8: Optional[paddle.Tensor],
+        weight_t_fp8: Optional[paddle.Tensor],
         bias: Union[paddle.Tensor, None],
         use_bias: bool,
         eps: float,
@@ -148,6 +151,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
@@ -182,6 +186,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ln_out,
             FP8FwdTensors.GEMM1_INPUT,
             weight,
+            weight_fp8,
+            weight_t_fp8,
             FP8FwdTensors.GEMM1_WEIGHT,
             bias,
             use_bias,
@@ -194,6 +200,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             sequence_parallel,
             tp_group,
             is_grad_enabled,
+            is_first_microbatch,
         )
 
         if is_grad_enabled:
@@ -227,6 +234,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
             ctx.requires_ln_wgrad = not ln_weight.stop_gradient
+            ctx.is_first_microbatch = is_first_microbatch
+
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
 
@@ -320,11 +329,18 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             bgrad = bgrad if ctx.requires_bgrad else None
             bgrad_out = (bgrad,) if ctx.use_bias else ()
 
+            if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
+                weight_cache_grad = ()
+            else:
+                # weight_fp8 and weight_t_fp8 are stop_gradient tensors
+                weight_cache_grad = (None, None)
+
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 dgamma if ctx.requires_ln_wgrad else None,
                 dbeta if ctx.requires_ln_bgrad else None,
                 wgrad if ctx.requires_wgrad else None,
+                *weight_cache_grad,
                 *bgrad_out,
             )
 
@@ -447,6 +463,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             )
         set_weight_tensor_dist_attr(self.weight, self.tensor_parallel, self.parallel_mode,
                                     self.backend)
+        self.fp8_weight_shapes.append(self.weight.shape)
 
         # Initialize Linear bias parameter
         self.has_bias = self._bias_attr is not False
@@ -483,21 +500,28 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     def _te_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> Union[paddle.Tensor, Tuple[paddle.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
         """
 
-        with self.prepare_forward(inp) as inp:
+        with self.prepare_forward(inp, is_first_microbatch=is_first_microbatch) as inp:
             # Layer input should be casted outside PyLayer, as performing
             # inplace cast to input tensors may cause problems when used
             # together with Paddle native layers.
             inp = cast_if_needed(inp, self.activation_dtype)
+
+            # Get persistent fp8 weight buffer. None if buffer does not exist.
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+
             out = _LayerNormLinear.apply(
                 inp,
                 self.ln_weight,
                 self.ln_bias,
                 self.weight,
+                weight_fp8,
+                weight_t_fp8,
                 self.bias if self.gemm_bias_fused_add else None,
                 self.has_bias and self.gemm_bias_fused_add,
                 self.eps,
@@ -515,6 +539,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                is_first_microbatch,
             )
 
         if self.return_layernorm_output:
@@ -530,11 +555,16 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     def _pd_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
         if self.zero_centered_gamma:
             raise NotImplementedError(
                 "Paddle backend does not support LayerNorm with zero-centered scale.")
+
+        if is_first_microbatch is not None:
+            warnings.warn(
+                "`is_first_microbatch` is not supported for paddle backend and is ignored.")
 
         ln_out = F.layer_norm(x=inp,
                               normalized_shape=inp.shape[-1],
@@ -557,8 +587,18 @@ class LayerNormLinear(TransformerEngineBaseLayer):
 
         Parameters
         ----------
-        inp : torch.Tensor
+        inp : paddle.Tensor
              Input tensor.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)
