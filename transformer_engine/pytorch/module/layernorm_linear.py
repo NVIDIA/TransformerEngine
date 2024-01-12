@@ -5,7 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any, ContextManager
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 from torch.nn import init
@@ -41,7 +41,6 @@ from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
-
 
 __all__ = ["LayerNormLinear"]
 
@@ -670,8 +669,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
-    cpu_offloading : bool, default = 'False'
-                    if set to `True`, offloads the input activation to this module to the CPU.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
@@ -690,7 +687,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         eps: float = 1e-5,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
-        cpu_offloading_context: Optional[ContextManager] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -716,7 +712,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        self.cpu_offloading = cpu_offloading_context is not None
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
@@ -1018,6 +1013,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
                 is_first_microbatch
             )
+        
+            from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
@@ -1040,7 +1037,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                self.cpu_offloading,
+                CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

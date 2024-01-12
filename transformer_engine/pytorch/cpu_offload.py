@@ -6,6 +6,8 @@ import torch
 from typing import Any
 from contextlib import nullcontext
 
+CPUOffloadEnabled = False
+
 class CpuOffloadSavedTensorHook:
     """Contex-manager that executes a pair of pack/unpack hooks for saved tensors.
     
@@ -54,6 +56,9 @@ class CpuOffloadSavedTensorHook:
         self.inside_context = False
     
     def __enter__(self):
+        global CPUOffloadEnabled
+        CPUOffloadEnabled = True
+
         self.inside_context = True
         torch._C._autograd._push_saved_tensors_default_hooks(
             self.on_save_for_backward, 
@@ -61,6 +66,9 @@ class CpuOffloadSavedTensorHook:
             )
     
     def __exit__(self, *args: Any):
+        global CPUOffloadEnabled
+        CPUOffloadEnabled = False
+
         self.inside_context = False
         torch._C._autograd._pop_saved_tensors_default_hooks()
     
@@ -374,7 +382,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if self.current_group < self.num_offload_group:
             torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_group])
 
-def get_cpu_offload_context(cpu_offloading, cpu_offloading_num_layers, cpu_offloading_activations, cpu_offloading_weights):
+def get_cpu_offload_context(enabled, num_layers, offload_activations, offload_weights):
 
    def tensor_need_offloading_checker_activations(tensor):
       return not hasattr(tensor,"weight_offloading")
@@ -385,17 +393,17 @@ def get_cpu_offload_context(cpu_offloading, cpu_offloading_num_layers, cpu_offlo
    def tensor_need_offloading_checker_all(tensor):
       return True
 
-   if cpu_offloading_activations and cpu_offloading_weights:
+   if offload_activations and offload_weights:
       tensor_need_offloading_checker = tensor_need_offloading_checker_all
-   elif cpu_offloading_activations:
+   elif offload_activations:
       tensor_need_offloading_checker = tensor_need_offloading_checker_activations
-   elif cpu_offloading_weights:
+   elif offload_weights:
       tensor_need_offloading_checker = tensor_need_offloading_checker_weights
    else:
       raise ValueError("CPU Offloading is enabled while it is not mentioned what to offload (weights/activations)")
 
    cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                         num_offload_group=cpu_offloading_num_layers,
+                         num_offload_group=num_layers,
                          num_prefetch_group=1,
                          tensor_need_offloading_checker=tensor_need_offloading_checker
                          )
@@ -403,7 +411,7 @@ def get_cpu_offload_context(cpu_offloading, cpu_offloading_num_layers, cpu_offlo
    def group_prefetch_offload_commit_async(tensor):
       return group_prefetch_offload_commit(tensor,cpu_offload_handler)
 
-   if cpu_offloading:
+   if enabled:
       return CpuOffloadHookWithOffloadHandler(offload_handler = cpu_offload_handler), group_prefetch_offload_commit_async
    else:
       return nullcontext(), group_prefetch_offload_commit_async

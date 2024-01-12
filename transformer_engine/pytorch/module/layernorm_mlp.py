@@ -5,7 +5,7 @@
 """LayerNormMLP API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any, ContextManager
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -50,7 +50,6 @@ from ..jit import no_torch_dynamo
 
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
-
 
 __all__ = ["LayerNormMLP"]
 
@@ -1090,8 +1089,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
-    cpu_offloading : bool, default = 'False'
-                    if set to `True`, offloads the input activation to this module to the CPU.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
@@ -1127,7 +1124,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        cpu_offloading_context: Optional[ContextManager] = None,
         params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         seq_length: Optional[int] = None,
@@ -1146,7 +1142,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        self.cpu_offloading = cpu_offloading_context is not None
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
@@ -1378,6 +1373,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         is_first_microbatch
                 )
 
+            from ..cpu_offload import CPUOffloadEnabled
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
@@ -1404,7 +1401,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                self.cpu_offloading,
+                CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
