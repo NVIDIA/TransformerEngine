@@ -174,7 +174,7 @@ def get_alibi_bias(
         if slopes.dim() == 2:
             slopes = slopes.view(*slopes.shape[:], 1, 1)
         bias = bias * slopes
-        bias = bias.to(dtype=torch.float32, device="cuda")
+        bias = bias.contiguous().to(dtype=torch.float32, device="cuda")
         _alibi_bias = bias
     return _alibi_bias
 
@@ -1244,8 +1244,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
-            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
-                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            #assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
+            #        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             matmul_result = torch.bmm(
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
@@ -1258,8 +1258,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
-                assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
-                        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+                #assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
+                #        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
                 if alibi_slopes is None:
                     get_alibi_slopes(output_size[1])

@@ -185,8 +185,8 @@ def fused_attn_fwd_qkvpacked(
         assert (attn_bias is not None
                 ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         h = qkv.size(2) if 'h3d' in qkv_layout else qkv.size(3)
-        assert (attn_bias.shape == torch.Size([1, h, max_seqlen, max_seqlen])
-                ), "attn_bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        #assert (attn_bias.shape == torch.Size([1, h, max_seqlen, max_seqlen])
+        #        ), "attn_bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
         assert (attn_bias.dtype == qkv.dtype
                 ), "attn_bias tensor must be in the same dtype as qkv."
 
@@ -480,8 +480,8 @@ def fused_attn_fwd_kvpacked(
         assert (attn_bias is not None
                 ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         h = q.size(2)
-        assert (attn_bias.shape == torch.Size([1, h, max_seqlen_q, max_seqlen_kv])
-                ), "attn_bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
+        #assert (attn_bias.shape == torch.Size([1, h, max_seqlen_q, max_seqlen_kv])
+        #        ), "attn_bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
         assert (attn_bias.dtype == q.dtype
                 ), "attn_bias tensor must be in the same dtype as q and kv."
 
@@ -785,8 +785,8 @@ def fused_attn_fwd(
         assert (attn_bias is not None
                 ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         h = q.size(2)
-        assert (attn_bias.shape == torch.Size([1, h, max_seqlen_q, max_seqlen_kv])
-                ), "attn_bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
+        #assert (attn_bias.shape == torch.Size([1, h, max_seqlen_q, max_seqlen_kv])
+        #        ), "attn_bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
         assert (attn_bias.dtype == q.dtype
                 ), "attn_bias tensor must be in the same dtype as q and kv."
 
