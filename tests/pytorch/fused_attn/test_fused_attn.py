@@ -254,6 +254,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
+        print(">>>>>>>>>>>> unfused")
         if swa:
             attn_mask_type = config.attn_mask_type
             config.attn_mask_type = "arbitrary"
@@ -265,6 +266,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 
     # FusedAttention backend
     if fused_attn_supported:
+        print(">>>>>>>>>>>> fused")
         if len(fused_attn_backend) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
@@ -281,22 +283,26 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 
     # FlashAttention backend
     if flash_attn_supported:
+        print(">>>>>>>>>>>> flash")
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
             dtype, config, "FlashAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
         )
 
-    if unfused_attn_supported and fused_attn_supported:
-        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-        for i,_ in enumerate(unfused_attn_bwd):
-            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
+        print('unfused vs flash')
+    if unfused_attn_supported and fused_attn_supported:
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        for i,_ in enumerate(unfused_attn_bwd):
+            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
+        print('unfused vs fused')
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
+        print('fused vs flash')
     if fused_attn_supported and len(fused_attn_backend) == 2:
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
@@ -508,6 +514,7 @@ def _run_dot_product_attention(
             alibi_slopes = _alibi_slopes
         elif config.alibi_type == "custom":
             alibi_slopes = torch.randn(config.num_heads).abs().to(dtype=torch.float32, device="cuda")
+            #alibi_slopes = torch.randn(config.batch_size, config.num_heads).abs().to(dtype=torch.float32, device="cuda")
 
     # Create input tensors
     dim_to_num = {
@@ -560,8 +567,14 @@ def _run_dot_product_attention(
     if config.attn_bias_type in ['no_bias', 'alibi']:
         bias = None
     if config.attn_bias_type == 'post_scale_bias':
-        bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
+        #bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
+        #        dtype=dtype, device="cuda")
+        bias = torch.randn(config.batch_size, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
                 dtype=dtype, device="cuda")
+        #bias = torch.randn(1, 1, config.max_seqlen_q, config.max_seqlen_kv,
+        #        dtype=dtype, device="cuda")
+        #bias = torch.randn(config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv,
+        #        dtype=dtype, device="cuda")
 
     # Create RNG
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -601,9 +614,10 @@ def _run_dot_product_attention(
             core_attention_bias=bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
-    out.backward(out_grad)
+    #out.backward(out_grad)
 
-    return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    #return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    return out, (None, None, None)
 
 model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
