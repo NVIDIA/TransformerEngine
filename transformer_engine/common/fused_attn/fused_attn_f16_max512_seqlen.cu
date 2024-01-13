@@ -130,16 +130,15 @@ static cudnn_frontend::Tensor createBMM1(int64_t b, int64_t h, int64_t s_q, int6
     return pTensor;
 }
 
-static cudnn_frontend::Tensor createBias(int64_t bias_b, int64_t bias_h,
-                                         int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+static cudnn_frontend::Tensor createBias(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                          NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
                                          // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops,
                                          cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     NVTE_CHECK(ops.size() != 0, "Bias op constructed incorrectly as the first one.");
 
-    int64_t b_dim[4] = {bias_b, bias_h, s_q, s_kv};
-    int64_t b_stride[4] = {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1};
+    int64_t b_dim[4] = {1, h, s_q, s_kv};
+    int64_t b_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
 
     int64_t afterBias_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBias_stride[4];
@@ -636,8 +635,8 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
 }
 
 void fused_attn_max_512_fwd_impl(
-    int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d, int64_t bias_b, int64_t bias_h,
-    bool is_training, float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
+    int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d, bool is_training,
+    float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK, void *devPtrV,
     void *devPtrS, void *devPtrO, void *devPtrBias, void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
@@ -692,7 +691,7 @@ void fused_attn_max_512_fwd_impl(
                        "NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS has not been implemented.");
 
             if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
-                auto bias_output = createBias(bias_b, bias_h, b, h, s_q, s_kv, d, layout,
+                auto bias_output = createBias(b, h, s_q, s_kv, d, layout,
                                 tensorType, ops, bmm1_output);
                 maskInput = std::make_shared<cudnn_frontend::Tensor>(std::move(bias_output));
             }
@@ -837,7 +836,6 @@ void fused_attn_max_512_fwd_impl(
 }
 
 void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 int64_t bias_b, int64_t bias_h,
                                  float scaling_factor, float dropout_probability,
                                  NVTE_QKV_Layout layout, NVTE_Mask_Type mask_type,
                                  NVTE_Bias_Type bias_type, void *devPtrQ, void *devPtrK,
@@ -1060,8 +1058,8 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                 createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType, ops, dsTensor, true);
 
             // dbias tensor
-            int64_t dbias_dim[4] = {bias_b, bias_h, s_q, s_kv};
-            int64_t dbias_stride[4] = {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1};
+            int64_t dbias_dim[4] = {1, h, s_q, s_kv};
+            int64_t dbias_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
             auto dBiasTensor =
                 tensor_create(tensorType, dBias_ID, dbias_dim, dbias_stride, false, false);
 
@@ -1264,8 +1262,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
 
     void *devPtrBias = static_cast<void *>(input_Bias->data.dptr);
-    size_t bias_b = input_Bias->data.shape[0];
-    size_t bias_h = input_Bias->data.shape[1];
 
     void *devPtrO = output_O->data.dptr;
 
@@ -1296,9 +1292,8 @@ void fused_attn_max_512_fwd_qkvpacked(
     size_t workspace_size = 0;
 
     fused_attn_max_512_fwd_impl(
-        batch, num_head, max_seqlen, max_seqlen, head_dim, bias_b, bias_h,
-        is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
-        devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        batch, num_head, max_seqlen, max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
         devPtrCuSeqlen, devPtrCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset,
         workspace->data.dptr, &workspace_size, get_cudnn_dtype(QKV_type), stream, handle);
 
@@ -1341,8 +1336,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t num_head, size_t q_max
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrK) + stride);
 
     void *devPtrBias = input_Bias->data.dptr;
-    size_t bias_b = input_Bias->data.shape[0];
-    size_t bias_h = input_Bias->data.shape[1];
 
     void *devPtrO = output_O->data.dptr;
 
@@ -1377,9 +1370,8 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t num_head, size_t q_max
     size_t workspace_size = 0;
 
     fused_attn_max_512_fwd_impl(
-        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, bias_b, bias_h, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
-        devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
         devQCuSeqlen, devKVCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
         &workspace_size, get_cudnn_dtype(q_type), stream, handle);
 
@@ -1414,8 +1406,6 @@ void fused_attn_max_512_fwd(size_t batch, size_t num_head, size_t q_max_seqlen,
     void *devPtrV = input_V->data.dptr;
 
     void *devPtrBias = input_Bias->data.dptr;
-    size_t bias_b = input_Bias->data.shape[0];
-    size_t bias_h = input_Bias->data.shape[1];
 
     void *devPtrO = output_O->data.dptr;
 
@@ -1450,9 +1440,8 @@ void fused_attn_max_512_fwd(size_t batch, size_t num_head, size_t q_max_seqlen,
     size_t workspace_size = 0;
 
     fused_attn_max_512_fwd_impl(
-        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, bias_b, bias_h,
-        is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
-        devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
         devQCuSeqlen, devKVCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
         &workspace_size, get_cudnn_dtype(q_type), stream, handle);
 
@@ -1498,8 +1487,6 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t num_head, size_t max_
     void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
 
     void *devPtrdBias = output_dBias->data.dptr;
-    size_t bias_b = output_dBias->data.shape[0];
-    size_t bias_h = output_dBias->data.shape[1];
 
     void *devPtrS = output_S->data.dptr;
 
@@ -1511,12 +1498,11 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t num_head, size_t max_
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    fused_attn_max_512_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, bias_b, bias_h,
-                                attn_scale, p_dropout, qkv_layout, mask_type, bias_type, devPtrQ,
-                                devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-                                devPtrdS, devPtrdBias, devPtrCuSeqlens, devPtrCuSeqlens,
-                                workspace->data.dptr, &workspace_size, get_cudnn_dtype(qkv_type),
-                                stream, handle);
+    fused_attn_max_512_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, attn_scale,
+                                p_dropout, qkv_layout, mask_type, bias_type, devPtrQ, devPtrK,
+                                devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdS,
+                                devPtrdBias, devPtrCuSeqlens, devPtrCuSeqlens, workspace->data.dptr,
+                                &workspace_size, get_cudnn_dtype(qkv_type), stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1560,8 +1546,6 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t num_head, size_t q_max
     void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdK) + stride);
 
     void *devPtrdBias = output_dBias->data.dptr;
-    size_t bias_b = output_dBias->data.shape[0];
-    size_t bias_h = output_dBias->data.shape[1];
 
     void *devPtrS = output_S->data.dptr;
 
@@ -1577,9 +1561,8 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t num_head, size_t q_max
     size_t workspace_size = 0;
 
     fused_attn_max_512_bwd_impl(
-        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, bias_b, bias_h,
-        attn_scale, p_dropout, qkv_layout, mask_type, bias_type,
-        devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, attn_scale, p_dropout, qkv_layout,
+        mask_type, bias_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
         devPtrdO, devPtrdS, devPtrdBias, devPtrQCuSeqlens, devPtrKVCuSeqlens, workspace->data.dptr,
         &workspace_size, get_cudnn_dtype(q_type), stream, handle);
 
@@ -1621,8 +1604,6 @@ void fused_attn_max_512_bwd(size_t batch, size_t num_head, size_t q_max_seqlen,
     void *devPtrdV = output_dV->data.dptr;
 
     void *devPtrdBias = output_dBias->data.dptr;
-    size_t bias_b = output_dBias->data.shape[0];
-    size_t bias_h = output_dBias->data.shape[1];
 
     void *devPtrS = output_S->data.dptr;
 
@@ -1638,9 +1619,8 @@ void fused_attn_max_512_bwd(size_t batch, size_t num_head, size_t q_max_seqlen,
     size_t workspace_size = 0;
 
     fused_attn_max_512_bwd_impl(
-        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, bias_b, bias_h,
-        attn_scale, p_dropout, qkv_layout, mask_type, bias_type,
-        devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, attn_scale, p_dropout, qkv_layout,
+        mask_type, bias_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
         devPtrdO, devPtrdS, devPtrdBias, devPtrQCuSeqlens, devPtrKVCuSeqlens, workspace->data.dptr,
         &workspace_size, get_cudnn_dtype(q_type), stream, handle);
 

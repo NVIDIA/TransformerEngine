@@ -2634,8 +2634,16 @@ class DotProductAttention(torch.nn.Module):
             fu_core_attention_bias_type = "post_scale_bias"
             fu_core_attention_bias = get_alibi_bias(
                 max_seqlen_q, max_seqlen_kv, alibi_slopes).to(dtype=query_layer.dtype)
+            # To be removed: when cuDNN backend adds support for [b, h, s, s] bias
+            # currently arbi backend fwd is working
+            if fu_core_attention_bias.shape[0] != 1:
+                use_fused_attention = False
 
         if use_fused_attention:
+            # max512 backend only accepts [1, h, s_q, s_kv] bias shape
+            if (fu_core_attention_bias.shape[0] != 1
+                or fu_core_attention_bias.shape[0] != query_layer.shape[-2]):
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
