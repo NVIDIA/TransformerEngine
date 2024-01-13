@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import os
 import pickle
-from typing import Generator, Dict, Tuple, Union, Any
+from typing import Generator, Dict, Tuple, Union, Any, List, Optional
 
 import numpy as np
 
@@ -16,7 +16,7 @@ from paddle.fluid import core
 from paddle.fluid.framework import _dygraph_tracer
 
 from ..constants import FP8BwdTensors, dist_group_type
-from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8
+from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8, transpose
 from ..fp8 import (
     FP8State,
     FP8TensorMeta,
@@ -24,6 +24,7 @@ from ..fp8 import (
     get_global_fp8_state,
     get_fp8_te_dtype,
 )
+from ..distributed import allgather
 from ..profile import nvtx_range
 from ..recompute import is_in_recompute_phase
 from ..fp8_buffer import FP8RecomputeBuffer
@@ -69,9 +70,12 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta["scaling_bwd"] = FP8TensorMeta(is_forward=False)
         self.tp_group = None
         self.tp_size = 1
+        self.sequence_parallel = False
         self.fp8_meta["autocast_id_fwd_stack"] = []
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0")))
+        self.fp8_weight_shapes = []
+        self.fp8_weight_cache = {}
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -138,6 +142,29 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
             return
+
+    def set_fp8_weights(self) -> None:
+        """Initializes FP8 weights for the module"""
+        if not self.fp8_enabled:
+            return
+
+        for i, shape in enumerate(self.fp8_weight_shapes, start=1):
+            weight_cast_key = f"weight{i}_fp8"
+            weight_transpose_key = f"weight{i}_t_fp8"
+
+            if (weight_cast_key in self.fp8_weight_cache
+                    and self.fp8_weight_cache[weight_cast_key].shape == shape):
+                return
+
+            self.fp8_weight_cache[weight_cast_key] = paddle.empty(
+                shape=shape,
+                dtype=paddle.uint8,
+            )
+
+            self.fp8_weight_cache[weight_transpose_key] = paddle.empty(
+                shape=[shape[1], shape[0]],
+                dtype=paddle.uint8,
+            )
 
     def _get_fp8_state(self) -> paddle.Tensor:
         """Dump FP8 state to paddle.Tensor."""
@@ -217,6 +244,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     def prepare_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Union[bool, None],
         num_gemms: int = 1,
     ) -> Generator[paddle.Tensor, None, None]:
         """Checks and prep for FWD.
@@ -233,16 +261,32 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             self.set_activation_dtype(inp)
             self.fp8_init(num_gemms=num_gemms)
 
+            # Create persistent tensors for fp8 weights and their transposes
+            # only when fp8 weight caching is used.
+            if is_first_microbatch is not None:
+                self.set_fp8_weights()
+
+            if self.fp8_enabled and self.sequence_parallel:
+                assert self.fp8_meta["recipe"].reduce_amax, \
+                "Amax reduction across tensor parallel group is " \
+                "necessary when using sequence parallelism with FP8."
+
+            update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
+
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
                 global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
                 global_fp8_fwd_buffer.wait()
                 if self.fp8_meta["recipe"].reduce_amax:
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
-                    amax_and_scale_update(self.fp8_meta, True)
+                    amax_and_scale_update(self.fp8_meta,
+                                          True,
+                                          update_weight_scale_inv=update_weight_scale_inv)
                     global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
                 else:
-                    amax_and_scale_update(self.fp8_meta, True)
+                    amax_and_scale_update(self.fp8_meta,
+                                          True,
+                                          update_weight_scale_inv=update_weight_scale_inv)
 
             if self.fp8_enabled and self.training:
                 # Setup for amax reduction
@@ -310,8 +354,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
 
     @staticmethod
-    def grad_output_preprocess(
-            ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
+    def grad_output_preprocess(ctx, grad_output: paddle.Tensor,
+                               row_parallel_mode: bool) -> Tuple[Union[paddle.Tensor, None], ...]:
         """Utility function for backward.
         Returns tuple in order (all optional/None based on training precion/recipe):
             R1: gathered `grad_output` in higher precision.
@@ -320,12 +364,36 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             R4: bias gradient on R1.
         """
         grad_output_mat = grad_output.reshape((-1, grad_output.shape[-1]))
+        gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8_enabled:
+            if gather_grad_output:
+                grad_output_mat, _ = allgather(grad_output_mat, ctx.tp_group)
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+
+        if gather_grad_output:
+            if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
+                if ctx.use_bias:
+                    bgrad = grad_output_mat.sum(axis=0)
+                else:
+                    bgrad = None
+                grad_output_c = cast_to_fp8(
+                    grad_output_mat,
+                    ctx.fp8_meta["scaling_bwd"],
+                    FP8BwdTensors.GRAD_OUTPUT1,
+                    fp8_dtype_backward,
+                )
+                grad_output_c, _ = allgather(grad_output_c, ctx.tp_group)
+                grad_output_t = transpose(grad_output_c, fp8_dtype_backward)
+
+                return grad_output_mat, grad_output_c, grad_output_t, bgrad
+
+            # FP8 case with gather and non-FP8 wgrad
+            grad_output_mat, _ = allgather(grad_output_mat, ctx.tp_group)
 
         # FP8 case without gather: cast, transpose, bgrad fused
         if ctx.use_bias:
@@ -358,3 +426,28 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     @abstractmethod
     def forward(self):
         """Needs override."""
+
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[Optional[paddle.Tensor]]:
+        """
+        Fetch the fp8 weight tensor placeholders if they exist (when
+        `is_first_microbatch` is not `None`)
+        """
+        if not self.fp8_enabled or is_first_microbatch is None:
+            return [None, None] * len(self.fp8_weight_shapes)
+
+        out_list = []
+        for i, _ in enumerate(self.fp8_weight_shapes, start=1):
+            weight_cast_key = f"weight{i}_fp8"
+            weight_transpose_key = f"weight{i}_t_fp8"
+
+            assert weight_cast_key in self.fp8_weight_cache, \
+                                "TE internal error: fp8 weight buffer is not found"
+
+            out_list.extend([
+                self.fp8_weight_cache[weight_cast_key],
+                self.fp8_weight_cache[weight_transpose_key],
+            ])
+        return out_list
