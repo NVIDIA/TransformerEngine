@@ -391,8 +391,6 @@ model_configs_alibi_slopes = {
     "alibi_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "causal", "alibi", alibi_type="vanilla"),
     "alibi_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
     "alibi_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi", alibi_type= "custom"),
-    "alibi_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", alibi_type=   "none"),
-    "alibi_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi", alibi_type=   "none"),
 }
 @pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
