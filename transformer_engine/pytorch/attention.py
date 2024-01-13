@@ -70,7 +70,7 @@ if _flash_attn_version >= _flash_attn_version_required:
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-_num_heads, _alibi_slopes = None, None
+_num_heads, _alibi_slopes, _max_seqlen_q, _max_seqlen_kv, _alibi_bias = None, None, None, None, None
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -130,6 +130,7 @@ def get_alibi_slopes(
     """
     global _num_heads, _alibi_slopes
     if _num_heads != num_heads or _alibi_slopes is None:
+        print('generate slopes')
         n = 2 ** math.floor(math.log2(num_heads))
         m_0 = 2.0 ** (-8.0 / n)
         m = torch.pow(m_0, torch.arange(1, 1 + n))
@@ -141,6 +142,8 @@ def get_alibi_slopes(
 
         _num_heads = num_heads
         _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
+    else:
+        print('not need to generate slopes')
 
 
 @torch.no_grad()
@@ -150,24 +153,36 @@ def get_alibi_bias(
     alibi_slopes: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Generate ALiBi bias in FP32. If `alibi_slopes` is in shape [num_heads], then the generated bias
-    is in [1, num_heads, max_seqlen_q, max_seqlen_kv]. If `alibi_slopes` is in
-    [batch_size, num_heads], the bias is in [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
+    Generate ALiBi bias in FP32. If `alibi_slopes` is in shape [num_heads],
+    then the generated bias is in [1, num_heads, max_seqlen_q, max_seqlen_kv].
+    If `alibi_slopes` is in [batch_size, num_heads], the bias is in
+    [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     """
-    bias = torch.arange(
-        1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
-    bias = bias - torch.arange(
-        1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
-    bias = bias.abs().mul(-1)
+    global _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias
     slopes = alibi_slopes if alibi_slopes is not None else _alibi_slopes
     assert slopes is not None, "ALiBi slopes can not be None!"
-    if slopes.dim() == 1:
-        slopes = slopes.view(1, slopes.shape[0], 1, 1)
-    if slopes.dim() == 2:
-        slopes = slopes.view(*slopes.shape[:], 1, 1)
-    bias = bias * slopes
-    bias = bias.to(dtype=torch.float32, device="cuda")
-    return bias
+    if (_alibi_bias is None
+        or _max_seqlen_q != max_seqlen_q
+        or _max_seqlen_kv != max_seqlen_kv
+        or not torch.equal(slopes, _alibi_slopes)):
+        print('generate bias')
+        _alibi_slopes = slopes
+        _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+        bias = torch.arange(
+            1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+        bias = bias - torch.arange(
+            1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
+        bias = bias.abs().mul(-1)
+        if slopes.dim() == 1:
+            slopes = slopes.view(1, slopes.shape[0], 1, 1)
+        if slopes.dim() == 2:
+            slopes = slopes.view(*slopes.shape[:], 1, 1)
+        bias = bias * slopes
+        bias = bias.to(dtype=torch.float32, device="cuda")
+        _alibi_bias = bias
+    else:
+        print('not need to generate bias')
+    return _alibi_bias
 
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
@@ -1165,6 +1180,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
 
@@ -1251,8 +1267,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                get_alibi_slopes(output_size[1])
-                core_attention_bias = get_alibi_bias(output_size[2], output_size[3])
+                if alibi_slopes is None:
+                    print('calling gen slopes in unfused')
+                    get_alibi_slopes(output_size[1])
+                print('calling gen bias in unfused')
+                core_attention_bias = get_alibi_bias(output_size[2], output_size[3], alibi_slopes)
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -2363,10 +2382,10 @@ class DotProductAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
-        alibi_slopes: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
@@ -2444,11 +2463,7 @@ class DotProductAttention(torch.nn.Module):
                        `arbitrary`}, default = `None`. Type of attention mask passed into
                        softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
         window_size: Optional[Tuple[int, int]], default = `None`
-                    sliding window size for local attention.
-        alibi_slopes: Optional[torch.Tensor], default = `None`
-                     An fp32 bias of shape (nheads,) or (batch_size, nheads)
-                     (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-                     is added to the attention score of query i and key j.
+                    Sliding window size for local attention.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -2459,6 +2474,10 @@ class DotProductAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+                     It adds a bias of (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                     to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         """
@@ -2481,6 +2500,15 @@ class DotProductAttention(torch.nn.Module):
 
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
+
+        if core_attention_bias_type == "alibi":
+            assert (core_attention_bias is None
+                ), "core_attention_bias must be None when core_attention_bias_type is alibi!"
+        elif alibi_slopes is not None:
+            alibi_slopes = None
+            warnings.warn(
+                """core_attention_bias_type must be "alibi" in order to use alibi_slopes!"""
+            )
 
         if window_size is None:
             window_size = self.window_size
@@ -2543,6 +2571,11 @@ class DotProductAttention(torch.nn.Module):
         # The following section filters out some backends based on
         # certain asserts before executing the forward pass.
 
+        # Filter: ONNX export.
+        if is_in_onnx_export_mode():
+            use_flash_attention = False
+            use_fused_attention = False
+
         # Filter: Input type.
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
@@ -2571,13 +2604,6 @@ class DotProductAttention(torch.nn.Module):
             )
             use_flash_attention = False
 
-        # Filter: bias.
-        if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
-            use_flash_attention = False
-        if core_attention_bias_type == "alibi" and use_flash_attention and alibi_slopes is None:
-            get_alibi_slopes(query_layer.shape[-2])
-            alibi_slopes = _alibi_slopes
-
         context_parallel = (self.cp_group is not None and \
             get_distributed_world_size(self.cp_group) != 1)
 
@@ -2587,11 +2613,6 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
             if (not _flash_attn_2_3_plus) or context_parallel:
                 use_flash_attention = False
-
-        # Filter: ONNX export.
-        if is_in_onnx_export_mode():
-            use_flash_attention = False
-            use_fused_attention = False
 
         # Filter: Attention mask type.
         #   attn_mask_type(s)    |     supported backends
@@ -2608,12 +2629,28 @@ class DotProductAttention(torch.nn.Module):
         if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             use_unfused_attention = False
 
+        # Filter: bias.
+        if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
+            use_flash_attention = False
+        if core_attention_bias_type == "alibi" and use_flash_attention and alibi_slopes is None:
+            print('calling gen slopes for flash')
+            get_alibi_slopes(query_layer.shape[-2])
+            alibi_slopes = _alibi_slopes
+
+        fu_core_attention_bias_type = core_attention_bias_type
+        fu_core_attention_bias = core_attention_bias
+        if core_attention_bias_type == "alibi" and use_fused_attention and alibi_slopes is not None:
+            fu_core_attention_bias_type = "post_scale_bias"
+            print('calling gen bias in fused')
+            fu_core_attention_bias = get_alibi_bias(
+                max_seqlen_q, max_seqlen_kv, alibi_slopes).to(dtype=query_layer.dtype)
+
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
                 QKVLayout[qkv_layout],
-                AttnBiasType[core_attention_bias_type],
+                AttnBiasType[fu_core_attention_bias_type],
                 AttnMaskType[attn_mask_type],
                 self.attention_dropout,
                 query_layer.shape[-2], # num_attn_heads
@@ -2629,13 +2666,6 @@ class DotProductAttention(torch.nn.Module):
                 use_fused_attention and is_backend_avail and \
                 (not context_parallel or \
                  fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
-
-        ## Filter: Alibi slopes
-        #if alibi_slopes is not None:
-        #    use_fused_attention = False
-        #    assert (
-        #        use_flash_attention
-        #    ), "Alibi slopes bias is only supported in the FlashAttention backend."
 
         # Filter: determinism.
         # backend                                  | deterministic
@@ -2697,8 +2727,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     fused_attention_backend=fused_attention_backend,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
+                    core_attention_bias_type=fu_core_attention_bias_type,
+                    core_attention_bias=fu_core_attention_bias,
                     fast_zero_fill=fast_zero_fill,
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
@@ -2715,8 +2745,8 @@ class DotProductAttention(torch.nn.Module):
                 attn_mask_type=attn_mask_type,
                 attention_mask=attention_mask,
                 fused_attention_backend=fused_attention_backend,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias=core_attention_bias,
+                core_attention_bias_type=fu_core_attention_bias_type,
+                core_attention_bias=fu_core_attention_bias,
                 fast_zero_fill=fast_zero_fill,
                 cp_group=self.cp_group,
                 cp_global_ranks=self.cp_global_ranks,
@@ -2742,7 +2772,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type = attn_mask_type,
                     attention_mask = attention_mask,
                     core_attention_bias_type = core_attention_bias_type,
-                    core_attention_bias = core_attention_bias)
+                    core_attention_bias = core_attention_bias,
+                    alibi_slopes = alibi_slopes)
             return self.unfused_attention(query_layer,
                     key_layer,
                     value_layer,
@@ -2752,7 +2783,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type = attn_mask_type,
                     attention_mask = attention_mask,
                     core_attention_bias_type = core_attention_bias_type,
-                    core_attention_bias = core_attention_bias)
+                    core_attention_bias = core_attention_bias,
+                    alibi_slopes = alibi_slopes)
 
         raise Exception("No dot product attention support for the provided inputs!")
 
@@ -3154,6 +3186,7 @@ class MultiheadAttention(torch.nn.Module):
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
@@ -3209,6 +3242,10 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+                     It adds a bias of (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                     to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         """
@@ -3436,6 +3473,7 @@ class MultiheadAttention(torch.nn.Module):
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
+            alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
         )
 
