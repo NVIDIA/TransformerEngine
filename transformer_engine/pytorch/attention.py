@@ -130,7 +130,6 @@ def get_alibi_slopes(
     """
     global _num_heads, _alibi_slopes
     if _num_heads != num_heads or _alibi_slopes is None:
-        print('generate slopes')
         n = 2 ** math.floor(math.log2(num_heads))
         m_0 = 2.0 ** (-8.0 / n)
         m = torch.pow(m_0, torch.arange(1, 1 + n))
@@ -142,8 +141,6 @@ def get_alibi_slopes(
 
         _num_heads = num_heads
         _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
-    else:
-        print('not need to generate slopes')
 
 
 @torch.no_grad()
@@ -165,7 +162,6 @@ def get_alibi_bias(
         or _max_seqlen_q != max_seqlen_q
         or _max_seqlen_kv != max_seqlen_kv
         or not torch.equal(slopes, _alibi_slopes)):
-        print('generate bias')
         _alibi_slopes = slopes
         _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
         bias = torch.arange(
@@ -180,8 +176,6 @@ def get_alibi_bias(
         bias = bias * slopes
         bias = bias.to(dtype=torch.float32, device="cuda")
         _alibi_bias = bias
-    else:
-        print('not need to generate bias')
     return _alibi_bias
 
 
@@ -1268,9 +1262,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
                 if alibi_slopes is None:
-                    print('calling gen slopes in unfused')
                     get_alibi_slopes(output_size[1])
-                print('calling gen bias in unfused')
                 core_attention_bias = get_alibi_bias(output_size[2], output_size[3], alibi_slopes)
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -2633,7 +2625,6 @@ class DotProductAttention(torch.nn.Module):
         if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
             use_flash_attention = False
         if core_attention_bias_type == "alibi" and use_flash_attention and alibi_slopes is None:
-            print('calling gen slopes for flash')
             get_alibi_slopes(query_layer.shape[-2])
             alibi_slopes = _alibi_slopes
 
@@ -2641,7 +2632,6 @@ class DotProductAttention(torch.nn.Module):
         fu_core_attention_bias = core_attention_bias
         if core_attention_bias_type == "alibi" and use_fused_attention and alibi_slopes is not None:
             fu_core_attention_bias_type = "post_scale_bias"
-            print('calling gen bias in fused')
             fu_core_attention_bias = get_alibi_bias(
                 max_seqlen_q, max_seqlen_kv, alibi_slopes).to(dtype=query_layer.dtype)
 
