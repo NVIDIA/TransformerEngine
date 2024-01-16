@@ -367,15 +367,13 @@ class LayerNormFwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         wkspace_aval, barrier_aval = ctx.avals_out[-2:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
 
         out_types = [
             ir.RankedTensorType.get(out_shape, output_type),
             ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype))
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
         ]
         operands = [x, gamma, beta]
         operand_shapes = [x_shape, g_shape, b_shape]
@@ -386,8 +384,8 @@ class LayerNormFwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
+            wkspace_aval.size,
+            barrier_aval.size,
             0,                                              # no dgamma_part in FWD pass
             0,                                              # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
@@ -563,22 +561,10 @@ class LayerNormBwdPrimitive(BasePrimitive):
         hidden_size = reduce(operator.mul, g_shape)
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-        wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
-        dgamma_part_size = reduce(operator.mul, dgamma_part_aval.shape)
-        dbeta_part_size = reduce(operator.mul, dbeta_part_aval.shape)
 
         out_types = [
-            ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(g_shape, g_type.element_type),
-            ir.RankedTensorType.get(b_shape, b_type.element_type),
-            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
-            ir.RankedTensorType.get(dgamma_part_aval.shape,
-                                    jax_dtype_to_ir_dtype(dgamma_part_aval.dtype)),
-            ir.RankedTensorType.get(dbeta_part_aval.shape,
-                                    jax_dtype_to_ir_dtype(dbeta_part_aval.dtype))
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
         ]
 
         operands = [dz, mu, rsigma, x, gamma]
@@ -587,13 +573,14 @@ class LayerNormBwdPrimitive(BasePrimitive):
 
         sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
+        wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
-            dgamma_part_size,
-            dbeta_part_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            dgamma_part_aval.size,
+            dbeta_part_aval.size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -761,8 +748,6 @@ class RmsNormFwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         wkspace_aval, barrier_aval = ctx.avals_out[-2:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
 
         out_types = [
             ir.RankedTensorType.get(out_shape, x_type.element_type),
@@ -779,8 +764,8 @@ class RmsNormFwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
+            wkspace_aval.size,
+            barrier_aval.size,
             0,                                              # no dgamma_part in FWD pass
             0,                                              # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
@@ -932,9 +917,6 @@ class RmsNormBwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         wkspace_aval, barrier_aval, dgamma_part_aval = ctx.avals_out[-3:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
-        dgamma_part_size = reduce(operator.mul, dgamma_part_aval.shape)
 
         out_types = [
             ir.RankedTensorType.get(x_shape, x_type.element_type),
@@ -953,9 +935,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
-            dgamma_part_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            dgamma_part_aval.size,
             0,                                              # no dbeta_part for RMSnorm
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
@@ -1963,10 +1945,9 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_size,
+            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
@@ -2137,10 +2118,9 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_size,
+            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
@@ -2356,11 +2336,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen,
-            num_heads, num_gqa_groups, head_dim, wkspace_size,
+            num_heads, num_gqa_groups, head_dim, wkspace_aval.size,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
@@ -2553,11 +2532,10 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen,
-            num_heads, num_gqa_groups, head_dim, wkspace_size,
+            num_heads, num_gqa_groups, head_dim, wkspace_aval.size,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
@@ -3479,8 +3457,6 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         wkspace_aval, barrier_aval = ctx.avals_out[-2:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
 
         out_types = [
             ir.RankedTensorType.get(out_shape, ir_out_dtype),
@@ -3501,8 +3477,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
+            wkspace_aval.size,
+            barrier_aval.size,
             0,                                              # no dgamma_part in FWD pass
             0,                                              # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
@@ -3723,8 +3699,6 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         wkspace_aval, barrier_aval = ctx.avals_out[-2:]
-        wkspace_size = reduce(operator.mul, wkspace_aval.shape)
-        barrier_size = reduce(operator.mul, barrier_aval.shape)
 
         out_types = [
             ir.RankedTensorType.get(out_shape, ir_out_dtype),
@@ -3742,8 +3716,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
-            wkspace_size,
-            barrier_size,
+            wkspace_aval.size,
+            barrier_aval.size,
             0,                                              # no dgamma_part in FWD pass
             0,                                              # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
