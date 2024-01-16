@@ -1244,8 +1244,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
-            #assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
-            #        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             matmul_result = torch.bmm(
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
@@ -1258,8 +1256,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
-                #assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
-                #        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
                 if alibi_slopes is None:
                     get_alibi_slopes(output_size[1])
@@ -2624,9 +2620,6 @@ class DotProductAttention(torch.nn.Module):
         # Filter: bias.
         if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
             use_flash_attention = False
-        if core_attention_bias_type == "alibi" and use_flash_attention and alibi_slopes is None:
-            get_alibi_slopes(query_layer.shape[-2])
-            alibi_slopes = _alibi_slopes
 
         fu_core_attention_bias_type = core_attention_bias_type
         fu_core_attention_bias = core_attention_bias
@@ -2634,16 +2627,14 @@ class DotProductAttention(torch.nn.Module):
             fu_core_attention_bias_type = "post_scale_bias"
             fu_core_attention_bias = get_alibi_bias(
                 max_seqlen_q, max_seqlen_kv, alibi_slopes).to(dtype=query_layer.dtype)
-            # To be removed: when cuDNN backend adds support for [b, h, s, s] bias
-            # currently arbi backend fwd is working
-            if fu_core_attention_bias.shape[0] != 1:
+            if (fu_core_attention_bias.shape[0] != 1
+                or fu_core_attention_bias.shape[1] != query_layer.shape[-2]):
+                # remove this line when cuDNN adds bwd support for [b, 1, s, s] and [b, h, s, s]
                 use_fused_attention = False
+                # max512 backend will only support [1, h, s, s]
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
         if use_fused_attention:
-            # max512 backend only accepts [1, h, s_q, s_kv] bias shape
-            if (fu_core_attention_bias.shape[0] != 1
-                or fu_core_attention_bias.shape[0] != query_layer.shape[-2]):
-                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
@@ -2693,6 +2684,9 @@ class DotProductAttention(torch.nn.Module):
         if use_flash_attention:
             if _NVTE_DEBUG:
                 print("[DotProductAttention]: using flash-attn",_flash_attn_version)
+            if core_attention_bias_type == "alibi" and alibi_slopes is None:
+                get_alibi_slopes(query_layer.shape[-2])
+                alibi_slopes = _alibi_slopes
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,

@@ -1169,7 +1169,6 @@ std::vector<at::Tensor> fused_attn_bwd(
     && (bias_type != NVTE_ALIBI)
     && (nvte_aux_tensor_pack.size >= 2)) {
       std::vector<int64_t> bias_shape(Aux_CTX_Tensors[nvte_aux_tensor_pack.size - 1].sizes().vec());
-      std::cout << "bias shape " << bias_shape[0] << " " << bias_shape[1] << std::endl;
       dBias = torch::empty(bias_shape, options);
       te_dBias = makeTransformerEngineTensor(dBias);
   }
