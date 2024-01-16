@@ -40,8 +40,8 @@ class QKVLayout(Enum):
 
 
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
-                                   dropout_probability, num_heads_q, num_heads_kv,
-                                   max_seqlen_q, max_seqlen_kv, head_dim):
+                                   dropout_probability, num_heads_q, num_heads_kv, max_seqlen_q,
+                                   max_seqlen_kv, head_dim):
     """
     To check whether the fused attention kernel is available
     """
@@ -83,10 +83,11 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                               seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                               attn_mask_type: AttnMaskType, scaling_factor: float,
                               dropout_probability: float, is_training: bool):
-    squeezed_mask = mask[..., 0]
+    mask = jnp.logical_not(mask)
+    actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
-                                                         squeezed_mask,
+                                                         actual_seqlen,
                                                          seed,
                                                          attn_bias_type=attn_bias_type.value,
                                                          attn_mask_type=attn_mask_type.value,
@@ -96,12 +97,12 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
     output = checkpoint_name(output, 'context')
     softmax_aux = checkpoint_name(softmax_aux, 'context')
     rng_state = checkpoint_name(rng_state, 'context')
-    return output, (qkv, bias, softmax_aux, rng_state, output, squeezed_mask)
+    return output, (qkv, bias, softmax_aux, rng_state, output, actual_seqlen)
 
 
 def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                               is_training, ctx, dz):
-    qkv, bias, softmax_aux, rng_state, output, squeezed_mask = ctx
+    qkv, bias, softmax_aux, rng_state, output, actual_seqlen = ctx
 
     grad_qkv, grad_bias = self_fused_attn_bwd(qkv,
                                               bias,
@@ -109,7 +110,7 @@ def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dr
                                               rng_state,
                                               output,
                                               dz,
-                                              squeezed_mask,
+                                              actual_seqlen,
                                               attn_bias_type=attn_bias_type.value,
                                               attn_mask_type=attn_mask_type.value,
                                               scaling_factor=scaling_factor,
@@ -159,14 +160,19 @@ def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mask: 
 def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                scaling_factor, dropout_probability, is_training):
 
-    q_squeezed_mask = mask[..., 0]
-    kv_squeezed_mask = mask[..., 0, :]
+    mask = jnp.logical_not(mask)
+    q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+    if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+        kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+    else:
+        # When mask is padding + causal, the actual seqlen is not the last row, use max to find it
+        kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
     output, softmax_aux, rng_state = cross_fused_attn_fwd(q,
                                                           kv,
                                                           bias,
-                                                          q_squeezed_mask,
-                                                          kv_squeezed_mask,
+                                                          q_actual_seqlen,
+                                                          kv_actual_seqlen,
                                                           seed,
                                                           attn_bias_type=attn_bias_type.value,
                                                           attn_mask_type=attn_mask_type.value,
@@ -174,12 +180,12 @@ def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mas
                                                           dropout_probability=dropout_probability,
                                                           is_training=is_training)
 
-    return output, (q, kv, bias, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask)
+    return output, (q, kv, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen)
 
 
 def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                                is_training, ctx, dz):
-    q, kv, bias, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask = ctx
+    q, kv, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen = ctx
 
     grad_q, grad_kv, grad_bias = cross_fused_attn_bwd(q,
                                                       kv,
@@ -188,8 +194,8 @@ def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, d
                                                       rng_state,
                                                       output,
                                                       dz,
-                                                      q_squeezed_mask,
-                                                      kv_squeezed_mask,
+                                                      q_actual_seqlen,
+                                                      kv_actual_seqlen,
                                                       attn_bias_type=attn_bias_type.value,
                                                       attn_mask_type=attn_mask_type.value,
                                                       scaling_factor=scaling_factor,
