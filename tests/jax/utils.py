@@ -327,7 +327,7 @@ def apply_rope(
     inputs: jnp.ndarray,
     position: jnp.ndarray,
     min_timescale: int = 1,
-    max_timescale: int = 1000,
+    max_timescale: int = 10000,
 ):
     embedding_dim = inputs.shape[-1]
     half_embedding_dim = embedding_dim // 2
@@ -372,7 +372,7 @@ class MultiHeadAttention(nn.Module):
     float32_logits: bool = False    # computes logits in float32 for stability.
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
-    enable_rope: bool = False
+    enable_rotary_pos_emb: bool = False
     fuse_qkv: bool = True
 
     def __post_init__(self):
@@ -475,7 +475,7 @@ class MultiHeadAttention(nn.Module):
             key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-        if self.enable_rope:
+        if self.enable_rotary_pos_emb:
             batch_dim = 1 if self.transpose_batch_sequence else 0
             seq_dim = 1 - batch_dim
 
@@ -803,7 +803,7 @@ class EncoderLayer(nn.Module):
     zero_centered_gamma: bool = False
     output_layernorm: bool = False
     drop_path: float = 0.0
-    enable_rope: bool = False
+    enable_rotary_pos_emb: bool = False
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -850,7 +850,7 @@ class EncoderLayer(nn.Module):
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                fuse_qkv=self.fuse_qkv_params,
-                               enable_rope=self.enable_rope,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                name='attention')(x,
                                                  x,
                                                  encoder_mask,
@@ -918,7 +918,7 @@ class DecoderLayer(nn.Module):
     layernorm_type: str = 'layernorm'
     zero_centered_gamma: bool = False
     drop_path: float = 0.0
-    enable_rope: bool = False
+    enable_rotary_pos_emb: bool = False
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -972,7 +972,7 @@ class DecoderLayer(nn.Module):
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
-                               enable_rope=self.enable_rope,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                fuse_qkv=self.fuse_qkv_params,
                                name='self_attention')(x,
                                                       x,
@@ -1005,7 +1005,7 @@ class DecoderLayer(nn.Module):
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
-                               enable_rope=self.enable_rope,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                fuse_qkv=self.fuse_qkv_params,
                                name='encoder_decoder_attention')(y,
                                                                  encoded,

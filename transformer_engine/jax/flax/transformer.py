@@ -285,6 +285,11 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
         Introduced in v0.10.0.
+    enable_rotary_pos_emb: bool, default = False
+        Whether to enable rotary position embedding to projected query and key.
+    rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
+        Indicate the min and max time-scales of rotary position embedding,
+        only used when :attr:`enable_rotary_pos_emb=True`
 
     Optimization parameters
     -----------------------
@@ -321,8 +326,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     attn_mask_type: str = 'causal'
-    enable_rope: bool = False
-    rope_windows: Tuple[int, int] = (1, 1000)
+    enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_windows: Tuple[int, int] = (1, 1000)
     dtype: DType = jnp.float32
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
@@ -593,15 +598,15 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             assert ln_out is not None
             residual = ln_out
 
-        if self.enable_rope:
+        if self.enable_rotary_pos_emb:
             if self.fuse_qkv and use_fused_attn:
                 if is_self_attn:
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
                 else:
                     key, value = jnp.split(kv_proj, [1], axis=-2)
 
-            query = rope(query, self.rope_windows, self.transpose_batch_sequence)
-            key = rope(key, self.rope_windows, self.transpose_batch_sequence)
+            query = rope(query, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
+            key = rope(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
 
             if use_fused_attn:
                 if is_self_attn:
@@ -966,6 +971,11 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         num_attention_heads=self.num_attention_heads, dtype=self.dtype,
         embedding_init=flax.linen.initializers.variance_scaling(1.0, 'fan_avg', 'uniform'),
         name='relpos_bias')
+    enable_rotary_pos_emb: bool, default = False
+        Whether to enable rotary position embedding to projected query and key in MHA.
+    rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
+        Indicate the min and max time-scales of rotary position embedding,
+        only used when :attr:`enable_rotary_pos_emb=True`
 
     Optimization parameters
     -----------------------
@@ -1014,8 +1024,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     self_attn_mask_type: str = 'causal'
     enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
-    enable_rope: bool = False
-    rope_windows: Tuple[int, int] = (1, 1000)
+    enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -1150,8 +1160,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
             output_layernorm=self.output_layernorm,
             attn_mask_type=self.self_attn_mask_type,
-            enable_rope=self.enable_rope,
-            rope_windows=self.rope_windows,
+            enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+            rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             fuse_qkv=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
@@ -1209,8 +1219,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 apply_residual_connection_post_layernorm,
                 output_layernorm=False,    # Must do LayerNorm before MHA.
                 attn_mask_type='padding',
-                enable_rope=self.enable_rope,
-                rope_windows=self.rope_windows,
+                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+                rotary_pos_emb_windows=self.rotary_pos_emb_windows,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,

@@ -38,6 +38,7 @@ constexpr size_t kCublasLtBackwardWorkspaceSize = 32 * 1024 * 1024;
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
+// Calculation total workspace size based on the give workspace shape and type.
 inline size_t calculate_wk_size(const NVTEShape &shape, const DType type) {
     size_t total_size = std::accumulate(shape.data, shape.data + shape.ndim, typeToSize(type),
                                         std::multiplies<size_t>());

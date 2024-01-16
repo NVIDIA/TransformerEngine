@@ -14,8 +14,8 @@ from jax import jit, value_and_grad
 from flax import linen as nn
 
 from utils import assert_allclose
-from transformer_engine.jax.cpp_extensions import gelu, gelu_fp8
 from transformer_engine.jax.cpp_extensions import dgelu, dgelu_dbias_cast_transpose
+from transformer_engine.jax.cpp_extensions import gelu, gelu_fp8
 from transformer_engine.jax.cpp_extensions import dgated_gelu, gated_gelu
 from transformer_engine.jax.cpp_extensions import dgated_gelu_cast_transpose, gated_gelu_fp8
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
@@ -319,16 +319,6 @@ class TestFP8Dot:
             return jnp.mean(
                 layernrom_gelu_fp8_mlp(x, ln_s, None, [y, z], [w, v], fp8_meta_pkg, "rmsnorm"))
 
-        def _convert_to_activation_function(fn_or_string):
-            """Convert a string to an activation function."""
-            if fn_or_string == 'linear':
-                return lambda x: x
-            if isinstance(fn_or_string, str):
-                return getattr(nn, fn_or_string)
-            if callable(fn_or_string):
-                return fn_or_string
-            raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
-
         def ln_gelu_fp8_mlp_ref(x: jnp.ndarray, ln_scale: jnp.ndarray, kernel_1: jnp.ndarray,
                                 kernel_2: jnp.ndarray, bias_1: jnp.ndarray, bias_2: jnp.ndarray,
                                 fp8_maxs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
@@ -349,12 +339,7 @@ class TestFP8Dot:
             bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
             linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = jnp.split(linear_1_out, len(activations), axis=-2)
-            acts = []
-            for idx, act_fn in enumerate(activations):
-                x_i = _convert_to_activation_function(act_fn)(x[idx])
-                acts.append(x_i)
-            x = functools.reduce(operator.mul, acts)
+            x = jax.nn.gelu(linear_1_out)
             x = jnp.asarray(jnp.squeeze(x, axis=-2), jnp.bfloat16)
 
             fp8_gemm_2_pkg = FP8MetaPackage(1, fp8_maxs[FP8Helper.NUM_META_PER_GEMM:],

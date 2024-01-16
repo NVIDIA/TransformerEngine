@@ -85,7 +85,7 @@ _KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
 _KEY_OF_ZERO_CENTERED_GAMMA = 'zero_centered_gamma'
 _KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
 _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
-_KEY_OF_ENABLE_ROPE = "enable_rope"
+_KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 
 BASE_ATTRS = {_KEY_OF_TRANSPOSE_BS: True}
 
