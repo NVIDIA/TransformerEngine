@@ -34,7 +34,6 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
@@ -755,13 +754,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
         )
         self.register_parameter('layer_norm_weight', layer_norm_weight,
                                 init_fn=init_method_constant(float(not self.zero_centered_gamma)))
-        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         if self.normalization != "RMSNorm":
             layer_norm_bias = torch.nn.Parameter(
                 torch.empty(in_features, device=device, dtype=params_dtype)
             )
             self.register_parameter('layer_norm_bias', layer_norm_bias)
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
 

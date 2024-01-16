@@ -206,4 +206,3 @@ class _ParameterInitMeta:
         assert self.parent is not None
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
-

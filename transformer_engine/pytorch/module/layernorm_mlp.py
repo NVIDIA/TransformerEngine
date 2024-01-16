@@ -39,7 +39,6 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
@@ -1182,7 +1181,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
             self.register_parameter('layer_norm_bias', layer_norm_bias)
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
 
@@ -1209,7 +1208,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 torch.empty(fc1_output_features, device=device, dtype=params_dtype)
             )
             self.register_parameter('fc1_bias', fc1_bias)
-            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)  # pylint: disable=access-member-before-definition
         else:
             self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
@@ -1231,7 +1230,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.register_parameter('fc2_bias', fc2_bias)
             # RPL
             if self.set_parallel_mode:
-                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)
+                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 

@@ -166,6 +166,7 @@ class RMSNorm(torch.nn.Module):
             init.zeros_(self.weight)
 
     def reset_parameters(self, defer_init=False) -> None:
+        """Reset RMSNorm parameters"""
         if defer_init:
             return
         init.constant_(self.weight, float(not self.zero_centered_gamma))

@@ -165,6 +165,7 @@ class LayerNorm(torch.nn.Module):
         init.zeros_(self.bias)
 
     def reset_parameters(self, defer_init=False) -> None:
+        """Init LayerNorm parameters"""
         if defer_init:
             return
         init.constant_(self.weight, float(not self.zero_centered_gamma))
