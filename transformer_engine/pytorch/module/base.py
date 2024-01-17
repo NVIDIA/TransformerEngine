@@ -755,7 +755,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         metedata used in deferred initialization.
         """
         super().register_parameter(name, param)
-        self.param_init_meta[name] = _ParameterInitMeta(self, **kwargs)
+        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
     def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
         """
@@ -790,6 +790,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
 
             # Redo parameter wrap in case we broke it above
+            # NOTE: Currently this can only be broken when primary weights are in Fp8 but
+            #       re-applying the nn.Parameter() wrap is a no-op when the input is already
+            #       a parameter so we always re-apply it just for extra safety.
             setattr(self, name, torch.nn.Parameter(param))
 
     @abstractmethod
