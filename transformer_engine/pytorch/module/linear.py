@@ -23,7 +23,6 @@ from ._common import _noop_cat
 from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
-    get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -32,7 +31,6 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
@@ -82,7 +80,7 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
-        ub_name: str,
+        ub_name: str
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -625,6 +623,10 @@ class Linear(TransformerEngineBaseModule):
         if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
+        self.get_rng_state_tracker = get_rng_state_tracker
+        if device == 'meta':
+            assert parameters_split is None, ("Cannot split module parameters "
+                                              "on 'meta' device.")
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -655,43 +657,16 @@ class Linear(TransformerEngineBaseModule):
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
 
-        if init_method is None:
-            init_method = get_default_init_method()
-
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
-        temp_weight = torch.empty(
+        self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
             device=device, dtype=params_dtype)
-
-        # TODO(ksivaman): This functionality works with FP8 outside TE.
-        initialize_affine_weight_gpu(
-            temp_weight,
-            init_method,
-            get_rng_state_tracker,
-            partition_dim=1 if self.parallel_mode == "row" else 0,
-            stride=1,
-        )
-
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
-
-            self.weight_tensor = Float8Tensor.to_float8(
-                temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-        else:
-            self.weight_tensor = temp_weight
 
         if self.use_bias:
             self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
         else:
             self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
-
-        with torch.no_grad():
-            self.bias_tensor.zero_()
 
         # Configure parameter splits
         self.weight_names = []
@@ -757,7 +732,10 @@ class Linear(TransformerEngineBaseModule):
             if is_subview:
                 weight = weight[split_start:split_end]
             weight = torch.nn.Parameter(weight)
-            self.register_parameter(self.weight_names[i], weight)
+            self.register_parameter(self.weight_names[i], weight,
+                                    init_fn=init_method,
+                                    get_rng_state_tracker=get_rng_state_tracker,
+                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
 
             # Construct bias parameter if needed
             if self.use_bias:
@@ -787,6 +765,12 @@ class Linear(TransformerEngineBaseModule):
             if not is_subview:
                 del self.weight_tensor
                 del self.bias_tensor
+
+        if self.primary_weights_in_fp8:
+            self.init_fp8_metadata()
+            self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 

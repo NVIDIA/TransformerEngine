@@ -4,12 +4,14 @@
 
 """Internal function used by multiple modules."""
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from dataclasses import dataclass
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..fp8 import get_fp8_te_dtype
+from ..utils import get_default_init_method
 
 def _get_normalization_func(normalization: str,
                             fp8_output: bool,
@@ -187,3 +189,18 @@ def _noop_cat(
 
     # Perform no-op concat
     return _NoopCatFunc.apply(split_ranges, full_tensor, *tensors)
+
+
+@dataclass
+class _ParameterInitMeta:
+    """
+    Stores essential metadata needed to support deferred parameter initialization.
+    """
+    init_fn: Optional[Callable] = get_default_init_method()
+    get_rng_state_tracker: Optional[Callable] = None
+    fp8_meta_index: Optional[int] = None
+
+    def __post_init__(self):
+        """Safeguard reference to the parameter's parent module and initialization function."""
+        if self.init_fn is None:
+            self.init_fn = get_default_init_method()
