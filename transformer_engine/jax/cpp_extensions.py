@@ -10,15 +10,7 @@ import operator
 import os
 import warnings
 
-import transformer_engine_jax
-from transformer_engine_jax import DType as TEDType
-from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
-
 import numpy as np
-import jax
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
@@ -28,6 +20,13 @@ from jax.interpreters.mlir import ir, dtype_to_ir_type
 from jax.sharding import PartitionSpec, NamedSharding
 from jax._src.interpreters import batching
 from jax._src import dispatch
+
+import transformer_engine_jax
+from transformer_engine_jax import DType as TEDType
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
