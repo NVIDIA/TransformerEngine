@@ -138,7 +138,6 @@ class BasePrimitive(metaclass=ABCMeta):
         return NotImplemented
 
     @classmethod
-    @partial(jax.jit, static_argnums=(0, ))
     def outer_abstract(cls, *args, **kwargs):
         """
         optional abstract wrapper to eliminate workspace tensors
@@ -3398,9 +3397,9 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-        wkspace_aval = x_aval.update(shape=wkspace_info[1],
+        wkspace_aval = x_aval.update(shape=wkspace_info[0],
                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = x_aval.update(shape=barrier_info[1],
+        barrier_aval = x_aval.update(shape=barrier_info[0],
                                      dtype=te_dtype_to_jax_dtype(barrier_info[1]))
 
         return out_aval, mu_aval, rsigma_aval, updated_amax_aval, wkspace_aval, barrier_aval
