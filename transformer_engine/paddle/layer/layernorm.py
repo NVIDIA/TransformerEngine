@@ -12,6 +12,7 @@ from paddle.nn.initializer import Constant
 
 from ..constants import TE_DType
 from ..cpp_extensions import layernorm_fwd, layernorm_bwd
+from ..distributed import mark_as_sequence_parallel_parameter
 
 __all__ = ["LayerNorm"]
 
@@ -90,6 +91,11 @@ class LayerNorm(paddle.nn.Layer):
                             (1 + \gamma) + \beta
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
              backend to use for softmax operation.
+
+    Parallelism parameters
+    ----------------------
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     """
 
     def __init__(
@@ -99,11 +105,13 @@ class LayerNorm(paddle.nn.Layer):
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         zero_centered_gamma: bool = False,
+        sequence_parallel: bool = False,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
+        self.sequence_parallel = sequence_parallel
         self.backend = backend
         self._dtype = self._helper.get_default_dtype()
 
@@ -129,6 +137,10 @@ class LayerNorm(paddle.nn.Layer):
             dtype=self._dtype,
             is_bias=True,
         )
+
+        if self.sequence_parallel:
+            mark_as_sequence_parallel_parameter(self.weight)
+            mark_as_sequence_parallel_parameter(self.bias)
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
