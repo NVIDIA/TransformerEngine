@@ -9,12 +9,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from transformer_engine.common.recipe import Format
-from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
-from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from utils import assert_allclose
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
+
+from transformer_engine.common.recipe import Format
+from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 
 is_fp8_supported, reason = is_fp8_available()
 
@@ -85,8 +86,13 @@ _KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
 _KEY_OF_ZERO_CENTERED_GAMMA = 'zero_centered_gamma'
 _KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
 _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
+_KEY_OF_NUM_HEADS = 'num_attention_heads'
+_KEY_OF_NUM_GQA_GROUPS = 'num_gqa_groups'
 
-BASE_ATTRS = {_KEY_OF_TRANSPOSE_BS: True}
+BASE_ATTRS = {
+    _KEY_OF_TRANSPOSE_BS: True,
+    _KEY_OF_NUM_HEADS: 8,
+}
 
 ATTRS = [{
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
@@ -129,6 +135,9 @@ ATTRS = [{
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
+}, {
+    _KEY_OF_NUM_HEADS: 8,
+    _KEY_OF_NUM_GQA_GROUPS: 4
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -137,21 +146,13 @@ ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 class TestEncoderLayer:
 
     @staticmethod
-    def sync_params(ref, target, attrs):
-        fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
-
+    def sync_params(ref, target):
         unfreeze_target = flax.core.unfreeze(target)
-        if fuse_qkv:
-            unfreeze_target['attention']['qkv']['kernel'] = \
-                jnp.reshape(ref['attention']['qkv']['kernel'],
-                unfreeze_target['attention']['qkv']['kernel'].shape)
-        else:
-            unfreeze_target['attention']['query']['kernel'] = \
-                ref['attention']['query']['kernel']
-            unfreeze_target['attention']['key']['kernel'] = \
-                ref['attention']['key']['kernel']
-            unfreeze_target['attention']['value']['kernel'] = \
-                ref['attention']['value']['kernel']
+        unfreeze_attn_scope = unfreeze_target['attention']
+        ref_attn_scope = ref['attention']
+        for key in ref_attn_scope.keys():
+            unfreeze_attn_scope[key]['kernel'] = \
+                ref_attn_scope[key]['kernel'].reshape(unfreeze_attn_scope[key]['kernel'].shape)
         unfreeze_target['mlp']['wi_kernel'] = \
             jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
         unfreeze_target['mlp']['wo_kernel'] = \
@@ -196,7 +197,7 @@ class TestEncoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
 
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
@@ -242,7 +243,7 @@ class TestEncoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):
@@ -266,7 +267,10 @@ class TestEncoderLayer:
         assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
 
         def reorganize_test_wgrad(test_wgrad, attrs):
-            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
+            num_heads = attrs.get(_KEY_OF_NUM_HEADS)
+            num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
+            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True) and \
+                       num_heads == num_gqa_groups
 
             attn_name = 'attention'
             unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
@@ -280,10 +284,12 @@ class TestEncoderLayer:
                     unfreeze_test_wgrad['pre_attention_layer_norm']['ln_bias'] = \
                         unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
                     del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
-            if fuse_qkv:
-                unfreeze_test_wgrad[attn_name]['qkv']['kernel'] = \
-                    jnp.reshape(unfreeze_test_wgrad[attn_name]['qkv']['kernel'],
-                        (unfreeze_test_wgrad[attn_name]['qkv']['kernel'].shape[0], -1))
+
+            for key in unfreeze_test_wgrad[attn_name].keys():
+                unfreeze_test_wgrad[attn_name][key]['kernel'] = \
+                    jnp.reshape(unfreeze_test_wgrad[attn_name][key]['kernel'],
+                        (unfreeze_test_wgrad[attn_name][key]['kernel'].shape[0], -1))
+
             unfreeze_test_wgrad['pre_mlp_layer_norm'] = {}
             unfreeze_test_wgrad['pre_mlp_layer_norm']['scale'] = \
                 unfreeze_test_wgrad['mlp']['scale']
@@ -348,26 +354,14 @@ class TestEncoderLayer:
 class TestDecoderLayer:
 
     @staticmethod
-    def sync_params(ref, target, attrs):
-        fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
-
+    def sync_params(ref, target):
         unfreeze_target = flax.core.unfreeze(target)
-        if fuse_qkv:
-            unfreeze_target['self_attention']['qkv']['kernel'] = \
-                jnp.reshape(ref['self_attention']['qkv']['kernel'],
-                unfreeze_target['self_attention']['qkv']['kernel'].shape)
-            unfreeze_target['encoder_decoder_attention']['kv']['kernel'] = \
-                jnp.reshape(ref['encoder_decoder_attention']['kv']['kernel'],
-                unfreeze_target['encoder_decoder_attention']['kv']['kernel'].shape)
-        else:
-            unfreeze_target['self_attention']['query']['kernel'] = \
-                ref['self_attention']['query']['kernel']
-            unfreeze_target['self_attention']['key']['kernel'] = \
-                ref['self_attention']['key']['kernel']
-            unfreeze_target['self_attention']['value']['kernel'] = \
-                ref['self_attention']['value']['kernel']
-        unfreeze_target['encoder_decoder_attention']['query']['kernel'] = \
-            ref['encoder_decoder_attention']['query']['kernel']
+        for scope in ['self_attention', 'encoder_decoder_attention']:
+            unfreeze_scope = unfreeze_target[scope]
+            ref_scope = ref[scope]
+            for key in unfreeze_scope.keys():
+                unfreeze_scope[key]['kernel'] = \
+                    ref_scope[key]['kernel'].reshape(unfreeze_scope[key]['kernel'].shape)
         unfreeze_target['mlp']['wi_kernel'] = \
             jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
         unfreeze_target['mlp']['wo_kernel'] = \
@@ -412,7 +406,7 @@ class TestDecoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
 
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
@@ -459,7 +453,7 @@ class TestDecoderLayer:
         test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params, attrs)
+        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):
@@ -483,11 +477,14 @@ class TestDecoderLayer:
         assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
 
         def reorganize_test_wgrad(test_wgrad, attrs):
-            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
-            attn_name = 'self_attention'
+            num_heads = attrs.get(_KEY_OF_NUM_HEADS)
+            num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
+            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True) and \
+                       num_heads == num_gqa_groups
 
             unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
             if "output_layernorm" not in attrs:
+                attn_name = 'self_attention'
                 unfreeze_test_wgrad['pre_self_attention_layer_norm'] = {}
                 pre_attn_layer_key = 'qkv' if fuse_qkv else 'query'
                 unfreeze_test_wgrad['pre_self_attention_layer_norm']['scale'] = \
@@ -498,14 +495,11 @@ class TestDecoderLayer:
                         unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
                     del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
 
-            if fuse_qkv:
-                unfreeze_test_wgrad[attn_name]['qkv']['kernel'] = \
-                    jnp.reshape(unfreeze_test_wgrad[attn_name]['qkv']['kernel'],
-                        (unfreeze_test_wgrad[attn_name]['qkv']['kernel'].shape[0], -1))
-                attn_name = 'encoder_decoder_attention'
-                unfreeze_test_wgrad[attn_name]['kv']['kernel'] = \
-                    jnp.reshape(unfreeze_test_wgrad[attn_name]['kv']['kernel'],
-                        (unfreeze_test_wgrad[attn_name]['kv']['kernel'].shape[0], -1))
+            for scope in ['self_attention', 'encoder_decoder_attention']:
+                for key in unfreeze_test_wgrad[scope].keys():
+                    unfreeze_test_wgrad[scope][key]['kernel'] = \
+                        jnp.reshape(unfreeze_test_wgrad[scope][key]['kernel'],
+                            (unfreeze_test_wgrad[scope][key]['kernel'].shape[0], -1))
 
             unfreeze_test_wgrad['pre_cross_attention_layer_norm'] = {}
             unfreeze_test_wgrad['pre_cross_attention_layer_norm']['scale'] = \
