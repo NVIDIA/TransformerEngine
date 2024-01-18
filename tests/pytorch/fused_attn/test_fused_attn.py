@@ -716,10 +716,10 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
-def test_te_layer_misc(dtype, model_configs, model):
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     """Test TransformerLayer module with miscellanous settings"""
     ckpt_attn = True
-    qkv_format = "bshd"
     fused_qkv_params = True
     RoPE = True
     test_transformer_layer(dtype, model_configs, model,
@@ -755,7 +755,7 @@ def _run_transformer_layer(
         config: ModelConfig,
         backend: str,
         ckpt_attn: bool,
-        qkv_layout: str,
+        qkv_format: str,
         workspace_opt: bool,
         fused_qkv_params: bool,
         RoPE: bool,
@@ -774,6 +774,10 @@ def _run_transformer_layer(
     # Create input tensor
     inp = torch.randn(config.max_seqlen_q, config.batch_size, config.hidden_size,
             dtype=dtype, device="cuda", requires_grad = True)
+    # In case the format to be tested is batch-first, need to transpose the
+    # input tensor.
+    if qkv_format == "bshd":
+            inp = inp.transpose(0,1)
 
     # Create seqlens
     if "padding" in config.attn_mask_type:
@@ -847,6 +851,7 @@ def _run_transformer_layer(
             qkv_weight_interleaved=False,
             ub_tp_comm_overlap=False,
             bias=True,
+            attn_input_format=qkv_format,
         )
         .to(dtype=dtype, device="cuda")
     )
