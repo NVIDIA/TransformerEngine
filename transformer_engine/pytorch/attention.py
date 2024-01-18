@@ -2846,7 +2846,7 @@ class MultiheadAttention(torch.nn.Module):
           forward pass.
     qkv_format: str, default = `sbhd`
             dimension format for `query_layer`, `key_layer` and `value_layer`,
-            {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
+            {`sbhd`, `bshd`}. `s` stands for the sequence length, `b` batch size,
             `h` the number of heads, `d` head size, and `t` the total number of sequences
             in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
             are used for when sequences in a batch are of equal length or padded to
