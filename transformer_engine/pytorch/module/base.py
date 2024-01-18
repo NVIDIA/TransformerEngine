@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_extensions as tex
+from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     get_default_fp8_recipe,
@@ -234,6 +235,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
+        self.param_init_meta = {}
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -745,6 +748,52 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
             )
         return fp8_weight_tensors
+
+    def register_parameter(self, name, param, **kwargs):
+        """
+        Thin wrapper around PyTorch parameter registration to stash additional parameter
+        metedata used in deferred initialization.
+        """
+        super().register_parameter(name, param)
+        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+
+    def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
+        """
+        Reset all module parameters to initial values. Unless deferred initialization
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        device before the values are reset to initial.
+        """
+        if defer_init:
+            return
+
+        for name, param in self.named_parameters(recurse=False):
+            # Ensure parameter is on a real device
+            if param.device == torch.device('meta'):
+                param = param.to(device='cuda')
+
+            # Initialize the parameter values on device
+            init_fn = self.param_init_meta[name].init_fn
+            get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
+            if get_rng_state_tracker is None:
+                init_fn(param)
+            else:
+                with get_rng_state_tracker().fork():
+                    init_fn(param)
+
+            # If primary weights are in fp8, wrap the parameter as Float8Tensor
+            fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                param = Float8Tensor.to_float8(
+                    param,
+                    fp8_meta=self.fp8_meta,
+                    fp8_meta_index=fp8_meta_index
+                )
+
+            # Redo parameter wrap in case we broke it above
+            # NOTE: Currently this can only be broken when primary weights are in Fp8 but
+            #       re-applying the nn.Parameter() wrap is a no-op when the input is already
+            #       a parameter so we always re-apply it just for extra safety.
+            setattr(self, name, torch.nn.Parameter(param))
 
     @abstractmethod
     def forward(self):

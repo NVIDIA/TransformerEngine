@@ -1197,3 +1197,80 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     assert_all_equal(outputs, outputs_fp8_params)
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_transformer_layer_hidden_states_format(dtype, bs, model):
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    # Set `torch.manual_seed` to make sure the weights are identical to the
+    # other layer. Set `*dropout` values to 0 to make sure the forward pass
+    # is identical to the other layer.
+    torch.manual_seed(0)
+    block_sbhd = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0,
+            attention_dropout=0,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            hidden_states_format="sbhd"
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+
+    # Set `torch.manual_seed` to make sure the weights are identical to the
+    # other layer. Set `*dropout` values to 0 to make sure the forward pass
+    # is identical to the other layer.
+    torch.manual_seed(0)
+    block_bshd = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0,
+            attention_dropout=0,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            hidden_states_format="bshd"
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+
+    for (n1, p1), (n2, p2) in zip(block_bshd.named_parameters(), block_sbhd.named_parameters()):
+        assert torch.all(torch.eq(p1, p2)), f"{n1}, {n2} not identical"
+
+    x_sbhd = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).to(dtype).cuda()
+
+    x_bshd = x_sbhd.transpose(0,1).contiguous()
+
+    # To make sure forward is also identical (just in case some module decides
+    # to act fancy)
+    torch.manual_seed(0)
+    y_sbhd = block_sbhd(x_sbhd)
+
+    # To make sure forward is also identical (just in case some module decides
+    # to act fancy)
+    torch.manual_seed(0)
+    y_bshd = block_bshd(x_bshd)
+
+    assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])

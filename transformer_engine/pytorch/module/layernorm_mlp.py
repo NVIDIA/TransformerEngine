@@ -30,6 +30,7 @@ from ..jit import (
 from ..utils import (
     divide,
     get_default_init_method,
+    init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -38,7 +39,6 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
@@ -1195,90 +1195,75 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # LN init
         self.eps = eps
-        self.layer_norm_weight = Parameter(
+        layer_norm_weight = Parameter(
             torch.empty(hidden_size, device=device, dtype=params_dtype)
         )
+        self.register_parameter('layer_norm_weight', layer_norm_weight,
+                                init_fn=init_method_constant(float(not self.zero_centered_gamma)))
         setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
         if self.normalization != "RMSNorm":
-            self.layer_norm_bias = Parameter(
+            layer_norm_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            self.register_parameter('layer_norm_bias', layer_norm_bias)
+            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
-        self.reset_layer_norm_parameters()
 
+        # FC1 init
         if self.activation in ['reglu', 'geglu', 'swiglu']:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
-        # FC1 init
-        fc1_temp_weight = torch.empty(
-            fc1_output_features, hidden_size, device=device, dtype=params_dtype)
 
-        initialize_affine_weight_gpu(
-            fc1_temp_weight,
-            init_method,
-            get_rng_state_tracker,
-            set_tp_attributes=False,
+        fc1_weight = Parameter(
+            torch.empty(
+                fc1_output_features, hidden_size, device=device, dtype=params_dtype
+            )
         )
+        self.register_parameter('fc1_weight', fc1_weight,
+                                init_fn=init_method,
+                                get_rng_state_tracker=get_rng_state_tracker,
+                                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
+        set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
+        self.fp8_weight_shapes.append(self.fc1_weight.shape)
+
+        if self.use_bias:
+            fc1_bias = Parameter(
+                torch.empty(fc1_output_features, device=device, dtype=params_dtype)
+            )
+            self.register_parameter('fc1_bias', fc1_bias)
+            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)  # pylint: disable=access-member-before-definition
+        else:
+            self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
+
+        # FC2 init
+        fc2_weight = Parameter(
+            torch.empty(hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
+        )
+        self.register_parameter('fc2_weight', fc2_weight,
+                                init_fn=output_layer_init_method,
+                                get_rng_state_tracker=get_rng_state_tracker,
+                                fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT)
+        set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
+        self.fp8_weight_shapes.append(self.fc2_weight.shape)
+
+        if self.use_bias:
+            fc2_bias = Parameter(
+                torch.empty(hidden_size, device=device, dtype=params_dtype)
+            )
+            self.register_parameter('fc2_bias', fc2_bias)
+            # RPL
+            if self.set_parallel_mode:
+                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)  # pylint: disable=access-member-before-definition
+        else:
+            self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
 
-            fc1_temp_weight = Float8Tensor.to_float8(
-                fc1_temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-
-        self.fc1_weight = Parameter(fc1_temp_weight)
-        set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
-        self.fp8_weight_shapes.append(self.fc1_weight.shape)
-
-        if self.use_bias:
-            self.fc1_bias = Parameter(
-                torch.empty(fc1_output_features, device=device, dtype=params_dtype)
-            )
-            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
-        else:
-            self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
-
-        with torch.no_grad():
-            self.fc1_bias.zero_()
-
-        # FC2 init
-        fc2_temp_weight = torch.empty(
-            hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
-
-        initialize_affine_weight_gpu(
-            fc2_temp_weight,
-            output_layer_init_method,
-            get_rng_state_tracker,
-            set_tp_attributes=False,
-        )
-
-        if self.primary_weights_in_fp8:
-            fc2_temp_weight = Float8Tensor.to_float8(
-                fc2_temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
-            )
-
-        self.fc2_weight = Parameter(fc2_temp_weight)
-        set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
-        self.fp8_weight_shapes.append(self.fc2_weight.shape)
-
-        if self.use_bias:
-            self.fc2_bias = Parameter(
-                torch.empty(hidden_size, device=device, dtype=params_dtype)
-            )
-            # RPL
-            if self.set_parallel_mode:
-                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)
-        else:
-            self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -1286,9 +1271,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
-
-        with torch.no_grad():
-            self.fc2_bias.zero_()
 
         if self.bias_gelu_nvfusion:
             set_jit_fusion_options()
@@ -1306,6 +1288,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNormMLP.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.layer_norm_weight)
         else:
