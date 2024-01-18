@@ -2464,7 +2464,7 @@ class DotProductAttention(torch.nn.Module):
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
         alibi_slopes: Optional[torch.Tensor], default = `None`
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
-                     It adds a bias of (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
@@ -3236,7 +3236,7 @@ class MultiheadAttention(torch.nn.Module):
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
         alibi_slopes: Optional[torch.Tensor], default = `None`
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
-                     It adds a bias of (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
