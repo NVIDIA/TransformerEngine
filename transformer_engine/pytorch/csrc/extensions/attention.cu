@@ -354,11 +354,17 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   at::Tensor dBias;
   TensorWrapper te_dBias;
   if ((bias_type != NVTE_NO_BIAS)
-    && (bias_type != NVTE_ALIBI)
-    && (nvte_aux_tensor_pack.size >= 2)) {
+    && (bias_type != NVTE_ALIBI)) {
+    if (nvte_aux_tensor_pack.size >= 2) {
       std::vector<int64_t> bias_shape(Aux_CTX_Tensors[nvte_aux_tensor_pack.size - 1].sizes().vec());
       dBias = torch::empty(bias_shape, options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    } else {
+      dBias = torch::empty({1, static_cast<int64_t>(h),
+                    static_cast<int64_t>(max_seqlen),
+                    static_cast<int64_t>(max_seqlen)}, options);
+      te_dBias = makeTransformerEngineTensor(dBias);
+    }
   }
 
   // create cu_seqlens tensorwrappers
@@ -720,11 +726,17 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   at::Tensor dBias;
   TensorWrapper te_dBias;
   if ((bias_type != NVTE_NO_BIAS)
-    && (bias_type != NVTE_ALIBI)
-    && (nvte_aux_tensor_pack.size >= 2)) {
+    && (bias_type != NVTE_ALIBI)) {
+    if (nvte_aux_tensor_pack.size >= 2) {
       std::vector<int64_t> bias_shape(Aux_CTX_Tensors[nvte_aux_tensor_pack.size - 1].sizes().vec());
       dBias = torch::empty(bias_shape, options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    } else {
+      dBias = torch::empty({1, static_cast<int64_t>(h_q),
+                    static_cast<int64_t>(max_seqlen_q),
+                    static_cast<int64_t>(max_seqlen_kv)}, options);
+      te_dBias = makeTransformerEngineTensor(dBias);
+    }
   }
 
   // create workspace
@@ -996,6 +1008,9 @@ std::vector<at::Tensor> fused_attn_bwd(
   std::vector<size_t> k_shape{k_sizes.begin(), k_sizes.end()};
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
+  auto h_q = q_shape[q_shape.size() - 2];
+  auto h_kv = k_shape[k_shape.size() - 2];
+  auto d = q_shape[q_shape.size() - 1];
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
 
   at::Tensor dQ;
@@ -1065,9 +1080,6 @@ std::vector<at::Tensor> fused_attn_bwd(
   TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    auto h_q = q_shape[q_shape.size() - 2];
-    auto h_kv = k_shape[k_shape.size() - 2];
-    auto d = q_shape[q_shape.size() - 1];
     if (set_zero
           && ((h_q * d) % block_size == 0)
           && ((h_kv * d) % block_size == 0)
@@ -1166,11 +1178,17 @@ std::vector<at::Tensor> fused_attn_bwd(
   at::Tensor dBias;
   TensorWrapper te_dBias;
   if ((bias_type != NVTE_NO_BIAS)
-    && (bias_type != NVTE_ALIBI)
-    && (nvte_aux_tensor_pack.size >= 2)) {
+    && (bias_type != NVTE_ALIBI)) {
+    if (nvte_aux_tensor_pack.size >= 2) {
       std::vector<int64_t> bias_shape(Aux_CTX_Tensors[nvte_aux_tensor_pack.size - 1].sizes().vec());
       dBias = torch::empty(bias_shape, options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    } else {
+      dBias = torch::empty({1, static_cast<int64_t>(h_q),
+                    static_cast<int64_t>(max_seqlen_q),
+                    static_cast<int64_t>(max_seqlen_kv)}, options);
+      te_dBias = makeTransformerEngineTensor(dBias);
+    }
   }
 
   // create workspace
