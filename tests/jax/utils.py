@@ -934,7 +934,7 @@ class EncoderLayer(nn.Module):
             y = LayerNorm(layernorm_type=self.layernorm_type,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
-                          name="output_layer_norm")(y)
+                          name="output_layernorm")(y)
         return y
 
 
@@ -1090,7 +1090,7 @@ class DecoderLayer(nn.Module):
             z = LayerNorm(layernorm_type=self.layernorm_type,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
-                          name="output_layer_norm")(z)
+                          name="output_layernorm")(z)
 
         return z
 

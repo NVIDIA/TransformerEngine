@@ -155,7 +155,7 @@ def core_attention(query: Array,
         'q, k, v batch dims must match.')
     sequence_dim = 0 if transpose_batch_sequence else 1
     assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
+    assert key.shape[-2] == value.shape[-2], 'k, v num_attention_heads must match.'
     assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
     if float32_logits:
@@ -257,28 +257,28 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
     Parameters
     ----------
-    head_dim : int
+    head_dim: int
         The hidden dimension of each attention head.
-    num_heads : int
-        The number of attention heads
-    num_gqa_groups : int, default = `None`
-        Number of GQA groups. When `None` is present, it is equal to num_heads.
+    num_attention_heads: int
+        The number of attention heads.
+    num_gqa_groups: int, default = `None`
+        Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
         This only affects the keys and values, not the querys.
         GQA-1 is equivalent to Multi-Query Attention
         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
-    dropout_rate : float, default = 0.0
-        Dropout probability for the dropout op during multi-head attention.
+    attention_dropout: float, default = 0.0
+        Dropout probability for the dropout op after the softmax.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
-    layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
+    layernorm_type: {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    zero_centered_gamma : bool, default = False
+    zero_centered_gamma: bool, default = False
         If set to `True`, the LayerNorm formula changes to
 
         .. math::
@@ -288,17 +288,17 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         This parameter is only applicable for 'layernorm'.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
-        Used for initializing the QKV and Output projection weights.
+        Used for initializing the QKV and output projection weights.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     use_bias: bool, default = False
-        Indicate whether or not to enable bias shifting for QKVO projections.
+        Indicate whether or not to enable bias shifting for QKV and output projections.
         If set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing bias of QKVO projections, only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
-    apply_residual_connection_post_layernorm : bool, default = False
-        Indicate if apply residual connection with the output of layer normalization.
-    output_layernorm : bool, default = False
+    input_layernorm: bool, default = True
+        If set to False, layer normalization to the input is not applied.
+    return_layernorm_output: bool, default = False
         Indicate if apply a layer normalization at the end of MHA.
     attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
@@ -308,16 +308,24 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
+    num_heads: int, default = None
+        Deprecated. Please refer `num_attention_heads`.
+    dropout_rate: float, default = None
+        Deprecated. Please refer `attention_dropout`.
+    output_layernorm: bool, default = None
+        Deprecated. Please refer `input_layernorm`
+    apply_residual_connection_post_layernorm: bool, default = None
+        Deprecated. Please refer `return_layernorm_output`.
 
     Optimization parameters
     -----------------------
-    dtype :jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    fuse_qkv: bool, default = True
+    fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence : bool, default = True
+    transpose_batch_sequence: bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -325,41 +333,74 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         Indicate whether to scale attention logits.
         If set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
         else :math:`Q*K`
-    scaled_query_init: bool, default = `True`
+    scaled_query_init: bool, default = True
         Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
     float32_logits : bool, default = False
         Whether to compute attention logits in float32.
+    fuse_qkv: bool, default = None
+        Deprecated. Please refer `fuse_qkv_params`
     """
 
     head_dim: int
-    num_heads: int
+    num_attention_heads: int
     num_gqa_groups: int | None = None
-    dropout_rate: float = 0.
+    attention_dropout: float = 0.
     dropout_rng_name: str = 'dropout'
+    input_layernorm: bool = True
     layernorm_type: str = "layernorm"
     layernorm_epsilon: float = 1e-6
+    return_layernorm_output: bool = False
     zero_centered_gamma: bool = False
     kernel_init: Initializer = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
-    apply_residual_connection_post_layernorm: bool = False
-    output_layernorm: bool = False
     attn_mask_type: str = 'causal'
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     dtype: DType = jnp.float32
-    fuse_qkv: bool = True
+    fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False    # computes logits in float32 for stability.
 
+    # Deprecated parameters
+    num_heads: int | None = None
+    dropout_rate: float | None = None
+    output_layernorm: bool | None = None
+    apply_residual_connection_post_layernorm: bool | None = None
+    fuse_qkv: bool | None = None
+
     def __post_init__(self):
+        # Deal with the deprecated parameters
+        if self.num_heads is not None:
+            self.num_attention_heads = self.num_heads
+            warnings.warn(
+                f"{__class__}.num_heads is deprecated. It will be removed recently. "
+                f"Please uses {__class__}.num_attention_heads as the new API.", DeprecationWarning)
+        if self.dropout_rate is not None:
+            self.attention_dropout = self.dropout_rate
+            warnings.warn(
+                f"{__class__}.dropout_rate is deprecated. It will be removed recently. "
+                f"Please use {__class__}.attention_dropout as the new API.", DeprecationWarning)
+        if self.apply_residual_connection_post_layernorm is not None:
+            warnings.warn(
+                f"{__class__}.apply_residual_connection_post_layernorm is deprecated. "
+                f"It will be removed recently, please use {__class__}.return_layernorm_output.",
+                DeprecationWarning)
+        if self.fuse_qkv is not None:
+            warnings.warn(
+                f"{__class__}.fuse_qkv is deprecated. It will be removed recently. "
+                f"Please use {__class__}.fuse_qkv_params as the new API.", DeprecationWarning)
+        assert self.output_layernorm is None, (
+            f"{__class__}.output_layernorm is deprecated. It will be removed recently. "
+            f"Please use {__class__}.input_layernorm for controlling whether to apply layernorm.")
+
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         if self.num_gqa_groups is None:
-            self.num_gqa_groups = self.num_heads
+            self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
 
     @nn.compact
@@ -446,7 +487,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                              "supported attn_mask_type = {'causal', 'padding'}")
 
         is_self_attn = (inputs_q is inputs_kv)
-        is_gqa = (self.num_heads != self.num_gqa_groups)
+        is_gqa = (self.num_attention_heads != self.num_gqa_groups)
         is_qkvpack = (is_self_attn and not is_gqa)
         qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
@@ -457,13 +498,13 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate, self.num_heads,
+                                                               self.attention_dropout,
+                                                               self.num_attention_heads,
                                                                self.num_gqa_groups, q_seqlen,
                                                                kv_seqlen, self.head_dim)
 
-        use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
-            has_fused_attn_kernel and \
-            enable_fused_attn
+        use_fused_attn = (not decode and not self.transpose_batch_sequence and self.fuse_qkv_params
+                          and has_fused_attn_kernel and enable_fused_attn)
 
         if enable_fused_attn and not use_fused_attn:
             reason = ""
@@ -472,8 +513,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             if self.transpose_batch_sequence:
                 reason += f"transpose_batch_sequence=False is required " \
                           f"but got {self.transpose_batch_sequence}, "
-            if not self.fuse_qkv:
-                reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
+            if not self.fuse_qkv_params:
+                reason += f"fuse_qkv_params=True is required but got {self.fuse_qkv_params}, "
             if not has_fused_attn_kernel:
                 reason += "no fused attention kernel is available, "
 
@@ -497,18 +538,17 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         inputs_q = with_sharding_constraint_by_logical_axes(inputs_q, inputs_logical_axes_maybe_sp)
 
-        residual = inputs_q
-        if self.fuse_qkv:
+        if self.fuse_qkv_params:
             if is_qkvpack:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
-                    enable_layernorm=not self.output_layernorm,
+                    enable_layernorm=self.input_layernorm,
                     layernorm_type=self.layernorm_type,
                     zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
-                    features=(3, self.num_heads * self.head_dim),
+                    features=(3, self.num_attention_heads * self.head_dim),
                     transpose_batch_sequence=self.transpose_batch_sequence,
-                    return_layernorm_output=self.apply_residual_connection_post_layernorm,
+                    return_layernorm_output=self.return_layernorm_output,
                     scale_axes=(W_NO_SHARD_AXES,),
                     ln_bias_axes=(W_NO_SHARD_AXES,),
                     kernel_axes=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
@@ -525,15 +565,14 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
                 query, ln_out = LayerNormDenseGeneral(
-                    enable_layernorm=not self.output_layernorm,
+                    enable_layernorm=self.input_layernorm,
                     layernorm_type=self.layernorm_type,
                     zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
-                    features=self.num_heads * self.head_dim,
+                    features=self.num_attention_heads * self.head_dim,
                     transpose_batch_sequence=self.transpose_batch_sequence,
-                    return_layernorm_output=(self.apply_residual_connection_post_layernorm
-                                             or is_self_attn),
+                    return_layernorm_output=(self.return_layernorm_output or is_self_attn),
                     scale_axes=(W_NO_SHARD_AXES,),
                     ln_bias_axes=(W_NO_SHARD_AXES,),
                     kernel_axes=(W_FSDP_AXES, W_TP_AXES),
@@ -575,12 +614,12 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 bias_axes=(W_TP_AXES,),
                 dtype=self.dtype)
             query, ln_out = LayerNormDenseGeneral(
-                enable_layernorm=not self.output_layernorm,
+                enable_layernorm=self.input_layernorm,
                 layernorm_type=self.layernorm_type,
                 zero_centered_gamma=self.zero_centered_gamma,
                 epsilon=self.layernorm_epsilon,
                 axis=-1,
-                features=self.num_heads * self.head_dim,
+                features=self.num_attention_heads * self.head_dim,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
                 scale_axes=(W_NO_SHARD_AXES,),
@@ -602,12 +641,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-        if self.apply_residual_connection_post_layernorm:
-            assert ln_out is not None
-            residual = ln_out
-
         if self.enable_rotary_pos_emb:
-            if self.fuse_qkv and use_fused_attn:
+            if self.fuse_qkv_params and use_fused_attn:
                 if is_self_attn:
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
                 else:
@@ -626,7 +661,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             query = checkpoint_name(query, 'query_proj')
             key = checkpoint_name(key, 'key_proj')
             value = checkpoint_name(value, 'value_proj')
-            query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
+            query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
             value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
             qkv_sharding_constraint = \
@@ -647,12 +682,12 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                         lambda: jnp.array(0, dtype=jnp.int32))
             if is_initialized:
                 if self.transpose_batch_sequence:
-                    length, batch, num_heads, head_dim = cached_key.value.shape
-                    expected_shape = (1, batch, num_heads, head_dim)
+                    length, batch, num_attention_heads, head_dim = cached_key.value.shape
+                    expected_shape = (1, batch, num_attention_heads, head_dim)
                     one_hot_indices_shape = (length, 1, 1, 1)
                 else:
-                    batch, length, num_heads, head_dim = cached_key.value.shape
-                    expected_shape = (batch, 1, num_heads, head_dim)
+                    batch, length, num_attention_heads, head_dim = cached_key.value.shape
+                    expected_shape = (batch, 1, num_attention_heads, head_dim)
                     one_hot_indices_shape = (1, length, 1, 1)
 
                 # Sanity shape check of cached key against input query.
@@ -680,7 +715,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
 
         dropout_rng = None
-        if not deterministic and self.dropout_rate > 0.:
+        if not deterministic and self.attention_dropout > 0.:
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
         if use_fused_attn:
@@ -694,7 +729,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 del dropout_rng
 
             if is_qkvpack:
-                qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
+                qkv_proj = qkv_proj.reshape(
+                    (*qkv_proj.shape[:-1], self.num_attetion_heads, self.head_dim))
                 qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                            HIDDEN_AXES)
                 qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
@@ -707,11 +743,11 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                     attn_bias_type=attn_bias_type,
                                     attn_mask_type=attn_mask_type,
                                     scaling_factor=scale_factor,
-                                    dropout_probability=self.dropout_rate,
+                                    dropout_probability=self.attention_dropout,
                                     is_training=not deterministic)
             else:
                 assert bias is None
-                query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
+                query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
                 kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
                 q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
                 kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
@@ -727,7 +763,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                      attn_bias_type=attn_bias_type,
                                      attn_mask_type=attn_mask_type,
                                      scaling_factor=scale_factor,
-                                     dropout_probability=self.dropout_rate,
+                                     dropout_probability=self.attention_dropout,
                                      is_training=not deterministic)
         else:
 
@@ -755,7 +791,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                mask=mask,
                                bias=bias,
                                dropout_rng=dropout_rng,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                deterministic=deterministic,
                                dtype=self.dtype,
                                float32_logits=self.float32_logits)
@@ -781,7 +817,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                            dtype=self.dtype,
                            name='out')(x)
         out = checkpoint_name(out, 'out_proj')
-        return out, residual
+        return out, ln_out
 
 
 class RelativePositionBiases(nn.Module):    # pylint: disable=too-few-public-methods
@@ -1162,14 +1198,15 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             inputs, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
-        x, residual = MultiHeadAttention(
-            num_heads=self.num_attention_heads,
+        residual = inputs
+        x, ln_out = MultiHeadAttention(
+            num_attention_heads=self.num_attention_heads,
             dtype=self.dtype,
             head_dim=head_dim,
             num_gqa_groups=self.num_gqa_groups,
             transpose_batch_sequence=self.transpose_batch_sequence,
             enable_sequence_parallel=self.enable_sequence_parallel,
-            dropout_rate=self.attention_dropout,
+            attention_dropout=self.attention_dropout,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_attention_logits,
             scale_attn_logits=self.scale_attn_logits,
@@ -1177,12 +1214,12 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             layernorm_type=self.layernorm_type,
             layernorm_epsilon=self.layernorm_epsilon,
             zero_centered_gamma=self.zero_centered_gamma,
-            apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
-            output_layernorm=self.output_layernorm,
+            return_layernorm_output=self.apply_residual_connection_post_layernorm,
+            input_layernorm=not self.output_layernorm,
             attn_mask_type=self.self_attn_mask_type,
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
-            fuse_qkv=self.fuse_qkv_params,
+            fuse_qkv_params=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
             bias_init=self.bias_init,
@@ -1214,6 +1251,11 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             x = nn.Dropout(rate=self.drop_path,
                            broadcast_dims=drop_path_shape,
                            rng_collection=self.dropout_rng_name)(x, deterministic=deterministic)
+
+        if self.apply_residual_connection_post_layernorm:
+            assert ln_out is not None
+            residual = ln_out
+
         x = x + residual
 
         mlp_input = x
@@ -1224,28 +1266,28 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             x = with_sharding_constraint_by_logical_axes(
                 x, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
-            y, residual = MultiHeadAttention(
-                num_heads=self.num_attention_heads,
+            residual = x
+            y, ln_out = MultiHeadAttention(
+                num_attention_heads=self.num_attention_heads,
                 dtype=self.dtype,
                 head_dim=head_dim,
                 num_gqa_groups=self.num_gqa_groups,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 enable_sequence_parallel=self.enable_sequence_parallel,
-                dropout_rate=self.attention_dropout,
+                attention_dropout=self.attention_dropout,
                 dropout_rng_name=self.dropout_rng_name,
                 layernorm_type=self.layernorm_type,
                 layernorm_epsilon=self.layernorm_epsilon,
                 zero_centered_gamma=self.zero_centered_gamma,
-                apply_residual_connection_post_layernorm=self.
-                apply_residual_connection_post_layernorm,
-                output_layernorm=False,    # Must do LayerNorm before MHA.
+                return_layernorm_output=self.apply_residual_connection_post_layernorm,
+                input_layernorm=True,    # Must do LayerNorm before MHA.
                 attn_mask_type='padding',
                 enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                 rotary_pos_emb_windows=self.rotary_pos_emb_windows,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,
-                fuse_qkv=self.fuse_qkv_params,
+                fuse_qkv_params=self.fuse_qkv_params,
                 kernel_init=self.mha_kernel_init,
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
@@ -1260,6 +1302,11 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 residual, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
             y = hidden_dropout(y, deterministic)
+
+            if self.apply_residual_connection_post_layernorm:
+                assert ln_out is not None
+                residual = ln_out
+
             mlp_input = y + residual
 
         mlp_input = with_sharding_constraint_by_logical_axes(
@@ -1320,6 +1367,6 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                           bias_axes=(W_NO_SHARD_AXES,),
                           transpose_batch_sequence=self.transpose_batch_sequence,
                           dtype=self.dtype,
-                          name="output_layer_norm")(z)
+                          name="output_layernorm")(z)
 
         return z
