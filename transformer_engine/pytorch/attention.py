@@ -1034,11 +1034,34 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: str = "sbhd") -> torch.Tensor:
     """
-    input tensor t is of shape [seq_length, ..., dim]
-    rotary positional embeding tensor `freqs` is of shape [seq_length, ..., dim]
+        Parameters
+        ----------
+        t: torch.Tensor
+            input tensor on which rotary positional embedding will be applied
+        freqs: torch.Tensor
+            rotary positional embeding tensor `freqs` is of shape
+            `[seq_length, ..., dim]`
+        tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+            of shape `[seq, bs, ...]`.
+
     """
+    assert tensor_format in ("sbhd", "bshd"),("Only formats `sbhd` or `bshd` "
+                                              "are supported for input tensor "
+                                              "`t`.")
+    max_seq_len = freqs.shape[0]
+    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+
+    # Only apply the rotary embeddings up to the sequence length of the running
+    # input.
+    assert cur_seq_len <= max_seq_len, (f"Rotary Embeddings only supported "
+                                        "upto {max_seq_len} sequence length!")
+    freqs = freqs[:cur_seq_len].to(t.dtype)
+    if tensor_format == "bshd":
+        freqs = freqs.transpose(0,1) # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
@@ -2821,6 +2844,14 @@ class MultiheadAttention(torch.nn.Module):
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
+    qkv_format: str, default = `sbhd`
+            dimension format for `query_layer`, `key_layer` and `value_layer`,
+            {`sbhd`, `bshd`}. `s` stands for the sequence length, `b` batch size,
+            `h` the number of heads and `d` head size. `sbhd` and `bshd` formats
+            are used for when sequences in a batch are of equal length or padded to
+            equal length. Please note that these formats do not reflect how
+            tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
+            For that, please use `_get_qkv_layout` to gain the layout information.
 
     Parallelism parameters
     ----------------------
@@ -2899,9 +2930,11 @@ class MultiheadAttention(torch.nn.Module):
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
+        qkv_format: str = "sbhd",
     ) -> None:
         super().__init__()
 
+        self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.window_size = check_set_window_size(attn_mask_type, self.window_size)
@@ -3045,6 +3078,7 @@ class MultiheadAttention(torch.nn.Module):
             kv_channels,
             num_gqa_groups=self.num_gqa_groups,
             attention_dropout=attention_dropout,
+            qkv_format=self.qkv_format,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             sequence_parallel=sequence_parallel,
@@ -3398,14 +3432,14 @@ class MultiheadAttention(torch.nn.Module):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format)
 
         context_layer = self.core_attention(
             query_layer,
             key_layer,
             value_layer,
-            qkv_format='sbhd',
+            qkv_format=self.qkv_format,
             cu_seqlens_q=None,
             cu_seqlens_kv=None,
             attention_mask=attention_mask,
