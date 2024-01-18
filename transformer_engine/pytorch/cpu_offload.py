@@ -412,35 +412,35 @@ def get_cpu_offload_context(enabled: bool = False,
 
     """
 
-   def tensor_need_offloading_checker_activations(tensor):
-      return not hasattr(tensor,"weight_offloading")
-
-   def tensor_need_offloading_checker_weights(tensor): #This includes the Gradient Accumulation Buffer
-      return hasattr(tensor,"weight_offloading")
-
-   def tensor_need_offloading_checker_all(tensor):
-      return True
-
-   if offload_activations and offload_weights:
-      tensor_need_offloading_checker = tensor_need_offloading_checker_all
-   elif offload_activations:
-      tensor_need_offloading_checker = tensor_need_offloading_checker_activations
-   elif offload_weights:
-      tensor_need_offloading_checker = tensor_need_offloading_checker_weights
-   else:
-      raise ValueError("CPU Offloading is enabled while it is not mentioned what to offload (weights/activations)")
-
-   cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                         num_offload_group=num_layers,
-                         num_prefetch_group=1,
-                         tensor_need_offloading_checker=tensor_need_offloading_checker
-                         )
-
-   def group_prefetch_offload_commit_async(tensor):
-      return group_prefetch_offload_commit(tensor,cpu_offload_handler)
-
-   if enabled:
-      return CpuOffloadHookWithOffloadHandler(offload_handler = cpu_offload_handler), group_prefetch_offload_commit_async
-   else:
-      return nullcontext(), group_prefetch_offload_commit_async
+    def tensor_need_offloading_checker_activations(tensor):
+       return not hasattr(tensor,"weight_offloading")
+ 
+    def tensor_need_offloading_checker_weights(tensor): #This includes the Gradient Accumulation Buffer
+       return hasattr(tensor,"weight_offloading")
+ 
+    def tensor_need_offloading_checker_all(tensor):
+       return True
+ 
+    if offload_activations and offload_weights:
+       tensor_need_offloading_checker = tensor_need_offloading_checker_all
+    elif offload_activations:
+       tensor_need_offloading_checker = tensor_need_offloading_checker_activations
+    elif offload_weights:
+       tensor_need_offloading_checker = tensor_need_offloading_checker_weights
+    else:
+       raise ValueError("CPU Offloading is enabled while it is not mentioned what to offload (weights/activations)")
+ 
+    cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
+                          num_offload_group=num_layers,
+                          num_prefetch_group=1,
+                          tensor_need_offloading_checker=tensor_need_offloading_checker
+                          )
+ 
+    def group_prefetch_offload_commit_async(tensor):
+       return group_prefetch_offload_commit(tensor,cpu_offload_handler)
+ 
+    if enabled:
+       return CpuOffloadHookWithOffloadHandler(offload_handler = cpu_offload_handler), group_prefetch_offload_commit_async
+    else:
+       return nullcontext(), group_prefetch_offload_commit_async
 
