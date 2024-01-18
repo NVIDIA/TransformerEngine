@@ -6,6 +6,7 @@ Praxis Modules related Transformer
 """
 from functools import partial
 from typing import Optional, Sequence, Tuple
+import warnings
 
 from praxis import pax_fiddle
 from praxis.base_layer import WeightInit
@@ -63,26 +64,57 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     """MultiHeadAttention"""
 
     head_dim: int = 64
-    num_heads: int = 16
+    num_attention_heads: int = 16
     num_gqa_groups: int | None = None
-    dropout_rate: float = 0.
+    attention_dropout: float = 0.
     dropout_rng_name: str = 'dropout'
+    input_layernorm: bool = True
     layernorm_type: str = "layernorm"
     layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
+    return_layernorm_output: bool = False
     use_bias: bool = False
     bias_init: WeightInit = WeightInit.Constant(0.0)
-    apply_residual_connection_post_layernorm: bool = False
-    output_layernorm: bool = False
     attn_mask_type: str = 'causal'
-    fuse_qkv: bool = True
+    fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
 
+    # Deprecated parameters
+    num_heads: int | None = None
+    dropout_rate: float | None = None
+    output_layernorm: bool | None = None
+    apply_residual_connection_post_layernorm: bool | None = None
+    fuse_qkv: bool | None = None
+
     def __post_init__(self):
+        # Deal with the deprecated parameters
+        if self.num_heads is not None:
+            self.num_attention_heads = self.num_heads
+            warnings.warn(
+                f"{__class__}.num_heads is deprecated. It will be removed recently. "
+                f"Please uses {__class__}.num_attention_heads as the new API.", DeprecationWarning)
+        if self.dropout_rate is not None:
+            self.attention_dropout = self.dropout_rate
+            warnings.warn(
+                f"{__class__}.dropout_rate is deprecated. It will be removed recently. "
+                f"Please use {__class__}.attention_dropout as the new API.", DeprecationWarning)
+        if self.apply_residual_connection_post_layernorm is not None:
+            warnings.warn(
+                f"{__class__}.apply_residual_connection_post_layernorm is deprecated. "
+                f"It will be removed recently, please use {__class__}.return_layernorm_output.",
+                DeprecationWarning)
+        if self.fuse_qkv is not None:
+            warnings.warn(
+                f"{__class__}.fuse_qkv is deprecated. It will be removed recently. "
+                f"Please use {__class__}.fuse_qkv_params as the new API.", DeprecationWarning)
+        assert self.output_layernorm is None, (
+            f"{__class__}.output_layernorm is deprecated. It will be removed recently. "
+            f"Please use {__class__}.input_layernorm for controlling whether to apply layernorm.")
+
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_heads
         super().__post_init__()
@@ -95,20 +127,20 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             flax_MultiHeadAttention,
             dtype=self.dtype,
             head_dim=self.head_dim,
-            num_heads=self.num_heads,
+            num_attention_heads=self.num_attention_heads,
             num_gqa_groups=self.num_gqa_groups,
-            dropout_rate=self.dropout_rate,
+            attention_dropout=self.attention_dropout,
             dropout_rng_name=self.dropout_rng_name,
+            input_layernorm=self.input_layernorm,
             layernorm_type=self.layernorm_type,
             layernorm_epsilon=self.layernorm_epsilon,
             zero_centered_gamma=self.zero_centered_gamma,
+            return_layernorm_output=self.return_layernorm_output,
             kernel_init=TransformerEngineBaseLayer.generate_params_init("kernel", self.params_init),
             use_bias=self.use_bias,
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
-            apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
-            output_layernorm=self.output_layernorm,
             attn_mask_type=self.attn_mask_type,
-            fuse_qkv=self.fuse_qkv,
+            fuse_qkv_params=self.fuse_qkv_params,
             transpose_batch_sequence=self.transpose_batch_sequence,
             enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
