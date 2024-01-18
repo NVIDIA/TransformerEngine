@@ -40,6 +40,21 @@ def get_default_init_method() -> Callable:
     return init_method_normal(0.023)
 
 
+def init_method_constant(val: float) -> Callable:
+    """Init method to set all tensor elements to a constant value."""
+    if val == 1.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.ones_(tensor)
+    elif val == 0.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.zeros_(tensor)
+    else:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.constant_(tensor, val)
+
+    return init_
+
+
 def init_method_normal(sigma: float) -> Callable:
     """Init method based on N(0, sigma)."""
 

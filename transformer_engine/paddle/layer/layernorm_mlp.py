@@ -4,6 +4,7 @@
 """LayerNormMLP API"""
 
 import os
+import warnings
 from typing import Union, Tuple, Dict, Any, Optional
 
 import paddle
@@ -46,11 +47,15 @@ def _mlp_forward(
     inputmat: paddle.Tensor,
     inputmat_fp8_index: FP8FwdTensors,
     fc1_weight: paddle.Tensor,
+    fc1_weight_fp8: Optional[paddle.Tensor],
+    fc1_weight_t_fp8: Optional[paddle.Tensor],
     fc1_weight_fp8_index: FP8FwdTensors,
     fc1_bias: Union[paddle.Tensor, None],
     use_fc1_bias: bool,
     fc2_input_fp8_index: FP8FwdTensors,    # FP8FwdTensors.GEMM2_INPUT
     fc2_weight: paddle.Tensor,
+    fc2_weight_fp8: Optional[paddle.Tensor],
+    fc2_weight_t_fp8: Optional[paddle.Tensor],
     fc2_weight_fp8_index: FP8FwdTensors,
     fc2_bias: Union[paddle.Tensor, None],
     use_fc2_bias: bool,
@@ -64,6 +69,7 @@ def _mlp_forward(
     tensor_parallel: bool,
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
+    is_first_microbatch: bool,
 ):
     if fp8_enabled:
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -71,6 +77,8 @@ def _mlp_forward(
             inputmat,
             inputmat_fp8_index,
             fc1_weight,
+            fc1_weight_fp8,
+            fc1_weight_t_fp8,
             fc1_weight_fp8_index,
             fc1_bias,
             use_fc1_bias,
@@ -81,6 +89,7 @@ def _mlp_forward(
             sequence_parallel,
             tp_group,
             is_grad_enabled,
+            is_first_microbatch,
         )
 
         gelu_out = gelu_fp8(
@@ -94,6 +103,8 @@ def _mlp_forward(
             gelu_out,
             fc2_input_fp8_index,
             fc2_weight,
+            fc2_weight_fp8,
+            fc2_weight_t_fp8,
             fc2_weight_fp8_index,
             fc2_bias,
             use_fc2_bias,
@@ -104,6 +115,7 @@ def _mlp_forward(
             sequence_parallel,
             tp_group,
             is_grad_enabled,
+            is_first_microbatch,
         )
     else:
         fc1_out, gelu_out = _linear_fwd_non_fp8(
@@ -321,9 +333,13 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         ln_weight: paddle.Tensor,
         ln_bias: paddle.Tensor,
         fc1_weight: paddle.Tensor,
+        fc1_weight_fp8: Optional[paddle.Tensor],
+        fc1_weight_t_fp8: Optional[paddle.Tensor],
         fc1_bias: Union[paddle.Tensor, None],
         use_fc1_bias: bool,
         fc2_weight: paddle.Tensor,
+        fc2_weight_fp8: Optional[paddle.Tensor],
+        fc2_weight_t_fp8: Optional[paddle.Tensor],
         fc2_bias: Union[paddle.Tensor, None],
         use_fc2_bias: bool,
         eps: float,
@@ -342,6 +358,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
@@ -385,11 +402,15 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ln_out,
             FP8FwdTensors.GEMM1_INPUT,
             fc1_weight,
+            fc1_weight_fp8,
+            fc1_weight_t_fp8,
             FP8FwdTensors.GEMM1_WEIGHT,
             fc1_bias,
             use_fc1_bias,
             FP8FwdTensors.GEMM2_INPUT,
             fc2_weight,
+            fc2_weight_fp8,
+            fc2_weight_t_fp8,
             FP8FwdTensors.GEMM2_WEIGHT,
             fc2_bias,
             use_fc2_bias,
@@ -403,6 +424,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            is_first_microbatch,
         )
 
         if is_grad_enabled:
@@ -443,6 +465,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
             ctx.requires_ln_wgrad = not ln_weight.stop_gradient
+            ctx.is_first_microbatch = is_first_microbatch
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
@@ -543,13 +566,23 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             fc1_bgrad_out = (fc1_bgrad,) if ctx.use_fc1_bias else ()
             fc2_bgrad_out = (fc2_bgrad,) if ctx.use_fc2_bias else ()
 
+            if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
+                fc1_weight_cache_grad = ()
+                fc2_weight_cache_grad = ()
+            else:
+                # weight_fp8 and weight_t_fp8 are stop_gradient tensors
+                fc1_weight_cache_grad = (None, None)
+                fc2_weight_cache_grad = (None, None)
+
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 dgamma if ctx.requires_ln_wgrad else None,
                 dbeta if ctx.requires_ln_bgrad else None,
                 fc1_wgrad if ctx.requires_fc1_wgrad else None,
+                *fc1_weight_cache_grad,
                 *fc1_bgrad_out,
                 fc2_wgrad if ctx.requires_fc2_wgrad else None,
+                *fc2_weight_cache_grad,
                 *fc2_bgrad_out,
             )
 
@@ -675,6 +708,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                                     self.tensor_parallel,
                                     parallel_mode='column',
                                     backend=self.backend)
+        self.fp8_weight_shapes.append(self.fc1_weight.shape)
 
         self.has_bias = self._bias_attr is not False
         use_default_bias = self._bias_attr is None or self._bias_attr is True
@@ -704,6 +738,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                                     self.tensor_parallel,
                                     parallel_mode='row',
                                     backend=self.backend)
+        self.fp8_weight_shapes.append(self.fc2_weight.shape)
 
         if self.has_bias:
             self.fc2_bias = self.create_parameter(
@@ -734,24 +769,34 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     def _te_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> Union[paddle.Tensor, Tuple[paddle.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
         """
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        with self.prepare_forward(inp, num_gemms=2, is_first_microbatch=is_first_microbatch) as inp:
             # Layer input should be casted outside PyLayer, as performing
             # inplace cast to input tensors may cause problems when used
             # together with Paddle native layers.
             inp = cast_if_needed(inp, self.activation_dtype)
+
+            # Get persistent fp8 weight buffer. None if buffer does not exist.
+            fc1_weight_fp8, fc1_weight_t_fp8, fc2_weight_fp8, fc2_weight_t_fp8 = \
+                                    self.get_fp8_weights_scratchpad(is_first_microbatch)
+
             out = _LayerNormMLP.apply(
                 inp,
                 self.ln_weight,
                 self.ln_bias,
                 self.fc1_weight,
+                fc1_weight_fp8,
+                fc1_weight_t_fp8,
                 self.fc1_bias,
                 self.has_bias,
                 self.fc2_weight,
+                fc2_weight_fp8,
+                fc2_weight_t_fp8,
                 self.fc2_bias,
                 self.has_bias,
                 self.eps,
@@ -770,6 +815,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                is_first_microbatch,
             )
 
         if self.return_layernorm_output:
@@ -785,11 +831,16 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     def _pd_forward(
         self,
         inp: paddle.Tensor,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
         if self.zero_centered_gamma:
             raise NotImplementedError(
                 "Paddle backend does not support LayerNorm with zero-centered scale.")
+
+        if is_first_microbatch is not None:
+            warnings.warn(
+                "`is_first_microbatch` is not supported for paddle backend and is ignored.")
 
         ln_out = F.layer_norm(x=inp,
                               normalized_shape=inp.shape[-1],
@@ -816,8 +867,18 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
         Parameters
         ----------
-        inp : torch.Tensor
+        inp : paddle.Tensor
              Input tensor.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)

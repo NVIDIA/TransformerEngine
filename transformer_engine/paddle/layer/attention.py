@@ -552,6 +552,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
         recompute_core_attention: bool = False,
+        is_first_microbatch: Optional[bool] = None,
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
         """
         MultiHeadAttention Layer.
@@ -575,6 +576,16 @@ class MultiHeadAttention(paddle.nn.Layer):
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
 
         if self.attn_mask_type != "causal" and attention_mask is not None:
@@ -594,13 +605,19 @@ class MultiHeadAttention(paddle.nn.Layer):
 
         if self.attention_type == "self":
             if self.input_layernorm:
-                layernorm_qkv_outputs = self.layernorm_qkv(hidden_states)
+                layernorm_qkv_outputs = self.layernorm_qkv(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
                 if self.return_layernorm_output:
                     mixed_qkv_layer, layernorm_output = layernorm_qkv_outputs
                 else:
                     mixed_qkv_layer = layernorm_qkv_outputs
             else:
-                mixed_qkv_layer = self.qkv(hidden_states)
+                mixed_qkv_layer = self.qkv(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
 
             # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
@@ -631,7 +648,10 @@ class MultiHeadAttention(paddle.nn.Layer):
                     )
 
         else:    # cross attention
-            mixed_kv_layer = self.key_value(encoder_output)
+            mixed_kv_layer = self.key_value(
+                encoder_output,
+                is_first_microbatch=is_first_microbatch,
+            )
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
             mixed_kv_layer = mixed_kv_layer.reshape(shape=[
                 -1, max_seq_len, 2, self.num_attention_heads_per_partition,
@@ -639,13 +659,19 @@ class MultiHeadAttention(paddle.nn.Layer):
             ])
 
             if self.input_layernorm:
-                layernorm_query_outputs = self.layernorm_query(hidden_states)
+                layernorm_query_outputs = self.layernorm_query(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
                 else:
                     query_layer = layernorm_query_outputs
             else:
-                query_layer = self.query_layer(hidden_states)
+                query_layer = self.query_layer(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
 
             query_layer = query_layer.reshape(shape=[
                 -1, max_seq_len, self.num_attention_heads_per_partition,
@@ -681,7 +707,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                                            [-1, context_layer.shape[2] * context_layer.shape[3]])
 
         # Output. [b, s, hidden]
-        attention_output = self.proj(context_layer)
+        attention_output = self.proj(context_layer, is_first_microbatch=is_first_microbatch)
 
         if self.input_layernorm and self.return_layernorm_output:
             return attention_output, layernorm_output
