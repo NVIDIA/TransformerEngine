@@ -3923,7 +3923,7 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         out = dz_aval.update(shape=x_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
 
-        dbias_shape = (*x_aval.shape[:static_axis_boundary+1], gi_hidden_size)
+        dbias_shape = (*x_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
         dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
 
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
@@ -3959,7 +3959,7 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         ir_scale_inv_shape = ir_amax_shape
         transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary,
                                                  transpose_axis_boundary)
-        dbias_shape = (*x_shape[:static_axis_boundary+1], ir_hidden_szie)
+        dbias_shape = (*x_shape[:static_axis_boundary + 1], ir_hidden_szie)
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
@@ -4034,7 +4034,8 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
-        dbias_shaprding = NamedSharding(mesh, PartitionSpec(*x_spec[:static_axis_boundary+1], x_spec[-1]))
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
 
@@ -4047,7 +4048,8 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
 
-        dbias_shaprding = NamedSharding(mesh, PartitionSpec(*x_spec[:static_axis_boundary+1], x_spec[-1]))
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
 
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
