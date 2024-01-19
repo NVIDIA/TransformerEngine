@@ -17,8 +17,6 @@ from transformer_engine.pytorch import TransformerLayer, fp8_autocast
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     RotaryPositionEmbedding,
-    get_alibi_slopes,
-    _alibi_slopes,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -399,9 +397,8 @@ model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
     "alibi_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "causal", "alibi", alibi_type="vanilla"),
     "alibi_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_2_0": ModelConfig(4, 24, 24, 128,  128,  128, 0.0, "causal", "alibi", alibi_type= "custom"),
-    "alibi_2_1": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
-    "alibi_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi", alibi_type= "custom"),
+    "alibi_2_0": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
+    "alibi_2_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi", alibi_type= "custom"),
 }
 @pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
@@ -513,10 +510,7 @@ def _run_dot_product_attention(
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi":
-        if config.alibi_type == "vanilla":
-            get_alibi_slopes(config.num_heads)
-            alibi_slopes = _alibi_slopes
-        elif config.alibi_type == "custom":
+        if config.alibi_type == "custom":
             alibi_slopes = torch.randn(
                 config.num_heads).abs().to(dtype=torch.float32, device="cuda")
 

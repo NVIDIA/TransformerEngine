@@ -71,6 +71,7 @@ if _flash_attn_version >= _flash_attn_version_required:
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 _num_heads, _alibi_slopes, _max_seqlen_q, _max_seqlen_kv, _alibi_bias = None, None, None, None, None
+_alibi_slopes_require_update, _alibi_bias_require_update = False, False
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -122,61 +123,76 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
 
 @torch.no_grad()
-def get_alibi_slopes(
+def get_alibi(
     num_heads: int,
-) -> torch.Tensor:
-    """
-    Generate ALiBi slopes in FP32 and shape [num_heads].
-    """
-    global _num_heads, _alibi_slopes
-    if _num_heads != num_heads or _alibi_slopes is None:
-        n = 2 ** math.floor(math.log2(num_heads))
-        m_0 = 2.0 ** (-8.0 / n)
-        m = torch.pow(m_0, torch.arange(1, 1 + n))
-
-        if n < num_heads:
-            m_hat_0 = 2.0 ** (-4.0 / n)
-            m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
-            m = torch.cat([m, m_hat])
-
-        _num_heads = num_heads
-        _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
-
-
-@torch.no_grad()
-def get_alibi_bias(
     max_seqlen_q: int,
     max_seqlen_kv: int,
     alibi_slopes: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    bias_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Generate ALiBi bias in FP32. If `alibi_slopes` is in shape [num_heads],
-    then the generated bias is in [1, num_heads, max_seqlen_q, max_seqlen_kv].
-    If `alibi_slopes` is in [batch_size, num_heads], the bias is in
-    [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
+    Parameters
+    ----------
+    num_heads: int
+        Number of heads.
+    max_seqlen_q: int
+        Maximum sequence length for queries.
+    max_seqlen_kv: int
+        Maximum sequence length for keys and values.
+    alibi_slopes: Optional[torch.Tensor], default = `None`
+        Custum ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
+    bias_dtype: Optional[torch.dtype], default = `None`
+        Dtype of the generated ALiBi bias. If None, use torch.float32.
+
+    Returns
+    ----------
+    alibi_slopes: torch.Tensor
+        ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
+    alibi_bias: torch.Tensor
+        ALiBi bias in FP32 or `bias_dtype`. If `alibi_slopes` is in [num_heads] shape,
+        then `alibi_bias` is in [1, num_heads, max_seqlen_q, max_seqlen_kv], and if
+        `alibi_slopes` is in [batch_size, num_heads], then the bias is in
+        [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     """
-    global _max_seqlen_q, _max_seqlen_kv, _alibi_slopes, _alibi_bias
-    slopes = alibi_slopes if alibi_slopes is not None else _alibi_slopes
-    assert slopes is not None, "ALiBi slopes can not be None!"
-    if (_alibi_bias is None
-        or _max_seqlen_q != max_seqlen_q
-        or _max_seqlen_kv != max_seqlen_kv
-        or not torch.equal(slopes, _alibi_slopes)):
-        _alibi_slopes = slopes
-        _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+    global _num_heads, _alibi_slopes, _alibi_slopes_require_update
+    if _alibi_slopes_require_update:
+        if alibi_slopes is not None:
+            _alibi_slopes = alibi_slopes
+        else:
+            n = 2 ** math.floor(math.log2(num_heads))
+            m_0 = 2.0 ** (-8.0 / n)
+            m = torch.pow(m_0, torch.arange(1, 1 + n))
+
+            if n < num_heads:
+                m_hat_0 = 2.0 ** (-4.0 / n)
+                m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
+                m = torch.cat([m, m_hat])
+
+            _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
+        _num_heads = num_heads
+        _alibi_slopes_require_update = False
+
+    global _max_seqlen_q, _max_seqlen_kv, _alibi_bias, _alibi_bias_require_update
+    if _alibi_bias_require_update:
+        assert _alibi_slopes is not None, "ALiBi slopes can not be None!"
+        if _alibi_slopes.dim() == 1:
+            slopes_shape = torch.Size([1, _alibi_slopes.shape[0], 1, 1])
+            bias_shape = torch.Size([1, _alibi_slopes.shape[0], max_seqlen_q, max_seqlen_kv])
+        if _alibi_slopes.dim() == 2:
+            slopes_shape = torch.Size([*_alibi_slopes.shape[:], 1, 1])
+            bias_shape = torch.Size([*_alibi_slopes.shape[:], max_seqlen_q, max_seqlen_kv])
         bias = torch.arange(
             1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
         bias = bias - torch.arange(
             1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
         bias = bias.abs().mul(-1)
-        if slopes.dim() == 1:
-            slopes = slopes.view(1, slopes.shape[0], 1, 1)
-        if slopes.dim() == 2:
-            slopes = slopes.view(*slopes.shape[:], 1, 1)
-        bias = bias * slopes
-        bias = bias.contiguous().to(dtype=torch.float32, device="cuda")
-        _alibi_bias = bias
-    return _alibi_bias
+        bias = bias * _alibi_slopes.view(slopes_shape)
+        _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+        bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
+        _alibi_bias = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_bias_require_update = False
+
+    return _alibi_slopes, _alibi_bias
 
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
@@ -1280,9 +1296,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
-                if alibi_slopes is None:
-                    get_alibi_slopes(output_size[1])
-                core_attention_bias = get_alibi_bias(output_size[2], output_size[3], alibi_slopes)
+                _, core_attention_bias = get_alibi(
+                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes)
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -2263,6 +2278,7 @@ class DotProductAttention(torch.nn.Module):
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
+        self.layer_number = 1 if layer_number is None else layer_number
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
@@ -2512,15 +2528,6 @@ class DotProductAttention(torch.nn.Module):
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
 
-        if core_attention_bias_type == "alibi":
-            assert (core_attention_bias is None
-                ), "core_attention_bias must be None when core_attention_bias_type is alibi!"
-        elif alibi_slopes is not None:
-            alibi_slopes = None
-            warnings.warn(
-                """core_attention_bias_type must be "alibi" in order to use alibi_slopes!"""
-            )
-
         if window_size is None:
             window_size = self.window_size
 
@@ -2641,6 +2648,22 @@ class DotProductAttention(torch.nn.Module):
             use_unfused_attention = False
 
         # Filter: bias.
+        global _num_heads, _max_seqlen_q, _max_seqlen_kv
+        global _alibi_slopes_require_update, _alibi_bias_require_update
+        if alibi_slopes is not None:
+            assert (core_attention_bias_type == "alibi"
+                ), "core_attention_bias_type must be alibi in order to use alibi_slopes!"
+            if self.layer_number == 1:
+                _alibi_slopes_require_update, _alibi_bias_require_update = True, True
+        if core_attention_bias_type == "alibi":
+            assert (core_attention_bias is None
+                ), "core_attention_bias must be None when core_attention_bias_type is alibi!"
+            if (_num_heads != query_layer.shape[-2]
+                or _max_seqlen_q != max_seqlen_q
+                or _max_seqlen_kv != max_seqlen_kv
+                or _alibi_slopes is None):
+                _alibi_slopes_require_update, _alibi_bias_require_update = True, True
+
         if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
             use_flash_attention = False
 
@@ -2648,8 +2671,9 @@ class DotProductAttention(torch.nn.Module):
         fu_core_attention_bias = core_attention_bias
         if core_attention_bias_type == "alibi" and use_fused_attention and alibi_slopes is not None:
             fu_core_attention_bias_type = "post_scale_bias"
-            fu_core_attention_bias = get_alibi_bias(
-                max_seqlen_q, max_seqlen_kv, alibi_slopes).to(dtype=query_layer.dtype)
+            _, fu_core_attention_bias = get_alibi(
+                query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes,
+                bias_dtype=query_layer.dtype)
             if (fu_core_attention_bias.shape[0] != 1
                 or fu_core_attention_bias.shape[1] != query_layer.shape[-2]):
                 # remove this line when cuDNN adds bwd support for [b, 1, s, s] and [b, h, s, s]
@@ -2707,9 +2731,9 @@ class DotProductAttention(torch.nn.Module):
         if use_flash_attention:
             if _NVTE_DEBUG:
                 print("[DotProductAttention]: using flash-attn",_flash_attn_version)
-            if core_attention_bias_type == "alibi" and alibi_slopes is None:
-                get_alibi_slopes(query_layer.shape[-2])
-                alibi_slopes = _alibi_slopes
+            if core_attention_bias_type == "alibi":
+                alibi_slopes, _ = get_alibi(
+                    query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
