@@ -1043,7 +1043,7 @@ class FusedRoPEFunc(torch.autograd.Function):
     """
     Function for FusedRoPE
 
-    This implementation assumes the input tensor to be in `sbhd` or `thd` format and
+    This implementation assumes the input tensor to be in `sbhd`, `bshd` or `thd` format and
     the RoPE tensor to be of shape (s, 1, 1, d). It accepts arbitrary memory layouts to avoid
     the expensive `.contiguous()` calls, thus it may not achieve the best memory access pattern.
     """
@@ -1106,9 +1106,9 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 def apply_rotary_pos_emb(
     t: torch.Tensor,
     freqs: torch.Tensor,
+    tensor_format: str = "sbhd",
     fused: bool = False,
     transpose_output_memory: bool = False,
-    qkv_format: str = "sbhd",
     cu_seqlens: Union[torch.Tensor, None] = None,
 ) -> torch.Tensor:
     """
@@ -1117,43 +1117,55 @@ def apply_rotary_pos_emb(
     Parameters
     ----------
     t: torch.Tensor
-        Tensor of shape [s, b, h, d] or [t, h, d].
+        Input tensor of shape `[s, b, h, d]`, `[s, b, h, d]` or `[t, h, d]`, on which
+        rotary positional embedding will be applied.
     freqs: torch.Tensor
-        Rotary positional embedding tensor of shape [s2, 1, 1, d2] and dtype 'float',
-        with s2 >= s and d2 <= d.
+        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
     fused: bool, default = False
         Whether to use a fused applying RoPE implementation.
+    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+        is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+        of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
     transpose_output_memory: bool, default = False
         Whether to transpose the 's' and 'b' dimension of the output's underlying memory format.
         This is very helpful when you want to get a contiguous tensor after calling
         `output.transpose(0, 1)`. It's only supported when `fused` is True and
-        `qkv_format` is 'sbhd' or 'bshd'.
-    qkv_format: str, default = 'sbhd'.
-        It could be 'sbhd', 'bshd' or 'thd', and 'thd' is only supported when `fused` is True.
+        `tensor_format` is 'sbhd' or 'bshd'.
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-        dtype torch.int32. Only valid when `qkv_format` is 'thd'.
+        dtype torch.int32. Only valid when `tensor_format` is 'thd'.
     """
     if fused:
         assert not (
-            transpose_output_memory and qkv_format == "thd"
+            transpose_output_memory and tensor_format == "thd"
         ), "transpose_output_memory only supports 'sbhd' or 'bshd' format."
         assert (
-            qkv_format != "thd" or cu_seqlens is not None
-        ), "cu_seqlens must not be None when qkv_format is 'thd'."
+            tensor_format != "thd" or cu_seqlens is not None
+        ), "cu_seqlens must not be None when tensor_format is 'thd'."
         return FusedRoPEFunc.apply(
-            t, freqs, transpose_output_memory, qkv_format, cu_seqlens
+            t, freqs, transpose_output_memory, tensor_format, cu_seqlens
         )
 
-    assert (
-        qkv_format == "sbhd"
-    ), f"Only 'sbhd' format is supported when fused is False, got {qkv_format}."
+    assert tensor_format in ("sbhd", "bshd"), (
+        "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
+        f"when fused is False, got {tensor_format}."
+    )
     assert (
         not transpose_output_memory
     ), "transpose_output_memory is not supported when fused is False."
 
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
+    max_seq_len = freqs.shape[0]
+    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+
+    # Only apply the rotary embeddings up to the sequence length of the running
+    # input.
+    assert cur_seq_len <= max_seq_len, (
+        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    )
+    freqs = freqs[:cur_seq_len].to(t.dtype)
+    if tensor_format == "bshd":
+        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
 
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
@@ -1161,7 +1173,7 @@ def apply_rotary_pos_emb(
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * cos_) + (_rotate_half(t) * sin_)
+    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
     return torch.cat((t, t_pass), dim=-1)
 
 
@@ -2937,6 +2949,14 @@ class MultiheadAttention(torch.nn.Module):
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
+    qkv_format: str, default = `sbhd`
+            dimension format for `query_layer`, `key_layer` and `value_layer`,
+            {`sbhd`, `bshd`}. `s` stands for the sequence length, `b` batch size,
+            `h` the number of heads and `d` head size. `sbhd` and `bshd` formats
+            are used for when sequences in a batch are of equal length or padded to
+            equal length. Please note that these formats do not reflect how
+            tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
+            For that, please use `_get_qkv_layout` to gain the layout information.
 
     Parallelism parameters
     ----------------------
@@ -3015,9 +3035,11 @@ class MultiheadAttention(torch.nn.Module):
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
+        qkv_format: str = "sbhd",
     ) -> None:
         super().__init__()
 
+        self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.window_size = check_set_window_size(attn_mask_type, self.window_size)
@@ -3161,6 +3183,7 @@ class MultiheadAttention(torch.nn.Module):
             kv_channels,
             num_gqa_groups=self.num_gqa_groups,
             attention_dropout=attention_dropout,
+            qkv_format=self.qkv_format,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             sequence_parallel=sequence_parallel,
@@ -3514,14 +3537,14 @@ class MultiheadAttention(torch.nn.Module):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format)
 
         context_layer = self.core_attention(
             query_layer,
             key_layer,
             value_layer,
-            qkv_format='sbhd',
+            qkv_format=self.qkv_format,
             cu_seqlens_q=None,
             cu_seqlens_kv=None,
             attention_mask=attention_mask,

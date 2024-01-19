@@ -4,6 +4,7 @@
 
 """RMSNorm API"""
 import os
+import warnings
 from typing import Union, Tuple, Optional
 
 import torch
@@ -141,7 +142,8 @@ class RMSNorm(torch.nn.Module):
             )
         )
         setattr(self.weight, "sequence_parallel", sequence_parallel)
-        self.reset_rms_norm_parameters()
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward RMSNorm C APIs. These envvars can be used to prevent the LN
@@ -152,11 +154,22 @@ class RMSNorm(torch.nn.Module):
 
     def reset_rms_norm_parameters(self) -> None:
         """Init RMSNorm params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use RMSNorm.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.weight)
         else:
             init.zeros_(self.weight)
 
+    def reset_parameters(self, defer_init=False) -> None:
+        """Reset RMSNorm parameters"""
+        if defer_init:
+            return
+        init.constant_(self.weight, float(not self.zero_centered_gamma))
 
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
