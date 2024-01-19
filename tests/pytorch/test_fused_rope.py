@@ -57,7 +57,7 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("margin", [0, 10])
 @pytest.mark.parametrize("transpose", [None, (0, 1), (2, 3)])
 @pytest.mark.parametrize("transpose_output_memory", [False, True])
-@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
+@pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 def test_fused_rope(
     dtype: torch.dtype,
@@ -67,7 +67,7 @@ def test_fused_rope(
     margin: int,
     transpose: Union[Tuple, None],
     transpose_output_memory: bool,
-    qkv_format: str,
+    tensor_format: str,
     loss_func: Callable,
 ) -> None:
     device = torch.device("cuda:0")
@@ -77,7 +77,7 @@ def test_fused_rope(
         dtype=dtype,
         device=device,
     )
-    if qkv_format == "bshd":
+    if tensor_format == "bshd":
         t = t.transpose(0, 1).contiguous()
     if transpose:
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
@@ -87,15 +87,9 @@ def test_fused_rope(
     emb = rotary_pos_emb(seq_length)
 
     # unfused
-    # TODO: use qkv_format as an argument when https://github.com/NVIDIA/TransformerEngine/pull/557 is merged.
-    if qkv_format == "sbhd":
-        output_unfused = apply_rotary_pos_emb(
-            t, emb[: seq_length - margin], fused=False
-        )
-    else:
-        output_unfused = apply_rotary_pos_emb(
-            t.transpose(0, 1), emb[: seq_length - margin], fused=False
-        ).transpose(0, 1)
+    output_unfused = apply_rotary_pos_emb(
+        t, emb, tensor_format=tensor_format, fused=False
+    )
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
     grad_unfused = t.grad.detach().clone()
@@ -105,9 +99,9 @@ def test_fused_rope(
     output_fused = apply_rotary_pos_emb(
         t,
         emb,
+        tensor_format=tensor_format,
         fused=True,
         transpose_output_memory=transpose_output_memory,
-        qkv_format=qkv_format,
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
@@ -159,7 +153,7 @@ def test_fused_rope_thd(
 
     # fused
     output_fused = apply_rotary_pos_emb(
-        t, emb, fused=True, qkv_format="thd", cu_seqlens=cu_seqlens
+        t, emb, fused=True, tensor_format="thd", cu_seqlens=cu_seqlens
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()

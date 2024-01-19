@@ -1163,9 +1163,11 @@ def apply_rotary_pos_emb(
     assert cur_seq_len <= max_seq_len, (
         f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
     )
-    freqs = freqs[:cur_seq_len].to(t.dtype)
+    freqs = freqs[:cur_seq_len]
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
 
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
@@ -1173,7 +1175,7 @@ def apply_rotary_pos_emb(
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    t = (t * cos_) + (_rotate_half(t) * sin_)
     return torch.cat((t, t_pass), dim=-1)
 
 
