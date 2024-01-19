@@ -25,6 +25,10 @@ pybind11::dict Registrations() {
     pybind11::dict dict;
     dict["te_transpose"] = EncapsulateFunction(Transpose);
     dict["te_cast_transpose"] = EncapsulateFunction(CastTranspose);
+    dict["te_gelu"] = EncapsulateFunction(Gelu);
+    dict["te_gelu_fp8"] = EncapsulateFunction(GeluFP8);
+    dict["te_dgelu"] = EncapsulateFunction(DGelu);
+    dict["te_dgelu_dbias_cast_transpose"] = EncapsulateFunction(DGeluDBiasCastTranspose);
     dict["te_gated_gelu"] = EncapsulateFunction(GatedGelu);
     dict["te_gated_gelu_fp8"] = EncapsulateFunction(GatedGeluFP8);
     dict["te_dgated_gelu"] = EncapsulateFunction(DGatedGelu);

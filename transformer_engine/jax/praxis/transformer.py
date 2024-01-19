@@ -156,6 +156,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
+    enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     enable_relative_embedding: bool = True
     relative_embedding: pax_fiddle.Config[RelativePositionBiases] = pax_fiddle.template_field(None)
     drop_path: float = 0.0
@@ -221,6 +223,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
             float32_attention_logits=self.float32_attention_logits,
             layer_type=self.layer_type,
             self_attn_mask_type=self.self_attn_mask_type,
+            enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+            rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             enable_relative_embedding=self.enable_relative_embedding,
             relative_embedding=relative_embedding_flax_module,
             drop_path=self.drop_path,
