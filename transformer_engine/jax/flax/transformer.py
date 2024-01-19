@@ -209,12 +209,12 @@ def core_attention(query: Array,
     return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
-def rope(x: Array, windows: Tuple[int, int], transpose_batch_seqlen: bool):
+def rope(x: Array, windows: Tuple[int, int], transpose_batch_sequence: bool):
     """
     Rotary Positional Embedding
     x should be in shape of
-    [Batch, Seqlen, ..., Hidden] if transpose_batch_seqlen is False, or
-    [Seqlen, Batch, ..., Hidden] if transpose_batch_seqlen is True, or
+    [Batch, Seqlen, ..., Hidden] if transpose_batch_sequence is False, or
+    [Seqlen, Batch, ..., Hidden] if transpose_batch_sequence is True.
     """
     embed_dim = x.shape[-1]
     half_embed_dim = embed_dim // 2
@@ -225,7 +225,7 @@ def rope(x: Array, windows: Tuple[int, int], transpose_batch_seqlen: bool):
     time_scales = min_window * (max_window / min_window)**fraction
     time_scales = jnp.expand_dims(time_scales, axis=tuple(range(x.ndim - 1)))
 
-    batch_dim = 1 if transpose_batch_seqlen else 0
+    batch_dim = 1 if transpose_batch_sequence else 0
     seq_dim = 1 - batch_dim
 
     positions = jnp.expand_dims(jnp.arange(x.shape[seq_dim]), axis=batch_dim)
