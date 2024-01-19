@@ -169,6 +169,8 @@ class RMSNorm(torch.nn.Module):
         """Reset RMSNorm parameters"""
         if defer_init:
             return
+        if self.weight.device == torch.device('meta'):
+            self.weight.to(device='cuda')
         init.constant_(self.weight, float(not self.zero_centered_gamma))
 
     @no_torch_dynamo()

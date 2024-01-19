@@ -168,7 +168,11 @@ class LayerNorm(torch.nn.Module):
         """Init LayerNorm parameters"""
         if defer_init:
             return
+        if self.weight.device == torch.device('meta'):
+            self.weight.to(device='cuda')
         init.constant_(self.weight, float(not self.zero_centered_gamma))
+        if self.bias.device == torch.device('meta'):
+            self.bias.to(device='cuda')
         init.zeros_(self.bias)
 
     @no_torch_dynamo()
