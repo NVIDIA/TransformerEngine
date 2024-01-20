@@ -314,7 +314,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = Parameter(weight, False)
+                weight = torch.nn.Parameter(weight, False)
                 weight.main_grad = main_grad
 
             # Primary weights are in FP8.
@@ -1006,7 +1006,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
                 is_first_microbatch
             )
-        
+
             from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():

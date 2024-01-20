@@ -331,7 +331,7 @@ class _Linear(torch.autograd.Function):
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = Parameter(weight, False)
+                weight = torch.nn.Parameter(weight, False)
                 weight.main_grad = main_grad
 
             # Primary weights are in FP8.

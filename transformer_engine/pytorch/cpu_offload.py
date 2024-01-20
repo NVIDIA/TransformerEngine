@@ -2,13 +2,14 @@
 #
 # See LICENSE for license information.
 
-import torch
 from typing import Any
 from contextlib import nullcontext
+import torch
 
 __all__ = ['get_cpu_offload_context']
 
 CPUOffloadEnabled = False
+
 
 class CpuOffloadSavedTensorHook:
     """Contex-manager that executes a pair of pack/unpack hooks for saved tensors.
@@ -85,6 +86,7 @@ class CpuOffloadSavedTensorHook:
                                   "is not implemented in CpuOffloadHook class. Inherit "
                                   "this class and implement your custom hooks")
 
+
 class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
     """Context-manager that offloads/recovers tensors through an offload hander.
 
@@ -111,18 +113,22 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
         )
         return tensor
 
+
 class OffloadHandler:
     """A base class for CPU offload-handler."""
     def __init__(self) -> None:
         pass
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        """Tensor push."""
         raise NotImplementedError("`tensor_push is not implented in OffloadHandler class. "
                                   "Inherit this class and implement your custom tensor_push.")
 
-    def tensor_pop(self, state: Any, **kwargs):
+    def tensor_pop(self, tensor_tag: Any, **kwargs):
+        """Tensor pop."""
         raise NotImplementedError("`tensor_pop is not implented in OffloadHandler class. "
                                   "Inherit this class and implement your custom tensor_pop.")
+
 
 class GroupCommitFunction(torch.autograd.Function):
     """this is a dummy op with output identical to input.
@@ -142,7 +148,9 @@ class GroupCommitFunction(torch.autograd.Function):
         cpu_offload_handler.on_group_commit_backward()
         return grad_output, None
 
+
 group_prefetch_offload_commit = GroupCommitFunction.apply
+
 
 class SynchronizedGroupOffloadHandler(OffloadHandler):
     """Offload Handler that offloads/reloads in a synchronized way.
@@ -166,7 +174,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         # Data structures to label saved tensors and book-keep their cpu copies.
         # Currently, on push, create a new cpu tensor and copies; on pop, copies the tensor back to gpu and deletes the cpu tensor
         self.current_group, self.tensor_count_current_group = (0, 0) # will increment whenever `group_commit()` is invoked
-        self.tensor_tag_to_state = dict()
+        self.tensor_tag_to_state = {}
 
     def on_group_commit_forward(self):
         # finishing up with updating current group and tensor count
@@ -196,10 +204,11 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs):
+        """Tensor push."""
         # obtain a unique tensor tag
         tensor_tag = (self.current_group, self.tensor_count_current_group)
         self.tensor_count_current_group += 1
-        assert not (tensor_tag in self.tensor_tag_to_state)
+        assert tensor_tag not in self.tensor_tag_to_state
         if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(tensor):
             state = SynchronizedGroupOffloadHandler.offload(tensor)
             self.tensor_tag_to_state[tensor_tag] = state
@@ -208,6 +217,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         return tensor_tag
 
     def tensor_pop(self, tensor_tag, **kwargs):
+        """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
         state = self.tensor_tag_to_state.pop(tensor_tag)
         if isinstance(state, tuple):
@@ -215,6 +225,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         else:
             tensor = state
         return tensor
+
 
 class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
     """Compared to synchronize, using more memory because of the buffer. But achieves better performance
@@ -235,7 +246,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # prepare for tensor buffer
         self.tensor_id_to_tensor_buf_double_bufs = []
         for _ in range(2):
-            self.tensor_id_to_tensor_buf_double_bufs.append(dict())
+            self.tensor_id_to_tensor_buf_double_bufs.append({})
 
         # allocate streams and events for synchronization
         self.d2h_stream = torch.cuda.Stream()
@@ -248,6 +259,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.d2h_final_event = torch.cuda.Event()
 
     def get_tensor_buf_for_offloaded_tensor(self, tensor, tensor_tag):
+        """Get tensor buffer for offloaded tensor."""
         group_id, tensor_id = tensor_tag
         # obtain ping-pong buffer
         id_buf_map = self.tensor_id_to_tensor_buf_double_bufs[(group_id % 2)]
@@ -256,7 +268,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             allocate_new_buf = True
         else:
             tensor_buf = id_buf_map[tensor_id]
-            if not (tensor_buf.size() == tensor.size() and tensor_buf.dtype == tensor.dtype):
+            if not (tensor_buf.size() == tensor.size() and tensor_buf.dtype == tensor.dtype): # pylint: disable=simplifiable-if-statement
                 allocate_new_buf = True
             else:
                 allocate_new_buf = False # in this case, reuse the old buffer
@@ -270,11 +282,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                                 )
         return id_buf_map[tensor_id]
 
+
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
         # obtain a unique tensor tag
         tensor_tag = (self.current_group, self.tensor_count_current_group)
         self.tensor_count_current_group += 1
-        assert not (tensor_tag in self.tensor_tag_to_state)
+        assert tensor_tag not in self.tensor_tag_to_state
 
         if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(tensor):
             # first copy the tensor to tensorbuf, so that the original tensor will not be deleted
@@ -287,6 +300,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         return tensor_tag
 
     def tensor_pop(self, tensor_tag, **kwargs):
+        """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
         # the tensor should have been copied back in on_group_commit_backward() which invokes bulk_reload_group
@@ -294,6 +308,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         return tensor
 
     def bulk_offload_group(self, group_to_offload):
+        """Bulk offload group."""
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_tag
@@ -307,17 +322,18 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         self.tensor_tag_to_state[tensor_tag] = state
 
     def synchronize_on_group_commit_forward(self, current_group):
+        """Synchronize on group commit forward."""
         # the host should wait for the copying of previous group
         # to avoid overwriting buffer
         previous_group = current_group - 1
-        if (previous_group < self.num_offload_group):
+        if previous_group < self.num_offload_group:
             torch.cuda.synchronize()
             # TODO (guyueh): this part is originally designed to reduce the peak memory usage.
             # however, uncommenting this part will cause illegal access, have not figured out why.
 
             if previous_group + 2 >= self.num_offload_group:
                 # this buffer is no longer required
-                self.tensor_id_to_tensor_buf_double_bufs[(previous_group % 2)] = dict()
+                self.tensor_id_to_tensor_buf_double_bufs[(previous_group % 2)] = {}
 
         # the copying of this group should wait for the computation stream event
         if current_group < self.num_offload_group:
@@ -338,20 +354,18 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         super().on_group_commit_forward()
 
     def bulk_reload_group(self, group_to_reload):
+        """Bulk reload group."""
         assert group_to_reload < self.num_offload_group
         if group_to_reload == self.num_offload_group - 1:
             self.h2d_stream.wait_event(self.d2h_final_event)
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
-            for tensor_label in self.tensor_tag_to_state.keys():
+            for tensor_label, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
-                    state = self.tensor_tag_to_state[tensor_label]
                     if isinstance(state, tuple):
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(state)
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
-                    else:
-                        self.tensor_tag_to_state[tensor_label] = state
 
     def on_group_commit_backward(self):
         # first decrement the current group.
@@ -361,8 +375,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         # decide the range of group to prefetch
         should_prefetch_until_group = self.current_group - self.num_prefetch_group
-        if should_prefetch_until_group < 0:
-            should_prefetch_until_group = 0
+        should_prefetch_until_group = max(should_prefetch_until_group, 0)
 
         # do prefetch
         for group_num_to_prefetch in range(self.next_group_to_fetch, should_prefetch_until_group - 1, -1):
@@ -383,6 +396,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # wait for the current group
         if self.current_group < self.num_offload_group:
             torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_group])
+
 
 def get_cpu_offload_context(enabled: bool = False,
     num_layers: int = 1,
@@ -418,10 +432,10 @@ def get_cpu_offload_context(enabled: bool = False,
     def tensor_need_offloading_checker_activations(tensor):
        return not hasattr(tensor,"weight_offloading")
 
-    def tensor_need_offloading_checker_weights(tensor): #This includes the Gradient Accumulation Buffer
+    def tensor_need_offloading_checker_weights(tensor): # This includes the Gradient Accumulation Buffer
        return hasattr(tensor,"weight_offloading")
 
-    def tensor_need_offloading_checker_all(tensor):
+    def tensor_need_offloading_checker_all(tensor): # pylint: disable=unused-argument
        return True
 
     if offload_activations and offload_weights:
@@ -440,10 +454,8 @@ def get_cpu_offload_context(enabled: bool = False,
                           )
  
     def group_prefetch_offload_commit_async(tensor):
-       return group_prefetch_offload_commit(tensor,cpu_offload_handler)
+        return group_prefetch_offload_commit(tensor,cpu_offload_handler)
  
     if enabled:
-       return CpuOffloadHookWithOffloadHandler(offload_handler = cpu_offload_handler), group_prefetch_offload_commit_async
-    else:
-       return nullcontext(), group_prefetch_offload_commit_async
-
+        return CpuOffloadHookWithOffloadHandler(offload_handler=cpu_offload_handler), group_prefetch_offload_commit_async
+    return nullcontext(), group_prefetch_offload_commit_async
