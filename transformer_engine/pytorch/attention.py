@@ -1034,7 +1034,11 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: str = "sbhd") -> torch.Tensor:
+def apply_rotary_pos_emb(
+        t: torch.Tensor,
+        freqs: torch.Tensor,
+        tensor_format: str = "sbhd"
+    ) -> torch.Tensor:
     """
         Parameters
         ----------
@@ -1056,8 +1060,10 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: st
 
     # Only apply the rotary embeddings up to the sequence length of the running
     # input.
-    assert cur_seq_len <= max_seq_len, (f"Rotary Embeddings only supported "
-                                        "upto {max_seq_len} sequence length!")
+    if cur_seq_len > max_seq_len:
+        raise Exception(f"Rotary Embeddings only supported upto {max_seq_len} "
+                        "sequence length!")
+
     freqs = freqs[:cur_seq_len].to(t.dtype)
     if tensor_format == "bshd":
         freqs = freqs.transpose(0,1) # [seq, 1, 1, dim] -> [1, seq, 1, dim]
