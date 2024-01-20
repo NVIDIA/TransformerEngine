@@ -250,7 +250,7 @@ class FusedAttnRunner:
         self._setup_inputs()
 
         def grad_func(func, *args, **kwargs):
-            # Gradient is small, use a gradient multiplier to amplify the graident
+            # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.valid_len_q * self.num_heads_q
             if is_causal_mask(self.attn_mask_type):
                 gradient_multiplier /= 10
