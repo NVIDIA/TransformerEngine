@@ -7,6 +7,8 @@ from typing import Any
 from contextlib import nullcontext
 import torch
 
+from .float8_tensor import Float8Tensor
+
 __all__ = ['get_cpu_offload_context']
 
 CPUOffloadEnabled = False
@@ -198,11 +200,23 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
-        cpu_backup = torch.empty(src_tensor.size(),
-                                 dtype=src_tensor.dtype,
-                                 layout=src_tensor.layout,
-                                 device="cpu",
-                                 pin_memory=pin_memory)
+        if isinstance(src_tensor, Float8Tensor):
+            cpu_backup = Float8Tensor(
+                data=torch.empty(src_tensor.size(), dtype=torch.uint8,
+                                 layout=src_tensor.layout, device="cpu",
+                                 pin_memory=pin_memory),
+                fp8_meta=src_tensor._fp8_meta,
+                fp8_meta_forward=src_tensor._fp8_meta_forward,
+                fp8_meta_index=src_tensor._fp8_meta_index,
+                fp8_dtype=src_tensor._fp8_dtype,
+                fp8_scale_inv=src_tensor._scale_inv,
+                dtype=src_tensor.dtype)
+        else:
+            cpu_backup = torch.empty(src_tensor.size(),
+                                    dtype=src_tensor.dtype,
+                                    layout=src_tensor.layout,
+                                    device="cpu",
+                                    pin_memory=pin_memory)
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
         return state
@@ -290,11 +304,20 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         if allocate_new_buf:
             # supposed to only execute once
-            id_buf_map[tensor_id] = torch.empty(tensor.size(),
-                                                dtype=tensor.dtype,
-                                                layout=tensor.layout,
-                                                device=tensor.device,
-                                                )
+            if isinstance(tensor, Float8Tensor):
+                id_buf_map[tensor_id] = Float8Tensor(
+                    data=torch.empty(tensor.size(), dtype=torch.uint8,
+                                     layout=tensor.layout, device=tensor.device),
+                    fp8_meta=tensor._fp8_meta,
+                    fp8_meta_forward=tensor._fp8_meta_forward,
+                    fp8_meta_index=tensor._fp8_meta_index,
+                    fp8_dtype=tensor._fp8_dtype,
+                    fp8_scale_inv=tensor._scale_inv,
+                    dtype=tensor.dtype)
+            else:
+                id_buf_map[tensor_id] = torch.empty(
+                    tensor.size(), dtype=tensor.dtype,
+                    layout=tensor.layout, device=tensor.device)
         return id_buf_map[tensor_id]
 
 
