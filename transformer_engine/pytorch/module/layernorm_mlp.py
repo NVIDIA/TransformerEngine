@@ -1262,11 +1262,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         else:
             self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
-        self.reset_parameters(defer_init=(device == 'meta'))
-
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

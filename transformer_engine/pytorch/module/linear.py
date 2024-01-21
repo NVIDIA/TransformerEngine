@@ -777,11 +777,11 @@ class Linear(TransformerEngineBaseModule):
                 del self.weight_tensor
                 del self.bias_tensor
 
-        self.reset_parameters(defer_init=(device == 'meta'))
-
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
             self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
