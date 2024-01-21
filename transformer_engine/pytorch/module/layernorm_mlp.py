@@ -432,6 +432,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.weight_offloading = True
                 fc1_bias.weight_offloading = True
 
+                inputmat.activation_offloading = True
+                mu.activation_offloading = True
+                rsigma.activation_offloading = True
+                ln_out.activation_offloading = True
+                fc1_out.activation_offloading = True
+                gelu_out.activation_offloading = True
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,

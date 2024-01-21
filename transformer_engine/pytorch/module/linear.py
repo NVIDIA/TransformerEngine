@@ -266,6 +266,8 @@ class _Linear(torch.autograd.Function):
                         saved_inputmat = inputmat
                     else:
                         saved_inputmat_t = inputmat_t
+                        if cpu_offloading:
+                            saved_inputmat_t.activation_offloading = True
                 else:
                     saved_inputmat = inputmat_no_fp8
 
@@ -275,6 +277,8 @@ class _Linear(torch.autograd.Function):
                     if fp8:
                         weight_t_fp8.weight_offloading = True
                     weight.weight_offloading = True
+
+                    saved_inputmat.activation_offloading = True
 
             ctx.save_for_backward(
                 saved_inputmat,

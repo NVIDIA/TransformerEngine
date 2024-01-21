@@ -309,7 +309,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # first copy the tensor to tensorbuf, so that the original tensor will not be deleted
             tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
             tensor_buf.copy_(tensor)
-            # Here we just save it, and at commit, bulk_offload_group will handle it
+            if hasattr(tensor,"weight_offloading"):
+                tensor_buf.weight_offloading = True
+            if hasattr(tensor,"activation_offloading"):
+                tensor_buf.activation_offloading = True
+           # Here we just save it, and at commit, bulk_offload_group will handle it
             self.tensor_tag_to_state[tensor_tag] = tensor_buf
         else:
             self.tensor_tag_to_state[tensor_tag] = tensor
@@ -454,20 +458,23 @@ def get_cpu_offload_context(
     """
 
     def tensor_need_offloading_checker_activations(tensor):
-        return not hasattr(tensor,"weight_offloading")
+        return hasattr(tensor,"activation_offloading")
 
     # This includes the Gradient Accumulation Buffer
     def tensor_need_offloading_checker_weights(tensor):
         return hasattr(tensor, "weight_offloading")
 
     def tensor_need_offloading_checker_all(tensor): # pylint: disable=unused-argument
-        return True
+        return (hasattr(tensor,"activation_offloading") or hasattr(tensor, "weight_offloading"))
 
     if offload_activations and offload_weights:
+        print("SELR 1")
         tensor_need_offloading_checker = tensor_need_offloading_checker_all
     elif offload_activations:
+        print("SELR 2")
         tensor_need_offloading_checker = tensor_need_offloading_checker_activations
     elif offload_weights:
+        print("SELR 3")
         tensor_need_offloading_checker = tensor_need_offloading_checker_weights
     else:
         raise ValueError(
