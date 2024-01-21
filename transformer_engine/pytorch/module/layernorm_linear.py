@@ -248,7 +248,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.weight_offloading = True
 
                 inputmat.activation_offloading = True
-                mu.activation_offloading = True
+                if normalization == "LayerNorm":
+                    mu.activation_offloading = True
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
