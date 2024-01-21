@@ -7,9 +7,7 @@ import os
 import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
-
 import torch
-from torch.nn.parameter import Parameter
 from torch.nn import init
 
 from .. import cpp_extensions as tex
@@ -27,6 +25,7 @@ from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
     get_default_init_method,
+    init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -35,13 +34,12 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-from ._common import _apply_normalization
+from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 
 
@@ -612,13 +610,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
-                      if a tuple of strings or a dict of strings to integers is provided,
-                      the weight and bias parameters of the module are exposed as `N` separate
-                      `torch.nn.parameter.Parameter`s each, split along the first dimension,
-                      where `N` is the length of the argument and the strings contained are the
-                      names of the split parameters. In the case of a tuple, each parameter
-                      has the same shape. In the case of a dict, the values give the
-                      `out_features` for each projection.
+                      Configuration for splitting the weight and bias tensors along dim 0 into
+                      multiple PyTorch parameters. If a list or tuple of strings is provided,
+                      they are used to make the names of equally-sized parameters. If a dict
+                      (preferably an OrderedDict) is provided, the keys are used as names and
+                      values as split sizes along dim 0. The resulting parameters will have
+                      names that end in `_weight` or `_bias`, so trailing underscores are
+                      stripped from any provided names.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -705,7 +703,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.ub_bulk_wgrad = ub_bulk_wgrad
@@ -752,42 +749,24 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         self.eps = eps
-        self.layer_norm_weight = Parameter(
+        layer_norm_weight = torch.nn.Parameter(
             torch.empty(in_features, device=device, dtype=params_dtype)
         )
-        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+        self.register_parameter('layer_norm_weight', layer_norm_weight,
+                                init_fn=init_method_constant(float(not self.zero_centered_gamma)))
+        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         if self.normalization != "RMSNorm":
-            self.layer_norm_bias = Parameter(
+            layer_norm_bias = torch.nn.Parameter(
                 torch.empty(in_features, device=device, dtype=params_dtype)
             )
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            self.register_parameter('layer_norm_bias', layer_norm_bias)
+            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
-        self.reset_layer_norm_parameters()
 
-        temp_weight = torch.empty(
+        self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
             device=device, dtype=params_dtype)
-
-        initialize_affine_weight_gpu(
-            temp_weight,
-            init_method,
-            get_rng_state_tracker,
-            partition_dim=1 if self.parallel_mode == "row" else 0,
-            stride=1,
-        )
-
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
-
-            self.weight_tensor = Float8Tensor.to_float8(
-                temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-        else:
-            self.weight_tensor = temp_weight
 
         if self.use_bias:
             self.bias_tensor = torch.empty(
@@ -797,74 +776,111 @@ class LayerNormLinear(TransformerEngineBaseModule):
         else:
             self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
 
-        with torch.no_grad():
-            self.bias_tensor.zero_()
-
-        if parameters_split is None:
-            parameters_split = {"": self.out_features}
-        elif isinstance(parameters_split, tuple):
-            assert (
-                self.out_features % len(parameters_split) == 0
-            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
-            split_size = self.out_features // len(parameters_split)
-            parameters_split = {key: split_size for key in parameters_split}
-        elif isinstance(parameters_split, dict):
-            overall_split_size = sum(parameters_split.values())
-            assert(
-                self.out_features == overall_split_size
-            ), f"Overall sum of parameters_split (={overall_split_size}) does not match "\
-               f"to out features (={self.out_features})"
-        else:
-            assert False, "Type of 'parameters_split' is not None, tuple or dict"
-        self.updated_parameters_split = parameters_split
-
+        # Configure parameter splits
         self.weight_names = []
         self.bias_names = []
+        self.parameter_split_sizes = []
+        if parameters_split is None:
+            # Split into a single parameter by default
+            self.weight_names = ["weight"]
+            self.bias_names = ["bias"]
+            self.parameter_split_sizes = [out_features]
+        elif not parameters_split:
+            raise ValueError("Cannot split weight buffer into 0 parameters")
+        elif isinstance(parameters_split, dict):
+            # Split parameters with provided sizes
+            for name, split_size in parameters_split.items():
+                self.weight_names.append(f"{name.rstrip('_')}_weight")
+                self.bias_names.append(f"{name.rstrip('_')}_bias")
+                self.parameter_split_sizes.append(split_size)
+        elif all(isinstance(name, str) for name in parameters_split):
+            # Split parameters evenly
+            split_size = out_features // len(parameters_split)
+            for name in parameters_split:
+                self.weight_names.append(f"{name.rstrip('_')}_weight")
+                self.bias_names.append(f"{name.rstrip('_')}_bias")
+                self.parameter_split_sizes.append(split_size)
+        else:
+            raise TypeError("Invalid configuration for parameters split")
 
-        slice_begin = 0
-        for pname, slice_size in parameters_split.items():
-            wname = pname + "weight"
-            bname = pname + "bias"
+        # Make sure parameter splits are valid
+        if sum(self.parameter_split_sizes) != out_features:
+            raise ValueError(
+                f"Trying to split weight buffer ({out_features=}) "
+                f"with split sizes {self.parameter_split_sizes}"
+            )
 
-            slice_end = slice_begin + slice_size
-            # NOTE(future): Figure out a way to support slicing when weights
-            # are of `Float8Tensor` class
-            if self.primary_weights_in_fp8:
-                assert len(parameters_split) == 1, ("Slicing operation is not "
-                                                    "supported in Float8Tensor "
-                                                    "class!")
-                self.register_parameter(wname, Parameter(self.weight_tensor))
-            else:
-                self.register_parameter(
-                    wname, Parameter(self.weight_tensor[slice_begin:slice_end])
+        # Adjust parameter splits for tensor-parallel distribution
+        if self.parallel_mode == "column":
+            for i, size in enumerate(self.parameter_split_sizes):
+                if size % self.tp_size != 0:
+                    raise RuntimeError(
+                        f"Attempting to distribute a parameter with out_features={size} "
+                        f"between {self.tp_size} tensor-parallel processes"
+                    )
+                self.parameter_split_sizes[i] = size // self.tp_size
+
+        # Construct parameters from weight and bias buffers
+        offset = 0
+        for i, split_size in enumerate(self.parameter_split_sizes):
+            split_start = offset
+            offset += split_size
+            split_end = offset
+
+            # Check if parameters are subviews of buffers
+            is_subview = (split_start, split_end) != (0, self.out_features)
+            if is_subview and self.primary_weights_in_fp8:
+                raise RuntimeError(
+                    "Splitting Float8Tensor into multiple params "
+                    "is not supported"
                 )
 
+            # Construct weight parameter
+            weight = self.weight_tensor
+            if is_subview:
+                weight = weight[split_start:split_end]
+            weight = torch.nn.Parameter(weight)
+            self.register_parameter(self.weight_names[i], weight,
+                                    init_fn=init_method,
+                                    get_rng_state_tracker=get_rng_state_tracker,
+                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
+
+            # Construct bias parameter if needed
+            if self.use_bias:
+                bias = self.bias_tensor
+                if is_subview:
+                    bias = bias[split_start:split_end]
+                bias = torch.nn.Parameter(bias)
+                self.register_parameter(self.bias_names[i], bias)
+                if parallel_mode == "row":
+                    bias.sequence_parallel = sequence_parallel
+            else:
+                bias = torch.Tensor().to(dtype=params_dtype, device=device)
+                setattr(self, self.bias_names[i], bias)
+
+            # Configure tensor parallelism
             set_tensor_model_parallel_attributes(
-                tensor=getattr(self, wname),
+                tensor=weight,
                 is_parallel=True,
                 dim=1 if parallel_mode == "row" else 0,
                 stride=1,
             )
-
-            if self.use_bias:
-                self.register_parameter(
-                    bname, Parameter(self.bias_tensor[slice_begin:slice_end])
-                )
-                if parallel_mode == "row":
-                    setattr(getattr(self, bname), "sequence_parallel", sequence_parallel)
-            else:
-                setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
-
             if parallel_mode == "column":
-                set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
+                set_tensor_model_parallel_attributes(bias, True, 0, 1)
 
-            self.weight_names.append(wname)
-            self.bias_names.append(bname)
+            # Concatenated tensors are not needed if not splitting
+            # into multiple parameters
+            if not is_subview:
+                del self.weight_tensor
+                del self.bias_tensor
 
-            slice_begin = slice_end
+        if self.primary_weights_in_fp8:
+            self.init_fp8_metadata()
+            self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
-
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -880,14 +896,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-        # Clean up weight and bias buffers
-        if self.parameters_split is None:
-            del self.weight_tensor
-            if self.use_bias:
-                del self.bias_tensor
-
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNormLinear.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.layer_norm_weight)
         else:
@@ -950,18 +966,26 @@ class LayerNormLinear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
-            bias_tensor = (
-                self.bias if self.parameters_split is None
-                else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names,
-                    self.updated_parameters_split)
-            )
-            weight_tensor = (
-                self.weight if self.parameters_split is None
-                else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names,
-                    self.updated_parameters_split)
-            )
+
+            # Get concatenated weight and bias tensors
+            if len(self.parameter_split_sizes) == 1:
+                weight_tensor = getattr(self, self.weight_names[0])
+                bias_tensor = getattr(self, self.bias_names[0])
+            elif torch.is_grad_enabled():
+                weight_tensor = _noop_cat(
+                    [getattr(self, name) for name in self.weight_names],
+                    self.weight_tensor,
+                )
+                if self.use_bias:
+                    bias_tensor = _noop_cat(
+                        [getattr(self, name) for name in self.bias_names],
+                        self.bias_tensor,
+                    )
+                else:
+                    bias_tensor = getattr(self, self.bias_names[0])  # Unused
+            else:
+                weight_tensor = self.weight_tensor
+                bias_tensor = self.bias_tensor
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(

@@ -114,6 +114,57 @@ def allreduce(
     return output, wait_handle
 
 
+def allgather(
+    input_: paddle.Tensor,
+    tp_group: Optional[dist_group_type] = None,
+    sync_op: bool = True,
+) -> Tuple[paddle.Tensor, Any]:
+    """All-gather the input tensor across model parallel group."""
+
+    # Bypass the function if we are using only 1 GPU.
+    if tp_group is None or tp_group.nranks == 1:
+        return input_, None
+
+    parallelism = tp_group.nranks
+    output_shape = input_.shape
+    output_shape[0] = output_shape[0] * parallelism
+    output = paddle.empty(shape=output_shape, dtype=input_.dtype)
+    wait_handle = tp_group.process_group.all_gather_into_tensor(output, input_, sync_op)
+    if sync_op:
+        wait_handle.wait()
+        return output, None
+    return output, wait_handle
+
+
+def reduce_scatter(
+    input_: paddle.Tensor,
+    tp_group: Optional[dist_group_type] = None,
+    sync_op: bool = True,
+) -> [paddle.Tensor, Any]:
+    """Reduce-scatter the input tensor across model parallel group."""
+
+    # Bypass the function if we are using only 1 GPU.
+    if tp_group is None or tp_group.nranks == 1:
+        return input_, None
+
+    parallelism = tp_group.nranks
+    output_shape = input_.shape
+    assert (
+        input_.shape[0] % parallelism == 0
+    ), f"Input sequence length {input_.shape[0]} can't be divided " \
+        f"exactly by sequence parallelism {parallelism}"
+    output_shape[0] = output_shape[0] // parallelism
+    output = paddle.empty(shape=output_shape, dtype=input_.dtype)
+    wait_handle = paddle.distributed.stream.reduce_scatter(output,
+                                                           input_,
+                                                           op=paddle.distributed.ReduceOp.SUM,
+                                                           group=tp_group,
+                                                           sync_op=sync_op)
+    if sync_op:
+        return output, None
+    return output, wait_handle
+
+
 def identity(
     input_: paddle.Tensor,
     tp_group: Optional[dist_group_type] = None,
@@ -125,3 +176,11 @@ def identity(
     output = mp_ops._c_identity(input_, group=tp_group)
 
     return output
+
+
+def mark_as_sequence_parallel_parameter(parameter: paddle.Tensor):
+    """
+    Set sequence_parallel attribute to input tensor. It is used for registering allreduce
+    hooks in PaddleNLP sequence parallel training.
+    """
+    setattr(parameter, "sequence_parallel", True)
