@@ -468,13 +468,10 @@ def get_cpu_offload_context(
         return (hasattr(tensor,"activation_offloading") or hasattr(tensor, "weight_offloading"))
 
     if offload_activations and offload_weights:
-        print("SELR 1")
         tensor_need_offloading_checker = tensor_need_offloading_checker_all
     elif offload_activations:
-        print("SELR 2")
         tensor_need_offloading_checker = tensor_need_offloading_checker_activations
     elif offload_weights:
-        print("SELR 3")
         tensor_need_offloading_checker = tensor_need_offloading_checker_weights
     else:
         raise ValueError(
