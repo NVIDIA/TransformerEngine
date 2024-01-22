@@ -99,16 +99,20 @@ def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
 _layernorm.defvjp(_layernorm_fwd_rule, _layernorm_bwd_rule)
 
 
-def layernorm_fp8_dot(x: jnp.ndarray,
-                      kernel: jnp.ndarray,
-                      gamma: jnp.ndarray,
-                      beta: jnp.ndarray,
-                      fp8_meta_pkg: FP8MetaPackage,
-                      layernorm_type: str,
-                      zero_centered_gamma: bool = False,
-                      epsilon: float = 1e-6,
-                      layernorm_input_axes: Tuple[str, ...] = None,
-                      dot_input_axes: Tuple[str, ...] = None) -> jnp.ndarray:
+def layernorm_fp8_dot(
+    x: jnp.ndarray,
+    kernel: jnp.ndarray,
+    gamma: jnp.ndarray,
+    beta: jnp.ndarray,
+    fp8_meta_pkg: FP8MetaPackage,
+    layernorm_type: str,
+    zero_centered_gamma: bool = False,
+    epsilon: float = 1e-6,
+    layernorm_input_axes: Tuple[
+        str, ...] = None,    # The logic axes of sharding constraint to the layernorm input.
+    dot_input_axes: Tuple[str,
+                          ...] = None    # The logic axes of sharding constraint to the dot input.
+) -> jnp.ndarray:
     """
     Layernorm + FP8 GEMM
     """

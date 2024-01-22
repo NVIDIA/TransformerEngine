@@ -209,7 +209,7 @@ def core_attention(query: Array,
     return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
-def rope(x: Array, windows: Tuple[int, int], transpose_batch_sequence: bool):
+def rotary_pos_emb(x: Array, windows: Tuple[int, int], transpose_batch_sequence: bool):
     """
     Rotary Positional Embedding
     x should be in shape of
@@ -308,6 +308,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
+    enable_sequence_parallel: bool, default = False
+        Whether to enable sequence parallelism to operations except dot.
 
     Optimization parameters
     -----------------------
@@ -613,8 +615,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 else:
                     key, value = jnp.split(kv_proj, [1], axis=-2)
 
-            query = rope(query, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
-            key = rope(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
+            query = rotary_pos_emb(query, self.rotary_pos_emb_windows,
+                                   self.transpose_batch_sequence)
+            key = rotary_pos_emb(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
 
             if use_fused_attn:
                 if is_self_attn:
@@ -992,6 +995,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
+    enable_sequence_parallel: bool, default = False
+        Whether to enable sequence parallelism to operations except dot.
 
     Optimization parameters
     -----------------------

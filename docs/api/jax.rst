@@ -6,6 +6,17 @@
 Jax
 =======
 
+Pre-defined Variable of Logical Axes
+------------------------------------
+* BATCH_AXES: The logical axis of batch dimension. It is usually sharded along DP + FSDP on Mesh.
+* SEQLEN_AXES: The logical axis of sequence length dimension. It is usually not sharded.
+* SEQLEN_TP_AXES: The logical axis of sequence length dimension. It is usually not sharded along TP on Mesh.
+* HEAD_AXES: The logical axis of head dimension of MHA. It is usually not sharded along TP on Mesh.
+* HIDDEN_AXES: The logical axis of hidden dimension. It is usually not sharded.
+* HIDDEN_TP_AXES: The logical axis of hidden dimension. It is usually not sharded along TP on Mesh.
+* JOINED_AXES: The logical axis of non-defined dimension. It is usually not sharded.
+
+
 .. autoapiclass:: transformer_engine.jax.MajorShardingType
 .. autoapiclass:: transformer_engine.jax.ShardingType
 .. autoapiclass:: transformer_engine.jax.flax.TransformerLayerType

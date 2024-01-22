@@ -504,6 +504,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         If set False, return None as the second tensor in outputs.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    layernorm_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of layernorm, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------
@@ -739,6 +747,18 @@ class LayerNormMLP(TransformerEngineBase):
         Dimensions that will share the same dropout mask for hidden
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    layernorm_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of layernorm, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_1_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of 1st dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_2_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of 2nd dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------

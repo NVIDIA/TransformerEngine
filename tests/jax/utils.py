@@ -340,7 +340,7 @@ class MlpBlock(nn.Module):
         return output
 
 
-def apply_rope(
+def apply_rotary_pos_emb(
     inputs: jnp.ndarray,
     position: jnp.ndarray,
     min_timescale: int = 1,
@@ -512,8 +512,8 @@ class MultiHeadAttention(nn.Module):
 
             position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
 
-            query = apply_rope(query, position)
-            key = apply_rope(key, position)
+            query = apply_rotary_pos_emb(query, position)
+            key = apply_rotary_pos_emb(key, position)
 
         query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
         key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
