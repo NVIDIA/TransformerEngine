@@ -37,7 +37,7 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsd
 #    [GPU-0] Peak memory use = 3000MiB
 
 # FSDP with deferred initialization:
-#    Modules initialized with empty paramaters via `device='meta'` option. Zero load on device
+#    Modules initialized with empty parameters via `device='meta'` option. Zero load on device
 #    memory until torch.distributed.fsdp.FullyShardedDataParallel mode triggers a reset on
 #    on already sharded model parameters.
 $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py --defer-init

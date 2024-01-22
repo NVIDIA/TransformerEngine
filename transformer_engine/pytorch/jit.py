@@ -12,6 +12,11 @@ jit_fuser = torch.jit.script
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
 
+# See: https://github.com/NVIDIA/TransformerEngine/issues/597
+dropout_fuser = torch.jit.script
+if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+    dropout_fuser = torch.compile
+
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
 no_torch_dynamo = lambda recursive=True: lambda func: func
@@ -134,7 +139,7 @@ def get_bias_dropout_add(training: bool) -> Callable:
     return _bias_dropout_add
 
 
-@jit_fuser
+@dropout_fuser
 def bias_dropout_add_fused_train_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
@@ -151,7 +156,7 @@ def bias_dropout_add_fused_train(
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
-@jit_fuser
+@dropout_fuser
 def bias_dropout_add_fused_inference_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
