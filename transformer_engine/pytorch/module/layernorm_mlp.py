@@ -1180,7 +1180,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             layer_norm_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
-            self.register_parameter('layer_norm_bias', layer_norm_bias)
+            self.register_parameter('layer_norm_bias', layer_norm_bias,
+                                    init_fn=init_method_constant(0.0))
             setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
@@ -1207,7 +1208,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_bias = Parameter(
                 torch.empty(fc1_output_features, device=device, dtype=params_dtype)
             )
-            self.register_parameter('fc1_bias', fc1_bias)
+            self.register_parameter('fc1_bias', fc1_bias,
+                                    init_fn=init_method_constant(0.0))
             set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)  # pylint: disable=access-member-before-definition
         else:
             self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
@@ -1227,7 +1229,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
-            self.register_parameter('fc2_bias', fc2_bias)
+            self.register_parameter('fc2_bias', fc2_bias,
+                                    init_fn=init_method_constant(0.0))
             # RPL
             if self.set_parallel_mode:
                 setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)  # pylint: disable=access-member-before-definition
