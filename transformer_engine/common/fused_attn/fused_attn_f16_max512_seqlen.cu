@@ -642,7 +642,6 @@ void fused_attn_max_512_fwd_impl(
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
     cudnnDataType_t tensorType, cudaStream_t stream, cudnnHandle_t handle) {
     try {
-
         FADescriptor descriptor{b,           h,
                                 s_q,         s_kv,
                                 d,           scaling_factor,
@@ -848,7 +847,6 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                  size_t *workspace_size, cudnnDataType_t tensorType,
                                  cudaStream_t stream, cudnnHandle_t handle) {
     try {
-
         FADescriptor descriptor{
             b,      h,         s_q,       s_kv,      d, scaling_factor, true, dropout_probability,
             layout, bias_type, mask_type, tensorType, false};

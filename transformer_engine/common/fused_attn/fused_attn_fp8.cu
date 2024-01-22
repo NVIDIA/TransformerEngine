@@ -1007,7 +1007,6 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
             cudaStream_t stream,
             cudnnHandle_t handle_) {
   try {
-
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, isTraining, dropoutProbability, layout,
@@ -1327,7 +1326,6 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
             cudaStream_t stream,
             cudnnHandle_t handle_) {
   try {
-
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, false, dropoutProbability, layout,

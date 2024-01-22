@@ -59,7 +59,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 cudnn_frontend::DataType_t tensorType,
                 void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
-
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
     bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
@@ -303,7 +302,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
                 cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
-
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
     bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
