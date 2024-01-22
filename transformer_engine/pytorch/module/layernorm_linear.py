@@ -781,7 +781,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             layer_norm_bias = torch.nn.Parameter(
                 torch.empty(in_features, device=device, dtype=params_dtype)
             )
-            self.register_parameter('layer_norm_bias', layer_norm_bias)
+            self.register_parameter('layer_norm_bias', layer_norm_bias,
+                                    init_fn=init_method_constant(0.0))
             setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
@@ -873,7 +874,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if is_subview:
                     bias = bias[split_start:split_end]
                 bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias)
+                self.register_parameter(self.bias_names[i], bias,
+                                        init_fn=init_method_constant(0.0))
                 if parallel_mode == "row":
                     bias.sequence_parallel = sequence_parallel
             else:
