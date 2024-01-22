@@ -26,6 +26,7 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
+    init_method_constant,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -764,7 +765,8 @@ class Linear(TransformerEngineBaseModule):
                 if is_subview:
                     bias = bias[split_start:split_end]
                 bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias)
+                self.register_parameter(self.bias_names[i], bias,
+                                        init_fn=init_method_constant(0.0))
                 if parallel_mode == "row":
                     bias.sequence_parallel = sequence_parallel
             else:
