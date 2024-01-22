@@ -93,6 +93,7 @@ _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_NUM_HEADS: 8,
+    _KEY_OF_DROPOUT_RATE: 0,
 }
 
 ATTRS = [{
@@ -221,7 +222,8 @@ class TestEncoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -282,9 +284,6 @@ class TestEncoderLayer:
         test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
                                        apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
-
         def reorganize_test_wgrad(test_wgrad, attrs):
             num_heads = attrs.get(_KEY_OF_NUM_HEADS)
             num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
@@ -328,10 +327,14 @@ class TestEncoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_dict(ref_grads[1],
-                     reorganize_test_wgrad(test_grads[1], attrs),
-                     rtol=rtol,
-                     atol=atol)    # wgrad
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
+
+            compare_dict(ref_grads[1],
+                         reorganize_test_wgrad(test_grads[1], attrs),
+                         rtol=rtol,
+                         atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 
@@ -430,7 +433,8 @@ class TestDecoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -492,9 +496,6 @@ class TestDecoderLayer:
         test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
                                        apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
-
         def reorganize_test_wgrad(test_wgrad, attrs):
             num_heads = attrs.get(_KEY_OF_NUM_HEADS)
             num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
@@ -547,10 +548,13 @@ class TestDecoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_dict(ref_grads[1],
-                     reorganize_test_wgrad(test_grads[1], attrs),
-                     rtol=rtol,
-                     atol=atol)    # wgrad
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
+            compare_dict(ref_grads[1],
+                         reorganize_test_wgrad(test_grads[1], attrs),
+                         rtol=rtol,
+                         atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 

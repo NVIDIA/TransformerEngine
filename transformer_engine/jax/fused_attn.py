@@ -37,6 +37,7 @@ class QKVLayout(Enum):
     """QKV layout"""
     BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
     BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
+    BSHD_BSHD_BSHD = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
 
 
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,

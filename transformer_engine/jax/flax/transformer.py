@@ -109,95 +109,316 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     return tuple(extended_rules)
 
 
-def core_attention(query: Array,
-                   key: Array,
-                   value: Array,
-                   scale_factor: float,
-                   transpose_batch_sequence: bool,
-                   softmax_type: SoftmaxType = SoftmaxType.SCALED,
-                   mask: Optional[Array] = None,
-                   bias: Optional[Array] = None,
-                   dropout_rng: Optional[PRNGKey] = None,
-                   dropout_rate: float = 0.,
-                   deterministic: bool = False,
-                   dtype: DType = jnp.float32,
-                   float32_logits: bool = False):
-    """Core attention"""
-    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
-    batch_dim = 1 if transpose_batch_sequence else 0
-    assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
-        'q, k, v batch dims must match.')
-    sequence_dim = 0 if transpose_batch_sequence else 1
-    assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert key.shape[-2] == value.shape[-2], 'k, v num_attention_heads must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
+class UnfusedDotProductAttention(nn.Module):
+    # TODO: unify attention bias/mask type
+    attn_bias_type: AttnBiasType = 'no_bias'
+    attn_mask_type: AttnMaskType = 'causal'
+    attention_dropout: float = 0.
+    dtype: DType = jnp.float32
+    float32_logits: bool = False
+    transpose_batch_sequence: bool = True
 
-    if float32_logits:
-        query = query.astype(jnp.float32)
-        key = key.astype(jnp.float32)
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 mask: Optional[Array] = None,
+                 bias: Optional[Array] = None,
+                 *,
+                 scale_factor: float,
+                 dropout_rng: PRNGKey | None = None,
+                 deterministic: bool = False) -> Array:
+        assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
+        batch_dim = 1 if self.transpose_batch_sequence else 0
+        assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
+            'q, k, v batch dims must match.')
+        sequence_dim = 0 if self.transpose_batch_sequence else 1
+        assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
+        assert key.shape[-2] == value.shape[-2], 'k, v num_attention_heads must match.'
+        assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
-    h_q, h_kv = query.shape[-2], key.shape[-2]
-    # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
-    # Therefore, we have to maintain two code paths.
-    is_gqa = (h_q != h_kv)
+        if self.float32_logits:
+            query = query.astype(jnp.float32)
+            key = key.astype(jnp.float32)
+        h_q, h_kv = query.shape[-2], key.shape[-2]
+        # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
+        # Therefore, we have to maintain two code paths.
+        is_gqa = (h_q != h_kv)
 
-    if is_gqa:
-        assert (h_q % h_kv == 0) and (h_q >= h_kv)
-        group_size = h_q // h_kv
-        grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
-
-    if transpose_batch_sequence:
         if is_gqa:
+            assert (h_q % h_kv == 0) and (h_q >= h_kv)
+            group_size = h_q // h_kv
+            grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
+
+        if transpose_batch_sequence:
+            if is_gqa:
+                attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
+            else:
+                attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
+        else:
+            if is_gqa:
+                attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
+            else:
+                attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+
+        if self.transpose_batch_sequence:
             attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
         else:
-            attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
-    else:
-        if is_gqa:
             attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
-        else:
-            attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
-    attn_weights = checkpoint_name(attn_weights, 'logits')
+        if is_gqa:
+            b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
+            attn_weights_without_groups_shape = (b, h * g, q, k)
+            attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
+        attn_weights = checkpoint_name(attn_weights, 'logits')
 
-    if is_gqa:
         b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
         attn_weights_without_groups_shape = (b, h * g, q, k)
         attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
-    attn_weights = with_sharding_constraint_by_logical_axes(
-        attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
+        attn_weights = with_sharding_constraint_by_logical_axes(
+            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
 
-    # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
-    # In this case, the scale can not fused into the Softmax module.
-    if bias is not None:
-        attn_weights = attn_weights * scale_factor
-        fused_scale_factor = 1.
-    else:
-        # If no bias, the scale can be fused into Softmax module
-        fused_scale_factor = scale_factor
+        # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
+        # In this case, the scale can not fused into the Softmax module.
+        if bias is not None:
+            attn_weights = attn_weights * scale_factor
+            fused_scale_factor = 1.
+        else:
+            # If no bias, the scale can be fused into Softmax module
+            fused_scale_factor = scale_factor
 
-    attn_weights = Softmax(softmax_type=softmax_type,
-                           scale_factor=fused_scale_factor)(attn_weights, mask, bias).astype(dtype)
+        if is_gqa:
+            attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
-    if is_gqa:
+        def convert_to_softmax_type(attn_mask_type, mask):
+            """
+            Convert the attn_mask_type to SoftmaxType
+            """
+            if attn_mask_type == 'causal':
+                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+            if attn_mask_type == 'padding':
+                if mask is not None:
+                    return SoftmaxType.SCALED_MASKED
+                return SoftmaxType.SCALED
+            raise ValueError(f"Unsupported {attn_mask_type=}, "
+                             "supported attn_mask_type = {'causal', 'padding'}")
+
+        # TODO: check softmax padding supportness
+        softmax_type = convert_to_softmax_type(self.attn_mask_type, mask)
+
+        attn_weights = Softmax(softmax_type=softmax_type,
+                               scale_factor=fused_scale_factor)(attn_weights, mask,
+                                                                bias).astype(self.dtype)
+
         attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
-    if not deterministic and dropout_rate > 0.:
-        keep_prob = 1.0 - dropout_rate
-        dropout_shape = list(attn_weights.shape)
-        # TODO(rewang): add attention dropout broadcast dimension arguments for users
-        keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-        multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
-        attn_weights = attn_weights * multiplier
+        if not deterministic and self.attention_dropout > 0.:
+            keep_prob = 1.0 - self.attention_dropout
+            dropout_shape = list(attn_weights.shape)
+            # TODO(rewang): add attention dropout broadcast dimension arguments for users
+            keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
+            multiplier = (keep.astype(attn_weights.dtype) /
+                          jnp.asarray(keep_prob, dtype=self.dtype))
+            attn_weights = attn_weights * multiplier
 
-    if transpose_batch_sequence:
+        if transpose_batch_sequence:
+            if is_gqa:
+                return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
+            return jnp.einsum('bhqk,kbhd->qbhd', attn_weights, value)
+
         if is_gqa:
-            return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
-        return jnp.einsum('bhqk,kbhd->qbhd', attn_weights, value)
+            return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
+        return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
-    if is_gqa:
-        return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+
+class FusedDotProductAttention(nn.Module):
+    attn_bias_type: AttnBiasType = AttnBiasType.NO_BIAS
+    attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+    attention_dropout: float = 0.
+    dtype: DType = jnp.float32
+    transpose_batch_sequence: bool = True
+    qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
+
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 mask: Optional[Array] = None,
+                 bias: Optional[Array] = None,
+                 *,
+                 scale_factor: float,
+                 dropout_rng: PRNGKey | None = None,
+                 deterministic: bool = False) -> Array:
+
+        seed = None
+        if dropout_rng is not None:
+            seed = jax.random.split(dropout_rng, num_of_devices())
+
+        if self.qkv_layout == QKVLayout.BS3HD:
+            """qkvpacked format, treat
+            query: qkvpacked tensor, shape = [..., 3, h, d]
+            key: ignore
+            value: ignore
+            """
+            qkv_packed = query
+            x = self_fused_attn(qkv_packed,
+                                bias,
+                                mask,
+                                seed,
+                                attn_bias_type=self.attn_bias_type,
+                                attn_mask_type=self.attn_mask_type,
+                                scaling_factor=scale_factor,
+                                dropout_probability=self.attention_dropout,
+                                is_training=not deterministic)
+        elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
+            """kvpacked format, treat
+            query: query tensor, shape = [..., h, d]
+            key: kvpacked tensor, shape = [..., 2, h, d]
+            value: ignore
+            """
+            kv_packed = key
+            x = cross_fused_attn(query,
+                                 kv_packed,
+                                 bias,
+                                 mask,
+                                 seed,
+                                 attn_bias_type=self.attn_bias_type,
+                                 attn_mask_type=self.attn_mask_type,
+                                 scaling_factor=scale_factor,
+                                 dropout_probability=self.attention_dropout,
+                                 is_training=not deterministic)
+        elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+            raise NotImplementedError
+        else:
+            raise ValueError("Unsupported qkv_layout.")
+
+        return x
+
+
+class DotProductAttention(nn.Module):
+    attn_bias_type: AttnBiasType = 'no_bias'
+    attn_mask_type: AttnMaskType = 'causal'
+    attention_dropout: float = 0.
+    dtype: DType = jnp.float32
+    dropout_rng_name: str = 'dropout'
+    float32_logits: bool = False
+    transpose_batch_sequence: bool = True
+
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 mask: Optional[Array] = None,
+                 bias: Optional[Array] = None,
+                 *,
+                 scale_factor: float,
+                 deterministic: bool = False) -> Array:
+
+        # is_self_attn = (inputs_q is inputs_kv)
+        # is_gqa = (self.num_attention_heads != self.num_gqa_groups)
+        # is_qkvpack = (is_self_attn and not is_gqa)
+        # qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
+
+        def canonicalize_attn_mask_type(attn_mask_type):
+            """
+            Convert the string to AttnMaskType
+            """
+            if attn_mask_type in ['causal', 'padding_causal']:
+                return AttnMaskType.PADDING_CAUSAL_MASK
+            if attn_mask_type in ['no_mask', 'padding']:
+                return AttnMaskType.PADDING_MASK
+            raise ValueError(f"Unsupported {attn_mask_type=}, "
+                             "supported attn_mask_type = {'causal', 'padding'}")
+
+        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
+
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+        if query.shape == key.shape == value.shape:
+            qkv_layout = QKVLayout.BS3HD
+        elif key.shape == value.shape:
+            qkv_layout = QKVLayout.BSHD_BS2HD
+        else:
+            raise ValueError("Unsupported query, key, value shape")
+
+        # TODO: Raise Error for attention bias type
+        # TODO: move attn mask type to attributes
+
+        batch_q, seqlen_q, num_attention_heads, head_dim_q = query.shape
+        batch_kv, seqlen_kv, num_gqa_groups, head_dim_kv = key.shape
+        assert batch_q == batch_kv
+        assert head_dim_q == head_dim_kv
+
+        if self.transpose_batch_sequence:
+            batch_q, seqlen_q = seqlen_q, batch_q
+            batch_kv, seqlen_kv = seqlen_kv, batch_kv
+
+        # TODO: canonicalize
+        attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
+
+        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
+                                                               attn_bias_type, attn_mask_type,
+                                                               self.attention_dropout,
+                                                               num_attention_heads, num_gqa_groups,
+                                                               seqlen_q, seqlen_kv, head_dim_q)
+
+        use_fused_attn = (has_fused_attn_kernel and enable_fused_attn)
+
+        dropout_rng = None
+        if not deterministic and self.attention_dropout > 0.:
+            dropout_rng = self.make_rng(self.dropout_rng_name)
+
+        # TODO: Add warning if it is not available
+        if not use_fused_attn:
+            x = UnfusedDotProductAttention(attn_bias_type=self.attn_bias_type,
+                                           attn_mask_type=self.attn_mask_type,
+                                           attention_dropout=self.attention_dropout,
+                                           dtype=self.dtype,
+                                           float32_logits=self.float32_logits,
+                                           transpose_batch_sequence=self.transpose_batch_sequence)(
+                                               query,
+                                               key,
+                                               value,
+                                               mask,
+                                               bias,
+                                               scale_factor=scale_factor,
+                                               dropout_rng=dropout_rng,
+                                               deterministic=deterministic)
+        else:
+            if self.transpose_batch_sequence:
+                query, key, value = map(functools.partial(jnp.transpose, axes=(1, 0, 2, 3)),
+                                        [query, key, value])
+            if qkv_layout == QKVLayout.BS3HD:
+                query = jnp.concatenate([
+                    query[..., jnp.newaxis, :, :], key[..., jnp.newaxis, :, :],
+                    value[..., jnp.newaxis, :, :]
+                ],
+                                        axis=-3)
+            elif qkv_layout == QKVLayout.BSHD_BS2HD:
+                key = jnp.concatenate([key[..., jnp.newaxis, :, :], value[..., jnp.newaxis, :, :]],
+                                      axis=-3)
+            x = FusedDotProductAttention(
+                attn_bias_type=attn_bias_type,
+                attn_mask_type=AttnMaskType[(self.attn_mask_type + '_mask').upper()],
+                attention_dropout=self.attention_dropout,
+                dtype=self.dtype,
+                transpose_batch_sequence=self.transpose_batch_sequence,
+                qkv_layout=qkv_layout,
+            )(query,
+              key,
+              value,
+              mask,
+              bias,
+              scale_factor=scale_factor,
+              dropout_rng=dropout_rng,
+              deterministic=deterministic)
+            if self.transpose_batch_sequence:
+                x = jnp.transpose(x, axes=(1, 0, 2, 3))
+
+        return x
 
 
 def rotary_pos_emb(x: Array, windows: Tuple[int, int], transpose_batch_sequence: bool):
@@ -300,7 +521,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
         Deprecated. Please refer `num_attention_heads`.
-    dropout_rate: float, default = None
+    attention_dropout: float, default = None
         Deprecated. Please refer `attention_dropout`.
     output_layernorm: bool, default = None
         Deprecated. Please refer `input_layernorm`
@@ -353,7 +574,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
-    float32_logits: bool = False    # computes logits in float32 for stability.
+    float32_logits: bool = False
 
     # Deprecated parameters
     num_heads: int | None = None
@@ -465,52 +686,53 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         # TODO(rewang): make it configurable for pre_scale_bias
         attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
-        def canonicalize_attn_mask_type(attn_mask_type):
-            """
-            Convert the string to AttnMaskType
-            """
-            if attn_mask_type == 'causal':
-                return AttnMaskType.PADDING_CAUSAL_MASK
-            if attn_mask_type == 'padding':
-                return AttnMaskType.PADDING_MASK
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
+        # def canonicalize_attn_mask_type(attn_mask_type):
+        #     """
+        #     Convert the string to AttnMaskType
+        #     """
+        #     if attn_mask_type == 'causal':
+        #         return AttnMaskType.PADDING_CAUSAL_MASK
+        #     if attn_mask_type == 'padding':
+        #         return AttnMaskType.PADDING_MASK
+        #     raise ValueError(f"Unsupported {attn_mask_type=}, "
+        #                      "supported attn_mask_type = {'causal', 'padding'}")
 
         is_self_attn = (inputs_q is inputs_kv)
         is_gqa = (self.num_attention_heads != self.num_gqa_groups)
         is_qkvpack = (is_self_attn and not is_gqa)
-        qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
-        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
-        q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
-        kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+        # qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
+        # attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
-                                                               attn_bias_type, attn_mask_type,
-                                                               self.attention_dropout,
-                                                               self.num_attention_heads,
-                                                               self.num_gqa_groups, q_seqlen,
-                                                               kv_seqlen, self.head_dim)
+        # q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
+        # kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
+        # enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
 
-        use_fused_attn = (not decode and not self.transpose_batch_sequence and self.fuse_qkv_params
-                          and has_fused_attn_kernel and enable_fused_attn)
+        # has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
+        #                                                        attn_bias_type, attn_mask_type,
+        #                                                        self.attention_dropout,
+        #                                                        self.num_attention_heads,
+        #                                                        self.num_gqa_groups, q_seqlen,
+        #                                                        kv_seqlen, self.head_dim)
 
-        if enable_fused_attn and not use_fused_attn:
-            reason = ""
-            if decode:
-                reason += f"decode=False is required but got {decode}, "
-            if self.transpose_batch_sequence:
-                reason += f"transpose_batch_sequence=False is required " \
-                          f"but got {self.transpose_batch_sequence}, "
-            if not self.fuse_qkv_params:
-                reason += f"fuse_qkv_params=True is required but got {self.fuse_qkv_params}, "
-            if not has_fused_attn_kernel:
-                reason += "no fused attention kernel is available, "
+        # use_fused_attn = (not decode and not self.transpose_batch_sequence and self.fuse_qkv_params
+        #                   and has_fused_attn_kernel and enable_fused_attn)
 
-            warnings.warn(
-                f"Fused attention is not enabled. Because " \
-                f"{reason}fall back to unfused attention.")
+        # if enable_fused_attn and not use_fused_attn:
+        #     reason = ""
+        #     if decode:
+        #         reason += f"decode=False is required but got {decode}, "
+        #     if self.transpose_batch_sequence:
+        #         reason += f"transpose_batch_sequence=False is required " \
+        #                   f"but got {self.transpose_batch_sequence}, "
+        #     if not self.fuse_qkv_params:
+        #         reason += f"fuse_qkv_params=True is required but got {self.fuse_qkv_params}, "
+        #     if not has_fused_attn_kernel:
+        #         reason += "no fused attention kernel is available, "
+
+        #     warnings.warn(
+        #         f"Fused attention is not enabled. Because " \
+        #         f"{reason}fall back to unfused attention.")
 
         def generate_batch_seqlen_logical_axes(is_sharded_seq):
             sequence_dim = 0 if self.transpose_batch_sequence else 1
@@ -551,8 +773,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
                 qkv_proj = checkpoint_name(qkv_proj, 'combined_qkv_proj')
-                if not use_fused_attn:
-                    query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
+                # if not use_fused_attn:
+                query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=self.input_layernorm,
@@ -590,8 +812,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, 'combined_kv_proj')
-                if not use_fused_attn:
-                    key, value = jnp.split(kv_proj, [1], axis=-2)
+                # if not use_fused_attn:
+                key, value = jnp.split(kv_proj, [1], axis=-2)
         else:
             kv_projection = functools.partial(
                 DenseGeneral,
@@ -632,36 +854,36 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
         if self.enable_rotary_pos_emb:
-            if self.fuse_qkv_params and use_fused_attn:
-                if is_qkvpack:
-                    query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
-                else:
-                    key, value = jnp.split(kv_proj, [1], axis=-2)
+            # if self.fuse_qkv_params and use_fused_attn:
+            #     if is_self_attn:
+            #         query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
+            #     else:
+            #         key, value = jnp.split(kv_proj, [1], axis=-2)
 
             query = rotary_pos_emb(query, self.rotary_pos_emb_windows,
                                    self.transpose_batch_sequence)
             key = rotary_pos_emb(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
 
-            if use_fused_attn:
-                if is_qkvpack:
-                    qkv_proj = jnp.concatenate([query, key, value], axis=-2)
-                else:
-                    kv_proj = jnp.concatenate([key, value], axis=-2)
+            # if use_fused_attn:
+            #     if is_self_attn:
+            #         qkv_proj = jnp.concatenate([query, key, value], axis=-2)
+            #     else:
+            #         kv_proj = jnp.concatenate([key, value], axis=-2)
 
-        if not use_fused_attn:
-            query = checkpoint_name(query, 'query_proj')
-            key = checkpoint_name(key, 'key_proj')
-            value = checkpoint_name(value, 'value_proj')
-            query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
-            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
-            value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
-            qkv_sharding_constraint = \
-                (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
-                if self.transpose_batch_sequence \
-                else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-            query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
-            key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
-            value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
+        # if not use_fused_attn:
+        query = checkpoint_name(query, 'query_proj')
+        key = checkpoint_name(key, 'key_proj')
+        value = checkpoint_name(value, 'value_proj')
+        query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
+        key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+        value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
+        qkv_sharding_constraint = \
+            (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
+            if self.transpose_batch_sequence \
+            else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
+        query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
+        key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
+        value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
 
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
@@ -707,89 +929,93 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
 
-        dropout_rng = None
-        if not deterministic and self.attention_dropout > 0.:
-            dropout_rng = self.make_rng(self.dropout_rng_name)
+        # dropout_rng = None
+        # if not deterministic and self.attention_dropout > 0.:
+        #     dropout_rng = self.make_rng(self.dropout_rng_name)
 
-        if use_fused_attn:
-            assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
-            assert not self.transpose_batch_sequence
+        # TODO: attn_bias_type API
+        # TODO: move attn_mask_type to attributes
+        # TODO: move dropout_rng to DotProductAttention
 
-            seed = None
-            if dropout_rng is not None:
-                seed = jax.random.split(dropout_rng, num_of_devices())
-                # ensure the old key never used
-                del dropout_rng
+        x = DotProductAttention(
+            attn_bias_type=('post_scale_bias' if bias is not None else 'no_bias'),
+            attn_mask_type=self.attn_mask_type,
+            attention_dropout=self.attention_dropout,
+            dtype=self.dtype,
+            dropout_rng_name=self.dropout_rng_name,
+            float32_logits=self.float32_logits,
+            transpose_batch_sequence=self.transpose_batch_sequence)(query,
+                                                                    key,
+                                                                    value,
+                                                                    mask,
+                                                                    bias,
+                                                                    scale_factor=scale_factor,
+                                                                    deterministic=deterministic)
 
-            if is_qkvpack:
-                qkv_proj = qkv_proj.reshape(
-                    (*qkv_proj.shape[:-1], self.num_attetion_heads, self.head_dim))
-                qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
-                                           HIDDEN_AXES)
-                qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
-                                                                    qkv_sharding_constraint)
+        # if use_fused_attn:
+        #     assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
+        #     assert not self.transpose_batch_sequence
 
-                x = self_fused_attn(qkv_proj,
-                                    bias,
-                                    mask,
-                                    seed,
-                                    attn_bias_type=attn_bias_type,
-                                    attn_mask_type=attn_mask_type,
-                                    scaling_factor=scale_factor,
-                                    dropout_probability=self.attention_dropout,
-                                    is_training=not deterministic)
-            else:
-                assert bias is None
-                query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
-                kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
-                q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-                kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
-                                          HIDDEN_AXES)
-                query = with_sharding_constraint_by_logical_axes(query, q_sharding_constraint)
-                kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
+        #     seed = None
+        #     if dropout_rng is not None:
+        #         seed = jax.random.split(dropout_rng, num_of_devices())
+        #         # ensure the old key never used
+        #         del dropout_rng
 
-                x = cross_fused_attn(query,
-                                     kv_proj,
-                                     bias,
-                                     mask,
-                                     seed,
-                                     attn_bias_type=attn_bias_type,
-                                     attn_mask_type=attn_mask_type,
-                                     scaling_factor=scale_factor,
-                                     dropout_probability=self.attention_dropout,
-                                     is_training=not deterministic)
-        else:
+        #     if is_qkvpack:
+        #         qkv_proj = qkv_proj.reshape(
+        #             (*qkv_proj.shape[:-1], self.num_attetion_heads, self.head_dim))
+        #         qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
+        #                                    HIDDEN_AXES)
+        #         qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
+        #                                                             qkv_sharding_constraint)
 
-            def convert_to_softmax_type(attn_mask_type, mask):
-                """
-                Convert the string to SoftmaxType
-                """
-                if attn_mask_type == 'causal':
-                    return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
-                if attn_mask_type == 'padding':
-                    if mask is not None:
-                        return SoftmaxType.SCALED_MASKED
-                    return SoftmaxType.SCALED
-                raise ValueError(f"Unsupported {attn_mask_type=}, "
-                                 "supported attn_mask_type = {'causal', 'padding'}")
+        #         x = self_fused_attn(qkv_proj,
+        #                             bias,
+        #                             mask,
+        #                             seed,
+        #                             attn_bias_type=attn_bias_type,
+        #                             attn_mask_type=attn_mask_type,
+        #                             scaling_factor=scale_factor,
+        #                             dropout_probability=self.attention_dropout,
+        #                             is_training=not deterministic)
+        #     else:
+        #         assert bias is None
+        #         query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
+        #         kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
+        #         q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
+        #         kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
+        #                                   HIDDEN_AXES)
+        #         query = with_sharding_constraint_by_logical_axes(query, q_sharding_constraint)
+        #         kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
 
-            softmax_type = convert_to_softmax_type(self.attn_mask_type, mask)
+        #         x = cross_fused_attn(query,
+        #                              kv_proj,
+        #                              bias,
+        #                              mask,
+        #                              seed,
+        #                              attn_bias_type=attn_bias_type,
+        #                              attn_mask_type=attn_mask_type,
+        #                              scaling_factor=scale_factor,
+        #                              dropout_probability=self.attention_dropout,
+        #                              is_training=not deterministic)
+        # else:
+        #     x = UnfusedDotProductAttention(
+        #       attention_dropout=self.attention_dropout,
+        #       dtype=self.dtype,
+        #       float32_logits=self.float32_logits,
+        #       transpose_batch_sequence=self.transpose_batch_sequence
+        #     )(query,
+        #       key,
+        #       value,
+        #       scale_factor=scale_factor,
+        #       attn_mask_type=self.attn_mask_type,
+        #       mask=mask,
+        #       bias=bias,
+        #       dropout_rng=dropout_rng,
+        #       deterministic=deterministic)
 
-            x = core_attention(query,
-                               key,
-                               value,
-                               scale_factor=scale_factor,
-                               transpose_batch_sequence=self.transpose_batch_sequence,
-                               softmax_type=softmax_type,
-                               mask=mask,
-                               bias=bias,
-                               dropout_rng=dropout_rng,
-                               dropout_rate=self.attention_dropout,
-                               deterministic=deterministic,
-                               dtype=self.dtype,
-                               float32_logits=self.float32_logits)
-
-            x = checkpoint_name(x, 'context')
+        #     x = checkpoint_name(x, 'context')
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 

@@ -1885,6 +1885,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
                                   attn_mask_type, dropout_probability, num_heads, num_heads,
                                   max_seqlen, max_seqlen, head_dim).get_fused_attn_backend()
+
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_shape = (*batch_shape, num_heads, max_seqlen, max_seqlen)
             softmax_dtype = qkv_dtype
@@ -2273,6 +2274,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
                                   attn_bias_type, attn_mask_type, dropout_probability, num_heads,
                                   num_gqa_groups, q_max_seqlen, kv_max_seqlen,
                                   q_head_dim).get_fused_attn_backend()
+
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, kv_max_seqlen)
             softmax_dtype = q_dtype
@@ -4272,9 +4274,12 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary,
                                                  transpose_axis_boundary)
         dbias_shape = (*x_shape[:static_axis_boundary + 1], ir_hidden_szie)
+<<<<<<< HEAD
 
         wkspace_aval = ctx.avals_out[-1]
 
+=======
+>>>>>>> 73dcb036 (DPA draft)
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
