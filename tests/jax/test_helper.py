@@ -204,7 +204,7 @@ class TestFP8Functions(unittest.TestCase):
             (MeshResource(None, 'tp')),
             (MeshResource('dp', 'tp')),
         )
-        # TODO (Ming Huang): Suport multi-GPUs testing. # pylint: disable=fixme
+        # TODO (Ming Huang): Support multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
         with jax.sharding.Mesh(devices, ('dp', 'tp')):

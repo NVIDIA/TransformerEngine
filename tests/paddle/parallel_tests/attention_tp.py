@@ -100,7 +100,7 @@ class TestAttentionTp(unittest.TestCase):
             paddle.distributed.all_gather(total_weight, partial_weight, group=tp_group)
             if interleave:
                 # Due to the interleaved qkv layout, need to concat on num_head
-                # dimention for column parallel linear in MultiHeadAttention layer
+                # dimension for column parallel linear in MultiHeadAttention layer
                 assert axis == 0
                 assert [3 * self.hidden_size // self.world_size,
                         self.hidden_size] == partial_weight.shape

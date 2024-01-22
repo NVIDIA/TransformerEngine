@@ -712,7 +712,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
 def test_te_layer_misc(dtype, model_configs, model, qkv_format):
-    """Test TransformerLayer module with miscellanous settings"""
+    """Test TransformerLayer module with miscellaneous settings"""
     ckpt_attn = True
     fused_qkv_params = True
     RoPE = True
