@@ -273,12 +273,16 @@ class FusedDotProductAttention(nn.Module):
 
 
 class DotProductAttention(nn.Module):
+    head_dim: int
+    num_attention_heads: int
+    num_gqa_groups: int | None = None
     attn_bias_type: AttnBiasType = 'no_bias'
     attn_mask_type: AttnMaskType = 'causal'
     attention_dropout: float = 0.
     dtype: DType = jnp.float32
     dropout_rng_name: str = 'dropout'
     float32_logits: bool = False
+    qkv_layout: str = 'bshd_bshd_bshd'
     transpose_batch_sequence: bool = True
 
     @nn.compact
@@ -292,10 +296,9 @@ class DotProductAttention(nn.Module):
                  scale_factor: float,
                  deterministic: bool = False) -> Array:
 
-        # is_self_attn = (inputs_q is inputs_kv)
-        # is_gqa = (self.num_attention_heads != self.num_gqa_groups)
-        # is_qkvpack = (is_self_attn and not is_gqa)
-        # qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
+        # print(f'init {query.shape=}', flush=True)
+        # print(f'init {key.shape=}', flush=True)
+        # print(f'init {value.shape=}', flush=True)
 
         def canonicalize_attn_mask_type(attn_mask_type):
             """
@@ -308,36 +311,35 @@ class DotProductAttention(nn.Module):
             raise ValueError(f"Unsupported {attn_mask_type=}, "
                              "supported attn_mask_type = {'causal', 'padding'}")
 
-        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
-
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
-        if query.shape == key.shape == value.shape:
-            qkv_layout = QKVLayout.BS3HD
-        elif key.shape == value.shape:
-            qkv_layout = QKVLayout.BSHD_BS2HD
-        else:
-            raise ValueError("Unsupported query, key, value shape")
-
-        # TODO: Raise Error for attention bias type
-        # TODO: move attn mask type to attributes
-
-        batch_q, seqlen_q, num_attention_heads, head_dim_q = query.shape
-        batch_kv, seqlen_kv, num_gqa_groups, head_dim_kv = key.shape
-        assert batch_q == batch_kv
-        assert head_dim_q == head_dim_kv
-
-        if self.transpose_batch_sequence:
-            batch_q, seqlen_q = seqlen_q, batch_q
-            batch_kv, seqlen_kv = seqlen_kv, batch_kv
-
         # TODO: canonicalize
         attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
+        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
+        qkv_layout = QKVLayout[self.qkv_layout.upper()]
+
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+
+        sequence_dim = 1 if self.transpose_batch_sequence else 0
+        seqlen_q = query.shape[sequence_dim]
+        if qkv_layout == QKVLayout.BS3HD:
+            seqlen_kv = seqlen_q
+        else:
+            seqlen_kv = key.shape[sequence_dim]
+
+        # batch_q, seqlen_q, num_attention_heads, head_dim_q = query.shape
+        # batch_kv, seqlen_kv, num_gqa_groups, head_dim_kv = key.shape
+        # assert batch_q == batch_kv
+        # assert head_dim_q == head_dim_kv
+
+        # if self.transpose_batch_sequence:
+        #     batch_q, seqlen_q = seqlen_q, batch_q
+        #     batch_kv, seqlen_kv = seqlen_kv, batch_kv
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.attention_dropout,
-                                                               num_attention_heads, num_gqa_groups,
-                                                               seqlen_q, seqlen_kv, head_dim_q)
+                                                               self.num_attention_heads,
+                                                               self.num_gqa_groups, seqlen_q,
+                                                               seqlen_kv, self.head_dim)
 
         use_fused_attn = (has_fused_attn_kernel and enable_fused_attn)
 
@@ -347,6 +349,24 @@ class DotProductAttention(nn.Module):
 
         # TODO: Add warning if it is not available
         if not use_fused_attn:
+            # unfused attention only supports splitted query, key, value
+            if qkv_layout == QKVLayout.BS3HD:
+                query, key, value = jnp.split(query, [1, 2], axis=-3)
+                query, key, value = map(functools.partial(jnp.squeeze, axis=-3),
+                                        [query, key, value])
+            elif qkv_layout == QKVLayout.BSHD_BS2HD:
+                key, value = jnp.split(key, [1], axis=-3)
+                key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
+            else:
+                assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+
+            # query = query.squeeze(axis=-3)
+            # key = key.squeeze(axis=-3)
+            # value = value.squeeze(axis=-3)
+
+            print(f'{query.shape=}', flush=True)
+            print(f'{key.shape=}', flush=True)
+            print(f'{value.shape=}', flush=True)
             x = UnfusedDotProductAttention(attn_bias_type=self.attn_bias_type,
                                            attn_mask_type=self.attn_mask_type,
                                            attention_dropout=self.attention_dropout,
@@ -655,57 +675,6 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
             return jnp.stack([k_kernel, v_kernel], axis=-2, dtype=dtype)
 
-        # TODO(rewang): make it configurable for pre_scale_bias
-        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
-
-        # def canonicalize_attn_mask_type(attn_mask_type):
-        #     """
-        #     Convert the string to AttnMaskType
-        #     """
-        #     if attn_mask_type == 'causal':
-        #         return AttnMaskType.PADDING_CAUSAL_MASK
-        #     if attn_mask_type == 'padding':
-        #         return AttnMaskType.PADDING_MASK
-        #     raise ValueError(f"Unsupported {attn_mask_type=}, "
-        #                      "supported attn_mask_type = {'causal', 'padding'}")
-
-        is_self_attn = (inputs_q is inputs_kv)
-        is_gqa = (self.num_attention_heads != self.num_gqa_groups)
-        is_qkvpack = (is_self_attn and not is_gqa)
-
-        # qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
-        # attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
-
-        # q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
-        # kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
-        # enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
-
-        # has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
-        #                                                        attn_bias_type, attn_mask_type,
-        #                                                        self.attention_dropout,
-        #                                                        self.num_attention_heads,
-        #                                                        self.num_gqa_groups, q_seqlen,
-        #                                                        kv_seqlen, self.head_dim)
-
-        # use_fused_attn = (not decode and not self.transpose_batch_sequence and self.fuse_qkv_params
-        #                   and has_fused_attn_kernel and enable_fused_attn)
-
-        # if enable_fused_attn and not use_fused_attn:
-        #     reason = ""
-        #     if decode:
-        #         reason += f"decode=False is required but got {decode}, "
-        #     if self.transpose_batch_sequence:
-        #         reason += f"transpose_batch_sequence=False is required " \
-        #                   f"but got {self.transpose_batch_sequence}, "
-        #     if not self.fuse_qkv_params:
-        #         reason += f"fuse_qkv_params=True is required but got {self.fuse_qkv_params}, "
-        #     if not has_fused_attn_kernel:
-        #         reason += "no fused attention kernel is available, "
-
-        #     warnings.warn(
-        #         f"Fused attention is not enabled. Because " \
-        #         f"{reason}fall back to unfused attention.")
-
         def generate_batch_seqlen_logical_axes(is_sharded_seq):
             sequence_dim = 0 if self.transpose_batch_sequence else 1
             batch_dim = 1 - sequence_dim
@@ -715,6 +684,13 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             axes[batch_dim] = BATCH_AXES
             axes[sequence_dim] = SEQLEN_TP_AXES if is_sharded_seq else SEQLEN_AXES
             return tuple(axes)
+
+        # TODO(rewang): make it configurable for pre_scale_bias
+        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
+
+        is_self_attn = (inputs_q is inputs_kv)
+        is_gqa = (self.num_attention_heads != self.num_gqa_groups)
+        is_qkvpack = (is_self_attn and not is_gqa)
 
         inputs_logical_axes_maybe_sp = (*generate_batch_seqlen_logical_axes(
             self.enable_sequence_parallel), HIDDEN_AXES)
@@ -745,8 +721,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
                 qkv_proj = checkpoint_name(qkv_proj, 'combined_qkv_proj')
-                # if not use_fused_attn:
-                query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
+                # qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_attention_heads, self.head_dim))
+                qkv_layout = QKVLayout.BS3HD
             else:
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=self.input_layernorm,
@@ -784,8 +760,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, 'combined_kv_proj')
-                # if not use_fused_attn:
-                key, value = jnp.split(kv_proj, [1], axis=-2)
+                # query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
+                # kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
+                qkv_layout = QKVLayout.BSHD_BS2HD
         else:
             kv_projection = functools.partial(
                 DenseGeneral,
@@ -824,39 +801,42 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+            # query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
+            # key = key.reshape((*key.shape[:-1], self.num_gqa_groups, self.head_dim))
+            # value = value.reshape((*value.shape[:-1], self.num_gqa_groups, self.head_dim))
+            qkv_layout = QKVLayout.BSHD_BSHD_BSHD
 
         if self.enable_rotary_pos_emb:
-            # if self.fuse_qkv_params and use_fused_attn:
-            #     if is_self_attn:
-            #         query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
-            #     else:
-            #         key, value = jnp.split(kv_proj, [1], axis=-2)
+            if qkv_layout == QKVLayout.BS3HD:
+                query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
+            elif qkv_layout == QKVLayout.BSHD_BS2HD:
+                key, value = jnp.split(kv_proj, [1], axis=-2)
+            else:
+                assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
 
             query = rope(query, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
             key = rope(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
+            qkv_layout = QKVLayout.BSHD_BSHD_BSHD
 
-            # if use_fused_attn:
-            #     if is_self_attn:
-            #         qkv_proj = jnp.concatenate([query, key, value], axis=-2)
-            #     else:
-            #         kv_proj = jnp.concatenate([key, value], axis=-2)
-
-        # if not use_fused_attn:
-        query = checkpoint_name(query, 'query_proj')
-        key = checkpoint_name(key, 'key_proj')
-        value = checkpoint_name(value, 'value_proj')
-        query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
-        key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
-        value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
-        qkv_sharding_constraint = \
-            (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
-            if self.transpose_batch_sequence \
-            else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-        query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
-        key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
-        value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
+        if qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+            # TODO: move to above
+            query = checkpoint_name(query, 'query_proj')
+            key = checkpoint_name(key, 'key_proj')
+            value = checkpoint_name(value, 'value_proj')
+            # TODO(rewang): refine
+            query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+            value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
+            qkv_sharding_constraint = \
+                (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
+                if self.transpose_batch_sequence \
+                else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
+            query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
+            key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
+            value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
 
         if decode:
+            assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
             is_initialized = self.has_variable('cache', 'cached_key')
 
             cached_key = self.variable('cache', 'cached_key', jnp.zeros, key.shape, key.dtype)
@@ -900,94 +880,37 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
 
-        # dropout_rng = None
-        # if not deterministic and self.attention_dropout > 0.:
-        #     dropout_rng = self.make_rng(self.dropout_rng_name)
-
-        # TODO: attn_bias_type API
-        # TODO: move attn_mask_type to attributes
-        # TODO: move dropout_rng to DotProductAttention
+        if qkv_layout == QKVLayout.BS3HD:
+            qkv_proj = qkv_proj.reshape(*qkv_proj.shape[:2], 3, self.num_attention_heads,
+                                        self.head_dim)
+            dpa_args = [qkv_proj, None, None]
+        elif qkv_layout == QKVLayout.BSHD_BS2HD:
+            query = query.reshape(*query.shape[:2], self.num_attention_heads, self.head_dim)
+            kv_proj = kv_proj.reshape(*kv_proj.shape[:2], 2, self.num_gqa_groups, self.head_dim)
+            dpa_args = [query, kv_proj, None]
+        else:
+            assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+            value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
+            dpa_args = [query, key, value]
 
         x = DotProductAttention(
+            head_dim=self.head_dim,
+            num_attention_heads=self.num_attention_heads,
+            num_gqa_groups=self.num_gqa_groups,
             attn_bias_type=('post_scale_bias' if bias is not None else 'no_bias'),
             attn_mask_type=self.attn_mask_type,
             attention_dropout=self.attention_dropout,
             dtype=self.dtype,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_logits,
-            transpose_batch_sequence=self.transpose_batch_sequence)(query,
-                                                                    key,
-                                                                    value,
+            qkv_layout=qkv_layout.name,
+            transpose_batch_sequence=self.transpose_batch_sequence)(*dpa_args,
                                                                     mask,
                                                                     bias,
                                                                     scale_factor=scale_factor,
                                                                     deterministic=deterministic)
-
-        # if use_fused_attn:
-        #     assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
-        #     assert not self.transpose_batch_sequence
-
-        #     seed = None
-        #     if dropout_rng is not None:
-        #         seed = jax.random.split(dropout_rng, num_of_devices())
-        #         # ensure the old key never used
-        #         del dropout_rng
-
-        #     if is_qkvpack:
-        #         qkv_proj = qkv_proj.reshape(
-        #             (*qkv_proj.shape[:-1], self.num_attetion_heads, self.head_dim))
-        #         qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
-        #                                    HIDDEN_AXES)
-        #         qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
-        #                                                             qkv_sharding_constraint)
-
-        #         x = self_fused_attn(qkv_proj,
-        #                             bias,
-        #                             mask,
-        #                             seed,
-        #                             attn_bias_type=attn_bias_type,
-        #                             attn_mask_type=attn_mask_type,
-        #                             scaling_factor=scale_factor,
-        #                             dropout_probability=self.attention_dropout,
-        #                             is_training=not deterministic)
-        #     else:
-        #         assert bias is None
-        #         query = query.reshape((*query.shape[:-1], self.num_attention_heads, self.head_dim))
-        #         kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
-        #         q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-        #         kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
-        #                                   HIDDEN_AXES)
-        #         query = with_sharding_constraint_by_logical_axes(query, q_sharding_constraint)
-        #         kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
-
-        #         x = cross_fused_attn(query,
-        #                              kv_proj,
-        #                              bias,
-        #                              mask,
-        #                              seed,
-        #                              attn_bias_type=attn_bias_type,
-        #                              attn_mask_type=attn_mask_type,
-        #                              scaling_factor=scale_factor,
-        #                              dropout_probability=self.attention_dropout,
-        #                              is_training=not deterministic)
-        # else:
-        #     x = UnfusedDotProductAttention(
-        #       attention_dropout=self.attention_dropout,
-        #       dtype=self.dtype,
-        #       float32_logits=self.float32_logits,
-        #       transpose_batch_sequence=self.transpose_batch_sequence
-        #     )(query,
-        #       key,
-        #       value,
-        #       scale_factor=scale_factor,
-        #       attn_mask_type=self.attn_mask_type,
-        #       mask=mask,
-        #       bias=bias,
-        #       dropout_rng=dropout_rng,
-        #       deterministic=deterministic)
-
-        #     x = checkpoint_name(x, 'context')
-
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         attn_context_sharding_constraint = \
@@ -1007,6 +930,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                            dtype=self.dtype,
                            name='out')(x)
         out = checkpoint_name(out, 'out_proj')
+
         return out, ln_out
 
 
