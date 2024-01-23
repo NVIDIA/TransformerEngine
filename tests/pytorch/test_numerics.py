@@ -1225,7 +1225,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            hidden_states_format="sbhd"
+            attn_input_format="sbhd"
         )
         .to(dtype=dtype)
         .cuda()
@@ -1248,7 +1248,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            hidden_states_format="bshd"
+            attn_input_format="bshd"
         )
         .to(dtype=dtype)
         .cuda()

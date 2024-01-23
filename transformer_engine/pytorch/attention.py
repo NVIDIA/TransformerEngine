@@ -1166,6 +1166,7 @@ def apply_rotary_pos_emb(
     freqs = freqs[:cur_seq_len]
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
 
