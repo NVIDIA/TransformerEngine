@@ -704,8 +704,9 @@ class MultiHeadAttention(paddle.nn.Layer):
 
             # [b, s_q, hidden_size+2*hidden_size_kv] --> [b, s_q, (h/ng+2), ng, d]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                0, 0, (num_queries_per_key_value +
-                       2), self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, (
+                    num_queries_per_key_value +
+                    2), self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
             ])
 
             # [b, s_q, (h/ng+2), ng, d]
