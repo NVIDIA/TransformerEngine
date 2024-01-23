@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,9 +14,7 @@ from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available, AmaxComputeAlgo
-from transformer_engine.jax.sharding import infer_major_sharding_type
-from transformer_engine.jax.sharding import MajorShardingType
-from transformer_engine.jax.sharding import ShardingResource
+from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 
 is_fp8_supported, reason = is_fp8_available()
 
@@ -160,7 +158,6 @@ class TestFP8Functions(unittest.TestCase):
 
     def _check_defult_state(self):
         self.assertFalse(FP8Helper.is_fp8_enabled())
-        self.assertEqual(infer_major_sharding_type(), MajorShardingType.SINGLE)
 
     def _compare_delay_scaling(self, ref, test):
         self.assertTrue(ref.margin == test.margin)
@@ -201,27 +198,20 @@ class TestFP8Functions(unittest.TestCase):
 
         ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)
 
-        # TODO (Ming Huang): Suport multi-GPUs testing. # pylint: disable=fixme
-        # srs = (
-        #     (ShardingResource(None, None), MajorShardingType.SINGLE),
-        #     (ShardingResource('dp', None), MajorShardingType.DP),
-        #     (ShardingResource(None, 'tp'), MajorShardingType.TP),
-        #     (ShardingResource('dp', 'tp'), MajorShardingType.DPTP),
-        # )
-        srs = (
-            (ShardingResource(None, None), MajorShardingType.SINGLE),
-            (ShardingResource('dp', None), MajorShardingType.SINGLE),
-            (ShardingResource(None, 'tp'), MajorShardingType.SINGLE),
-            (ShardingResource('dp', 'tp'), MajorShardingType.SINGLE),
+        mesh_s = (
+            (MeshResource(None, None)),
+            (MeshResource('dp', None)),
+            (MeshResource(None, 'tp')),
+            (MeshResource('dp', 'tp')),
         )
-        # TODO (Ming Huang): Suport multi-GPUs testing. # pylint: disable=fixme
+        # TODO (Ming Huang): Support multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
         with jax.sharding.Mesh(devices, ('dp', 'tp')):
-            for sr, mst in srs:
-                with fp8_autocast(enabled=True, fp8_recipe=ds, sharding_resource=sr):
+            for sr in mesh_s:
+                with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=sr):
                     self.assertTrue(FP8Helper.is_fp8_enabled())
                     self._compare_delay_scaling(get_delayed_scaling(), ds)
-                    self.assertEqual(infer_major_sharding_type(), mst)
+                    self.assertEqual(sr, global_mesh_resource())
 
                 self._check_defult_state()

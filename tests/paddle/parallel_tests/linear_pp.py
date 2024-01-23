@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Unittest for Linear layer in pipeline parallel"""
@@ -19,6 +19,23 @@ from utils import assert_allclose, set_random_seed
 import transformer_engine.paddle as te
 
 
+class TELinear(te.Linear):
+    """To pass is_first_microbatch"""
+
+    def __init__(self, *args, **kwargs):
+        assert 'accumulate_steps' in kwargs
+        self.accumulate_steps = kwargs['accumulate_steps']
+        del kwargs['accumulate_steps']
+        self._micro_batch_id = 0
+        super().__init__(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        kwargs['is_first_microbatch'] = (self._micro_batch_id % self.accumulate_steps) == 0
+        if paddle.is_grad_enabled() and self.training:
+            self._micro_batch_id += 1
+        return super().forward(*args, **kwargs)
+
+
 class TEPipelineModel(PipelineLayer):
     """Model for pipeline parallel test"""
 
@@ -28,6 +45,7 @@ class TEPipelineModel(PipelineLayer):
                  weight_attrs,
                  use_te=True,
                  use_fp8=False,
+                 accumulate_steps=1,
                  **kwargs):
         self.in_features = in_features
         self.hidden_features = hidden_features
@@ -35,10 +53,22 @@ class TEPipelineModel(PipelineLayer):
         hcg = fleet.get_hybrid_communicate_group()
         self.dp_group = hcg.get_data_parallel_group()
 
-        Linear = te.Linear if use_te else paddle.nn.Linear
+        Linear = TELinear if use_te else paddle.nn.Linear
+        extra_kwargs = {}
+        if use_te:
+            extra_kwargs['accumulate_steps'] = accumulate_steps
+
         model_desc = [
-            LayerDesc(Linear, self.in_features, self.hidden_features, weight_attr=weight_attrs[0]),
-            LayerDesc(Linear, self.hidden_features, self.in_features, weight_attr=weight_attrs[1]),
+            LayerDesc(Linear,
+                      self.in_features,
+                      self.hidden_features,
+                      weight_attr=weight_attrs[0],
+                      **extra_kwargs),
+            LayerDesc(Linear,
+                      self.hidden_features,
+                      self.in_features,
+                      weight_attr=weight_attrs[1],
+                      **extra_kwargs),
         ]
         super().__init__(layers=model_desc, loss_fn=paddle.nn.CrossEntropyLoss(), **kwargs)
 
@@ -84,8 +114,9 @@ class TestLinearPipelineParallel(unittest.TestCase):
             "mp_degree": 1,
             "pp_degree": self.pipeline_parallel_size,
         }
+        self.accumulate_steps = self.batch_size // self.micro_batch_size
         strategy.pipeline_configs = {
-            "accumulate_steps": self.batch_size // self.micro_batch_size,
+            "accumulate_steps": self.accumulate_steps,
             "micro_batch_size": self.micro_batch_size,
         }
         fleet.init(is_collective=True, strategy=strategy)
@@ -128,6 +159,7 @@ class TestLinearPipelineParallel(unittest.TestCase):
             use_fp8=self.fp8,
             seg_method="layer:Linear",
             num_stages=self.pipeline_parallel_size,
+            accumulate_steps=self.accumulate_steps,
         )
 
         # Check if model is split across ranks as expected

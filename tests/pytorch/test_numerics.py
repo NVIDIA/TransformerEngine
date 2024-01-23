@@ -1,10 +1,9 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import math
 import os
-import contextlib
 from typing import List, Optional
 import pytest
 import copy
@@ -12,9 +11,8 @@ import copy
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-from torch import _C
-from torch.cuda import _lazy_call, device as device_ctx_manager
 
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -25,9 +23,14 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
+from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
+
+
+# Only run FP8 tests on H100.
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
 
 seed = 1234
-rng_str = "rng_state"
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 # Record initial RNG state from script run.
@@ -91,124 +94,10 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
             raise AssertionError(msg)
 
 
-def _set_cuda_rng_state(new_state, device=-1):
-    """Sets the random number generator state of the current GPU.
-
-    Argumentss:
-        new_state (torch.ByteTensor): The desired state
-    This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
-    with a single change: the input state is not cloned. Cloning caused
-    major performance issues for +4 GPU cases.
-    """
-    if hasattr(_C, "_cuda_setRNGState") and callable(_C._cuda_setRNGState):
-        # older PyTorch
-        def cb():
-            with device_ctx_manager(device):
-                _C._cuda_setRNGState(new_state)
-
-    else:
-        # newer PyTorch
-        if device == -1:
-            device = torch.device("cuda")
-        elif isinstance(device, str):
-            device = torch.device(device)
-        elif isinstance(device, int):
-            device = torch.device("cuda", device)
-
-        def cb():
-            idx = device.index
-            if idx is None:
-                idx = torch.cuda.current_device()
-            default_generator = torch.cuda.default_generators[idx]
-            default_generator.set_state(new_state)
-
-    _lazy_call(cb)
-
-
 def reset_rng_states() -> None:
-    # revert back to initial RNG state.
+    """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
     _set_cuda_rng_state(_cuda_rng_state)
-
-
-class CudaRNGStatesTracker:
-    """Tracker for the cuda RNG states.
-
-    Using the `add` method, a cuda rng state is initialized based on
-    the input `seed` and is assigned to `name`. Later, by forking the
-    rng state, we can perform operations and return to our starting
-    cuda state.
-    """
-
-    def __init__(self):
-        # Map from a string name to the cuda rng state.
-        self.states_ = {}
-        # Seeds are just for book keeping and ensure no seed is set twice.
-        self.seeds_ = set()
-
-    def reset(self):
-        """Set to the initial state (no tracker)."""
-        self.states_ = {}
-        self.seeds_ = set()
-
-    def get_states(self):
-        """Get rng states. Copy the dictionary so we have direct
-        pointers to the states, not just a pointer to the dictionary."""
-        states = {}
-        for name in self.states_:
-            states[name] = self.states_[name]
-        return states
-
-    def set_states(self, states):
-        """Set the rng states. For efficiency purposes, we do not check
-        the size of seed for compatibility."""
-        self.states_ = states
-
-    def add(self, name, seed):
-        """Track the rng state."""
-        # Check seed is not already used.
-        if seed in self.seeds_:
-            raise Exception("seed {} already exists".format(seed))
-        self.seeds_.add(seed)
-        # Check that state is not already defined.
-        if name in self.states_:
-            raise Exception("cuda rng state {} already exists".format(name))
-        # Get the current rng state.
-        orig_rng_state = torch.cuda.get_rng_state()
-        # Set the new state and store it.
-        torch.cuda.manual_seed(seed)
-        self.states_[name] = torch.cuda.get_rng_state()
-        # Reset rng state to what it was.
-        _set_cuda_rng_state(orig_rng_state)
-
-    @contextlib.contextmanager
-    def fork(self, name=rng_str):
-        """Fork the cuda rng state, perform operations, and exit with
-        the original state."""
-        # Check if we have added the state
-        if name not in self.states_:
-            raise Exception("cuda rng state {} is not added".format(name))
-        # Store current rng state.
-        orig_cuda_rng_state = torch.cuda.get_rng_state()
-        # Set rng state to the desired one
-        _set_cuda_rng_state(self.states_[name])
-        # Do the stuff we wanted to do.
-        try:
-            yield
-        finally:
-            # Update the current rng state for later use.
-            self.states_[name] = torch.cuda.get_rng_state()
-            # And set the state to the original state we started with.
-            _set_cuda_rng_state(orig_cuda_rng_state)
-
-
-_DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-_DUMMY_CUDA_RNG_STATE_TRACKER.add(rng_str, seed)
-
-
-def get_dummy_cuda_rng_tracker():
-    """Get cuda rng tracker."""
-    return _DUMMY_CUDA_RNG_STATE_TRACKER
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -433,13 +322,12 @@ class TorchLayerNormMLP(nn.Module):
 
 
 class TorchGPT(nn.Module):
-    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int):
+    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.resid_attn_dropout = nn.Dropout(0.1)
-        self.resid_mlp_dropout = nn.Dropout(0.1)
+        self.parallel_attention_mlp = parallel_attention_mlp
 
     def forward(
         self,
@@ -448,74 +336,52 @@ class TorchGPT(nn.Module):
     ) -> torch.Tensor:
         a = self.ln(x)
         b = self.causal_attn(a, attn_mask)
-        x = x + self.resid_attn_dropout(b)
-        n = self.ln_mlp(x)
-        x = x + self.resid_mlp_dropout(n)
+        if self.parallel_attention_mlp:
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
+        else:
+            x = x + nn.functional.dropout(b, p=0.1, training=self.training)
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(n, p=0.1, training=self.training)
         return x
 
 
-def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
+
+def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
     reset_rng_states()
-
-    te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
-    te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
-
-    te_out = block(
-        te_inp_hidden_states,
-        attention_mask=te_inp_attn_mask,
-        checkpoint_core_attention=recompute,
-    )
-    loss = te_out.sum()
-    loss.backward()
-    torch.cuda.synchronize()
-
-    outputs = [te_out, te_inp_hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            outputs.append(p.grad)
-    return outputs
-
-
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_selective_activation_recompute(dtype, bs, model):
-    config = model_configs[model]
+    FP8GlobalStateManager.reset()
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            params_dtype=dtype,
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        block = (
+            TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_attention_heads,
+                layernorm_epsilon=config.eps,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.1,
+                attention_dropout=0.1,
+                kv_channels=config.embed,
+                apply_residual_connection_post_layernorm=False,
+                output_layernorm=False,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            )
+            .cuda()
         )
-        .cuda()
-        .eval()
-    )
-
-    outputs = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False)
-    outputs_recompute = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
-
-
-def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
-    reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
@@ -523,21 +389,11 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    if recompute:
-        te_out = te_checkpoint(
-            block,
-            False,  # distribute_saved_activations
-            get_dummy_cuda_rng_tracker,
-            None,  # tp_group
-            te_inp_hidden_states,
-            attention_mask=te_inp_attn_mask,
-            checkpoint_core_attention=False,
-        )
-    else:
+    with fp8_autocast(enabled=fp8):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
-            checkpoint_core_attention=False,
+            checkpoint_core_attention=recompute,
         )
     loss = te_out.sum()
     loss.backward()
@@ -553,14 +409,36 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_full_activation_recompute(dtype, bs, model):
+@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     config = model_configs[model]
+
+    outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
+    outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
+    assert_all_equal(outputs, outputs_recompute)
+
+
+def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        block = (
         TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -575,13 +453,58 @@ def test_gpt_full_activation_recompute(dtype, bs, model):
             output_layernorm=False,
             get_rng_state_tracker=get_dummy_cuda_rng_tracker,
             params_dtype=dtype,
+            fuse_qkv_params=True,
         )
         .cuda()
-        .eval()
-    )
+        )
 
-    outputs = _test_e2e_full_recompute(block, bs, dtype, config, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(block, bs, dtype, config, recompute=True)
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    te_inp_hidden_states.retain_grad()
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+
+    with fp8_autocast(enabled=fp8):
+        if recompute:
+            te_out = te_checkpoint(
+                block,
+                False,  # distribute_saved_activations
+                get_dummy_cuda_rng_tracker,
+                None,  # tp_group
+                te_inp_hidden_states,
+                attention_mask=te_inp_attn_mask,
+                checkpoint_core_attention=False,
+            )
+        else:
+            te_out = block(
+                te_inp_hidden_states,
+                attention_mask=te_inp_attn_mask,
+                checkpoint_core_attention=False,
+            )
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    outputs = [te_out, te_inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+
+    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
+    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
 
 
@@ -589,6 +512,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
     return (
         TransformerLayer(
             config.hidden_size,
@@ -605,7 +529,6 @@ def _test_e2e_checkpointing_get_model(config, dtype):
             params_dtype=dtype,
         )
         .cuda()
-        .eval()
     )
 
 
@@ -640,9 +563,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
+        global _cpu_rng_state, _cuda_rng_state
+        _cpu_rng_state = torch.get_rng_state()
+        _cuda_rng_state = torch.cuda.get_rng_state()
+
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path))
+        reset_rng_states()
 
         for p in block.parameters():
             if p.requires_grad:
@@ -676,8 +604,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
-    outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    assert_all_equal(outputs, outputs_recompute)
+    outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
+    assert_all_equal(outputs, outputs_checkpoint)
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -704,7 +632,8 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
+def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
 
     te_gpt = (
@@ -717,6 +646,7 @@ def test_gpt_accuracy(dtype, bs, model):
             hidden_dropout=0.1,
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -728,6 +658,7 @@ def test_gpt_accuracy(dtype, bs, model):
             config.hidden_size,
             config.eps,
             config.num_attention_heads,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -893,21 +824,19 @@ def test_dpa_accuracy(dtype, bs, model):
         DotProductAttention(
             config.num_attention_heads,
             config.embed,
-            attention_dropout=0.1,  # dropout
+            attention_dropout=0.0, # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     torch_dpa = (
         TorchDotProductAttention(
             config.embed,
-            0.1,  # dropout
+            0.0, # dropout
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     te_outputs = _test_dpa_accuracy(te_dpa, bs, dtype, config)
@@ -962,6 +891,7 @@ def test_linear_accuracy(dtype, bs, model):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -1001,6 +931,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1201,3 +1132,149 @@ def test_gpt_cuda_graph(dtype, bs, model):
     assert_allclose(out, graphed_out, 1e-3)
     assert_allclose(params, graphed_params, 1e-3)
     assert_allclose(grads, graphed_grads, 1e-3)
+
+
+def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    with fp8_model_init(enabled=fp8_model_params):
+        block = (
+            TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_attention_heads,
+                layernorm_epsilon=config.eps,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.1,
+                attention_dropout=0.1,
+                kv_channels=config.embed,
+                apply_residual_connection_post_layernorm=False,
+                output_layernorm=False,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            )
+            .cuda()
+        )
+
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    te_inp_hidden_states.retain_grad()
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+
+    with fp8_autocast(enabled=True):
+        te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    outputs = [te_out, te_inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_fp8_parameters(dtype, bs, model):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+
+    outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
+    outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
+    assert_all_equal(outputs, outputs_fp8_params)
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_transformer_layer_hidden_states_format(dtype, bs, model):
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    # Set `torch.manual_seed` to make sure the weights are identical to the
+    # other layer. Set `*dropout` values to 0 to make sure the forward pass
+    # is identical to the other layer.
+    torch.manual_seed(0)
+    block_sbhd = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0,
+            attention_dropout=0,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            attn_input_format="sbhd"
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+
+    # Set `torch.manual_seed` to make sure the weights are identical to the
+    # other layer. Set `*dropout` values to 0 to make sure the forward pass
+    # is identical to the other layer.
+    torch.manual_seed(0)
+    block_bshd = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0,
+            attention_dropout=0,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            attn_input_format="bshd"
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+
+    for (n1, p1), (n2, p2) in zip(block_bshd.named_parameters(), block_sbhd.named_parameters()):
+        assert torch.all(torch.eq(p1, p2)), f"{n1}, {n2} not identical"
+
+    x_sbhd = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).to(dtype).cuda()
+
+    x_bshd = x_sbhd.transpose(0,1).contiguous()
+
+    # To make sure forward is also identical (just in case some module decides
+    # to act fancy)
+    torch.manual_seed(0)
+    y_sbhd = block_sbhd(x_sbhd)
+
+    # To make sure forward is also identical (just in case some module decides
+    # to act fancy)
+    torch.manual_seed(0)
+    y_bshd = block_bshd(x_bshd)
+
+    assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])

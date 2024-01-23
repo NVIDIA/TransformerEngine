@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,6 +12,8 @@ from praxis import pax_fiddle
 from praxis.base_layer import WeightInit, DEFAULT_INIT_MUTABLE_LIST
 import pytest
 
+from utils import assert_allclose
+
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_fp8_metas, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
@@ -23,12 +25,12 @@ from transformer_engine.jax.flax import TransformerLayer as flax_TransformerLaye
 from transformer_engine.jax.flax.module import Softmax
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from transformer_engine.jax.praxis import LayerNorm
-from transformer_engine.jax.praxis import FusedSoftmax, LayerNorm
+from transformer_engine.jax.praxis import FusedSoftmax
 from transformer_engine.jax.praxis import LayerNormLinear, LayerNormMLP, Linear
 from transformer_engine.jax.praxis import MultiHeadAttention, RelativePositionBiases
-from transformer_engine.jax.praxis import TransformerEngineBaseLayer, TransformerLayer, TransformerLayerType
+from transformer_engine.jax.praxis import TransformerEngineBaseLayer
+from transformer_engine.jax.praxis import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.softmax import SoftmaxType
-from utils import assert_allclose
 
 is_fp8_supported, reason = is_fp8_available()
 
@@ -36,6 +38,16 @@ DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]
 DTYPE = [jnp.float32, jnp.bfloat16]
 ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
+
+
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
+    """
+    Clear all live arrays to keep the resource clean
+    """
+    yield
+    for arr in jax.live_arrays():
+        arr.delete()
 
 
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
@@ -652,7 +664,7 @@ class TestRelativePositionBias(TestLayer):
             praxis_variables, flax_variables = self.sync_variables(praxis_variables, flax_variables)
 
             praxis_loss= \
-                    TestLayer.loss(praxis_variables, *test_input, module=praxis_layer, mean_out=False)
+                TestLayer.loss(praxis_variables, *test_input, module=praxis_layer, mean_out=False)
             flax_loss = \
                 TestLayer.loss(flax_variables, *test_input, module=flax_layer, mean_out=False)
 
@@ -664,6 +676,8 @@ class MultiHeadAttnAttr:
     LN_TYPE = 'layernorm_type'
     ATTN_MASK_TYPE = 'attn_mask_type'
     ZERO_CEN = 'zero_centered_gamma'
+    NUM_ATTN_HEADS = 'num_attention_heads'
+    NUM_GQA_GROUPS = 'num_gqa_groups'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -693,6 +707,13 @@ class MultiHeadAttnAttr:
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
         ATTN_MASK_TYPE: 'causal'
     }]
 

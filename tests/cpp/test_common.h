@@ -1,20 +1,22 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #pragma once
 
+#include <iostream>
 #include <memory>
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
-#include <cuda_fp16.h>
+#include <vector>
+
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime_api.h>
-#include <vector>
-#include <iostream>
+
+#include <transformer_engine/transformer_engine.h>
+#include "util/logging.h"
 
 namespace test {
 using namespace transformer_engine;
@@ -252,4 +254,3 @@ bool isFp8Type(DType type);
         default: \
             NVTE_ERROR("Invalid type."); \
     }
-

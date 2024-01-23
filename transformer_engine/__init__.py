@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,10 +12,5 @@ except ImportError as e:
 
 try:
     from . import jax
-except ImportError as e:
-    pass
-
-try:
-    from . import tensorflow
 except ImportError as e:
     pass

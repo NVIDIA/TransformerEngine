@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Unittest for group sharding"""
@@ -48,11 +48,8 @@ class TestGroupSharding(unittest.TestCase):
     def _get_model_and_optimizer(self, model, stage):
         if stage == 1:
             optimizer = DygraphShardingOptimizer(
-                hcg=fleet.get_hybrid_communicate_group(),
-                user_defined_strategy=self.strategy,
-                params=model.parameters(),
-                inner_optimizer_class=paddle.optimizer.AdamW,
-                learning_rate=0.01,
+                paddle.optimizer.AdamW(learning_rate=0.01, parameters=model.parameters()),
+                fleet.get_hybrid_communicate_group(),
             )
             model = fleet.distributed_model(model)
             optimizer = fleet.distributed_optimizer(optimizer)

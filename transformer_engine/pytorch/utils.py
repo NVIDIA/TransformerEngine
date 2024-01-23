@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,11 +8,23 @@ from typing import Any, Callable, Optional, Tuple
 import torch
 
 
-def get_device_compute_capability() -> float:
-    """Returns the cuda compute capability of current GPU"""
-    major = torch.cuda.get_device_properties(torch.cuda.current_device()).major
-    minor = torch.cuda.get_device_properties(torch.cuda.current_device()).minor
-    return major + minor / 10
+def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
+    """
+    Trick to deallocate tensor memory when delete operation does not
+    release the tensor due to PyTorch override.
+
+    Must be used carefully.
+    """
+    for t in tensors:
+        if t is not None:
+            t.data = torch.Tensor()
+            del t
+
+
+def get_device_compute_capability() -> Tuple[int, int]:
+    """CUDA compute capability of current GPU"""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return (props.major, props.minor)
 
 
 def attention_mask_func(
@@ -26,6 +38,21 @@ def attention_mask_func(
 def get_default_init_method() -> Callable:
     """Weight initialization method if not provided by user"""
     return init_method_normal(0.023)
+
+
+def init_method_constant(val: float) -> Callable:
+    """Init method to set all tensor elements to a constant value."""
+    if val == 1.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.ones_(tensor)
+    elif val == 0.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.zeros_(tensor)
+    else:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.constant_(tensor, val)
+
+    return init_
 
 
 def init_method_normal(sigma: float) -> Callable:

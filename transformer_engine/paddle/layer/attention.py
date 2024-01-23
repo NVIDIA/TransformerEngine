@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Attntion API"""
@@ -15,8 +15,8 @@ import transformer_engine_paddle as tex
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .softmax import FusedScaleMaskSoftmax
-from ..constants import (AttnTypes, TE_DType, QKVLayout, AttnBiasType, AttnMaskType,
-                         FusedAttnBackend, dist_group_type)
+from ..constants import (AttnTypes, TE_DType, AttnBiasType, AttnMaskType, FusedAttnBackend,
+                         dist_group_type)
 from ..cpp_extensions import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
@@ -27,6 +27,8 @@ from ..cpp_extensions import (
 from ..distributed import get_tp_group_and_world_size, track_rng_state
 from ..utils import attention_mask_func, divide
 from ..recompute import recompute
+
+__all__ = ["DotProductAttention", "MultiHeadAttention"]
 
 
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
@@ -129,7 +131,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
 
 
 class DotProductAttention(paddle.nn.Layer):
-    """Dot Product Attention Layer
+    """
     Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
@@ -150,8 +152,7 @@ class DotProductAttention(paddle.nn.Layer):
     attention_type: {'self', 'cross'}, default = `self`
                     type of attention operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-                backend to use for attention operation.
-
+             backend to use for attention operation.
     """
 
     def __init__(self,
@@ -166,14 +167,11 @@ class DotProductAttention(paddle.nn.Layer):
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
-        self.qkv_layout = "qkv_interleaved" if attention_type == "self" else "kv_interleaved"
+        self.qkv_layout = "bs3hd" if attention_type == "self" else "bshd_bs2hd"
 
         self.backend = backend
 
-        arch = paddle.device.cuda.get_device_capability()
-        self.is_fused_attn_supported = arch in ((8, 0), (9, 0))
-        self.use_fused_attention = (int(os.getenv("NVTE_FUSED_ATTN", "1"))
-                                    and self.is_fused_attn_supported)
+        self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
         if not self.use_fused_attention and backend == 'transformer_engine':
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
@@ -218,27 +216,30 @@ class DotProductAttention(paddle.nn.Layer):
         Parameters
         ----------
         query_layer : paddle.Tensor
-                     Query tensor.
+                      Query tensor.
         key_value_layer : paddle.Tensor
-                   Key tensor.
+                          Key tensor.
         attention_mask : Optional[paddle.Tensor], default = `None`
-                        Boolean tensor used to mask out softmax input when not using attention.
+                         Boolean tensor used to mask out softmax input when not using attention.
         core_attention_bias_type: str, default = `no_bias`
-                                only support no_bias type currently, {`no_bias`}
+                                  only support no_bias type currently, {`no_bias`}
         core_attention_bias: Optional[paddle.Tensor], default = `None`
-                    Bias tensor for Q * K.T
-        set_zero: bool, defautl = `True`
-                    Whether to use the fast path to set output tensors to 0 or not.
+                             Bias tensor for Q * K.T
+        set_zero: bool, default = `True`
+                  Whether to use the fast path to set output tensors to 0 or not.
         """
 
-        if self.backend == 'transformer_engine':
+        backend = self.backend
+
+        if backend == 'transformer_engine':
             max_s_q = query_layer.shape[1]
             max_s_kv = max_s_q if self.attention_type == "self" else key_value_layer.shape[1]
             self.fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
-                QKVLayout[self.qkv_layout], AttnBiasType[core_attention_bias_type],
-                AttnMaskType[self.attn_mask_type], self.attention_dropout, max_s_q, max_s_kv,
-                query_layer.shape[-1])
+                tex.get_nvte_qkv_layout(self.qkv_layout), AttnBiasType[core_attention_bias_type],
+                AttnMaskType[self.attn_mask_type], self.attention_dropout, query_layer.shape[-2],
+                key_value_layer.shape[-2] if key_value_layer is not None else query_layer.shape[-2],
+                max_s_q, max_s_kv, query_layer.shape[-1])
 
             is_backend_avail = (self.fused_attention_backend in [
                 FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -247,16 +248,16 @@ class DotProductAttention(paddle.nn.Layer):
                 return self._te_forward(query_layer, key_value_layer, attention_mask,
                                         core_attention_bias_type, core_attention_bias, set_zero)
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
-            self.backend = 'paddle'
+            backend = 'paddle'
             self.scale_mask_softmax = FusedScaleMaskSoftmax(self.attn_mask_type,
                                                             attention_mask_func,
-                                                            backend=self.backend)
-        if self.backend == 'paddle':
+                                                            backend=backend)
+        if backend == 'paddle':
             if core_attention_bias_type != "no_bias":
                 warnings.warn("Paddle backend dot product attention does not support bias yet. "
                               "Bias will be ignored.")
             return self._pd_forward(query_layer, key_value_layer, attention_mask)
-        raise AttributeError(f"Backend {self.backend} is not supported.")
+        raise AttributeError(f"Backend {backend} is not supported.")
 
     def _te_forward(
         self,
@@ -359,7 +360,9 @@ class DotProductAttention(paddle.nn.Layer):
 
 
 class MultiHeadAttention(paddle.nn.Layer):
-    """Attention w/ QKV and Proj Gemms
+    """
+    Multi-head Attention (MHA), including Query,
+    Key, Value and Output projection.
 
     Parameters
     ----------
@@ -388,7 +391,8 @@ class MultiHeadAttention(paddle.nn.Layer):
     zero_centered_gamma: bool, default = `False`
                     whether to zero initialize the gamma of the layernorm operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-                backend to use for attention operation.
+             backend to use for attention operation. If set to 'paddle', a framework
+             only no-FP8 path is executed with limited optimization.
 
     Parallelism parameters
     ----------------------
@@ -396,6 +400,8 @@ class MultiHeadAttention(paddle.nn.Layer):
                       if set to `True`, QKV and FC1 layers are used as Column Parallel
                       whereas PROJ and FC2 is used as Row Parallel as described
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
     rng_state_name : str, default = `local_seed`
@@ -422,6 +428,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         attention_type: str = "self",
         zero_centered_gamma: bool = False,
         set_parallel_mode: bool = False,
+        sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
         rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
@@ -440,7 +447,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
-
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_size_per_attention_head = hidden_size // num_attention_heads
         self.num_attention_heads = num_attention_heads
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -462,6 +469,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -472,6 +480,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     self.weight_attr,
                     self.bias_attr,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -487,6 +496,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -497,6 +507,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     self.weight_attr,
                     self.bias_attr,
                     parallel_mode=qkv_parallel_mode,
+                    sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
                     backend=self.backend,
                 )
@@ -506,6 +517,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                 self.weight_attr,
                 self.bias_attr,
                 parallel_mode=qkv_parallel_mode,
+                sequence_parallel=self.sequence_parallel,
                 tp_group=self.tp_group,
                 backend=self.backend,
             )
@@ -526,6 +538,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             self.weight_attr,
             self.bias_attr,
             parallel_mode="row" if set_parallel_mode else None,
+            sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
             backend=self.backend,
         )
@@ -539,10 +552,10 @@ class MultiHeadAttention(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
         recompute_core_attention: bool = False,
+        is_first_microbatch: Optional[bool] = None,
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
         """
         MultiHeadAttention Layer.
-
 
         Parameters
         ----------
@@ -556,32 +569,60 @@ class MultiHeadAttention(paddle.nn.Layer):
                                 only support no_bias type currently, {`no_bias`}
         core_attention_bias: Optional[paddle.Tensor], default = `None`
                     Bias tensor for Q * K.T
-        set_zero: bool, defautl = `True`
+        set_zero: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         recompute_core_attention: bool, default = `False`
                                   If true, forward activations for core attention are recomputed
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
 
-        # hidden_states: [b, s_q, hidden_size]
         if self.attn_mask_type != "causal" and attention_mask is not None:
             assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
 
+        input_dim = len(hidden_states.shape)
+        if input_dim == 2:
+            # hidden_states: [b * s_q, hidden_size]
+            # need to get max_seq_len from attention_mask
+            assert attention_mask is not None
+            max_seq_len = attention_mask.shape[-1]
+        elif input_dim == 3:
+            # hidden_states: [b, s_q, hidden_size]
+            max_seq_len = hidden_states.shape[1]
+        else:
+            raise ValueError(f"hidden_states should have 2 or 3 dimensions, got {input_dim}.")
+
         if self.attention_type == "self":
             if self.input_layernorm:
-                layernorm_qkv_outputs = self.layernorm_qkv(hidden_states)
+                layernorm_qkv_outputs = self.layernorm_qkv(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
                 if self.return_layernorm_output:
                     mixed_qkv_layer, layernorm_output = layernorm_qkv_outputs
                 else:
                     mixed_qkv_layer = layernorm_qkv_outputs
             else:
-                mixed_qkv_layer = self.qkv(hidden_states)
+                mixed_qkv_layer = self.qkv(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
 
             # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                0, 0, 3, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 3, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
@@ -607,23 +648,34 @@ class MultiHeadAttention(paddle.nn.Layer):
                     )
 
         else:    # cross attention
-            mixed_kv_layer = self.key_value(encoder_output)
+            mixed_kv_layer = self.key_value(
+                encoder_output,
+                is_first_microbatch=is_first_microbatch,
+            )
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
             mixed_kv_layer = mixed_kv_layer.reshape(shape=[
-                0, 0, 2, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 2, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             if self.input_layernorm:
-                layernorm_query_outputs = self.layernorm_query(hidden_states)
+                layernorm_query_outputs = self.layernorm_query(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
                 else:
                     query_layer = layernorm_query_outputs
             else:
-                query_layer = self.query_layer(hidden_states)
+                query_layer = self.query_layer(
+                    hidden_states,
+                    is_first_microbatch=is_first_microbatch,
+                )
 
             query_layer = query_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 if recompute_core_attention:
@@ -647,10 +699,15 @@ class MultiHeadAttention(paddle.nn.Layer):
                         set_zero=set_zero,
                     )
 
-        context_layer = paddle.reshape(context_layer,
-                                       [0, 0, context_layer.shape[2] * context_layer.shape[3]])
+        if input_dim == 3:
+            context_layer = paddle.reshape(
+                context_layer, [-1, max_seq_len, context_layer.shape[2] * context_layer.shape[3]])
+        else:    # input_dim == 2
+            context_layer = paddle.reshape(context_layer,
+                                           [-1, context_layer.shape[2] * context_layer.shape[3]])
+
         # Output. [b, s, hidden]
-        attention_output = self.proj(context_layer)
+        attention_output = self.proj(context_layer, is_first_microbatch=is_first_microbatch)
 
         if self.input_layernorm and self.return_layernorm_output:
             return attention_output, layernorm_output

@@ -1,26 +1,27 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 #pragma once
 
+#include <cstdlib>
+#include <vector>
+
 #include <cublasLt.h>
+#include "paddle/extension.h"
+#include "paddle/phi/backends/all_context.h"
+
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
-#include <transformer_engine/logging.h>
 #include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
-#include <cstdlib>
-#include <vector>
-
-#include "paddle/extension.h"
-#include "paddle/phi/backends/all_context.h"
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
@@ -127,10 +128,12 @@ inline DType Int2NvteDType(int64_t dtype) {
 inline NVTE_Fused_Attn_Backend get_fused_attn_backend(
     const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    float p_dropout, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim) {
+    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim) {
     NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-        attn_mask_type, p_dropout, max_seqlen_q, max_seqlen_kv, head_dim);
+        attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups,
+        max_seqlen_q, max_seqlen_kv, head_dim);
     return fused_attention_backend;
 }
 
@@ -175,6 +178,8 @@ TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, c
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);
 TensorWrapper MakeNvteTensor(paddle::Tensor &tensor);  // NOLINT
 TensorWrapper MakeNvteTensor(const paddle::Tensor &tensor);
+
+NVTE_QKV_Layout get_nvte_qkv_layout(const std::string &qkv_layout);
 
 }  // namespace paddle_ext
 }  // namespace transformer_engine

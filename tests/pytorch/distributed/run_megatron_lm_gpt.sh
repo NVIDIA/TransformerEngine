@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -81,7 +81,6 @@ options=" \
     --merge-file /data/gpt3/pile-cc1-cc2-shuf/bpe/gpt2-merges.txt \
     --save-interval ${SAVE_INTERVAL} \
     --save ${CHECKPOINT_DIR} \
-    --load ${CHECKPOINT_DIR} \
     --split ${SPLIT} \
     --clip-grad ${CLIP_GRAD} \
     --weight-decay ${WEIGHT_DECAY} \
@@ -90,8 +89,6 @@ options=" \
     --init-method-std ${INIT_METHOD_STD} \
     --log-params-norm \
     --log-num-zeros-in-grad \
-    --no-query-key-layer-scaling \
-    --DDP-impl local \
     --transformer-impl ${TRANSFORMER_IMPL} \
     --tensorboard-dir ${TENSORBOARD_DIR} \
     --fp8-margin 0 \
@@ -108,7 +105,7 @@ if [[ "$WGRAD_FUSION" == "False" ]]; then
 fi
 
 if [[ "$FP8" != "False" ]]; then
-        options+=" --fp8-${FP8}"
+        options+=" --fp8-format ${FP8}"
 fi
 
 if [[ "$DTYPE" != "fp32" ]]; then

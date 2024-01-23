@@ -1,21 +1,24 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <stdio.h>
+#include <assert.h>
+
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
+
 #if __CUDA_ARCH__ >= 800
 #include <cuda_bf16.h>
 #define half nv_bfloat16
 #else
 #include <cuda_fp16.h>
 #endif
+
 #include "userbuffers.h"
-#include <assert.h>
-#include <cuda_fp8.h>
-#include <stdio.h>
 
 #define MAX_THREADS 1024
 #define TIMEOUT 200000000000ull

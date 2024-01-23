@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,9 +14,9 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
+from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     get_default_fp8_recipe,
@@ -28,6 +28,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    get_distributed_world_size,
 )
 from ..cpp_extensions import (
     fp8_cast_transpose_fused,
@@ -35,6 +36,7 @@ from ..cpp_extensions import (
     cast_to_fp8,
 )
 from ..constants import dist_group_type
+from ..float8_tensor import Float8Tensor
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -77,9 +79,7 @@ def _prepare_backward(
             _amax_reduce_handle_bwd = None
 
         # Update amax and scale; Skip all setup for global amax reduction
-        if not fp8_meta["recipe"].reduce_amax:
-            amax_and_scale_update(fp8_meta, False)
-        else:
+        if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
             # From previous iteration
             FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
             amax_and_scale_update(fp8_meta, False)
@@ -89,11 +89,14 @@ def _prepare_backward(
             fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
             FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+        else:
+            amax_and_scale_update(fp8_meta, False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
 
-    if fp8 and fp8_meta["recipe"].reduce_amax:
+    if (fp8 and fp8_meta["recipe"].reduce_amax
+        and get_distributed_world_size(fp8_meta["fp8_group"]) > 1):
         if fp8_meta["first_module"]:
             _amax_reduce_handle_bwd = FP8GlobalStateManager.global_amax_reduction(
                 fp8_meta,
@@ -210,44 +213,6 @@ def get_ub(name: str):
     return _ub_communicators[name]
 
 
-class _NoopCat(torch.autograd.Function):
-    """This class is a no-op replacement for `torch.cat`."""
-
-    @staticmethod
-    def forward(ctx,
-                full_param_buffer: torch.Tensor,
-                *params_split: Tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
-        sum_params_shape = sum(p.shape[0] for p in params_split)
-        assert (
-            full_param_buffer.shape[0] == sum_params_shape
-        ), "Dimensions not compatible for concatenation"
-
-        param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.storage(),
-                        full_param_buffer.storage_offset(),
-                        full_param_buffer.size(),
-                        full_param_buffer.stride())
-        param_temp.requires_grad = True
-
-        ctx.save_for_backward(*params_split)
-        return param_temp
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        params_split = ctx.saved_tensors
-        grads = []
-        slice_begin = 0
-        for i, _ in enumerate(params_split):
-            slice_size = params_split[i].shape[0]
-            slice_end = slice_begin + slice_size
-            grads.append(grad_output[slice_begin:slice_end])
-            slice_begin = slice_end
-
-        return None, *grads
-
-
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -270,6 +235,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
+        self.param_init_meta = {}
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -449,35 +416,56 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             setattr(
                 self,
                 weight_cast_attr,
-                torch.empty(
-                    shape,
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
-                ),
+                Float8Tensor(
+                    data=torch.empty(
+                        shape,
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
+                )
             )
             setattr(
                 self,
                 weight_transpose_attr,
-                torch.empty(
-                    shape[1],
-                    shape[0],
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
-                ),
+                Float8Tensor(
+                    data=torch.empty(
+                        shape[1],
+                        shape[0],
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
+                )
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
-        """Set TP group."""
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
         self.tp_group = tp_group
         self.tp_group_initialized = True
 
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
-    def fp8_init(self, num_gemms: int = 1) -> None:
+    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
+        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+
+        if self.fp8_parameters and not self.fp8_initialized:
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors()
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
@@ -526,7 +514,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert self.tp_group_initialized, "TP group not initialized."
 
             self.set_activation_dtype(inp)
-            self.fp8_init(num_gemms=num_gemms)
+            self.init_fp8_metadata(num_gemms=num_gemms)
 
             # Create persistent tensors for fp8 weights and their transposes
             # only when fp8 weight caching is used.
@@ -541,7 +529,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-                if self.fp8_meta["recipe"].reduce_amax:
+                if (self.fp8_meta["recipe"].reduce_amax
+                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -554,7 +543,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             if self.fp8 and self.training:
                 # Setup for amax reduction
-                if self.fp8_meta["recipe"].reduce_amax:
+                if (self.fp8_meta["recipe"].reduce_amax
+                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
                         # Wait for the prior AMAX reduction to finish
@@ -580,7 +570,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.fp8
                 and self.training
                 and is_fp8_activation_recompute_enabled()
-                and not in_fp8_activation_recompute_phase()
             ):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
@@ -591,7 +580,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
             return
 
-        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
+        if (self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax
+            and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
             FP8GlobalStateManager.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 FP8GlobalStateManager.global_amax_reduction,
@@ -716,44 +706,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self,
-        buffer_name: str,
-        pnames: List[str],
-        parameters_split: Dict[str, int]
-        ) -> torch.Tensor:
-        """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
-           the same memory region. If this is not the case, then the split parameters
-           are concatenated and the buffer is overwritten. The parameters' memory is then
-           re-assigned to point to the buffer to avoid subsequent concatenations.
-        """
-
-        assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
-        full_param_buffer = getattr(self, buffer_name)
-        params = [getattr(self, name) for name in pnames]
-        slice_begin = 0
-        for i, p in enumerate(params):
-            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
-            slice_end = slice_begin + slice_size
-            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
-                with torch.no_grad():
-                    setattr(self, buffer_name, torch.cat(params))
-                    slice_begin_j = 0
-                    for pname in pnames:
-                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
-                        slice_end_j = slice_begin_j + slice_size_j
-                        full_param_buffer = getattr(self, buffer_name)
-                        setattr(self, pname,
-                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
-                        slice_begin_j = slice_end_j
-                break
-            slice_begin = slice_end
-
-        return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
-
     def get_fp8_weights_empty_tensors(
         self,
         is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
+    ) -> List[Float8Tensor]:
         """
         Returns empty tensors to be later used to store fp8 version of weights
         and their transposes (for the bwd pass) for this batch (or microbatch).
@@ -769,23 +725,75 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_weight_tensors = []
         for shape in self.fp8_weight_shapes:
             fp8_weight_tensors.append(
-                torch.empty(
-                    shape,
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
+                Float8Tensor(
+                    data=torch.empty(
+                        shape,
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
                 )
             )
-
             fp8_weight_tensors.append(
-                torch.empty(
-                    shape[1],
-                    shape[0],
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
+                Float8Tensor(
+                    data=torch.empty(
+                        shape[1],
+                        shape[0],
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
                 )
             )
         return fp8_weight_tensors
 
+    def register_parameter(self, name, param, **kwargs):
+        """
+        Thin wrapper around PyTorch parameter registration to stash additional parameter
+        metedata used in deferred initialization.
+        """
+        super().register_parameter(name, param)
+        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+
+    def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
+        """
+        Reset all module parameters to initial values. Unless deferred initialization
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        device before the values are reset to initial.
+        """
+        if defer_init:
+            return
+
+        for name, param in self.named_parameters(recurse=False):
+            # Ensure parameter is on a real device
+            if param.device == torch.device('meta'):
+                param = torch.empty_like(param, device='cuda')
+
+            # Initialize the parameter values on device
+            init_fn = self.param_init_meta[name].init_fn
+            get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
+            if get_rng_state_tracker is None:
+                init_fn(param)
+            else:
+                with get_rng_state_tracker().fork():
+                    init_fn(param)
+
+            # If primary weights are in fp8, wrap the parameter as Float8Tensor
+            fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                param = Float8Tensor.to_float8(
+                    param,
+                    fp8_meta=self.fp8_meta,
+                    fp8_meta_index=fp8_meta_index
+                )
+
+            # Redo parameter wrap in case we broke it above
+            # NOTE: Currently this can only be broken when primary weights are in Fp8 but
+            #       re-applying the nn.Parameter() wrap is a no-op when the input is already
+            #       a parameter so we always re-apply it just for extra safety.
+            setattr(self, name, torch.nn.Parameter(param))
 
     @abstractmethod
     def forward(self):

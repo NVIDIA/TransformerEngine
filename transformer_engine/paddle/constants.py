@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Constants"""
@@ -52,12 +52,6 @@ GemmParallelModes = ("row", "column", None)
 dist_group_type = paddle.distributed.collective.Group
 
 RecomputeFunctionNames = ('unpack', 'backward')
-
-QKVLayout = {
-    "not_interleaved": tex.NVTE_QKV_Layout.NVTE_NOT_INTERLEAVED,
-    "qkv_interleaved": tex.NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED,
-    "kv_interleaved": tex.NVTE_QKV_Layout.NVTE_KV_INTERLEAVED,
-}
 
 AttnBiasType = {
     "no_bias": tex.NVTE_Bias_Type.NVTE_NO_BIAS,

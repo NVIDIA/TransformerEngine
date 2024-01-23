@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -41,7 +41,7 @@ target_include_directories(transformer_engine PUBLIC
 
 # Check for cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
 if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
     message(FATAL_ERROR
             "Could not find cuDNN frontend API. "

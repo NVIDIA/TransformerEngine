@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -145,9 +145,6 @@ void nvte_multi_cast_transpose(size_t num_tensors,
  * This function produces 2 results:
  *  - `cast_output` is the result of the cast
  *  - `transposed_output` is the transposed result of the cast.
- *
- *  Calling this function with workspace being an empty tensor will not perform the operation,
- *  but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     input               Input tensor of shape [N, H].
  *  \param[in]     geglu_input         Tensor used as input to the forward of GeGLU operation.

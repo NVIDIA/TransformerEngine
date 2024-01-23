@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -30,109 +30,6 @@ void generateMatrixStrides(
     constexpr int seqlen_q_dim_idx = 2;
     constexpr int seqlen_kv_dim_idx = 3;
 
-    // to be deprecated in the future
-    switch (matrix) {
-        case NVTE_QKV_Matrix::NVTE_Q_Matrix:
-            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                strideA[hidden_dim_idx] = 1;
-                strideA[seqlen_dim_idx] = 3 * h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_q * 3 * h * d;
-            } else if ((layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
-                || (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)) {
-                strideA[hidden_dim_idx] = 1;
-                strideA[seqlen_dim_idx] = h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_q * h * d;
-            }
-            break;
-        case NVTE_QKV_Matrix::NVTE_K_Matrix:
-            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                strideA[seqlen_dim_idx] = 3 * h * d;
-                strideA[hidden_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[seqlen_dim_idx] = 2 * h * d;
-                strideA[hidden_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
-                strideA[seqlen_dim_idx] = h * d;
-                strideA[hidden_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * h * d;
-            }
-            break;
-        case NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose:
-            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                strideA[seqlen_transpose_dim_idx] = 3 * h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[seqlen_transpose_dim_idx] = 2 * h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
-                strideA[seqlen_transpose_dim_idx] = h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * h * d;
-            }
-            break;
-        case NVTE_QKV_Matrix::NVTE_V_Matrix:
-            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                strideA[hidden_dim_idx] = 1;
-                strideA[seqlen_dim_idx] = 3 * h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[hidden_dim_idx] = 1;
-                strideA[seqlen_dim_idx] = 2* h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
-                strideA[hidden_dim_idx] = 1;
-                strideA[seqlen_dim_idx] = h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * h * d;
-            }
-            break;
-        case NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose:
-            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[seqlen_transpose_dim_idx] = 3 * h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[seqlen_transpose_dim_idx] = 2* h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
-                strideA[hidden_transpose_dim_idx] = 1;
-                strideA[seqlen_transpose_dim_idx] = h * d;
-                strideA[head_dim_idx] = d;
-                strideA[batch_dim_idx] = s_kv * h * d;
-            }
-            break;
-        case NVTE_QKV_Matrix::NVTE_S_Matrix:
-            strideA[seqlen_kv_dim_idx] = 1;
-            strideA[seqlen_q_dim_idx] = s_kv;
-            strideA[head_dim_idx] = s_q * s_kv;
-            strideA[batch_dim_idx] = h * s_q * s_kv;
-            break;
-        case NVTE_QKV_Matrix::NVTE_O_Matrix:
-            strideA[seqlen_kv_dim_idx] = 1;
-            strideA[seqlen_q_dim_idx] = h * d;
-            strideA[head_dim_idx] = d;
-            strideA[batch_dim_idx] = s_q * h * d;
-            break;
-    }
-
-    // new way of getting strides
     switch (layout) {
         case NVTE_QKV_Layout::NVTE_SB3HD:
             if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
@@ -493,6 +390,29 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
       return CUDNN_DATA_FP8_E4M3;
     case DType::kFloat8E5M2:
       return CUDNN_DATA_FP8_E5M2;
+    default:
+      NVTE_ERROR("Invalid cuDNN data type. \n");
+  }
+}
+
+// get cuDNN data type
+cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kInt32:
+      return cudnn_frontend::DataType_t::INT32;
+    case DType::kInt64:
+      return cudnn_frontend::DataType_t::INT64;
+    case DType::kFloat16:
+      return cudnn_frontend::DataType_t::HALF;
+    case DType::kFloat32:
+      return cudnn_frontend::DataType_t::FLOAT;
+    case DType::kBFloat16:
+      return cudnn_frontend::DataType_t::BFLOAT16;
+    case DType::kFloat8E4M3:
+      return cudnn_frontend::DataType_t::FP8_E4M3;
+    case DType::kFloat8E5M2:
+      return cudnn_frontend::DataType_t::FP8_E5M2;
     default:
       NVTE_ERROR("Invalid cuDNN data type. \n");
   }

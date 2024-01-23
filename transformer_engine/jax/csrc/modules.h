@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -7,19 +7,18 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
-#include <cuda_runtime_api.h>
-
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/logging.h"
-#include "transformer_engine/transformer_engine.h"
+#include <transformer_engine/fused_attn.h>
+#include <transformer_engine/transformer_engine.h>
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -76,10 +75,11 @@ struct CustomCallNormDescriptor {
     DType w_dtype;
     bool zero_centered_gamma;
     float eps;
+    int sm_margin;
 };
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             bool zero_centered_gamma, float eps);
+                                             bool zero_centered_gamma, float eps, int sm_margin);
 
 struct SoftmaxDescriptor {
     size_t batch;
@@ -98,6 +98,7 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
 struct CustomCallFusedAttnDescriptor {
     size_t batch;
     size_t num_head;
+    size_t num_gqa_groups;
     size_t q_max_seqlen;
     size_t kv_max_seqlen;
     size_t head_dim;
@@ -110,13 +111,14 @@ struct CustomCallFusedAttnDescriptor {
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t batch, size_t num_head, size_t num_gqa_groups, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
+                                            size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t head_dim);
 

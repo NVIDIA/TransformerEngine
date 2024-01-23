@@ -1,16 +1,17 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Transformer"""
 
 from typing import Optional, Union
+import warnings
 
 import paddle
 from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
 
-from . import LayerNormMLP, LayerNorm, MultiHeadAttention
-from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
-from ..distributed import get_tp_group_and_world_size, track_rng_state
+from transformer_engine.paddle.layer import LayerNormMLP, LayerNorm, MultiHeadAttention
+from transformer_engine.paddle.constants import AttnMaskTypes, LayerTypes, dist_group_type
+from transformer_engine.paddle.distributed import get_tp_group_and_world_size, track_rng_state
 
 
 class TransformerLayer(paddle.nn.Layer):
@@ -33,6 +34,10 @@ class TransformerLayer(paddle.nn.Layer):
                    dropout probability for the dropout op after FC2 layer.
     attention_dropout: float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
     self_attn_mask_type: {'causal', 'padding'}, default = `causal`
                         type of attention mask passed into softmax operation.
     apply_residual_connection_post_layernorm : bool, default = `False`
@@ -62,6 +67,8 @@ class TransformerLayer(paddle.nn.Layer):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    backend: {'transformer_engine', 'paddle'}, default = 'transformer_engine'
+             if set to 'paddle', a framework only no-FP8 path is executed with limited optimization.
 
     Parallelism parameters
     ----------------------
@@ -69,6 +76,8 @@ class TransformerLayer(paddle.nn.Layer):
                       if set to `True`, QKV and FC1 layers are used as Column Parallel
                       whereas PROJ and FC2 is used as Row Parallel as described
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
     attention_dropout_rng_state_name : str, default = `local_seed`
@@ -101,6 +110,7 @@ class TransformerLayer(paddle.nn.Layer):
                  zero_centered_gamma: bool = False,
                  activation: str = 'gelu',
                  set_parallel_mode: bool = False,
+                 sequence_parallel: bool = False,
                  tp_group: Optional[dist_group_type] = None,
                  attention_dropout_rng_state_name: str = 'local_seed',
                  hidden_dropout_rng_state_name: str = 'global_seed',
@@ -116,7 +126,13 @@ class TransformerLayer(paddle.nn.Layer):
         self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
+        # SP needs local seed for hidden dropout
+        if self.sequence_parallel and self.hidden_dropout_rng_state_name == 'global_seed':
+            warnings.warn("RNG state for hidden dropout needs to be different across TP ranks. "
+                          "Forcing hidden_dropout_rng_state_name to 'local_seed'")
+            self.hidden_dropout_rng_state_name = 'local_seed'
 
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -135,6 +151,7 @@ class TransformerLayer(paddle.nn.Layer):
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "zero_centered_gamma": zero_centered_gamma,
             "set_parallel_mode": set_parallel_mode,
+            "sequence_parallel": self.sequence_parallel,
             "tp_group": tp_group,
             "rng_state_name": attention_dropout_rng_state_name,
             "backend": backend,
@@ -167,6 +184,7 @@ class TransformerLayer(paddle.nn.Layer):
             return_layernorm_output=apply_residual_connection_post_layernorm,
             zero_centered_gamma=zero_centered_gamma,
             set_parallel_mode=set_parallel_mode,
+            sequence_parallel=self.sequence_parallel,
             tp_group=tp_group,
             backend=backend,
         )
@@ -180,6 +198,7 @@ class TransformerLayer(paddle.nn.Layer):
                 weight_attr,
                 bias_attr,
                 zero_centered_gamma=zero_centered_gamma,
+                sequence_parallel=self.sequence_parallel,
                 backend=backend,
             )
 
@@ -198,6 +217,7 @@ class TransformerLayer(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
         recompute_core_attention: bool = False,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -229,6 +249,16 @@ class TransformerLayer(paddle.nn.Layer):
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
@@ -245,6 +275,7 @@ class TransformerLayer(paddle.nn.Layer):
             core_attention_bias=core_attention_bias,
             set_zero=set_zero,
             recompute_core_attention=recompute_core_attention,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -267,6 +298,7 @@ class TransformerLayer(paddle.nn.Layer):
                 core_attention_bias=core_attention_bias,
                 set_zero=set_zero,
                 recompute_core_attention=recompute_core_attention,
+                is_first_microbatch=is_first_microbatch,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, residual = inter_attention_outputs
@@ -279,7 +311,7 @@ class TransformerLayer(paddle.nn.Layer):
                 bda_output = self.fused_dropout_add2(attention_output, residual)
 
         # MLP.
-        mlp_outputs = self.layernorm_mlp(bda_output)
+        mlp_outputs = self.layernorm_mlp(bda_output, is_first_microbatch=is_first_microbatch)
         if self.apply_residual_connection_post_layernorm:
             mlp_output, residual = mlp_outputs
         else:

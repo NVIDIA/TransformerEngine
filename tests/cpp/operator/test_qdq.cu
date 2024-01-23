@@ -1,22 +1,22 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "gtest/gtest.h"
-#include <transformer_engine/cast.h>
-#include <transformer_engine/logging.h>
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <memory>
-#include <iostream>
-#include <iomanip>
-#include <random>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <random>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+
+#include <transformer_engine/cast.h>
+#include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
-#include "transformer_engine/transformer_engine.h"
 
 using namespace transformer_engine;
 

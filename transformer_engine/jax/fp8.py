@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -6,7 +6,7 @@ Helper module for fp8 meta management
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +17,7 @@ from transformer_engine_jax import get_cublasLt_version
 from transformer_engine_jax import get_cuda_version, get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
-from transformer_engine.jax.sharding import ShardingResource
+from transformer_engine.jax.sharding import MeshResource
 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
@@ -59,37 +59,29 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
 
 def _format2dtypes(format_: Format):
     if format_ == Format.E4M3:
-        return DType.kFloat8E4M3, DType.kFloat8E4M3
+        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
     if format_ == Format.E5M2:
-        return DType.kFloat8E5M2, DType.kFloat8E5M2
+        return jnp.float8_e5m2, jnp.float8_e5m2
     if format_ == Format.HYBRID:
-        return DType.kFloat8E4M3, DType.kFloat8E5M2
-    return DType.kBFloat16, DType.kBFloat16
+        return jnp.float8_e4m3fn, jnp.float8_e5m2
+    return jnp.bfloat16, jnp.bfloat16
 
 
-class FP8GemmPackage:
+class FP8MetaPackage:
     """
-    A container that contains all required data for
-    FP8 GEMM
+    A container that contains all required meta data for FP8
     """
 
     def __init__(
         self,
         num_of_gemm: int,
-        inputs: jnp.ndarray,
-        kernels: List[jnp.ndarray],
         fp8_max: jnp.ndarray,
         amax: jnp.ndarray,
         scale: jnp.ndarray,
         scale_inv: jnp.ndarray,
     ) -> None:
+        total_num_of_meta = num_of_gemm * FP8Helper.NUM_META_PER_GEMM
         self._num_of_gemm = num_of_gemm
-        self._inputs = inputs
-
-        assert len(kernels) == self._num_of_gemm
-        self._kernels = kernels
-
-        total_num_of_meta = self._num_of_gemm * FP8Helper.NUM_META_PER_GEMM
         assert fp8_max.shape[0] == total_num_of_meta
         self._fp8_max = fp8_max
         assert amax.shape[0] == total_num_of_meta
@@ -105,20 +97,6 @@ class FP8GemmPackage:
         num_of_gemm of this package
         """
         return self._num_of_gemm
-
-    @property
-    def inputs(self) -> jnp.ndarray:
-        """
-        inputs of this package
-        """
-        return self._inputs
-
-    @property
-    def kernels(self) -> List[jnp.ndarray]:
-        """
-        kernels of this package
-        """
-        return self._kernels
 
     @property
     def fp8_max(self) -> jnp.ndarray:
@@ -148,11 +126,27 @@ class FP8GemmPackage:
         """
         return self._scale_inv
 
+    def get_package_by_gemm_idx(self, gemm_idx):
+        """
+        Get a sub package by gemm_idx
+        """
+        assert self.num_of_gemm > gemm_idx
+
+        meta_start_idx = gemm_idx * FP8Helper.NUM_META_PER_GEMM
+        meta_end_idx = (gemm_idx + 1) * FP8Helper.NUM_META_PER_GEMM
+        return FP8MetaPackage(1, self.fp8_max[meta_start_idx:meta_end_idx],
+                              self.amax[meta_start_idx:meta_end_idx],
+                              self.scale[meta_start_idx:meta_end_idx],
+                              self.scale_inv[meta_start_idx:meta_end_idx])
+
 
 class AmaxComputeAlgo(Enum):
     """AmaxComputeAlgo."""
     MAX = "max"
     MOST_RECENT = "most_recent"
+
+
+NVTE_FP8_COLLECTION_NAME = "fp8_meta_collection"
 
 
 class FP8Helper:
@@ -162,8 +156,8 @@ class FP8Helper:
     INITIALIZED = False
     MARGIN: float = 0.0
     FP8_FORMAT: Format = Format.HYBRID
-    FWD_DTYPE: DType = DType.kFloat8E4M3
-    BWD_DTYPE: DType = DType.kFloat8E5M2
+    FWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[0]
+    BWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[1]
     UPDATE_FP8META_INTERVAL: int = 1
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
@@ -171,7 +165,7 @@ class FP8Helper:
     INPUT_META_IDX_PER_GEMM: int = 0
     KERNEL_META_IDX_PER_GEMM: int = 1
     GRAD_META_IDX_PER_GEMM: int = 2
-    FP8_COLLECTION_NAME: str = "fp8_meta_collection"
+    FP8_COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
     FP8_AMAX_NAME: str = "fp8_meta_amax"
     FP8_SCALE_NAME: str = "fp8_meta_scale"
     FP8_SCALE_INV_NAME: str = "fp8_meta_scale_inv"
@@ -216,20 +210,11 @@ class FP8Helper:
         FP8Helper.INITIALIZED = False
         FP8Helper.MARGIN = 0.0
         FP8Helper.FP8_FORMAT = Format.HYBRID
-        FP8Helper.FWD_DTYPE = DType.kFloat8E4M3
-        FP8Helper.BWD_DTYPE = DType.kFloat8E5M2
+        FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = \
+            _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.UPDATE_FP8META_INTERVAL = 1
         FP8Helper.AMAX_HISTORY_LEN = 1024
         FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
-
-    @staticmethod
-    def update_amax_history(amax_buffers: jnp.ndarray) -> jnp.ndarray:
-        """
-        Update the amax history
-        """
-        updated_amax_buffers = jnp.roll(amax_buffers, -1, 1)
-        updated_amax_buffers = updated_amax_buffers.at[:, 0].set(0)
-        return updated_amax_buffers
 
     @staticmethod
     def update_collections(new: Collection, original: Collection) -> Collection:
@@ -270,8 +255,8 @@ class FP8Helper:
         Generate the FP8 max array
         """
         num_of_gemm = num_of_meta // FP8Helper.NUM_META_PER_GEMM
-        fp8_max_fwd = FP8Helper.FP8_FORMAT.value.max_fwd
-        fp8_max_bwd = FP8Helper.FP8_FORMAT.value.max_bwd
+        fp8_max_fwd = jnp.finfo(FP8Helper.FWD_DTYPE).max
+        fp8_max_bwd = jnp.finfo(FP8Helper.BWD_DTYPE).max
         fp8_max_per_gemm = []
         for i in range(FP8Helper.NUM_META_PER_GEMM):
             val = fp8_max_bwd if i == FP8Helper.GRAD_META_IDX_PER_GEMM \
@@ -318,11 +303,40 @@ class FP8Helper:
 
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
 
+    @staticmethod
+    def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
+        """
+        Update the amax history
+        """
+        updated_amax = jnp.roll(amax, -1, -1)
+        updated_amax = updated_amax.at[..., 0].set(0)
+        return updated_amax
+
+    @staticmethod
+    @jax.jit
+    def update_fp8_scale(fp8_max: jnp.ndarray, amax: jnp.ndarray,
+                         scale: jnp.ndarray) -> jnp.ndarray:
+        """
+        Calculate fp8 scale and scale_inv based on given amax.
+        """
+        if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
+            amax = jnp.max(amax, axis=-1, keepdims=True)
+        else:
+            amax = amax[..., 0:1]
+
+        sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
+        sf = jnp.where(amax > 0.0, sf, scale)
+        sf = jnp.where(jnp.isfinite(amax), sf, scale)
+        scale = sf
+        scale_inv = 1 / sf
+
+        return scale, scale_inv
+
 
 @contextmanager
 def fp8_autocast(enabled: bool = False,
                  fp8_recipe: Optional[DelayedScaling] = None,
-                 sharding_resource: Optional[ShardingResource] = None) -> None:
+                 mesh_resource: Optional[MeshResource] = None) -> None:
     r"""
     Context manager for FP8 usage.
 
@@ -334,9 +348,9 @@ def fp8_autocast(enabled: bool = False,
         devices = np.asarray(jax.devices()).reshape(*mesh_shape)
 
         with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
-            sharding_resource=ShardingResource(dp_mesh_axis_name, tp_mesh_axis_name)
+            mesh_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
 
-            with fp8_autocast(enabled=True, sharding_resource=sharding_resource):
+            with fp8_autocast(enabled=True, mesh_resource=mesh_resource):
                 rules = extend_logical_axis_rules(tuple())
                 transformer = TransformerLayer()
 
@@ -356,7 +370,7 @@ def fp8_autocast(enabled: bool = False,
         Whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
         Recipe used for FP8 training.
-    sharding_resource: ShardingResource, default = None
+    mesh_resource: MeshResource, default = None
         Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then no data or tensor parallelism will be used.
 
@@ -373,11 +387,11 @@ def fp8_autocast(enabled: bool = False,
         "DelayedScaling override_linear_precision isn't supported by TE/JAX.")
     assert fp8_recipe.reduce_amax, ("DelayedScaling reduce_amax should be enabled for TE/JAX.")
 
-    if sharding_resource is None:
-        sharding_resource = ShardingResource()
+    if mesh_resource is None:
+        mesh_resource = MeshResource()
 
     try:
-        with global_shard_guard(sharding_resource):
+        with global_shard_guard(mesh_resource):
             if enabled:
                 fp8_available, reason_for_no_fp8 = is_fp8_available()
                 assert fp8_available, reason_for_no_fp8

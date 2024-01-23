@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """TE FP8 extensions and GEMMs"""
@@ -185,11 +185,22 @@ def cast_to_fp8(
     fp8_meta_tensor: FP8TensorMeta,
     fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
+    out: Optional[paddle.Tensor] = None,
 ) -> paddle.Tensor:
     """Cast input to FP8"""
-    out, _, _ = tex.cast_to_fp8(
+    if out is None:
+        out = paddle.empty(
+            shape=inp.shape,
+            dtype=paddle.uint8,
+        )
+    else:
+        assert out.shape == inp.shape, "Output shape does not match input shape."
+        assert out.dtype == paddle.uint8, "Output should be of uint8 dtype."
+
+    tex.cast_to_fp8(
         inp,
         fp8_meta_tensor.scale,
+        out,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
         fp8_tensor.value,
@@ -231,11 +242,34 @@ def cast_transpose(
     fp8_meta_tensor: FP8TensorMeta,
     fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
+    cast_out: Optional[paddle.Tensor] = None,
+    transpose_out: Optional[paddle.Tensor] = None,
 ) -> Union[Tuple[paddle.Tensor, paddle.Tensor], None]:
     """Cast + Transpose with FP8 output"""
-    cast_out, transpose_out, _, _ = tex.te_cast_transpose(
+    if cast_out is None:
+        cast_out = paddle.empty(
+            shape=inp.shape,
+            dtype=paddle.uint8,
+        )
+    else:
+        assert cast_out.shape == inp.shape, "cast_out shape does not match input shape."
+        assert cast_out.dtype == paddle.uint8, "cast_out should be of uint8 dtype."
+
+    if transpose_out is None:
+        transpose_out = paddle.empty(
+            shape=[inp.shape[1], inp.shape[0]],
+            dtype=paddle.uint8,
+        )
+    else:
+        assert transpose_out.shape == [inp.shape[1], inp.shape[0]
+                                      ], "Transposed output shape does not match input shape."
+        assert transpose_out.dtype == paddle.uint8, "Output should be of uint8 dtype."
+
+    tex.te_cast_transpose(
         inp,
         fp8_meta_tensor.scale,
+        cast_out,
+        transpose_out,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
         fp8_tensor.value,
@@ -431,7 +465,7 @@ def fused_attn_fwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -472,7 +506,12 @@ def fused_attn_fwd_qkvpacked(
         out = paddle.empty(shape=[b, max_seqlen, h, d], dtype=qkv.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
@@ -518,7 +557,7 @@ def fused_attn_bwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -587,7 +626,7 @@ def fused_attn_fwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -631,7 +670,12 @@ def fused_attn_fwd_kvpacked(
         out = paddle.empty(shape=[b, max_seqlen_q, h, d], dtype=q.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
@@ -685,7 +729,7 @@ def fused_attn_bwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
