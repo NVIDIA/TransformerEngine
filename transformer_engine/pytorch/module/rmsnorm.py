@@ -141,7 +141,7 @@ class RMSNorm(torch.nn.Module):
                 dtype=params_dtype,
             )
         )
-        setattr(self.weight, "sequence_parallel", sequence_parallel)
+        self.sequence_parallel = sequence_parallel
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
@@ -169,7 +169,11 @@ class RMSNorm(torch.nn.Module):
         """Reset RMSNorm parameters"""
         if defer_init:
             return
+
+        if self.weight.device == torch.device('meta'):
+            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device='cuda'))
         init.constant_(self.weight, float(not self.zero_centered_gamma))
+        setattr(self.weight, "sequence_parallel", self.sequence_parallel)
 
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
