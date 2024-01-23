@@ -32,7 +32,7 @@ RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" =~ jax|all ]] \
   && SKIP_HEAD_INSTALLS=1 \
      pip install \
-     fiddle chex>=0.1.83 git+https://github.com/google/praxis \
+     fiddle chex>=0.1.83 clu git+https://github.com/google/praxis \
   || [[ ! "${FRAMEWORK}" =~ jax|all ]]
 EOF
 
