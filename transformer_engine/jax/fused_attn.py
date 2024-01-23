@@ -40,6 +40,20 @@ class QKVLayout(Enum):
     BSHD_BSHD_BSHD = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
 
 
+def canonicalize_attn_mask_type(attn_mask_type: str):
+    """Convert string attn_mask_type to AttnMaskType
+    TE-JAX currently fall back to the padding version kernels for the libraries integration.
+    The overhead between padding and non-padding version should be small.
+    However, we will lease this limitation in the near feature.
+    """
+    if attn_mask_type in ['causal', 'padding_causal']:
+        return AttnMaskType.PADDING_CAUSAL_MASK
+    if attn_mask_type in ['no_mask', 'padding']:
+        return AttnMaskType.PADDING_MASK
+    raise ValueError(f"Unsupported {attn_mask_type=}, "
+                     "supported attn_mask_type={'no_mask', 'padding', 'causal', 'padding_causal'}")
+
+
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
                                    dropout_probability, num_heads_q, num_heads_kv, max_seqlen_q,
                                    max_seqlen_kv, head_dim):
@@ -84,8 +98,12 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                               seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                               attn_mask_type: AttnMaskType, scaling_factor: float,
                               dropout_probability: float, is_training: bool):
-    mask = jnp.logical_not(mask)
-    actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+    if mask is None:
+        batch, seqlen, *_ = qkv.shape
+        actual_seqlen = jnp.full((batch,), seqlen, dtype=jnp.int32)
+    else:
+        mask = jnp.logical_not(mask)
+        actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
                                                          actual_seqlen,
@@ -160,14 +178,19 @@ def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mask: 
 
 def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                scaling_factor, dropout_probability, is_training):
-
-    mask = jnp.logical_not(mask)
-    q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-    if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-        kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+    if mask is None:
+        batch, s_q, *_ = q.shape
+        s_kv = kv.shape[1]
+        q_actual_seqlen = jnp.full((batch,), s_q, dtype=jnp.int32)
+        kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
     else:
-        # When mask is padding + causal, the actual seqlen is not the last row, use max to find it
-        kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+        mask = jnp.logical_not(mask)
+        q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+            kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        else:
+            # When mask is causal, the actual seqlen is not the last row, use max to find it
+            kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
     output, softmax_aux, rng_state = cross_fused_attn_fwd(q,
                                                           kv,

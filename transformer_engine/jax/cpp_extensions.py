@@ -1737,8 +1737,6 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
                                   attn_mask_type, dropout_probability, num_head, num_head,
                                   max_seqlen, max_seqlen, head_dim).get_fused_attn_backend()
 
-        print(f'{backend=}', flush=True)
-
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*batch_shape, num_head, max_seqlen, max_seqlen)
             softmax_dtype = qkv_dtype
@@ -2093,8 +2091,6 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
                                   attn_bias_type, attn_mask_type, dropout_probability, q_num_head,
                                   kv_num_head, q_max_seqlen, kv_max_seqlen,
                                   q_head_dim).get_fused_attn_backend()
-
-        print(f'{backend=}', flush=True)
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*q_batch_shape, q_num_head, q_max_seqlen, kv_max_seqlen)

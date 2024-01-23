@@ -76,6 +76,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     use_bias: bool = False
     bias_init: WeightInit = WeightInit.Constant(0.0)
     attn_mask_type: str = 'causal'
+    attn_bias_type: str | None = None
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = False
@@ -139,6 +140,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             use_bias=self.use_bias,
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             attn_mask_type=self.attn_mask_type,
+            attn_bias_type=self.attn_bias_type,
             fuse_qkv_params=self.fuse_qkv_params,
             transpose_batch_sequence=self.transpose_batch_sequence,
             scale_attn_logits=self.scale_attn_logits,
@@ -188,6 +190,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
+    self_attn_bias_type: str | None = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     enable_relative_embedding: bool = True
@@ -255,6 +258,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             float32_attention_logits=self.float32_attention_logits,
             layer_type=self.layer_type,
             self_attn_mask_type=self.self_attn_mask_type,
+            self_attn_bias_type=self.self_attn_bias_type,
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             enable_relative_embedding=self.enable_relative_embedding,
