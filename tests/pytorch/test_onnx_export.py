@@ -625,7 +625,7 @@ def test_export_layernorm(
             eps = 1e-6 # An arbitrary small value
             dtype = torch.float if fake_bf16_io else precision
             self.ln = te.LayerNorm(inp_shape[1], eps, params_dtype=dtype,
-                zero_centered_gamma=False).eval().cuda()
+                zero_centered_gamma=zero_centered_gamma).eval().cuda()
 
         def forward(self, inp):
             ret = self.ln(inp)
@@ -679,6 +679,7 @@ def test_export_layernorm(
             fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
 
 @pytest.mark.parametrize("scale_factor", [448, 112])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize(
     "use_fp8, precision,             atol", [
     [False,   torch.float32,         1e-7],
@@ -695,6 +696,7 @@ def test_export_rmsnorm(
     use_fp8: bool,
     scale_factor: float,
     precision: torch.dtype,
+    zero_centered_gamma: bool,
     atol: float
 ):
     fake_bf16_io = precision == "fake-torch.bfloat16"
@@ -713,7 +715,8 @@ def test_export_rmsnorm(
             super().__init__()
             eps = 1e-6 # An arbitrary small value
             dtype = torch.float if fake_bf16_io else precision
-            self.ln = te.RMSNorm(inp_shape[1], eps, params_dtype=dtype).eval().cuda()
+            self.ln = te.RMSNorm(inp_shape[1], eps, params_dtype=dtype,
+                                 zero_centered_gamma=zero_centered_gamma).eval().cuda()
 
         def forward(self, inp):
             ret = self.ln(inp)
@@ -739,7 +742,7 @@ def test_export_rmsnorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
-                False)
+                zero_centered_gamma)
 
             ret = cast_from_fp8(
                 ret,
@@ -875,9 +878,6 @@ def test_export_layernorm_linear(
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     # Set dimensions (these are arbitrary).
     in_features = 64
     out_features = 256
@@ -946,8 +946,6 @@ def test_export_layernorm_mlp(
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     # Set dimensions (these are arbitrary).
     in_features = 64

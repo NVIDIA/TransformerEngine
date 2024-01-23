@@ -114,7 +114,7 @@ class RMSNorm(torch.nn.Module):
                          the RMSNorm formula changes to
 
                          .. math::
-                            y = \frac{x}{RMS(x) + \varepsilon} * (1 + \gamma)
+                            y = \frac{x}{RMS_\varepsilon(x)} * (1 + \gamma)
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -155,7 +155,7 @@ class RMSNorm(torch.nn.Module):
     def reset_rms_norm_parameters(self) -> None:
         """Init RMSNorm params"""
         warnings.warn(
-            ("This method will be deprecated in an upcoming release. "
+            ("This method is deprecated and will be removed in an upcoming release. "
              "Update your code to use RMSNorm.reset_parameters() instead."),
             DeprecationWarning,
             stacklevel=2

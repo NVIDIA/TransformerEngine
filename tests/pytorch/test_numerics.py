@@ -216,13 +216,15 @@ class TorchDotProductAttention(torch.nn.Module):
 
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
-    def __init__(self, in_features, eps=1e-5):
+    def __init__(self, in_features, zero_centered_gamma, eps=1e-5):
         super().__init__()
 
         self.eps = eps
         self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
 
-        self.weight = nn.Parameter(torch.ones(in_features))
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
         self.register_parameter("weight", self.weight)
 
     def forward(self, x):
@@ -233,7 +235,10 @@ class TorchRMSNorm(nn.Module):
         r_rms_x = rms_x2 ** (-1. / 2)
         x_normed = x * r_rms_x
 
-        return (self.weight.float() * x_normed).to(x.dtype)
+        w = self.weight.float()
+        if self.zero_centered_gamma:
+            w = 1 + w
+        return (w * x_normed).to(x.dtype)
 
 
 class TorchLayerNormLinear(nn.Module):
@@ -892,13 +897,15 @@ def test_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
-def test_rmsnorm_accuracy(dtype, bs, model, eps):
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     config = model_configs[model]
 
     te_rmsnorm = (
         RMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
@@ -909,6 +916,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         TorchRMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
