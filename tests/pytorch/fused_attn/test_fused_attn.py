@@ -193,8 +193,10 @@ model_configs_base = {
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
 }
 
+# NOTE: torch.cuda.is_bf16_compatible() returns incorrect information for V100s and TU102s.
+#       Directly checking device capability is more reliable for detecting Bf16 support.
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
+if torch.cuda.get_device_capability()[0] >= 8:  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
