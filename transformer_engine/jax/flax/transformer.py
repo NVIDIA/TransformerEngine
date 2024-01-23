@@ -25,7 +25,7 @@ from jax.ad_checkpoint import checkpoint_name
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from ..fused_attn import is_fused_attn_kernel_available
+from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
@@ -109,13 +109,10 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     return tuple(extended_rules)
 
 
-class UnfusedDotProductAttention(nn.Module):
-    # TODO: unify attention bias/mask type
-    attn_bias_type: AttnBiasType = 'no_bias'
-    attn_mask_type: AttnMaskType = 'causal'
-    # attn_bias_type: AttnBiasType = AttnBiasType.NO_BIAS
-    # attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.
+    attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+    attn_bias_type: AttnBiasType | None = None
     dtype: DType = jnp.float32
     float32_logits: bool = False
     transpose_batch_sequence: bool = True
@@ -182,14 +179,16 @@ class UnfusedDotProductAttention(nn.Module):
         attn_weights = with_sharding_constraint_by_logical_axes(
             attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
 
-        # When a bias is present, the computation is Softmax(attn_weights * scale + bias)
+        # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
         # In this case, the scale can not fused into the Softmax module.
-        if bias is not None:
+        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             attn_weights = attn_weights * scale_factor
             fused_scale_factor = 1.
         else:
-            # If no bias, the scale can be fused into Softmax module
+            # If not post_scale_bias, the scale can be fused into Softmax module
             fused_scale_factor = scale_factor
+            if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
+                attn_weights += bias
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
@@ -198,16 +197,15 @@ class UnfusedDotProductAttention(nn.Module):
             """
             Convert the attn_mask_type to SoftmaxType
             """
-            if attn_mask_type == 'causal':
+            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
-            if attn_mask_type == 'padding':
+            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
                 if mask is not None:
                     return SoftmaxType.SCALED_MASKED
                 return SoftmaxType.SCALED
             raise ValueError(f"Unsupported {attn_mask_type=}, "
                              "supported attn_mask_type = {'causal', 'padding'}")
 
-        # TODO: check softmax padding supportness
         softmax_type = convert_to_softmax_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(softmax_type=softmax_type,
@@ -235,13 +233,13 @@ class UnfusedDotProductAttention(nn.Module):
         return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
 
-class FusedDotProductAttention(nn.Module):
-    attn_bias_type: AttnBiasType = AttnBiasType.NO_BIAS
-    attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.
+    attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+    attn_bias_type: AttnBiasType | None = None
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = False
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
+    transpose_batch_sequence: bool = False
 
     @nn.compact
     def __call__(self,
@@ -265,14 +263,15 @@ class FusedDotProductAttention(nn.Module):
         qkv_layout_override = self.qkv_layout
         if self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
             if query.shape == key.shape == value.shape:
-                query = jnp.concatenate((jnp.expand_dims(query, axis=2), jnp.expand_dims(
-                    key, axis=2), jnp.expand_dims(value, axis=2)),
+                query = jnp.concatenate(list(
+                    map(functools.partial(jnp.expand_dims, axis=2), [query, key, value])),
                                         axis=-3)
                 del key, value
                 qkv_layout_override = QKVLayout.BS3HD
             elif key.shape == value.shape:
-                key = jnp.concatenate(
-                    (jnp.expand_dims(key, axis=2), jnp.expand_dims(value, axis=2)), axis=-3)
+                key = jnp.concatenate(list(
+                    map(functools.partial(jnp.expand_dims, axis=2), [key, value])),
+                                      axis=-3)
                 del value
                 qkv_layout_override = QKVLayout.BSHD_BS2HD
             else:
@@ -291,8 +290,8 @@ class FusedDotProductAttention(nn.Module):
                                 bias,
                                 mask,
                                 seed,
-                                attn_bias_type=self.attn_bias_type,
                                 attn_mask_type=self.attn_mask_type,
+                                attn_bias_type=self.attn_bias_type,
                                 scaling_factor=scale_factor,
                                 dropout_probability=self.attention_dropout,
                                 is_training=not deterministic)
@@ -311,8 +310,8 @@ class FusedDotProductAttention(nn.Module):
                                  bias,
                                  mask,
                                  seed,
-                                 attn_bias_type=self.attn_bias_type,
                                  attn_mask_type=self.attn_mask_type,
+                                 attn_bias_type=self.attn_bias_type,
                                  scaling_factor=scale_factor,
                                  dropout_probability=self.attention_dropout,
                                  is_training=not deterministic)
@@ -327,13 +326,13 @@ class FusedDotProductAttention(nn.Module):
         return x
 
 
-class DotProductAttention(nn.Module):
+class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
     head_dim: int
     num_attention_heads: int
     num_gqa_groups: int | None = None
-    attn_bias_type: AttnBiasType = 'no_bias'
-    attn_mask_type: AttnMaskType = 'causal'
     attention_dropout: float = 0.
+    attn_mask_type: AttnMaskType = 'causal'
+    attn_bias_type: AttnBiasType = None
     dtype: DType = jnp.float32
     dropout_rng_name: str = 'dropout'
     float32_logits: bool = False
@@ -351,25 +350,23 @@ class DotProductAttention(nn.Module):
                  scale_factor: float,
                  deterministic: bool = False) -> Array:
 
-        def canonicalize_attn_mask_type(attn_mask_type):
-            """
-            Convert the string to AttnMaskType
-            """
-            if attn_mask_type in ['causal', 'padding_causal']:
-                return AttnMaskType.PADDING_CAUSAL_MASK
-            if attn_mask_type in ['no_mask', 'padding']:
-                return AttnMaskType.PADDING_MASK
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
-
-        # TODO: canonicalize
-        attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
+        # For internal API, we use enum to maintain
+        if self.attn_bias_type is None:
+            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
+        else:
+            attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
         qkv_layout = QKVLayout[self.qkv_layout.upper()]
+        del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
+
+        if attn_bias_type == AttnBiasType.NO_BIAS:
+            assert bias is None
+        else:
+            assert bias is not None
 
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
 
-        sequence_dim = 1 if self.transpose_batch_sequence else 0
+        sequence_dim = 0 if self.transpose_batch_sequence else 1
         seqlen_q = query.shape[sequence_dim]
         if qkv_layout == QKVLayout.BS3HD:
             seqlen_kv = seqlen_q
@@ -383,13 +380,20 @@ class DotProductAttention(nn.Module):
                                                                self.num_gqa_groups, seqlen_q,
                                                                seqlen_kv, self.head_dim)
 
-        use_fused_attn = (has_fused_attn_kernel and enable_fused_attn)
+        use_fused_attn = (enable_fused_attn and has_fused_attn_kernel)
+
+        if enable_fused_attn and not has_fused_attn_kernel:
+            warnings.warn("Fused attention is not enabled because there is no available kernel.\n"
+                          "Fall back to the unfused attention.\n"
+                          "Please try to update the cuDNN and TE to the latest version.\n"
+                          f"{self.dtype=}\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
+                          f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
+                          f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{self.head_dim=}\n")
 
         dropout_rng = None
         if not deterministic and self.attention_dropout > 0.:
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
-        # TODO: Add warning if it is not available
         if not use_fused_attn:
             # unfused attention only supports splitted query, key, value
             if qkv_layout == QKVLayout.BS3HD:
@@ -402,25 +406,25 @@ class DotProductAttention(nn.Module):
             else:
                 assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
 
-            x = UnfusedDotProductAttention(attn_bias_type=self.attn_bias_type,
-                                           attn_mask_type=self.attn_mask_type,
-                                           attention_dropout=self.attention_dropout,
-                                           dtype=self.dtype,
-                                           float32_logits=self.float32_logits,
-                                           transpose_batch_sequence=self.transpose_batch_sequence)(
-                                               query,
-                                               key,
-                                               value,
-                                               mask,
-                                               bias,
-                                               scale_factor=scale_factor,
-                                               dropout_rng=dropout_rng,
-                                               deterministic=deterministic)
+            x = _UnfusedDotProductAttention(attention_dropout=self.attention_dropout,
+                                            attn_mask_type=attn_mask_type,
+                                            attn_bias_type=attn_bias_type,
+                                            dtype=self.dtype,
+                                            float32_logits=self.float32_logits,
+                                            transpose_batch_sequence=self.transpose_batch_sequence)(
+                                                query,
+                                                key,
+                                                value,
+                                                mask,
+                                                bias,
+                                                scale_factor=scale_factor,
+                                                dropout_rng=dropout_rng,
+                                                deterministic=deterministic)
         else:
-            x = FusedDotProductAttention(
-                attn_bias_type=attn_bias_type,
-                attn_mask_type=AttnMaskType[(self.attn_mask_type + '_mask').upper()],
+            x = _FusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
+                attn_mask_type=attn_mask_type,
+                attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
@@ -474,11 +478,6 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     Multi-head Attention (MHA), including Query,
     Key, Value and Output projection.
 
-    .. note::
-
-        Argument :attr:`mask` will be ignored when
-        :attr:`attn_mask_type` is set to `"causal"`.
-
     Parameters
     ----------
     head_dim: int
@@ -524,9 +523,15 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         If set to False, layer normalization to the input is not applied.
     return_layernorm_output: bool, default = False
         Indicate if apply a layer normalization at the end of MHA.
-    attn_mask_type: {'causal', 'padding'}, default = 'causal'
-        Type of attention mask passed into softmax operation.
+    attn_mask_type: str, default = 'causal'
+        Type of the attention mask passed into softmax operation in the self attention.
+        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
         Introduced in v0.10.0.
+    attn_bias_type: str | None, default = None
+        Type of the attention bias passed into the self attention.
+        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        When default is present, the type is automatically decided by the MHA's bias parameter.
+        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
     enable_rotary_pos_emb: bool, default = False
         Whether to enable rotary position embedding to projected query and key.
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
@@ -536,7 +541,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
         Deprecated. Please refer `num_attention_heads`.
-    attention_dropout: float, default = None
+    dropout_rate: float, default = None
         Deprecated. Please refer `attention_dropout`.
     output_layernorm: bool, default = None
         Deprecated. Please refer `input_layernorm`
@@ -581,6 +586,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     attn_mask_type: str = 'causal'
+    attn_bias_type: str | None = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     dtype: DType = jnp.float32
@@ -708,9 +714,6 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             axes[sequence_dim] = SEQLEN_TP_AXES if is_sharded_seq else SEQLEN_AXES
             return tuple(axes)
 
-        # TODO(rewang): make it configurable for pre_scale_bias
-        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
-
         is_self_attn = (inputs_q is inputs_kv)
         is_gqa = (self.num_attention_heads != self.num_gqa_groups)
         is_qkvpack = (is_self_attn and not is_gqa)
@@ -821,6 +824,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+            query = checkpoint_name(query, 'query_proj')
+            key = checkpoint_name(key, 'key_proj')
+            value = checkpoint_name(value, 'value_proj')
             qkv_layout = QKVLayout.BSHD_BSHD_BSHD
 
         if self.enable_rotary_pos_emb:
@@ -837,21 +843,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             qkv_layout = QKVLayout.BSHD_BSHD_BSHD
 
         if qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
-            # TODO: move to above
-            query = checkpoint_name(query, 'query_proj')
-            key = checkpoint_name(key, 'key_proj')
-            value = checkpoint_name(value, 'value_proj')
-            # TODO(rewang): refine
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
             value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
-            qkv_sharding_constraint = \
-                (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
-                if self.transpose_batch_sequence \
-                else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-            query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
-            key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
-            value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
 
         if decode:
             assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
@@ -898,43 +892,54 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
 
+        LEADING_AXES = (BATCH_AXES, SEQLEN_AXES)
+        if self.transpose_batch_sequence:
+            LEADING_AXES = (SEQLEN_AXES, BATCH_AXES)
+
         if qkv_layout == QKVLayout.BS3HD:
             qkv_proj = qkv_proj.reshape(*qkv_proj.shape[:2], 3, self.num_attention_heads,
                                         self.head_dim)
+            qkv_sharding_constraint = (*LEADING_AXES, JOINED_AXES, HEAD_AXES, HIDDEN_AXES)
+            qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj, qkv_sharding_constraint)
             dpa_args = [qkv_proj, None, None]
         elif qkv_layout == QKVLayout.BSHD_BS2HD:
             query = query.reshape(*query.shape[:2], self.num_attention_heads, self.head_dim)
             kv_proj = kv_proj.reshape(*kv_proj.shape[:2], 2, self.num_gqa_groups, self.head_dim)
+            q_sharding_constraint = (*LEADING_AXES, HEAD_AXES, HIDDEN_AXES)
+            kv_sharding_constraint = (*LEADING_AXES, JOINED_AXES, HEAD_AXES, HIDDEN_AXES)
+            query = with_sharding_constraint_by_logical_axes(query, q_sharding_constraint)
+            kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
             dpa_args = [query, kv_proj, None]
         else:
             assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
             value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
+            qkv_sharding_constraint = (*LEADING_AXES, HEAD_AXES, HIDDEN_AXES)
+            query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
+            key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
+            value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
             dpa_args = [query, key, value]
 
-        x = DotProductAttention(
-            head_dim=self.head_dim,
-            num_attention_heads=self.num_attention_heads,
-            num_gqa_groups=self.num_gqa_groups,
-            attn_bias_type=('post_scale_bias' if bias is not None else 'no_bias'),
-            attn_mask_type=self.attn_mask_type,
-            attention_dropout=self.attention_dropout,
-            dtype=self.dtype,
-            dropout_rng_name=self.dropout_rng_name,
-            float32_logits=self.float32_logits,
-            qkv_layout=qkv_layout.name,
-            transpose_batch_sequence=self.transpose_batch_sequence)(*dpa_args,
-                                                                    mask,
-                                                                    bias,
-                                                                    scale_factor=scale_factor,
-                                                                    deterministic=deterministic)
+        x = DotProductAttention(head_dim=self.head_dim,
+                                num_attention_heads=self.num_attention_heads,
+                                num_gqa_groups=self.num_gqa_groups,
+                                attn_mask_type=self.attn_mask_type,
+                                attn_bias_type=self.attn_bias_type,
+                                attention_dropout=self.attention_dropout,
+                                dtype=self.dtype,
+                                dropout_rng_name=self.dropout_rng_name,
+                                float32_logits=self.float32_logits,
+                                qkv_layout=qkv_layout.name,
+                                transpose_batch_sequence=self.transpose_batch_sequence)(
+                                    *dpa_args,
+                                    mask,
+                                    bias,
+                                    scale_factor=scale_factor,
+                                    deterministic=deterministic)
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
-        attn_context_sharding_constraint = \
-            (SEQLEN_AXES, BATCH_AXES, HIDDEN_TP_AXES) \
-            if self.transpose_batch_sequence \
-            else (BATCH_AXES, SEQLEN_AXES, HIDDEN_TP_AXES)
+        attn_context_sharding_constraint = (*LEADING_AXES, HIDDEN_TP_AXES)
         x = with_sharding_constraint_by_logical_axes(x, attn_context_sharding_constraint)
 
         out = DenseGeneral(features=inputs_q.shape[-1],
@@ -1065,11 +1070,6 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     an attention block and a feedforward network (MLP).
     This standard layer is based on the paper “Attention Is All You Need”.
 
-    .. note::
-
-        Argument :attr:`attention_mask` will be ignored when
-        :attr:`self_attn_mask_type` is set to `"causal"`.
-
     Parameters
     ----------
     hidden_size: int, default = 512
@@ -1142,9 +1142,15 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         If set to TransformerLayerType.DECODER, an additional cross-attention block
         is added after self-attention.this can be used for structures like `T5`
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
-    self_attn_mask_type: {'causal', 'padding'}, default = 'causal'
-        Type of attention mask passed into softmax operation.
+    self_attn_mask_type: str, default = 'causal'
+        Type of the attention mask passed into softmax operation in the self attention.
+        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
         Introduced in v0.10.0.
+    self_attn_bias_type: str | None, default = None
+        Type of the attention bias passed into the self attention.
+        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        When default is present, the type is automatically decided by the MHA's bias parameter.
+        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
@@ -1209,6 +1215,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
+    self_attn_bias_type: str | None = None
     enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     enable_rotary_pos_emb: bool = False
@@ -1351,6 +1358,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             input_layernorm=not self.output_layernorm,
             attn_mask_type=self.self_attn_mask_type,
+            attn_bias_type=self.self_attn_bias_type,
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             fuse_qkv_params=self.fuse_qkv_params,
@@ -1416,6 +1424,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 return_layernorm_output=self.apply_residual_connection_post_layernorm,
                 input_layernorm=True,    # Must do LayerNorm before MHA.
                 attn_mask_type='padding',
+                attn_bias_type='no_bias',
                 enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                 rotary_pos_emb_windows=self.rotary_pos_emb_windows,
                 float32_logits=self.float32_attention_logits,

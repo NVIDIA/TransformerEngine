@@ -1023,6 +1023,7 @@ class TestTransformer(TestLayer):
         enable_rotary_pos_emb = attrs[TransformerLayerAttr.ENABLE_ROPE]
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
+                                               dtype=dtype,
                                                num_attention_heads=num_attention_heads)
         drop_path = 0.0
         transpose_batch_sequence = attrs[TransformerLayerAttr.TRANSPOSE_BS]
