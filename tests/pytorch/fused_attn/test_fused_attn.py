@@ -41,6 +41,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
+    is_bf16_compatible,
 )
 import transformer_engine_extensions as tex
 from transformer_engine_extensions import NVTE_Fused_Attn_Backend
@@ -193,10 +194,8 @@ model_configs_base = {
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
 }
 
-# NOTE: torch.cuda.is_bf16_compatible() returns incorrect information for V100s and TU102s.
-#       Directly checking device capability is more reliable for detecting Bf16 support.
 param_types = [torch.float16]
-if torch.cuda.get_device_capability()[0] >= 8:  # bf16 requires sm_80 or higher
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 

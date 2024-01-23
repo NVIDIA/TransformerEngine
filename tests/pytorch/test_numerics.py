@@ -17,6 +17,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
+    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
@@ -52,10 +53,8 @@ model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
-# NOTE: torch.cuda.is_bf16_compatible() returns incorrect information for V100s and TU102s.
-#       Directly checking device capability is more reliable for detecting Bf16 support.
 param_types = [torch.float32, torch.float16]
-if torch.cuda.get_device_capability()[0] >= 8:  # bf16 requires sm_80 or higher
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]

@@ -13,6 +13,7 @@ from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
+    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     LayerNormLinear,
@@ -100,10 +101,8 @@ fp8_recipes = [
     ),
 ]
 
-# NOTE: torch.cuda.is_bf16_compatible() returns incorrect information for V100s and TU102s.
-#       Directly checking device capability is more reliable for detecting Bf16 support.
 param_types = [torch.float32, torch.float16]
-if torch.cuda.get_device_capability()[0] >= 8:  # bf16 requires sm_80 or higher
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
