@@ -41,7 +41,7 @@ RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" =~ pytorch|all ]] \
   && export NVTE_WITH_USERBUFFERS=1 \
   && export MPI_HOME=/usr/local/mpi \
-  && export MAX_JOBS=1 \
+  && export MAX_JOBS=4 \
   || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
 
   NVTE_FRAMEWORK=${FRAMEWORK} \
