@@ -14,9 +14,11 @@ from praxis.pytypes import JTensor
 
 from .module import TransformerEngineBaseLayer
 from ..flax.transformer import TransformerLayerType
+from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
+from ..fused_attn import AttnBiasType, AttnMaskType
 
 
 class RelativePositionBiases(TransformerEngineBaseLayer):
@@ -58,6 +60,58 @@ class RelativePositionBiases(TransformerEngineBaseLayer):
     def __call__(self, q_seqlen: JTensor, k_seqlen: JTensor, bidirectional: bool = True) -> JTensor:
         """__call__"""
         return self.relative_position_bias(q_seqlen, k_seqlen, bidirectional)
+
+
+class DotProductAttention(TransformerEngineBaseLayer):
+    """DotProductAttention"""
+
+    head_dim: int = 64
+    num_attention_heads: int = 16
+    num_gqa_groups: int | None = None
+    attention_dropout: float = 0.
+    attn_mask_type: AttnMaskType = 'causal'
+    attn_bias_type: AttnBiasType = None
+    dropout_rng_name: str = 'dropout'
+    float32_logits: bool = False
+    qkv_layout: str = 'bshd_bshd_bshd'
+    scale_factor: float | None = None
+    transpose_batch_sequence: bool = True
+
+    def setup(self) -> None:
+        """setup"""
+        super().setup()
+
+        dpa_cls = partial(flax_DotProductAttention,
+                          head_dim=self.head_dim,
+                          num_attention_heads=self.num_attention_heads,
+                          num_gqa_groups=self.num_gqa_groups,
+                          attn_mask_type=self.attn_mask_type,
+                          attn_bias_type=self.attn_bias_type,
+                          attention_dropout=self.attention_dropout,
+                          dtype=self.dtype,
+                          dropout_rng_name=self.dropout_rng_name,
+                          float32_logits=self.float32_logits,
+                          qkv_layout=self.qkv_layout,
+                          scale_factor=self.scale_factor,
+                          transpose_batch_sequence=self.transpose_batch_sequence)
+
+        self.create_layer("dot_product_attention", dpa_cls)
+
+    def __call__(self,
+                 query: JTensor,
+                 key: JTensor,
+                 value: JTensor,
+                 mask: Optional[JTensor] = None,
+                 bias: Optional[JTensor] = None,
+                 *,
+                 deterministic: bool = False) -> JTensor:
+        """__call__"""
+        return self.dot_product_attention(query,
+                                          key,
+                                          value,
+                                          mask,
+                                          bias,
+                                          deterministic=deterministic)
 
 
 class MultiHeadAttention(TransformerEngineBaseLayer):

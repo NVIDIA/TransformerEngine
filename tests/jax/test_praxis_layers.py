@@ -20,6 +20,7 @@ from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
 from transformer_engine.jax.flax import LayerNorm as flax_LayerNorm
 from transformer_engine.jax.flax import LayerNormMLP as flax_LayerNormMLP
 from transformer_engine.jax.flax import MultiHeadAttention as flax_MultiHeadAttention
+from transformer_engine.jax.flax import DotProductAttention as flax_DotProductAttention
 from transformer_engine.jax.flax import RelativePositionBiases as flax_RelativePositionBiases
 from transformer_engine.jax.flax import TransformerLayer as flax_TransformerLayer
 from transformer_engine.jax.flax.module import Softmax
@@ -27,8 +28,8 @@ from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from transformer_engine.jax.praxis import LayerNorm
 from transformer_engine.jax.praxis import FusedSoftmax
 from transformer_engine.jax.praxis import LayerNormLinear, LayerNormMLP, Linear
-from transformer_engine.jax.praxis import MultiHeadAttention, RelativePositionBiases
-from transformer_engine.jax.praxis import TransformerEngineBaseLayer
+from transformer_engine.jax.praxis import DotProductAttention, MultiHeadAttention
+from transformer_engine.jax.praxis import RelativePositionBiases, TransformerEngineBaseLayer
 from transformer_engine.jax.praxis import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.softmax import SoftmaxType
 
@@ -101,8 +102,9 @@ class TestLayer:
 
         lyr_name = self.get_layer_name()
 
-        synced_praxis_variables['params'][lyr_name]['cld'] = \
-            flax.core.unfreeze(flax_variables['params'])
+        if 'params' in flax_variables:
+            synced_praxis_variables['params'][lyr_name]['cld'] = \
+                flax.core.unfreeze(flax_variables['params'])
 
         return synced_praxis_variables, flax_variables
 
@@ -111,8 +113,9 @@ class TestLayer:
 
         lyr_name = self.get_layer_name()
 
-        synced_praxis_grads['params'] = \
-            synced_praxis_grads['params'][lyr_name]['cld']
+        if 'params' in synced_praxis_grads:
+            synced_praxis_grads['params'] = \
+                synced_praxis_grads['params'][lyr_name]['cld']
 
         if FP8Helper.is_fp8_enabled():
             synced_praxis_grads[FP8Helper.FP8_COLLECTION_NAME] = \
@@ -671,6 +674,82 @@ class TestRelativePositionBias(TestLayer):
             assert_allclose(praxis_loss, flax_loss, rtol=rtol, atol=atol)
 
 
+class DotProductAttnAttr:
+    ATTN_MASK_TYPE = 'attn_mask_type'
+    NUM_GQA_GROUPS = 'num_gqa_groups'
+    TRANSPOSE_BS = 'transpose_batch_sequence'
+    SCALE_FACTOR = 'scale_factor'
+    ATTRS = [{
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: True,
+        SCALE_FACTOR: 0.125,
+    }, {
+        ATTN_MASK_TYPE: 'padding_causal',
+        TRANSPOSE_BS: True,
+        SCALE_FACTOR: 0.125,
+    }, {
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
+        SCALE_FACTOR: 0.125,
+    }, {
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: False,
+        SCALE_FACTOR: 0.125,
+    }, {
+        ATTN_MASK_TYPE: 'padding_causal',
+        TRANSPOSE_BS: False,
+        SCALE_FACTOR: 2.,
+    }, {
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
+        SCALE_FACTOR: 1.,
+    }]
+
+
+class TestDotProductAttn(TestLayer):
+
+    def input_getter(self, shape, dtype):
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, k_key, v_key = jax.random.split(key, 3)
+        return list(map(partial(jax.random.normal, shape=shape, dtype=dtype),
+                        [q_key, k_key, v_key]))
+
+    def get_layer_name(self):
+        return 'dot_product_attn'
+
+    def generate_praxis_p_and_flax_cls(self, dtype, attrs):
+        head_dim = 64
+        num_attention_heads = 16
+        num_gqa_groups = num_attention_heads
+        attn_mask_type = attrs[DotProductAttnAttr.ATTN_MASK_TYPE]
+        transpose_batch_sequence = attrs[DotProductAttnAttr.TRANSPOSE_BS]
+
+        praxis_p = pax_fiddle.Config(DotProductAttention,
+                                     name='mha',
+                                     dtype=dtype,
+                                     head_dim=head_dim,
+                                     num_attention_heads=num_attention_heads,
+                                     num_gqa_groups=num_gqa_groups,
+                                     attn_mask_type=attn_mask_type,
+                                     transpose_batch_sequence=transpose_batch_sequence)
+        flax_cls = partial(flax_DotProductAttention,
+                           dtype=dtype,
+                           head_dim=head_dim,
+                           num_attention_heads=num_attention_heads,
+                           num_gqa_groups=num_gqa_groups,
+                           attn_mask_type=attn_mask_type,
+                           transpose_batch_sequence=transpose_batch_sequence)
+
+        return praxis_p, flax_cls
+
+    @pytest.mark.parametrize('data_shape', [(32, 128, 16, 64)])
+    @pytest.mark.parametrize('dtype', DTYPE)
+    @pytest.mark.parametrize('attrs', DotProductAttnAttr.ATTRS)
+    def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
+        self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
+
+
 class MultiHeadAttnAttr:
     USE_BIAS = 'use_bias'
     LN_TYPE = 'layernorm_type'
@@ -731,6 +810,8 @@ class TestMultiHeadAttn(TestLayer):
     def generate_praxis_p_and_flax_cls(self, dtype, attrs):
         head_dim = 64
         num_attention_heads = 16
+        num_gqa_groups = attrs[MultiHeadAttnAttr.NUM_GQA_GROUPS] \
+            if MultiHeadAttnAttr.NUM_GQA_GROUPS in attrs else None
         layernorm_type = attrs[MultiHeadAttnAttr.LN_TYPE]
         zero_centered_gamma = attrs[MultiHeadAttnAttr.ZERO_CEN]
         kernel_init = WeightInit.Gaussian(1.0)
@@ -750,6 +831,7 @@ class TestMultiHeadAttn(TestLayer):
                                      dtype=dtype,
                                      head_dim=head_dim,
                                      num_attention_heads=num_attention_heads,
+                                     num_gqa_groups=num_gqa_groups,
                                      layernorm_type=layernorm_type,
                                      zero_centered_gamma=zero_centered_gamma,
                                      params_init=kernel_init,
@@ -768,6 +850,7 @@ class TestMultiHeadAttn(TestLayer):
             dtype=dtype,
             head_dim=head_dim,
             num_attention_heads=num_attention_heads,
+            num_gqa_groups=num_gqa_groups,
             layernorm_type=layernorm_type,
             zero_centered_gamma=zero_centered_gamma,
             kernel_init=TransformerEngineBaseLayer.generate_params_init("kernel", kernel_init),
