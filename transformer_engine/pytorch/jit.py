@@ -17,7 +17,12 @@ if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
 no_torch_dynamo = lambda recursive=True: lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
-    no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+    if torch.__version__ >= "2.1":
+        no_torch_dynamo = lambda recursive=True: lambda f: \
+                                                    torch._dynamo.disable(f, recursive=recursive)
+    else:
+        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
 
 
 def set_jit_fusion_options() -> None:
