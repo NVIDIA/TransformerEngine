@@ -140,7 +140,7 @@ def get_alibi(
     max_seqlen_kv: int
         Maximum sequence length for keys and values.
     alibi_slopes: Optional[torch.Tensor], default = `None`
-        Custum ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
+        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
     bias_dtype: Optional[torch.dtype], default = `None`
         Dtype of the generated ALiBi bias. If None, use torch.float32.
 
