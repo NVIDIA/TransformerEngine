@@ -769,7 +769,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         for name, param in self.named_parameters(recurse=False):
             # Ensure parameter is on a real device
             if param.device == torch.device('meta'):
-                param = param.to(device='cuda')
+                param = torch.empty_like(param, device='cuda')
 
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn

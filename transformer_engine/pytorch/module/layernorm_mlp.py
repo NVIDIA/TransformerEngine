@@ -1208,14 +1208,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
         self.register_parameter('layer_norm_weight', layer_norm_weight,
                                 init_fn=init_method_constant(float(not self.zero_centered_gamma)))
-        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
         if self.normalization != "RMSNorm":
             layer_norm_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
             self.register_parameter('layer_norm_bias', layer_norm_bias,
                                     init_fn=init_method_constant(0.0))
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.layer_norm_bias = None
 
@@ -1234,7 +1232,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                 init_fn=init_method,
                                 get_rng_state_tracker=get_rng_state_tracker,
                                 fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
-        set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
         self.fp8_weight_shapes.append(self.fc1_weight.shape)
 
         if self.use_bias:
@@ -1243,7 +1240,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
             self.register_parameter('fc1_bias', fc1_bias,
                                     init_fn=init_method_constant(0.0))
-            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)  # pylint: disable=access-member-before-definition
         else:
             self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
@@ -1255,7 +1251,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                 init_fn=output_layer_init_method,
                                 get_rng_state_tracker=get_rng_state_tracker,
                                 fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT)
-        set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
         self.fp8_weight_shapes.append(self.fc2_weight.shape)
 
         if self.use_bias:
@@ -1264,9 +1259,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
             self.register_parameter('fc2_bias', fc2_bias,
                                     init_fn=init_method_constant(0.0))
-            # RPL
-            if self.set_parallel_mode:
-                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)  # pylint: disable=access-member-before-definition
         else:
             self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
@@ -1311,6 +1303,23 @@ class LayerNormMLP(TransformerEngineBaseModule):
             init.zeros_(self.layer_norm_weight)
         if self.layer_norm_bias is not None:
             init.zeros_(self.layer_norm_bias)
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+
+        if not defer_init:
+            # Set parallel attributes for layer norm parameters
+            setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+            if self.normalization != "RMSNorm":
+                setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+
+            # Set parallel attributes for linear parameters
+            set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
+            set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
+            if self.use_bias:
+                set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+                if self.set_parallel_mode:
+                    setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)
 
     def get_fp8_weights_scratchpad(
         self,

@@ -3158,6 +3158,7 @@ class MultiheadAttention(torch.nn.Module):
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
             layer_number=self.layer_number,
+            attention_type=self.attention_type,
         )
 
         # Linear
