@@ -115,6 +115,7 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
     attn_bias_type: AttnBiasType | None = None
     dtype: DType = jnp.float32
     float32_logits: bool = False
+    scale_factor: float | None = None
     transpose_batch_sequence: bool = True
 
     @nn.compact
@@ -125,7 +126,6 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
                  mask: Optional[Array] = None,
                  bias: Optional[Array] = None,
                  *,
-                 scale_factor: float,
                  dropout_rng: PRNGKey | None = None,
                  deterministic: bool = False) -> Array:
         assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
@@ -136,6 +136,12 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
         assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
         assert key.shape[-2] == value.shape[-2], 'k, v num_attention_heads must match.'
         assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
+
+        if self.scale_factor is None:
+            scale_factor = 1.0 / sqrt(query.shape[-1])
+        else:
+            scale_factor = self.scale_factor
+        del self.scale_factor
 
         if self.float32_logits:
             query = query.astype(jnp.float32)
@@ -239,6 +245,7 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
     attn_bias_type: AttnBiasType | None = None
     dtype: DType = jnp.float32
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
+    scale_factor: float | None = None
     transpose_batch_sequence: bool = False
 
     @nn.compact
@@ -249,13 +256,18 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
                  mask: Optional[Array] = None,
                  bias: Optional[Array] = None,
                  *,
-                 scale_factor: float,
                  dropout_rng: PRNGKey | None = None,
                  deterministic: bool = False) -> Array:
 
         seed = None
         if dropout_rng is not None:
             seed = jax.random.split(dropout_rng, num_of_devices())
+
+        if self.scale_factor is None:
+            scale_factor = 1.0 / sqrt(query.shape[-1])
+        else:
+            scale_factor = self.scale_factor
+        del self.scale_factor
 
         # TODO(rewang): integrate BSHD_BSHD_BSHD kernel
         # The BSHD_BSHD_BSHD kernel has not been integrated.
@@ -337,6 +349,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     dropout_rng_name: str = 'dropout'
     float32_logits: bool = False
     qkv_layout: str = 'bshd_bshd_bshd'
+    scale_factor: float | None = None
     transpose_batch_sequence: bool = True
 
     @nn.compact
@@ -347,7 +360,6 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
                  mask: Optional[Array] = None,
                  bias: Optional[Array] = None,
                  *,
-                 scale_factor: float,
                  deterministic: bool = False) -> Array:
 
         # For internal API, we use enum to maintain
@@ -394,6 +406,12 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         if not deterministic and self.attention_dropout > 0.:
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
+        if self.scale_factor is None:
+            scale_factor = 1.0 / sqrt(self.head_dim)
+        else:
+            scale_factor = self.scale_factor
+        del self.scale_factor
+
         if not use_fused_attn:
             # unfused attention only supports splitted query, key, value
             if qkv_layout == QKVLayout.BS3HD:
@@ -411,13 +429,13 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
                                             attn_bias_type=attn_bias_type,
                                             dtype=self.dtype,
                                             float32_logits=self.float32_logits,
+                                            scale_factor=scale_factor,
                                             transpose_batch_sequence=self.transpose_batch_sequence)(
                                                 query,
                                                 key,
                                                 value,
                                                 mask,
                                                 bias,
-                                                scale_factor=scale_factor,
                                                 dropout_rng=dropout_rng,
                                                 deterministic=deterministic)
         else:
@@ -426,16 +444,10 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
+                scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
-            )(query,
-              key,
-              value,
-              mask,
-              bias,
-              scale_factor=scale_factor,
-              dropout_rng=dropout_rng,
-              deterministic=deterministic)
+            )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
 
         return x
 
@@ -931,12 +943,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                 dropout_rng_name=self.dropout_rng_name,
                                 float32_logits=self.float32_logits,
                                 qkv_layout=qkv_layout.name,
+                                scale_factor=scale_factor,
                                 transpose_batch_sequence=self.transpose_batch_sequence)(
-                                    *dpa_args,
-                                    mask,
-                                    bias,
-                                    scale_factor=scale_factor,
-                                    deterministic=deterministic)
+                                    *dpa_args, mask, bias, deterministic=deterministic)
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         attn_context_sharding_constraint = (*LEADING_AXES, HIDDEN_TP_AXES)
