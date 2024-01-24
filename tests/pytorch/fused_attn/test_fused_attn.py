@@ -41,6 +41,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
+    is_bf16_compatible,
 )
 import transformer_engine_extensions as tex
 from transformer_engine_extensions import NVTE_Fused_Attn_Backend
@@ -194,7 +195,7 @@ model_configs_base = {
 }
 
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
