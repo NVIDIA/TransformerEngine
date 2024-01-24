@@ -767,21 +767,9 @@ class Linear(TransformerEngineBaseModule):
                 bias = torch.nn.Parameter(bias)
                 self.register_parameter(self.bias_names[i], bias,
                                         init_fn=init_method_constant(0.0))
-                if parallel_mode == "row":
-                    bias.sequence_parallel = sequence_parallel
             else:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
                 setattr(self, self.bias_names[i], bias)
-
-            # Configure tensor parallelism
-            set_tensor_model_parallel_attributes(
-                tensor=weight,
-                is_parallel=True,
-                dim=1 if parallel_mode == "row" else 0,
-                stride=1,
-            )
-            if parallel_mode == "column":
-                set_tensor_model_parallel_attributes(bias, True, 0, 1)
 
             # Concatenated tensors are not needed if not splitting
             # into multiple parameters
@@ -803,6 +791,27 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+
+        if not defer_init:
+            # Set parallelism attributes for linear weights
+            for weight in self.weight_names:
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, weight),
+                    is_parallel=True,
+                    dim=1 if self.parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+            # Set parallelism attributes for linear biases
+            if self.use_bias:
+                for bias in self.bias_names:
+                    if self.parallel_mode == "row":
+                        setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
+                    elif self.parallel_mode == "column":
+                        set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
     def get_fp8_weights_scratchpad(
         self,
