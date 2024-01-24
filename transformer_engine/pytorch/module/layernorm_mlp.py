@@ -424,8 +424,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 if fuse_wgrad_accumulation:
                     fc1_weight.main_grad.weight_offloading = True
                     fc2_weight.main_grad.weight_offloading = True
-                if fp8:
+                if fp8 and fc1_weight_t_fp8 is not None:
                     fc1_weight_t_fp8.weight_offloading = True
+                if fp8 and fc2_weight_t_fp8 is not None:
                     fc2_weight_t_fp8.weight_offloading = True
                 ln_weight.weight_offloading = True
                 fc1_weight.weight_offloading = True
