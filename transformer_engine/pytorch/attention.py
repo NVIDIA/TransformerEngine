@@ -1053,23 +1053,21 @@ class FusedRoPEFunc(torch.autograd.Function):
         ctx,
         t: torch.Tensor,
         freqs: torch.Tensor,
-        transpose_output_memory: bool = False,
-        qkv_format: str = "sbhd",
+        tensor_format: str = "sbhd",
         cu_seqlens: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        if qkv_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, transpose_output_memory)
-        elif qkv_format == "bshd":
+        if tensor_format == "sbhd":
+            output = tex.fused_rope_forward(t, freqs, True)
+        elif tensor_format == "bshd":
             output = tex.fused_rope_forward(
-                t.transpose(0, 1), freqs, not transpose_output_memory
+                t.transpose(0, 1), freqs, True
             ).transpose(0, 1)
-        elif qkv_format == "thd":
+        elif tensor_format == "thd":
             output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
         else:
-            raise ValueError(f"Unsupported qkv_format: {qkv_format}.")
+            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
         ctx.save_for_backward(freqs, cu_seqlens)
-        ctx.transpose_output_memory = transpose_output_memory
-        ctx.qkv_format = qkv_format
+        ctx.tensor_format = tensor_format
 
         return output
 
@@ -1078,18 +1076,16 @@ class FusedRoPEFunc(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         freqs, cu_seqlens = ctx.saved_tensors
-        if ctx.qkv_format == "sbhd":
+        if ctx.tensor_format == "sbhd":
+            grad_input = tex.fused_rope_backward(grad_output, freqs, True)
+        elif ctx.tensor_format == "bshd":
             grad_input = tex.fused_rope_backward(
-                grad_output, freqs, ctx.transpose_output_memory
-            )
-        elif ctx.qkv_format == "bshd":
-            grad_input = tex.fused_rope_backward(
-                grad_output.transpose(0, 1), freqs, not ctx.transpose_output_memory
+                grad_output.transpose(0, 1), freqs, True
             ).transpose(0, 1)
-        elif ctx.qkv_format == "thd":
+        elif ctx.tensor_format == "thd":
             grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
         else:
-            raise ValueError(f"Unsupported qkv_format: {ctx.qkv_format}.")
+            raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
 
         return grad_input, None, None, None, None
 
@@ -1108,7 +1104,6 @@ def apply_rotary_pos_emb(
     freqs: torch.Tensor,
     tensor_format: str = "sbhd",
     fused: bool = False,
-    transpose_output_memory: bool = False,
     cu_seqlens: Union[torch.Tensor, None] = None,
 ) -> torch.Tensor:
     """
@@ -1124,36 +1119,27 @@ def apply_rotary_pos_emb(
         with `s2 >= s` and `d2 <= d`.
     fused: bool, default = False
         Whether to use a fused applying RoPE implementation.
+        Note: When using fused RoPE on an input tensor in `sbhd` format, the output
+        tensor will be in shape `[s, b, h, d]` but the 's' and 'b' dimensions of the
+        underlying memory layout are transposed.
+        See https://github.com/NVIDIA/TransformerEngine/pull/517 for more details.
     tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
         is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
         of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-    transpose_output_memory: bool, default = False
-        Whether to transpose the 's' and 'b' dimension of the output's underlying memory format.
-        This is very helpful when you want to get a contiguous tensor after calling
-        `output.transpose(0, 1)`. It's only supported when `fused` is True and
-        `tensor_format` is 'sbhd' or 'bshd'.
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
     """
     if fused:
-        assert not (
-            transpose_output_memory and tensor_format == "thd"
-        ), "transpose_output_memory only supports 'sbhd' or 'bshd' format."
         assert (
             tensor_format != "thd" or cu_seqlens is not None
         ), "cu_seqlens must not be None when tensor_format is 'thd'."
-        return FusedRoPEFunc.apply(
-            t, freqs, transpose_output_memory, tensor_format, cu_seqlens
-        )
+        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens)
 
     assert tensor_format in ("sbhd", "bshd"), (
         "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
         f"when fused is False, got {tensor_format}."
     )
-    assert (
-        not transpose_output_memory
-    ), "transpose_output_memory is not supported when fused is False."
 
     max_seq_len = freqs.shape[0]
     cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]

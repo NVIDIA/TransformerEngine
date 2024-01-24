@@ -56,7 +56,6 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("margin", [0, 10])
 @pytest.mark.parametrize("transpose", [None, (0, 1), (2, 3)])
-@pytest.mark.parametrize("transpose_output_memory", [False, True])
 @pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 def test_fused_rope(
@@ -66,7 +65,6 @@ def test_fused_rope(
     rotary_percent: float,
     margin: int,
     transpose: Union[Tuple, None],
-    transpose_output_memory: bool,
     tensor_format: str,
     loss_func: Callable,
 ) -> None:
@@ -101,7 +99,6 @@ def test_fused_rope(
         emb,
         tensor_format=tensor_format,
         fused=True,
-        transpose_output_memory=transpose_output_memory,
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
@@ -110,7 +107,10 @@ def test_fused_rope(
 
     torch.testing.assert_close(output_fused, output_unfused, **get_tol(dtype))
     torch.testing.assert_close(grad_fused, grad_unfused, **get_tol(dtype))
-    assert output_fused.transpose(0, 1).is_contiguous() is transpose_output_memory
+    if tensor_format == "bshd":
+        assert output_fused.is_contiguous()
+    else:
+        assert output_fused.transpose(0, 1).is_contiguous()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
