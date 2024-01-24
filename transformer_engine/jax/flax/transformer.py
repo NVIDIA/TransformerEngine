@@ -72,12 +72,12 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
 
     Parameters
     ----------
-    rules : Sequence[Tuple[str, Union[str, None]]]
+    rules: Sequence[Tuple[str, Union[str, None]]]
         the base Flax logical axis rules to extend.
 
     Returns
     -------
-    extended_rules : Sequence[Tuple[str, Union[str, None]]]
+    extended_rules: Sequence[Tuple[str, Union[str, None]]]
         the extended Flax logical axis rules.
     """
     rules_map = {}
@@ -178,9 +178,7 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
                 attn_weights += bias
 
         def convert_to_softmax_type(attn_mask_type, mask):
-            """
-            Convert the attn_mask_type to SoftmaxType
-            """
+            """Convert the attn_mask_type to SoftmaxType"""
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
             if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
@@ -313,6 +311,74 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
 
 
 class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
+    r"""
+    Dot Product Attention (DPA). Allows the model to jointly attend to information from different
+    representation subspaces as described in the paper:
+    `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
+
+    Parameters
+    ----------
+    head_dim: int
+        The hidden dimension of each attention head.
+    num_attention_heads: int
+        The number of attention heads.
+    num_gqa_groups: int, default = `None`
+        Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
+        Grouped Query Attention is described in
+        `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+        This only affects the keys and values, not the querys.
+        GQA-1 is equivalent to Multi-Query Attention
+        (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+        is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
+    attention_dropout: float, default = 0.0
+        Dropout probability for the dropout op after the softmax.
+    attn_mask_type: str, default = 'causal'
+        Type of the attention mask passed into softmax operation in the self attention.
+        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
+        Introduced in v0.10.0.
+    attn_bias_type: str | None, default = None
+        Type of the attention bias passed in the self attention.
+        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        When default is present, the type is automatically decided by the MHA's bias parameter.
+        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+    dropout_rng_name: str, default = 'dropout'
+        The key in given RNGs via flax.linen.Module.apply that is used
+        to generate Dropout masks in the core attention.
+    float32_logits: bool, default = False
+        Whether to compute attention logits in float32 for the unfused attention backend.
+        For fused attention backend, the accumulation is always float32 without the perf overhead.
+    qkv_layout: str, default = 'bshd_bshd_bshd'
+        Specifies the dimensional layout format for the query, key, and value tensors in __call__().
+        It indicates how the inputs are processed.
+        Available options: {'bs3hd', 'bshd_bs2hd', 'bshd_bshd_bshd'}. Where
+
+        * bs3hd: `query` tensor is treated as a qkvpacked tensor with shape = [b, s, 3, h, d].
+        `key` and `value` arguments in `__call__()` are ignored in this layout.
+        * bshd_bs2hd: query tensor with shape = [b, s, h, d]. key tensor is treaded as a kvpacked
+        tensor with shape = [b, s, 2, h, d]. `value` argument in `__call__()` is ignored.
+        * bshd_bshd_bshd: query, key, and value are seperated with shape = [b, s, h, d].
+
+        Explanation of denotations:
+
+        * b: batch size
+        * s: seqeuence length
+        * h: num_attention_heads or num_gqa_groups
+        * d: head dimension
+
+    scale_factor: float | None, default = None
+        Scale factor to apply on query. When :attrs:`None` is present, the scale factor is equal
+        to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
+        need to apply scale on query, which is to set :attrs:`scale_factor=`.
+    transpose_batch_sequence: bool, default = True
+        Indicate whether the input tensors were switched axis of batch
+        and sequence length dimension. if set to True, the input tensors
+        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
+
+    Optimization parameters
+    -----------------------
+    dtype: jax.numpy.dtype, default = jax.numpy.float32
+        The data type used to allocate the initial parameters.
+    """
     head_dim: int
     num_attention_heads: int
     num_gqa_groups: int | None = None
@@ -335,6 +401,29 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
                  bias: Optional[Array] = None,
                  *,
                  deterministic: bool = False) -> Array:
+        """
+        Parameters
+        ----------
+        query: jax.numpy.ndarray
+            The details of query tensor representation is described in :attrs:`qkv_layout`.
+        key: jax.numpy.ndarrary
+            The details of kery tensor representation is described in :attrs:`qkv_layout`.
+        value: jax.numpy.ndarrary
+            The details of value tensor representation is described in :attrs:`qkv_layout`.
+        mask: jax.numpy.ndarray, default = None
+            Boolean tensor used to mask out the attention softmax input.
+            :attrs:`True` means mask out the corresponding values.
+        bias: jax.numpy.ndarray, default = None
+            A tensor used to shift attention softmax input.
+        *
+        deterministic: bool,default = False
+            Disable dropout layers if set to True.
+
+        Returns
+        -------
+        outputs: jax.numpy.ndarray
+            Output tensors.
+        """
 
         # For internal API, we use enum to maintain
         if self.attn_bias_type is None:
@@ -480,6 +569,15 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     attention_dropout: float, default = 0.0
         Dropout probability for the dropout op after the softmax.
+    attn_mask_type: str, default = 'causal'
+        Type of the attention mask passed into softmax operation in the attention.
+        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
+        Introduced in v0.10.0.
+    attn_bias_type: str | None, default = None
+        Type of the attention bias passed in the attention.
+        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        When default is present, the type is automatically decided by the MHA's bias parameter.
+        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
@@ -508,16 +606,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     input_layernorm: bool, default = True
         If set to False, layer normalization to the input is not applied.
     return_layernorm_output: bool, default = False
-        Indicate if apply a layer normalization at the end of MHA.
-    attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the self attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
-    attn_bias_type: str | None, default = None
-        Type of the attention bias passed into the self attention.
-        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
-        When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        If set to True, output of layernorm is returned from the forward together with the output
+        of the linear transformation.
+        Example use case: residual connection for transformer module is taken post layernorm.
     enable_rotary_pos_emb: bool, default = False
         Whether to enable rotary position embedding to projected query and key.
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
@@ -546,12 +637,13 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     scale_attn_logits: bool, default = False
         Indicate whether to scale attention logits.
-        If set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
+        If set to True, :math:`\frac{Q}{\sqrt{head\_dim}*K}`,
         else :math:`Q*K`
     scaled_query_init: bool, default = True
-        Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
-    float32_logits : bool, default = False
-        Whether to compute attention logits in float32.
+        Whether to scale WQ on initialization by :math:`\frac{1}{\sqrt{head\_dim}}`
+    float32_logits: bool, default = False
+        Whether to compute attention logits in float32 for the unfused attention backend.
+        For fused attention backend, the accumulation is always float32 without the perf overhead.
     fuse_qkv: bool, default = None
         Deprecated. Please refer `fuse_qkv_params`
     """
@@ -634,23 +726,24 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         Parameters
         ----------
-        inputs_q : jax.numpy.ndarray
+        inputs_q: jax.numpy.ndarray
             Input tensor for query projection.
-        inputs_kv : jax.numpy.ndarray
+        inputs_kv: jax.numpy.ndarray
             Input tensor for key/value projection.
-        mask : jax.numpy.ndarray, default = None
-            Boolean tensor used to mask out self-attention softmax input.
-        bias : jax.numpy.ndarray, default = None
-            A tensor used to shift self-attention softmax input.
+        mask: jax.numpy.ndarray, default = None
+            Boolean tensor used to mask out the attention softmax input.
+            :attrs:`True` means mask out the corresponding values.
+        bias: jax.numpy.ndarray, default = None
+            A tensor used to shift the attention softmax input.
         *
-        decode : bool,default = False
+        decode: bool,default = False
             Indicate whether to prepare and use an autoregressive cache.
-        deterministic : bool,default = False
+        deterministic: bool,default = False
             Disable dropout layers if set to True.
 
         Returns
         -------
-        outputs : jax.numpy.ndarray
+        outputs: jax.numpy.ndarray
             Output tensors.
         """
 
@@ -943,21 +1036,21 @@ class RelativePositionBiases(nn.Module):    # pylint: disable=too-few-public-met
 
     Parameters
     ----------
-    num_buckets : int
+    num_buckets: int
         The number of buckets to bucket distances between key and query positions into.
-    max_distance : int
+    max_distance: int
         The maximum distance before everything is lumped into the last
         distance bucket.
-    num_attention_heads : int
+    num_attention_heads: int
         Number of attention heads in the transformer layer.
-    embedding_init : Initializer, default = flax.linen.linear.default_embed_init
+    embedding_init: Initializer, default = flax.linen.linear.default_embed_init
         Used for initializing relative embedding tables.
-    embedding_axes : Tuple[str, ...], default = ('heads', 'relpos_buckets')
+    embedding_axes: Tuple[str, ...], default = ('heads', 'relpos_buckets')
         The name of axes used to shard embedding attention bias with a corresponding mesh.
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
     """
     num_buckets: int
@@ -974,11 +1067,11 @@ class RelativePositionBiases(nn.Module):    # pylint: disable=too-few-public-met
 
         Parameters
         ----------
-        q_seqlen : int
+        q_seqlen: int
             The sequence length of query.
-        k_seqlen : int
+        k_seqlen: int
             The sequence length of key.
-        bidirectional : bool, default = True
+        bidirectional: bool, default = True
             Indicate whether to allow positive memory-query relative position
             embeddings.
 
@@ -1058,7 +1151,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         Intermediate size to which input samples are projected.
     num_attention_heads: int, default = 8
         Number of attention heads in the transformer layer.
-    num_gqa_groups : int, default = `None`
+    num_gqa_groups: int, default = `None`
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -1066,11 +1159,11 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         GQA-1 is equivalent to Multi-Query Attention
         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
-    layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
+    layernorm_type: {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    zero_centered_gamma : bool, default = False
+    zero_centered_gamma: bool, default = False
         If set to `True`, the LayerNorm formula changes to
 
         .. math::
@@ -1117,7 +1210,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         after the final dropout-add. default behavior is to apply layer
         normalization on the input side, before the QKV transformation.
     float32_attention_logits: bool, default = False
-        If set to True, attention logits are executed in jax.numpy.float32.
+        Whether to compute attention logits in float32 for the unfused attention backend.
+        For fused attention backend, the accumulation is always float32 without the perf overhead.
     layer_type: TransformerLayerType, default = TransformerLayerType.ENCODER
         If set to TransformerLayerType.DECODER, an additional cross-attention block
         is added after self-attention.this can be used for structures like `T5`
@@ -1149,7 +1243,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype :jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
     drop_path: float, default = 0.0
         When > 0.0, applies stochastic depth per sample in the main
@@ -1158,7 +1252,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         If set to True, `TransformerLayer` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence : bool, default = False
+    transpose_batch_sequence: bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -1230,29 +1324,29 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
 
         Parameters
         ----------
-        inputs : jax.numpy.ndarray
+        inputs: jax.numpy.ndarray
             Input tensor.
-        encoded : jax.numpy.ndarray, default = None
+        encoded: jax.numpy.ndarray, default = None
             Output tensors of the encoder block to be fed into the decoder block if using
             :attr:`layer_type=TransformerLayerType.DECODER`.
         attention_mask : jax.numpy.ndarray, default = None
             Boolean tensor used to mask out self-attention softmax input.
-        encoder_decoder_mask : jax.numpy.ndarray, default = None
+        encoder_decoder_mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.
         deterministic: bool, default = False
             Disable dropout layers if set to True.
-        decode: bool,default = False
+        decode: bool, default = False
             Indicate whether to prepare and use an autoregressive cache
             in Multi-head attention (MHA).
-        max_decode_length : bool, default = None
+        max_decode_length: bool, default = None
             The maximum length to generate relative embedding biases when
             :attr:`layer_type=TransformerLayerType.DECODER` and
             :attr:`enable_relative_embedding=True`.
 
         Returns
         -------
-        outputs : jax.numpy.ndarray
+        outputs: jax.numpy.ndarray
             Output tensors.
         """
         assert self.layer_type in TransformerLayerType, \
