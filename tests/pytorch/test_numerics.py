@@ -214,6 +214,29 @@ class TorchDotProductAttention(torch.nn.Module):
         return context_layer
 
 
+class TorchLayerNorm(nn.Module):
+    def __init__(self, in_features: int,
+                 eps: float,
+                 zero_centered_gamma: bool):
+        super().__init__()
+        self.eps = eps
+        self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
+
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
+        self.bias = nn.Parameter(torch.zeros(in_features))
+        self.register_parameter("weight", self.weight)
+        self.register_parameter("bias", self.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.weight if not self.zero_centered_gamma else 1 + self.weight
+        w = w.to(torch.float32)
+        b = self.bias.to(torch.float32)
+        out = torch.nn.functional.layer_norm(x, self.in_features, weight=w,
+                                             bias=b, eps=self.eps)
+        return out.to(x.dtype)
+
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
     def __init__(self, in_features, zero_centered_gamma, eps=1e-5):
@@ -934,7 +957,51 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
     else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+        assert_allclose(te_outputs[0], torch_outputs[0], 1e-3)
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
+    config = model_configs[model]
+
+    te_layernorm = (
+        LayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_layernorm = (
+        TorchLayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_layernorm.weight = Parameter(te_layernorm.weight.clone())
+        torch_layernorm.bias = Parameter(te_layernorm.bias.clone())
+
+    te_outputs = _test_granular_accuracy(te_layernorm, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 1e-3)
 
 
 @pytest.mark.parametrize("dtype", param_types)
