@@ -11,6 +11,15 @@ from .float8_tensor import Float8Tensor
 
 __all__ = ['get_cpu_offload_context']
 
+TORCH_MAJOR = int(torch.__version__.split(".")[0])
+TORCH_MINOR = int(torch.__version__.split(".")[1])
+
+# nvFuser is deprecated in PyTorch JIT starting from 2.2
+if (TORCH_MAJOR > 2) or (TORCH_MAJOR == 2 and TORCH_MINOR >= 2):
+    check_torch_stray_tensor = True
+else:
+    check_torch_stray_tensor = False
+
 CPUOffloadEnabled = False
 
 
@@ -184,6 +193,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         # the tensor back to gpu and deletes the cpu tensor.
         # These will increment whenever `group_commit()` is invoked
         self.current_group, self.tensor_count_current_group = (0, 0)
+        self.torch_tensor_count = 0
         self.tensor_tag_to_state = {}
 
     def on_group_commit_forward(self):
@@ -200,6 +210,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
+
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
         cpu_backup = torch.empty(
@@ -310,25 +321,34 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
-        # obtain a unique tensor tag
-        tensor_tag = (self.current_group, self.tensor_count_current_group)
-        self.tensor_count_current_group += 1
-        assert tensor_tag not in self.tensor_tag_to_state
+        torch_stray_tensor = (type(tensor) != torch.Tensor) and check_torch_stray_tensor
+        if not torch_stray_tensor:
+            # obtain a unique tensor tag
+            tensor_tag = (self.current_group, self.tensor_count_current_group)
+            self.tensor_count_current_group += 1
+            assert tensor_tag not in self.tensor_tag_to_state
 
-        if (self.current_group < self.num_offload_group
-            and self.tensor_need_offloading_checker(tensor)):
-            # first copy the tensor to tensorbuf, so that the original tensor will not be deleted
-            tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
-            tensor_buf.copy_(tensor)
-            if hasattr(tensor,"weight_offloading"):
-                tensor_buf.weight_offloading = True
-            if hasattr(tensor,"activation_offloading"):
-                tensor_buf.activation_offloading = True
-           # Here we just save it, and at commit, bulk_offload_group will handle it
-            self.tensor_tag_to_state[tensor_tag] = tensor_buf
+            if (self.current_group < self.num_offload_group
+                and self.tensor_need_offloading_checker(tensor)):
+                # first copy the tensor to tensorbuf, so that the original tensor will not be deleted
+                tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
+                tensor_buf.copy_(tensor)
+                if hasattr(tensor,"weight_offloading"):
+                    tensor_buf.weight_offloading = True
+                if hasattr(tensor,"activation_offloading"):
+                    tensor_buf.activation_offloading = True
+                # Here we just save it, and at commit, bulk_offload_group will handle it
+                self.tensor_tag_to_state[tensor_tag] = tensor_buf
+            else:
+                self.tensor_tag_to_state[tensor_tag] = tensor
+            return tensor_tag
         else:
+            tensor_tag = (-1,self.torch_tensor_count)
+            self.torch_tensor_count += 1
             self.tensor_tag_to_state[tensor_tag] = tensor
-        return tensor_tag
+
+            return tensor_tag
+
 
     def tensor_pop(self, tensor_tag, **kwargs):
         """Tensor pop."""
@@ -350,6 +370,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
                     # if offload, return the reference to cpu copy
                     if self.tensor_need_offloading_checker(tensor_on_device):
+                        if hasattr(tensor_on_device,"weight_offloading"):
+                            delattr(tensor_on_device,"weight_offloading")
+                        if hasattr(tensor_on_device,"activation_offloading"):
+                            delattr(tensor_on_device,"activation_offloading")
                         state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         self.tensor_tag_to_state[tensor_tag] = state
 
