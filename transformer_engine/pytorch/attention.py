@@ -1057,7 +1057,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         cu_seqlens: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         if tensor_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, True)
+            output = tex.fused_rope_forward(t, freqs, False)
         elif tensor_format == "bshd":
             output = tex.fused_rope_forward(
                 t.transpose(0, 1), freqs, True
@@ -1077,7 +1077,7 @@ class FusedRoPEFunc(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         freqs, cu_seqlens = ctx.saved_tensors
         if ctx.tensor_format == "sbhd":
-            grad_input = tex.fused_rope_backward(grad_output, freqs, True)
+            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
         elif ctx.tensor_format == "bshd":
             grad_input = tex.fused_rope_backward(
                 grad_output.transpose(0, 1), freqs, True
@@ -1119,10 +1119,6 @@ def apply_rotary_pos_emb(
         with `s2 >= s` and `d2 <= d`.
     fused: bool, default = False
         Whether to use a fused applying RoPE implementation.
-        Note: When using fused RoPE on an input tensor in `sbhd` format, the output
-        tensor will be in shape `[s, b, h, d]` but the 's' and 'b' dimensions of the
-        underlying memory layout are transposed.
-        See https://github.com/NVIDIA/TransformerEngine/pull/517 for more details.
     tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
         is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
         of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.

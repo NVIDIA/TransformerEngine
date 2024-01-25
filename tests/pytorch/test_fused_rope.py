@@ -41,10 +41,11 @@ def get_tol(dtype: torch.dtype) -> Dict:
     return dict(atol=1e-5, rtol=1.3e-6)
 
 
+# Gradient is a broadcasted scalar
 def _overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     return output.sum() * 2
 
-
+# Gradient is a full tensor
 def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     t = torch.ones_like(output)
     return torch.sum(output * t)
@@ -107,10 +108,7 @@ def test_fused_rope(
 
     torch.testing.assert_close(output_fused, output_unfused, **get_tol(dtype))
     torch.testing.assert_close(grad_fused, grad_unfused, **get_tol(dtype))
-    if tensor_format == "bshd":
-        assert output_fused.is_contiguous()
-    else:
-        assert output_fused.transpose(0, 1).is_contiguous()
+    assert output_fused.is_contiguous()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
