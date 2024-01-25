@@ -1854,6 +1854,13 @@ class FusedAttnFunc(torch.autograd.Function):
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            tensor_list = [v, out, cu_seqlens_q, cu_seqlens_kv]
+            for tensor in tensor_list:
+                if tensor is not None:
+                    tensor.activation_offloading = True
+
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
@@ -2733,6 +2740,9 @@ class DotProductAttention(torch.nn.Module):
 
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
+
+        assert (not CPUOffloadEnabled), \
+            "CPU Offloading is only implemented with Flash Attention and Fused Attention!"
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
