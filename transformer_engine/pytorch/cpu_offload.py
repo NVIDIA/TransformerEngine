@@ -210,6 +210,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
+
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
         cpu_backup = torch.empty(
