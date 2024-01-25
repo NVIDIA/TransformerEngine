@@ -1864,7 +1864,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         from .cpu_offload import CPUOffloadEnabled
         if CPUOffloadEnabled:
-            tensor_list = [v, out, cu_seqlens_q, cu_seqlens_kv]
+            tensor_list = [v, out, cu_seqlens_q, cu_seqlens_kv] # Can offload Q/K tensors, but CUDNN fused_attn_bwd fails
             for tensor in tensor_list:
                 if tensor is not None:
                     tensor.activation_offloading = True
@@ -2749,6 +2749,7 @@ class DotProductAttention(torch.nn.Module):
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
+        from .cpu_offload import CPUOffloadEnabled
         assert (not CPUOffloadEnabled), \
             "CPU Offloading is only implemented with Flash Attention and Fused Attention!"
 
