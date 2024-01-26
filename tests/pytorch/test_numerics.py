@@ -330,9 +330,11 @@ class TorchLayerNormMLP(nn.Module):
                  normalization: str = "LayerNorm"):
         super().__init__()
         if normalization == "LayerNorm":
-            self.ln = nn.LayerNorm(hidden_size, eps=eps)
+            self.ln = TorchLayerNorm(hidden_size, eps=eps,
+                                     zero_centered_gamma=False)
         elif normalization == "RMSNorm":
-            self.ln = TorchRMSNorm(hidden_size, eps=eps)
+            self.ln = TorchRMSNorm(hidden_size, eps=eps,
+                                   zero_centered_gamma=False)
         else:
             raise RuntimeError("Unsupported normalization")
         if 'glu' in activation:
