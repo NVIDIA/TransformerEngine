@@ -73,7 +73,7 @@ kernel(const float* amax_history_ptr,
     const auto last_amax = amax_history[0];
     const auto& length = amax_history_length;
     const auto& stride = amax_history_stride;
-    for (size_t off=0; off<length; off+=bsize) {
+    for (size_t off = 0; off < length; off += bsize) {
       const size_t i = off + tid;
       float a = 0;
       if (i < length) {
@@ -87,7 +87,7 @@ kernel(const float* amax_history_ptr,
     }
 
     // Compute amax to use for scaling factor
-    switch(amax_compute_algo) {
+    switch (amax_compute_algo) {
     case AmaxComputeAlgo::MOST_RECENT:
       amax = last_amax;
       break;
@@ -156,7 +156,7 @@ void amax_and_scale_update(const Tensor &amax_history,
   // Number of elements in tensor
   auto numel = [] (const Tensor &tensor) -> size_t {
     size_t acc = 1;
-    for (const auto& dim: tensor.data.shape) {
+    for (const auto& dim : tensor.data.shape) {
       acc *= dim;
     }
     return acc;
