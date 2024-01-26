@@ -234,13 +234,14 @@ def amax_and_scale_update(
     fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
 
     if not callable(amax_compute) and sf_compute is None:
+        if update_weight_scale_inv:
+            non_weight_mask = paddle.empty([0])
         tex.amax_and_scale_update_inplace(
             _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
             _scale=fp8_meta[fp8_meta_tensor_key].scale,
             _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
             non_weight_mask=fp8_meta[fp8_meta_tensor_key].non_weight_mask,
-            update_weight_scale_inv=update_weight_scale_inv,
-            fp8_dtype=get_fp8_te_dtype(fp8_meta["recipe"], fwd_update),
+            fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
             margin=float(fp8_meta["recipe"].margin),
             amax_compute=amax_compute)
     else:

@@ -1018,7 +1018,6 @@ void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
                                    paddle::Tensor &scale,         // NOLINT
                                    paddle::Tensor &scale_inv,     // NOLINT
                                    const paddle::Tensor &non_weight_mask,
-                                   bool update_weight_scale_inv,
                                    int64_t fp8_dtype,
                                    float margin,
                                    const std::string &amax_compute) {
@@ -1341,8 +1340,7 @@ PD_BUILD_OP(amax_and_scale_update_inplace)
     .SetInplaceMap({{"_amax_history", "amax_history"},
                     {"_scale", "scale"},
                     {"_scale_inv", "scale_inv"}})
-    .Attrs({"update_weight_scale_inv: bool", "fp8_dtype: int64_t", "margin: float",
-            "amax_compute: std::string"})
+    .Attrs({"fp8_dtype: int64_t", "margin: float", "amax_compute: std::string"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace));
 
 PD_BUILD_OP(update_latest_amax_history_inplace)

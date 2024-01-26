@@ -70,7 +70,7 @@ kernel(const float* amax_history_ptr,
     // Roll amax history
     const auto* amax_history = amax_history_ptr + bid;
     auto* updated_amax_history = updated_amax_history_ptr + bid;
-    const auto& last_amax = amax_history[0];
+    const auto last_amax = amax_history[0];
     const auto& length = amax_history_length;
     const auto& stride = amax_history_stride;
     for (size_t off=0; off<length; off+=bsize) {
