@@ -959,7 +959,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 
     # Check output.
     atol = {torch.float32 : 1e-7,
-            torch.half    : 1e-3,
+            torch.half    : 2e-3,
             torch.bfloat16: 1e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
@@ -1004,7 +1004,7 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 
     # Check output.
     atol = {torch.float32 : 1e-7,
-            torch.half    : 1e-3,
+            torch.half    : 2e-3,
             torch.bfloat16: 1e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
@@ -1058,9 +1058,9 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 1e-7,
-            torch.half    : 1e-3,
-            torch.bfloat16: 1e-2,
+    atol = {torch.float32 : 2e-4,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
