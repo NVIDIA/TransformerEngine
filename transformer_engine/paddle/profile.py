@@ -5,7 +5,10 @@
 
 from contextlib import contextmanager
 
-from paddle.fluid import core
+try:
+    from paddle.base import core
+except ImportError:
+    from paddle.fluid import core
 
 
 @contextmanager
