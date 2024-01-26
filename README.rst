@@ -102,6 +102,7 @@ Flax
 
 .. code-block:: python
 
+  import flax
   import jax
   import jax.numpy as jnp
   import transformer_engine.jax as te
@@ -130,7 +131,7 @@ Flax
 
       # Initialize models.
       variables = model.init(init_rng, inp)
-      other_variables, params = variables.pop('params')
+      other_variables, params = flax.core.pop(variables, 'params')
 
       # Construct the forward and backward function
       fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))

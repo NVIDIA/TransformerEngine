@@ -17,6 +17,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
+    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
@@ -53,7 +54,7 @@ model_configs = {
 }
 
 param_types = [torch.float32, torch.float16]
-if torch.cuda.is_bf16_supported():
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
