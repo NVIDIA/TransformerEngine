@@ -5,6 +5,12 @@
 
 import struct
 
+from utils import (
+    assert_allclose,
+    create_fp8_meta,
+    get_fused_attention_backend,
+    is_fused_attention_supported,
+)
 import numpy as np
 import paddle
 import paddle.nn.functional as F
@@ -39,6 +45,8 @@ from transformer_engine.paddle.cpp_extensions import (
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
+    fused_attn_fwd,
+    fused_attn_bwd,
     scaled_softmax_forward,
     scaled_softmax_backward,
     scaled_masked_softmax_forward,
@@ -594,6 +602,7 @@ class TestFusedAttn:
 
         self.q = _random(self.q_shape)
         if self.attn_mode == "self_attn":
+            assert self.q_seqlen == self.kv_seqlen, "self attention requires q_seqlen == kv_seqlen"
             self.kv = self.q
         else:
             self.kv = _random(self.kv_shape)
@@ -774,6 +783,70 @@ class TestFusedAttn:
 
         return out, q_grad, k_grad, v_grad
 
+    def _get_fused_attention_with_separate_qkv(self):
+        paddle.disable_static(place=paddle.CUDAPlace(0))
+
+        q_tensor = paddle.to_tensor(self.q, stop_gradient=False)
+        k_tensor = paddle.to_tensor(self.kv, stop_gradient=False)
+        v_tensor = paddle.to_tensor(self.kv, stop_gradient=False)
+
+        q_cu_seqlen_tensor = paddle.to_tensor(self.q_cu_seqlen, dtype="int32", stop_gradient=True)
+        kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
+
+        qkv_layout = "bshd_bshd_bshd"
+        fused_attention_backend = get_fused_attention_backend(
+            num_heads=self.num_heads,
+            num_gqa_groups=self.num_heads,
+            q_seqlen=self.q_seqlen,
+            kv_seqlen=self.kv_seqlen,
+            head_size=self.head_size,
+            dtype=self.dtype,
+            dropout=self.dropout_prob,
+            qkv_layout=qkv_layout,
+            bias_type="no_bias",
+            mask_type="causal" if self.is_causal_masking else "padding",
+        )
+
+        qkv_dtype = tex.DType.kBFloat16 if self.dtype == "bfloat16" else tex.DType.kFloat16
+        out, softmax_aux_tensor, rng_state = fused_attn_fwd(
+            q_tensor,
+            k_tensor,
+            v_tensor,
+            q_cu_seqlen_tensor,
+            kv_cu_seqlen_tensor,
+            is_training=True,
+            max_seqlen_q=self.q_seqlen,
+            max_seqlen_kv=self.kv_seqlen,
+            qkv_dtype=qkv_dtype,
+            fused_attention_backend=fused_attention_backend,
+            Bias=None,
+            attn_scale=self.scaling_factor,
+            dropout=self.dropout_prob,
+            set_zero=False,
+            qkv_layout=qkv_layout,
+            attn_mask_type="causal" if self.is_causal_masking else "padding")
+        dq, dk, dv, _ = fused_attn_bwd(
+            q_tensor,
+            k_tensor,
+            v_tensor,
+            q_cu_seqlen_tensor,
+            kv_cu_seqlen_tensor,
+            rng_state,
+            out,
+            self.dout,
+            softmax_aux_tensor,
+            fused_attention_backend=fused_attention_backend,
+            max_seqlen_q=self.q_seqlen,
+            max_seqlen_kv=self.kv_seqlen,
+            qkv_dtype=qkv_dtype,
+            attn_scale=self.scaling_factor,
+            dropout=self.dropout_prob,
+            set_zero=False,
+            qkv_layout=qkv_layout,
+            attn_mask_type="causal" if self.is_causal_masking else "padding")
+
+        return out, dq, dk, dv
+
     @pytest.mark.parametrize('b, s, h, d', SELF_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True, False])
@@ -852,6 +925,35 @@ class TestFusedAttn:
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
+        assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
+        assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
+
+    @pytest.mark.parametrize('b, s, h, d', FLASH_ATTN_CASES)
+    @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
+    @pytest.mark.parametrize('is_causal_masking', [False, True])
+    def test_fused_attn_with_separate_qkv_forward_backward(self, b, s, h, d, dtype,
+                                                           is_causal_masking):
+        """
+        test flash attention forward + backward with separate qkv inputs
+        """
+        if not is_fused_attention_supported(
+                num_heads=h,
+                num_gqa_groups=h,
+                q_seqlen=s,
+                kv_seqlen=s,
+                head_size=d,
+                dtype=dtype,
+                dropout=0.0,
+                qkv_layout="bshd_bshd_bshd",
+                bias_type="no_bias",
+                mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
+        self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
+        reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
+        fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_with_separate_qkv()
         assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
         assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
