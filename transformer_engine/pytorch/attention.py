@@ -2909,8 +2909,8 @@ class MultiheadAttention(torch.nn.Module):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = `True`
-                     if set to `False`, layer normalization to the input is not applied.
+    input_layernorm: bool, default = `False`
+                     if set to `True`, layer normalization to the input is applied.
     attention_type: { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
