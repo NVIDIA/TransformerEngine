@@ -210,7 +210,7 @@ void amax_and_scale_update(const Tensor &amax_history,
   }
 
   // Expected maximum value after scale is applied
-  const float scaled_max = fp8_dtype_max(fp8_dtype) * std::pow(-2.f, margin);
+  const float scaled_max = fp8_dtype_max(fp8_dtype) * std::pow(2.f, -margin);
 
   // Launch CUDA kernel
   constexpr size_t block_size = amax_and_scale_update_impl::bsize;
