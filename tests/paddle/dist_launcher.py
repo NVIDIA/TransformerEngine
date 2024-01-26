@@ -10,7 +10,10 @@ import subprocess
 import time
 import unittest
 
-from paddle import fluid
+try:
+    from paddle.base import core
+except ImportError:
+    from paddle.fluid import core
 from paddle.distributed.utils.launch_utils import (
     TrainerProc,
     find_free_ports,
@@ -114,7 +117,7 @@ class TestDistributed(unittest.TestCase):
         allocator_strategy="auto_growth",
     ):
         """Run target file in subprocesses"""
-        if (not fluid.core.is_compiled_with_cuda() or fluid.core.get_cuda_device_count() == 0):
+        if (not core.is_compiled_with_cuda() or core.get_cuda_device_count() == 0):
             return
 
         selected_gpus = get_gpus('0,1')
