@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from subprocess import CalledProcessError
 import sys
+import sysconfig
 import tempfile
 from typing import List, Optional, Tuple, Union
 
@@ -284,7 +285,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6,<=2.3.3,!=2.0.9,!=2.1.0"])
+        add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
@@ -327,6 +328,8 @@ class CMakeExtension(setuptools.Extension):
             cmake_path,
             "-B",
             build_dir,
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]

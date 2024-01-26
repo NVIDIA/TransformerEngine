@@ -533,7 +533,7 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 );
 
 /***************************************************************************************************
- * FP8
+ * FP8 scaling factors
  **************************************************************************************************/
 
 void fused_amax_and_scale_update(const at::Tensor& amax_history,
@@ -547,6 +547,31 @@ void fused_amax_and_scale_update(const at::Tensor& amax_history,
                                  float fp8_max,
                                  float margin,
                                  bool update_weight_scale_inv);
+
+
+/***************************************************************************************************
+ * Rotary positional embedding
+ **************************************************************************************************/
+
+at::Tensor fused_rope_forward(const at::Tensor &input,
+                              const at::Tensor &freqs,
+                              const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_backward(const at::Tensor &output_grads,
+                               const at::Tensor &freqs,
+                               const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_thd_forward(const at::Tensor &input,
+                                  const at::Tensor &cu_seqlens,
+                                  const at::Tensor &freqs
+);
+
+at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
+                                   const at::Tensor &cu_seqlens,
+                                   const at::Tensor &freqs
+);
 
 /***************************************************************************************************
  * Miscellaneous
