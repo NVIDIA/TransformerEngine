@@ -533,21 +533,19 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 );
 
 /***************************************************************************************************
- * FP8 scaling factors
+ * FP8 recipe
  **************************************************************************************************/
 
-void fused_amax_and_scale_update(const at::Tensor& amax_history,
-                                 const at::Tensor& scale,
-                                 const at::Tensor& scale_inv,
-                                 const at::Tensor& non_weight_mask,
+void fused_amax_and_scale_update(const at::Tensor &amax_history,
+                                 const at::Tensor &scale,
+                                 const at::Tensor &scale_inv,
+                                 const at::Tensor &scale_inv_mask,
                                  at::Tensor updated_amax_history,
                                  at::Tensor updated_scale,
                                  at::Tensor updated_scale_inv,
                                  const std::string& amax_compute_algo,
-                                 float fp8_max,
-                                 float margin,
-                                 bool update_weight_scale_inv);
-
+                                 transformer_engine::DType fp8_dtype,
+                                 float margin);
 
 /***************************************************************************************************
  * Rotary positional embedding
