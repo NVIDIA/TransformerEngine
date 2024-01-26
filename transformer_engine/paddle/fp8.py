@@ -240,7 +240,7 @@ def amax_and_scale_update(
             _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
             non_weight_mask=fp8_meta[fp8_meta_tensor_key].non_weight_mask,
             update_weight_scale_inv=update_weight_scale_inv,
-            fp8_max=fp8_meta[fp8_max_key],
+            fp8_dtype=get_fp8_te_dtype(fp8_meta["recipe"], fwd_update),
             margin=float(fp8_meta["recipe"].margin),
             amax_compute=amax_compute)
     else:

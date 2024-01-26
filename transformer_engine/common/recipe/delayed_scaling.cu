@@ -73,10 +73,17 @@ kernel(const float* amax_history_ptr,
     const auto& last_amax = amax_history[0];
     const auto& length = amax_history_length;
     const auto& stride = amax_history_stride;
-    for (size_t i=tid; i<length; i+=bsize) {
-      const auto& a = (i < length - 1) ? amax_history[(i+1)*stride] : last_amax;
-      updated_amax_history[i*stride] = (i > 0) ? a : 0;
-      amax = fmaxf(amax, a);
+    for (size_t off=0; off<length; off+=bsize) {
+      const size_t i = off + tid;
+      float a = 0;
+      if (i < length) {
+        a = (i < length - 1) ? amax_history[(i+1)*stride] : last_amax;
+        amax = fmaxf(amax, a);
+      }
+      __syncthreads();  // In case roll is in-place
+      if (i < length) {
+        updated_amax_history[i*stride] = (i > 0) ? a : 0;
+      }
     }
 
     // Compute amax to use for scaling factor
@@ -228,6 +235,7 @@ void amax_and_scale_update(const Tensor &amax_history,
       num_scales,
       amax_compute_algo_,
       scaled_max);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace delayed_scaling_recipe

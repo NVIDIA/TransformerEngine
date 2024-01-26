@@ -944,6 +944,7 @@ def test_amax_and_scale_update(update_weight_scale_inv):
     num_gemm = 6
     history_len = 1024
     recipe = DelayedScaling()
+    fp8_dtype = tex.DType.kFloat8E4M3
     fp8_max = recipe.fp8_format.value.max_fwd
     non_weight_mask = paddle.to_tensor([True, False] * (num_gemm // 2))
 
@@ -976,7 +977,7 @@ def test_amax_and_scale_update(update_weight_scale_inv):
                                       _scale_inv=scale_inv_actual,
                                       non_weight_mask=non_weight_mask,
                                       update_weight_scale_inv=update_weight_scale_inv,
-                                      fp8_max=fp8_max,
+                                      fp8_dtype=fp8_dtype,
                                       margin=0.,
                                       amax_compute="max")
 
