@@ -7,7 +7,8 @@ variables:
     DATADIR: /mnt/nvdl/datasets
 
     # framework containers
-    PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+    PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3.12284069-devel
+    # PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel  ### TODO (tym): Restore once cuDNN v9 bug is fixed upstream
     JAX_IMAGE: ghcr.io/nvidia/jax:latest
     PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
 
