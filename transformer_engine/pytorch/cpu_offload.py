@@ -311,7 +311,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
-        torch_stray_tensor = (type(tensor) == torch._subclasses.fake_tensor.FakeTensor or type(tensor) == torch._subclasses.functional_tensor.FunctionalTensor)
+
+        torch_stray_tensor = (isinstance(tensor,torch._subclasses.fake_tensor.FakeTensor) or
+                            isinstance(tensor,torch._subclasses.functional_tensor.FunctionalTensor))
+
         if not torch_stray_tensor:
             # obtain a unique tensor tag
             tensor_tag = (self.current_group, self.tensor_count_current_group)
@@ -320,7 +323,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             if (self.current_group < self.num_offload_group
                 and self.tensor_need_offloading_checker(tensor)):
-                # first copy the tensor to tensorbuf, so that the original tensor will not be deleted
+                # first copy the tensor to tensorbuf, 
+                # so that the original tensor will not be deleted
                 tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
                 tensor_buf.copy_(tensor)
                 if hasattr(tensor,"weight_offloading"):
@@ -331,13 +335,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 self.tensor_tag_to_state[tensor_tag] = tensor_buf
             else:
                 self.tensor_tag_to_state[tensor_tag] = tensor
-            return tensor_tag
         else:
             tensor_tag = (-1,self.torch_tensor_count)
             self.torch_tensor_count += 1
             self.tensor_tag_to_state[tensor_tag] = tensor
 
-            return tensor_tag
+        return tensor_tag
 
     def tensor_pop(self, tensor_tag, **kwargs):
         """Tensor pop."""
