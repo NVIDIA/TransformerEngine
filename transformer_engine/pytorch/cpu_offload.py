@@ -11,15 +11,6 @@ from .float8_tensor import Float8Tensor
 
 __all__ = ['get_cpu_offload_context']
 
-TORCH_MAJOR = int(torch.__version__.split(".")[0])
-TORCH_MINOR = int(torch.__version__.split(".")[1])
-
-# nvFuser is deprecated in PyTorch JIT starting from 2.2
-if (TORCH_MAJOR > 2) or (TORCH_MAJOR == 2 and TORCH_MINOR >= 2):
-    check_torch_stray_tensor = True
-else:
-    check_torch_stray_tensor = False
-
 CPUOffloadEnabled = False
 
 
@@ -320,7 +311,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
-        torch_stray_tensor = (type(tensor) != torch.Tensor) and check_torch_stray_tensor
+        torch_stray_tensor = (type(tensor) == torch._subclasses.fake_tensor.FakeTensor or type(tensor) == torch._subclasses.functional_tensor.FunctionalTensor)
         if not torch_stray_tensor:
             # obtain a unique tensor tag
             tensor_tag = (self.current_group, self.tensor_count_current_group)
