@@ -59,8 +59,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 cudnn_frontend::DataType_t tensorType,
                 void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
-    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
-
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
     bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
@@ -248,6 +246,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             return;
         }
 
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
         // Build variant pack
         std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
             {Q, devPtrQ},
@@ -300,8 +302,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
                 cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
-    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
-
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
     bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
@@ -518,6 +518,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
             return;
         }
+
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
         // build variant pack
         std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
