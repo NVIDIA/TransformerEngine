@@ -2836,9 +2836,9 @@ class DotProductAttention(torch.nn.Module):
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
         from .cpu_offload import CPUOffloadEnabled
-        if CPUOffloadEnabled:  
+        if CPUOffloadEnabled:
             warnings.warn(
-                           "Attention activation Offloading is only implemented" 
+                           "Attention activation Offloading is only implemented"
                            "with Flash Attention and Fused Attention!"
                          )
 
