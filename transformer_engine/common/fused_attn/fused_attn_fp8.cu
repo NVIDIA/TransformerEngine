@@ -1007,8 +1007,6 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
             cudaStream_t stream,
             cudnnHandle_t handle_) {
   try {
-      NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
-
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, isTraining, dropoutProbability, layout,
@@ -1212,6 +1210,10 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           return;
       }
 
+      // cuDNN stream check needs to be moved here to support dummy kernel calls with
+      // null streams for sizing the cuDNN workspace.
+      NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
+
       int32_t* qkv_ragged_offset = reinterpret_cast<int32_t*>(
                   reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
       int32_t* o_ragged_offset = reinterpret_cast<int32_t*>(
@@ -1324,8 +1326,6 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
             cudaStream_t stream,
             cudnnHandle_t handle_) {
   try {
-      NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
-
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, false, dropoutProbability, layout,
@@ -1744,6 +1744,10 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           *workspace_size = wkspace_size + ((b + 1) * 2 + b) * sizeof(int32_t);
           return;
       }
+
+      // cuDNN stream check needs to be moved here to support dummy kernel calls with
+      // null streams for sizing the cuDNN workspace.
+      NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
       int32_t* qkv_ragged_offset = reinterpret_cast<int32_t*>(
                   reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
