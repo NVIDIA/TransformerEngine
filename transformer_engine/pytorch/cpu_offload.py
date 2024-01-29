@@ -312,8 +312,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
 
-        torch_stray_tensor = isinstance(tensor,torch._subclasses.fake_tensor.FakeTensor,
-                                        torch._subclasses.functional_tensor.FunctionalTensor)
+        torch_stray_tensor = isinstance(tensor,(torch._subclasses.fake_tensor.FakeTensor,
+                                        torch._subclasses.functional_tensor.FunctionalTensor))
 
         if not torch_stray_tensor:
             # obtain a unique tensor tag
