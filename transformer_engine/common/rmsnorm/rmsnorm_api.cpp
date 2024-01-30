@@ -335,7 +335,7 @@ void nvte_rmsnorm1p_bwd(const NVTETensor dz,      // Nxhidden_size
                         NVTETensor dgamma_part, cudaStream_t stream,
                         const int multiprocessorCount, NVTETensor workspace,
                         NVTETensor barrier) {
-  NVTE_API_CALL(nvte_rmsnorm_bwd);
+  NVTE_API_CALL(nvte_rmsnorm1p_bwd);
   using namespace transformer_engine;
   rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
               *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
