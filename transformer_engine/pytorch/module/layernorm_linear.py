@@ -242,7 +242,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if cpu_offloading:
                 if fuse_wgrad_accumulation:
                     weight.main_grad.weight_offloading = True
-                if fp8:
+                if fp8 and weight_t_fp8 is not None:
                     weight_t_fp8.weight_offloading = True
                 ln_weight.weight_offloading = True
                 weight.weight_offloading = True
