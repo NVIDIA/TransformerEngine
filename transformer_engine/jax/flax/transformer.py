@@ -366,9 +366,9 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         * d: head dimension
 
     scale_factor: float | None, default = None
-        Scale factor to apply on query. When :attrs:`None` is present, the scale factor is equal
+        Scale factor to apply on query. When :attr:`None` is present, the scale factor is equal
         to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
-        need to apply scale on query, which is to set :attrs:`scale_factor=`.
+        need to apply scale on query, which is to set :attr:`scale_factor=1.`.
     transpose_batch_sequence: bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
@@ -405,14 +405,14 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         Parameters
         ----------
         query: jax.numpy.ndarray
-            The details of query tensor representation is described in :attrs:`qkv_layout`.
+            The details of query tensor representation is described in :attr:`qkv_layout`.
         key: jax.numpy.ndarrary
-            The details of kery tensor representation is described in :attrs:`qkv_layout`.
+            The details of kery tensor representation is described in :attr:`qkv_layout`.
         value: jax.numpy.ndarrary
-            The details of value tensor representation is described in :attrs:`qkv_layout`.
+            The details of value tensor representation is described in :attr:`qkv_layout`.
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
-            :attrs:`True` means mask out the corresponding values.
+            :attr:`True` means mask out the corresponding values.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *
@@ -732,7 +732,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             Input tensor for key/value projection.
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
-            :attrs:`True` means mask out the corresponding values.
+            :attr:`True` means mask out the corresponding values.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
