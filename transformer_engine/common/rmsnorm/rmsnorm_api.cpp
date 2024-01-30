@@ -113,12 +113,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     const bool fp8_out = is_fp8_dtype(otype);
     auto ctype = DType::kFloat32;
 
-    CheckInputTensor(x, "x");
-    CheckInputTensor(gamma, "gamma");
-
-    CheckOutputTensor(*z, "z");
-    CheckOutputTensor(*rsigma, "rsigma");
-
     NVTE_CHECK(x.data.shape.size() == 2);
 
     const size_t rows = x.data.shape[0];
@@ -172,6 +166,15 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
         return;
     }
+
+    // Tensor checks are delayed here in order to recover workspace sizes with null data
+    CheckInputTensor(x, "x");
+    CheckInputTensor(gamma, "gamma");
+
+    CheckOutputTensor(*z, "z");
+    CheckOutputTensor(*rsigma, "rsigma");
+
+
     if (launch_params.barrier_size > 0) {
         params.workspace = workspace->data.dptr;
         params.barrier = reinterpret_cast<int *>(barrier->data.dptr);
@@ -203,13 +206,6 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     auto wtype = gamma.data.dtype;
     auto otype = wtype;
     auto ctype = DType::kFloat32;
-
-    CheckInputTensor(dz, "dz");
-    CheckInputTensor(x, "x");
-    CheckInputTensor(rsigma, "rsigma");
-    CheckInputTensor(gamma, "gamma");
-    CheckOutputTensor(*dx, "dx");
-    CheckOutputTensor(*dgamma, "dgamma");
 
     NVTE_CHECK(dz.data.dtype == otype);
     NVTE_CHECK(rsigma.data.dtype == ctype);
@@ -267,6 +263,14 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
 
         return;
     }
+
+    // Tensor checks are delayed here in order to recover workspace sizes with null data
+    CheckInputTensor(dz, "dz");
+    CheckInputTensor(x, "x");
+    CheckInputTensor(rsigma, "rsigma");
+    CheckInputTensor(gamma, "gamma");
+    CheckOutputTensor(*dx, "dx");
+    CheckOutputTensor(*dgamma, "dgamma");
 
     if (launch_params.barrier_size > 0) {
         params.workspace = workspace->data.dptr;

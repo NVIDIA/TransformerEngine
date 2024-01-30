@@ -22,8 +22,8 @@ from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import layernrom_geglu_fp8_mlp, geglu
-from ..mlp import layernrom_gelu_fp8_mlp, gelu
+from ..mlp import layernorm_geglu_fp8_mlp, geglu
+from ..mlp import layernorm_gelu_fp8_mlp, gelu
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -936,7 +936,7 @@ class LayerNormMLP(TransformerEngineBase):
         if use_fused_ln_geglu_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            out = layernrom_geglu_fp8_mlp(y,
+            out = layernorm_geglu_fp8_mlp(y,
                                           scale,
                                           ln_bias, [kernel_1, kernel_2],
                                           fp8_meta_package,
@@ -964,7 +964,7 @@ class LayerNormMLP(TransformerEngineBase):
                                                      axes=self.bias_axes_2)
             bias_2 = bias_2.astype(self.dtype)
 
-            out = layernrom_gelu_fp8_mlp(y,
+            out = layernorm_gelu_fp8_mlp(y,
                                          scale,
                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
                                          fp8_meta_package,

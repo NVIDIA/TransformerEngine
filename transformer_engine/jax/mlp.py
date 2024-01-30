@@ -92,7 +92,7 @@ def _geglu_bwd_rule(ctx, g):
 _geglu.defvjp(_geglu_fwd_rule, _geglu_bwd_rule)
 
 
-def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
+def layernorm_geglu_fp8_mlp(x: jnp.ndarray,
                             gamma: jnp.ndarray,
                             beta: jnp.ndarray,
                             kernels: List[jnp.ndarray],
@@ -128,7 +128,7 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
 
-    output = _layernrom_geglu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax, scale,
+    output = _layernorm_geglu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax, scale,
                                       scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
                                       zero_centered_gamma, epsilon, layernorm_input_axes,
                                       dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
@@ -137,7 +137,7 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
-def _layernrom_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
+def _layernorm_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_max: jnp.ndarray,
                              amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
                              fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype, layernorm_type: str,
@@ -145,7 +145,7 @@ def _layernrom_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarr
                              layernorm_input_axes: Tuple[str, ...],
                              dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
                              ffn1_ckpt_name: str, ffn2_ckpt_name: str):
-    output, _ = _layernrom_geglu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax,
+    output, _ = _layernorm_geglu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax,
                                                   scale, scale_inv, fwd_dtype, bwd_dtype,
                                                   layernorm_type, zero_centered_gamma, epsilon,
                                                   layernorm_input_axes, dot_1_input_axes,
@@ -153,7 +153,7 @@ def _layernrom_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarr
     return output
 
 
-def _layernrom_geglu_fp8_mlp_fwd_rule(
+def _layernorm_geglu_fp8_mlp_fwd_rule(
         x,
         gamma,
         beta,
@@ -271,7 +271,7 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     return dot_2_output, ctx
 
 
-def _layernrom_geglu_fp8_mlp_bwd_rule(
+def _layernorm_geglu_fp8_mlp_bwd_rule(
         fwd_dtype,    # pylint: disable=unused-argument
         bwd_dtype,
         layernorm_type,
@@ -381,11 +381,11 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
            fp8_max, amax, scale, scale_inv
 
 
-_layernrom_geglu_fp8_mlp.defvjp(_layernrom_geglu_fp8_mlp_fwd_rule,
-                                _layernrom_geglu_fp8_mlp_bwd_rule)
+_layernorm_geglu_fp8_mlp.defvjp(_layernorm_geglu_fp8_mlp_fwd_rule,
+                                _layernorm_geglu_fp8_mlp_bwd_rule)
 
 
-def layernrom_gelu_fp8_mlp(x: jnp.ndarray,
+def layernorm_gelu_fp8_mlp(x: jnp.ndarray,
                            gamma: jnp.ndarray,
                            beta: jnp.ndarray,
                            kernels: List[jnp.ndarray],
@@ -424,7 +424,7 @@ def layernrom_gelu_fp8_mlp(x: jnp.ndarray,
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
 
-    output = _layernrom_gelu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max,
+    output = _layernorm_gelu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max,
                                      amax, scale, scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
                                      zero_centered_gamma, epsilon, layernorm_input_axes,
                                      dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
@@ -433,7 +433,7 @@ def layernrom_gelu_fp8_mlp(x: jnp.ndarray,
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18, 19, 20))
-def _layernrom_gelu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
+def _layernorm_gelu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                             kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, bias_1: jnp.ndarray,
                             bias_2: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
                             scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype,
@@ -441,7 +441,7 @@ def _layernrom_gelu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarra
                             epsilon: float, layernorm_input_axes: Tuple[str, ...],
                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
                             ffn1_ckpt_name: str, ffn2_ckpt_name: str):
-    output, _ = _layernrom_gelu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
+    output, _ = _layernorm_gelu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
                                                  fp8_max, amax, scale, scale_inv, fwd_dtype,
                                                  bwd_dtype, layernorm_type, zero_centered_gamma,
                                                  epsilon, layernorm_input_axes, dot_1_input_axes,
@@ -449,7 +449,7 @@ def _layernrom_gelu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarra
     return output
 
 
-def _layernrom_gelu_fp8_mlp_fwd_rule(
+def _layernorm_gelu_fp8_mlp_fwd_rule(
         x,
         gamma,
         beta,
@@ -579,7 +579,7 @@ def _layernrom_gelu_fp8_mlp_fwd_rule(
     return dot_2_output, ctx
 
 
-def _layernrom_gelu_fp8_mlp_bwd_rule(
+def _layernorm_gelu_fp8_mlp_bwd_rule(
         fwd_dtype,    # pylint: disable=unused-argument
         bwd_dtype,
         layernorm_type,
@@ -694,4 +694,4 @@ def _layernrom_gelu_fp8_mlp_bwd_rule(
            fp8_max, amax, scale, scale_inv
 
 
-_layernrom_gelu_fp8_mlp.defvjp(_layernrom_gelu_fp8_mlp_fwd_rule, _layernrom_gelu_fp8_mlp_bwd_rule)
+_layernorm_gelu_fp8_mlp.defvjp(_layernorm_gelu_fp8_mlp_fwd_rule, _layernorm_gelu_fp8_mlp_bwd_rule)
