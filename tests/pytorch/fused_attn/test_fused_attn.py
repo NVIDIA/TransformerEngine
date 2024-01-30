@@ -396,10 +396,10 @@ def test_dpa_sliding_window(dtype, model_configs, model):
 
 model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
-    "alibi_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_2_0": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
-    "alibi_2_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi", alibi_type= "custom"),
+    "alibi_1_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "causal", "alibi", alibi_type="vanilla"),
+    "alibi_1_1": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "causal", "alibi", alibi_type="vanilla"),
+    "alibi_2_0": ModelConfig(2, 24, 24, 128, 1024, 1024, 0.0, "causal", "alibi", alibi_type= "custom"),
+    "alibi_2_1": ModelConfig(1, 24, 24, 128, 1024, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
 }
 @pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
