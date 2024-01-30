@@ -10,6 +10,27 @@ from test_fused_attn_with_cp import model_configs
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}
 
+def get_seq_idx(cu_seqlens, world_size, rank):
+    cu_seqlens = cu_seqlens.cpu()
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    seq_idx = []
+    for i in range(seqlens.shape[0]):
+        # The first half
+        left = cu_seqlens[i]
+        block_size = seqlens[i] // world_size // 2
+        left = left + rank * block_size
+        right = left + block_size
+        idx = torch.arange(left, right).to(torch.int32)
+        seq_idx.append(idx)
+        # The second half
+        right = cu_seqlens[i+1]
+        right = right - rank * block_size
+        left = right - block_size
+        idx = torch.arange(left, right).to(torch.int32)
+        seq_idx.append(idx)
+    seq_idx = torch.cat(seq_idx)
+    return seq_idx.cuda()
+
 def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend='FlashAttention'):
     """Test DotProductAttention module with context parallelism"""
 
@@ -58,12 +79,25 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim)
         kv_input_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.batch_size, config.max_seqlen_q, config.num_heads*config.head_dim)
+        cu_seqlens_q = None
+        cu_seqlens_kv = None
     elif qkv_format == "sbhd":
         q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim)
         kv_input_shape = (config.max_seqlen_kv, config.batch_size, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.max_seqlen_q, config.batch_size, config.num_heads*config.head_dim)
+        cu_seqlens_q = None
+        cu_seqlens_kv = None
     else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
+        seqlens_q = torch.randint(world_size*2, config.max_seqlen_q*2, [config.batch_size]).to(torch.int32)
+        seqlens_q = seqlens_q - seqlens_q % (world_size * 2)
+        cu_seqlens_q = torch.cat([torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0)])
+        cu_seqlens_kv = cu_seqlens_q
+        q_input_shape = (cu_seqlens_q[-1], config.num_heads, config.head_dim)
+        kv_input_shape = (cu_seqlens_kv[-1], config.num_gqa_groups, config.head_dim)
+        attn_output_shape = (cu_seqlens_q[-1], config.num_heads*config.head_dim)
+        cu_seqlens_q = cu_seqlens_q.to(torch.int32).cuda()
+        cu_seqlens_kv = cu_seqlens_kv.to(torch.int32).cuda()
+
     q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
     k = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
@@ -72,24 +106,39 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     # make sure all GPU ranks have same inputs
     for x in [q, k, v, dout]:
         dist.broadcast(x, 0, group=cp_comm_group)
+    if qkv_format == "thd":
+        for x in [cu_seqlens_q, cu_seqlens_kv]:
+            dist.broadcast(x, 0, group=cp_comm_group)
 
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
-    out = core_attn(q, k, v)
+    out = core_attn(q, k, v, cu_seqlens_q = cu_seqlens_q, cu_seqlens_kv = cu_seqlens_kv)
     out.backward(dout)
 
     # run core_attn wit CP
-    q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
-    seq_dim = qkv_format.index('s')
-    q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
-        for x in [q_, k_, v_, dout_]]
-    seq_idx = torch.tensor([rank, 2*world_size-rank-1], device=q_.device)
-    q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
-    q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
+    if qkv_format == "bshd" or qkv_format == "sbhd":
+        q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
+        seq_dim = qkv_format.index('s')
+        q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
+            for x in [q_, k_, v_, dout_]]
+        seq_idx = torch.tensor([rank, 2*world_size-rank-1], device=q_.device)
+        q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
+        q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
+    else:
+        q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
+        seq_idx_q = get_seq_idx(cu_seqlens_q, world_size, rank)
+        seq_idx_kv = get_seq_idx(cu_seqlens_kv, world_size, rank)
+        q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
+        k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
+
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream())
-    out_ = core_attn(q_, k_, v_)
+
+    if qkv_format == "bshd" or qkv_format == "sbhd":
+        out_ = core_attn(q_, k_, v_)
+    else:
+        out_ = core_attn(q_, k_, v_, cu_seqlens_q=cu_seqlens_q//world_size, cu_seqlens_kv=cu_seqlens_kv//world_size)
     out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:
@@ -100,11 +149,18 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == 'bf16':
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
-    dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
-        for x in [q.grad, k.grad, v.grad, out]]
-    dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
-    dq_, dk_, dv_, out_ = [x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim]//2, *x.shape[(seq_dim+1):]) \
-        for x in [q_.grad, k_.grad, v_.grad, out_]]
+
+    if qkv_format == "bshd" or qkv_format == "sbhd":
+        dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
+            for x in [q.grad, k.grad, v.grad, out]]
+        dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
+        dq_, dk_, dv_, out_ = [x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim]//2, *x.shape[(seq_dim+1):]) \
+            for x in [q_.grad, k_.grad, v_.grad, out_]]
+    else:
+        dq, out = [x.index_select(0, seq_idx_q).contiguous().view(-1) for x in [q.grad, out]]
+        dk, dv = [x.index_select(0, seq_idx_kv).contiguous().view(-1) for x in [k.grad, v.grad]]
+        dq_, dk_, dv_, out_ = [x.view(-1) for x in [q_.grad, k_.grad, v_.grad, out_]]
+
     if qkv_format == "bshd":
         torch.testing.assert_close(out_[:, 0], out[:, 0], **tols)
         torch.testing.assert_close(dq_[:, 0], dq[:, 0], **tols)
@@ -124,7 +180,10 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         torch.testing.assert_close(dk_[1], dk[1], **tols)
         torch.testing.assert_close(dv_[1], dv[1], **tols)
     else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
+        torch.testing.assert_close(out_, out, **tols)
+        torch.testing.assert_close(dq_, dq, **tols)
+        torch.testing.assert_close(dk_, dk, **tols)
+        torch.testing.assert_close(dv_, dv, **tols)
 
 def main(**kwargs):
     run_dpa_with_cp(**kwargs)

@@ -480,11 +480,78 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
 
 
 @jit_fuser
+def flash_attn_fwd_out_correction_thd(out, out_per_step, softmax_lse, softmax_lse_per_step):
+    """
+    Merge partial outputs of each step in Attention with context parallelism.
+    This is a special version for THD format.
+
+    Parameters
+    ----------
+        out                  : [t, num_heads, dim_per_head]
+        out_per_step         : [t, num_heads, dim_per_head]
+        softmax_lse          : [t, num_heads]
+        softmax_lse_per_step : [t, num_heads]
+    """
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse)
+    # [t, num_heads] -> [t, num_heads, 1]
+    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
+    out_corrected = out_per_step * softmax_lse_corrected_exp
+    out.add_(out_corrected)
+
+
+@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Attention with context parallelism"""
     softmax_lse.exp_()
     softmax_lse.add_(softmax_lse_per_step.to(torch.double).exp())
     softmax_lse.log_()
+
+
+def get_thd_indices_with_cp(cu_seqlens, max_seqlen):
+    """
+    Compute the indices needed in context parallelism when q/k/v are in thd format.
+
+    Outputs:
+        left    : The indices of the first half tokens of each seq
+        right   : The indices of the second half tokens of each seq
+        c_right : The indices (of the second half tokens) to convert from bshd to thd
+        c_total : The indices (of the total tokens) to convert from bshd to thd
+        ch_total: The indices (of the total tokens) to convert from bshd to thd, This
+                  equals to `c_total` when the inputs are `cu_seqlens//2` and `max_seqlen//2`
+
+    Examples:
+        ---------------------------------------------------------------
+        Inputs : cu_seqlens = [0, 4, 12]
+                 max_seqlen = 8
+        ---------------------------------------------------------------
+        Outputs: left     = [0, 1, 4, 5, 6, 7]
+                 right    = [2, 3, 8, 9, 10, 11]
+                 c_right  = [2, 3, 12, 13, 14, 15]
+                 c_total  = [0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15]
+                 ch_right = [0, 1, 4, 5, 6, 7]
+    """
+    cu_seqlens = cu_seqlens.cpu()
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    left, right, c_right, c_total, ch_total = [], [], [], [], []
+    for i in range(seqlens.shape[0]):
+        # left, right
+        l = cu_seqlens[i].item()
+        m = l + seqlens[i].item() // 2
+        r = cu_seqlens[i+1].item()
+        left.append(torch.arange(l, m).to(torch.int32))
+        right.append(torch.arange(m, r).to(torch.int32))
+        # c_right, c_total
+        l = i * max_seqlen
+        m = l + seqlens[i].item() // 2
+        r = l + seqlens[i].item()
+        c_right.append(torch.arange(m, r).to(torch.int32))
+        # ch_total
+        c_total.append(torch.arange(l, r).to(torch.int32))
+        l = i * max_seqlen//2
+        r = l + seqlens[i].item() // 2
+        ch_total.append(torch.arange(l, r).to(torch.int32))
+    out = [torch.cat(x).cuda() for x in [left, right, c_right, c_total, ch_total]]
+    return out[0], out[1], out[2], out[3], out[4]
 
 
 class AttnFuncWithCP(torch.autograd.Function):
@@ -508,10 +575,18 @@ class AttnFuncWithCP(torch.autograd.Function):
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         causal = (attn_mask_type == "causal")
+        thd = (len(q.shape) == 3)
 
-        if causal:
+        if causal and not thd:
             # [b, s, np, hn] -> [b, 2, s//2, np, hn]
             q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
+
+        if thd:
+            # Compute the indices needed when q/k/v are in thd format
+            l_q, r_q, cr_q, ct_q, cht_q = get_thd_indices_with_cp(cu_seqlens_q, max_seqlen_q)
+            # c_right, c_total, ch_total of k/v are not used
+            l_k, r_k,    _,    _,     _ = get_thd_indices_with_cp(cu_seqlens_k, max_seqlen_k)
+
         assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
         fa_optional_forward_kwargs = {}
         if _flash_attn_2_3_plus:
@@ -601,8 +676,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                                 q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
+                                if thd:
+                                    # [2, t, np, hn] -> [2, t/2, np, hn]
+                                    kv_inputs[i%2] = kv_inputs[i%2][:, l_k, ...].contiguous()
+                                else:
+                                    # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                                    kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                                 # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
@@ -631,8 +710,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                                 )
                             else:
-                                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                                q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
+                                if thd:
+                                    # [t, np, hn] -> [t/2, np, hn]
+                                    q_inputs[i%2] = q[r_q, ...].contiguous()
+                                else:
+                                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                                    q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
                                 # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
@@ -681,7 +764,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if i == 1:
                         out = torch.empty_like(q).zero_()
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
-                        if causal:
+                        if causal and not thd:
                             # [b, np, sq] -> [b, np, 2, sq//2]
                             softmax_lse_ = softmax_lse.view(
                                 *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2
@@ -690,8 +773,24 @@ class AttnFuncWithCP(torch.autograd.Function):
                         flash_attn_fwd_softmax_lse_correction(softmax_lse,
                                                               softmax_lse_per_step[i-1])
                     else:
-                        flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
-                                                              softmax_lse_per_step[i-1])
+                        if thd:
+                            b, np, sq = softmax_lse.shape
+                            cur_lse = softmax_lse_per_step[i-1]
+                            # [b, np, sq//2] -> [b, sq//2, np] -> [b*sq//2, np]
+                            cur_lse = cur_lse.transpose(1, 2).contiguous().view(-1, np)
+                            # [b*sq//2, np] -> [t//2, np]
+                            cur_lse = cur_lse[cht_q]
+                            # [b, np, sq] -> [b, sq, np] -> [b*sq, np]
+                            softmax_lse = softmax_lse.transpose(1, 2).contiguous().view(-1, np)
+                            # [b*sq, np] -> [t//2, np]
+                            softmax_lse_ = softmax_lse[cr_q]
+                            flash_attn_fwd_softmax_lse_correction(softmax_lse_, cur_lse)
+                            softmax_lse[cr_q] = softmax_lse_
+                            # [b*sq, np] -> [b, sq, np] -> [b, np, sq]
+                            softmax_lse = softmax_lse.view(b, sq, np).transpose(1, 2)
+                        else:
+                            flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
+                                                                  softmax_lse_per_step[i-1])
 
                 if i < cp_size:
                     flash_attn_streams[(i-1)%2].record_event(fwd_results_correction_done)
@@ -699,26 +798,67 @@ class AttnFuncWithCP(torch.autograd.Function):
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         softmax_lse = softmax_lse.to(torch.float)
+        if thd:
+            b, np, sq = softmax_lse.shape
+            # [b, np, sq] -> [b, sq, np] -> [b*sq, np]
+            softmax_lse = softmax_lse.transpose(1, 2).contiguous().view(-1, np)
+
         for i in range(cp_size):
-            # [b*sq, np, hn] -> [b, sq, np, hn] or [b*sq//2, np, hn] -> [b, sq//2, np, hn]
-            out_ = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
-            if i <= rank or not causal:
-                flash_attn_fwd_out_correction(out.view(*out_.shape),
-                                              out_,
-                                              softmax_lse,
-                                              softmax_lse_per_step[i])
+            if thd:
+                out_ = out_per_step[i]
             else:
-                flash_attn_fwd_out_correction(out[:, 1, ...],
-                                              out_,
-                                              softmax_lse_[..., 1, :],
-                                              softmax_lse_per_step[i])
+                # [b*sq, np, hn] -> [b, sq, np, hn] or [b*sq//2, np, hn] -> [b, sq//2, np, hn]
+                out_ = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
+
+            if i <= rank or not causal:
+                if thd:
+                    # [b*sq, np] -> [t, np]
+                    lse = softmax_lse[ct_q]
+                    lse_per_step = softmax_lse_per_step[i]
+                    # [b, np, sq] -> [b, sq, np] -> [b*sq, np]
+                    lse_per_step = lse_per_step.transpose(1, 2).contiguous().view(-1, np)
+                    # [b*sq, np] -> [t, np]
+                    lse_per_step = lse_per_step[ct_q]
+                    flash_attn_fwd_out_correction_thd(out, out_, lse, lse_per_step)
+                else:
+                    flash_attn_fwd_out_correction(out.view(*out_.shape),
+                                                  out_,
+                                                  softmax_lse,
+                                                  softmax_lse_per_step[i])
+            else:
+                if thd:
+                    # [b*sq, np] -> [t/2, np]
+                    lse = softmax_lse[cr_q]
+                    lse_per_step = softmax_lse_per_step[i]
+                    # [b, np, sq/2] -> [b, sq/2, np] -> [b*sq/2, np]
+                    lse_per_step = lse_per_step.transpose(1, 2).contiguous().view(-1, np)
+                    # [b*sq/2, np] -> [t/2, np]
+                    lse_per_step = lse_per_step[cht_q]
+                    # [t, np, hn] -> [t/2, np, hn]
+                    tmp_out = out[r_q]
+                    flash_attn_fwd_out_correction_thd(tmp_out, out_, lse, lse_per_step)
+                    out[r_q] = tmp_out
+                else:
+                    flash_attn_fwd_out_correction(out[:, 1, ...],
+                                                  out_,
+                                                  softmax_lse_[..., 1, :],
+                                                  softmax_lse_per_step[i])
+
+        if thd:
+            # [b*sq, np] -> [b, sq, np] -> [b, np, sq]
+            softmax_lse = softmax_lse.view(b, sq, np).transpose(1, 2).contiguous()
 
         kv = p2p_comm_buffers[-1]
         if use_fused_attention:
             out = out.view(out.shape[0], -1, *out.shape[-2:])
         else:
             out = out.view(-1, *out.shape[-2:])
-        ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+
+        if thd:
+            ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, l_q, r_q, cr_q, cht_q, l_k, r_k)
+        else:
+            ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+        ctx.thd = thd
         ctx.rng_states = rng_states
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -733,7 +873,10 @@ class AttnFuncWithCP(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+        if ctx.thd:
+            q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, l_q, r_q, cr_q, cht_q, l_k, r_k = ctx.saved_tensors
+        else:
+            q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
 
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
@@ -742,12 +885,19 @@ class AttnFuncWithCP(torch.autograd.Function):
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         if ctx.causal:
-            # [b, np, sq] -> [b, np, 2, sq//2]
-            softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
-            softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
-            if ctx.use_fused_attention:
-                # [b, np, sq//2] -> [b, np, sq//2, 1]
-                softmax_lse_.unsqueeze_(-1)
+            if ctx.thd:
+                b, np, sq = softmax_lse.shape
+                softmax_lse_ = torch.zeros([b * sq//2, np], dtype=softmax_lse.dtype).cuda()
+                softmax_lse_[cht_q] = softmax_lse.transpose(1, 2).contiguous().view(-1, np)[cr_q]
+                softmax_lse_ = softmax_lse_.view(b, sq//2, np).transpose(1, 2).contiguous()
+            else:
+                # [b, np, sq] -> [b, np, 2, sq//2]
+                softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+                softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
+                if ctx.use_fused_attention:
+                    # [b, np, sq//2] -> [b, np, sq//2, 1]
+                    softmax_lse_.unsqueeze_(-1)
+
         if ctx.use_fused_attention:
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
@@ -856,8 +1006,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         q_ = q.view(-1, *q.shape[-2:])
                         dq_ = torch.empty_like(q_)
-                        # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
-                        kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
+                        if ctx.thd:
+                            # [2, t, np, hn] -> [2, t/2, np, hn]
+                            kv_ = kv[:, l_k, ...].contiguous()
+                        else:
+                            # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
+                            kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
                         dkv_ = torch.empty_like(kv_)
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
@@ -893,15 +1047,23 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_mask_type="no_mask",
                         )
                     else:
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                        q_ = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
+                        if ctx.thd:
+                            # [t, np, hn] -> [t/2, np, hn]
+                            q_ = q[r_q, ...].contiguous()
+                        else:
+                            # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                            q_ = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
                         dq_ = torch.empty_like(q_)
                         # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                         kv_ = kv.view(2, -1, *kv.shape[-2:])
                         dkv_ = torch.empty_like(kv_)
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                        out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
-                        dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
+                        if ctx.thd:
+                            out_ = out[r_q, ...].contiguous()
+                            dout_ = dout[r_q, ...].contiguous()
+                        else:
+                            # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                            out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
+                            dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
                             fa_optional_backward_kwargs["window_size"] = [-1, -1]
                         _flash_attn_backward(
@@ -945,13 +1107,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                         **fa_optional_backward_kwargs
                     )
 
-            if i >= (cp_size-rank-1) or not ctx.causal:
-                # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
-                # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
-                dq_ = dq_.view(*dq.shape)
-            else:
-                # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
-                dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
+            if not ctx.thd:
+                if i >= (cp_size-rank-1) or not ctx.causal:
+                    # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
+                    # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
+                    dq_ = dq_.view(*dq.shape)
+                else:
+                    # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
+                    dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
 
             if ctx.causal:
                 if i > (cp_size-rank-1):
@@ -960,12 +1123,22 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if rank == (cp_size-1):
                         dq.copy_(dq_)
                     else:
-                        dq[:, 0, ...].copy_(dq_[:, 0, ...])
-                        dq[:, 1, ...].add_(dq_[:, 1, ...])
+                        if ctx.thd:
+                            dq[l_q] = dq_[l_q]
+                            dq[r_q] = dq[r_q].add_(dq_[r_q])
+                        else:
+                            dq[:, 0, ...].copy_(dq_[:, 0, ...])
+                            dq[:, 1, ...].add_(dq_[:, 1, ...])
                 elif i > 0:
-                    dq[:, 1, ...].add_(dq_)
+                    if ctx.thd:
+                        dq[r_q] = dq[r_q].add_(dq_)
+                    else:
+                        dq[:, 1, ...].add_(dq_)
                 else:
-                    dq[:, 1, ...].copy_(dq_)
+                    if ctx.thd:
+                        dq[r_q] = dq_
+                    else:
+                        dq[:, 1, ...].copy_(dq_)
             else:
                 if i == 0:
                     dq.copy_(dq_)
@@ -979,26 +1152,38 @@ class AttnFuncWithCP(torch.autograd.Function):
             dkv = p2p_comm_buffers[(i+1)%2][1]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
-            if ctx.causal and i >= (cp_size-rank-1) and i != (cp_size-1):
-                # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
-            else:
-                # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn] if causal
-                # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
-                dkv_ = dkv_.view(*dkv.shape)
+
+            if not ctx.thd:
+                if ctx.causal and i >= (cp_size-rank-1) and i != (cp_size-1):
+                    # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                    dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
+                else:
+                    # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn] if causal
+                    # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
+                    dkv_ = dkv_.view(*dkv.shape)
 
             if ctx.causal:
                 if i == (cp_size-1):
                     if rank == 0:
-                        dkv[:, :, 0, ...].add_(dkv_[:, :, 0, ...])
-                        dkv[:, :, 1, ...].copy_(dkv_[:, :, 1, ...])
+                        if ctx.thd:
+                            dkv[:, l_k, ...] = dkv[:, l_k, ...].add_(dkv_[:, l_k, ...])
+                            dkv[:, r_k, ...] = dkv_[:, r_k, ...]
+                        else:
+                            dkv[:, :, 0, ...].add_(dkv_[:, :, 0, ...])
+                            dkv[:, :, 1, ...].copy_(dkv_[:, :, 1, ...])
                     else:
                         dkv.add_(dkv_)
                 elif i >= (cp_size-rank-1):
                     if i == 0 and rank == (cp_size-1):
-                        dkv[:, :, 0, ...].copy_(dkv_)
+                        if ctx.thd:
+                            dkv[:, l_k] = dkv_
+                        else:
+                            dkv[:, :, 0, ...].copy_(dkv_)
                     else:
-                        dkv[:, :, 0, ...].add_(dkv_)
+                        if ctx.thd:
+                            dkv[:, l_k, ...] = dkv[:, l_k, ...].add_(dkv_)
+                        else:
+                            dkv[:, :, 0, ...].add_(dkv_)
                 elif i > 0:
                     dkv.add_(dkv_)
                 else:
@@ -1009,11 +1194,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                 else:
                     dkv.add_(dkv_)
 
-        if ctx.causal:
+        if ctx.causal and not ctx.thd:
             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
             dq = dq.view(q.shape[0], -1, *q.shape[-2:])
             # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
             dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+
         return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, \
                 None, None, None, None, None, None
 
@@ -1775,7 +1961,6 @@ class FlashAttention(torch.nn.Module):
                         key_layer.device,
                     )
         elif qkv_format == 'thd':
-            assert not context_parallel, "thd format not supported with context parallelism!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             if max_seqlen_q is None:
