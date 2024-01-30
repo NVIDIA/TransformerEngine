@@ -1752,6 +1752,14 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic
                 )
         else:
+
+            from .cpu_offload import CPUOffloadEnabled
+            if CPUOffloadEnabled:
+                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
+                for tensor in tensor_list:
+                    if tensor is not None:
+                        tensor.activation_offloading = True
+
             with self.attention_dropout_ctx():
                 fa_optional_forward_kwargs = {}
                 if _flash_attn_2_3_plus:
@@ -1937,6 +1945,15 @@ class FusedAttnFunc(torch.autograd.Function):
             None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
+
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            tensor_list = [q, k, v, out, cu_seqlens_q, cu_seqlens_kv]
+            qkv_layout = 'sbhd_sbhd_sbhd'
+            for tensor in tensor_list:
+                if tensor is not None:
+                    tensor.activation_offloading = True
+
 
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
@@ -2817,6 +2834,13 @@ class DotProductAttention(torch.nn.Module):
 
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
+
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            warnings.warn(
+                           "Attention activation Offloading is only implemented"
+                           "with Flash Attention and Fused Attention!"
+                         )
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
