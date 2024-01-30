@@ -340,7 +340,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         Type of the attention bias passed in the self attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        Where it is :attr:`post_scale_bias` if there is bias. Otherwise :attr:`no_bias` is used.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
@@ -352,10 +352,10 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         It indicates how the inputs are processed.
         Available options: {'bs3hd', 'bshd_bs2hd', 'bshd_bshd_bshd'}. Where
 
-        * bs3hd: `query` tensor is treated as a qkvpacked tensor with shape = [b, s, 3, h, d].
-        `key` and `value` arguments in `__call__()` are ignored in this layout.
+        * bs3hd: query tensor is treated as a qkvpacked tensor with shape = [b, s, 3, h, d].
+          key and value arguments in :attr:`__call__()` are ignored in this layout.
         * bshd_bs2hd: query tensor with shape = [b, s, h, d]. key tensor is treaded as a kvpacked
-        tensor with shape = [b, s, 2, h, d]. `value` argument in `__call__()` is ignored.
+          tensor with shape = [b, s, 2, h, d]. `value` argument in :attr:`__call__()` is ignored.
         * bshd_bshd_bshd: query, key, and value are seperated with shape = [b, s, h, d].
 
         Explanation of denotations:
@@ -372,7 +372,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     transpose_batch_sequence: bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
+        should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
 
     Optimization parameters
     -----------------------
@@ -415,7 +415,8 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
             :attr:`True` means mask out the corresponding values.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
-        *
+        *:
+            Below parameters are keyword only
         deterministic: bool,default = False
             Disable dropout layers if set to True.
 
