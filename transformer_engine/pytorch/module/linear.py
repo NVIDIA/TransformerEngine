@@ -432,8 +432,9 @@ class _Linear(torch.autograd.Function):
                     )
 
                 # Overlap dgrad-RS/AR with wgrad
-                # TODO: handle this
-                if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                if ctx.explicit_expert_comm:
+                    dgrad = dgrad
+                elif ctx.parallel_mode == "column" and ctx.sequence_parallel:
                     if handle is not None:
                         handle.wait()
                     dgrad, handle = reduce_scatter_along_first_dim(
