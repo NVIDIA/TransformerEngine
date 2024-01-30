@@ -25,7 +25,7 @@ extern "C" {
  * @f]
  * where
  * @f[
- * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
+ * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  *
  * Calling this function with workspace and barrier set to empty tensor will not
@@ -61,7 +61,7 @@ void nvte_rmsnorm_fwd(const NVTETensor x,
  * @f]
  * where
  * @f[
- * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
+ * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  *
  * Calling this function with workspace and barrier set to empty tensor will not
@@ -97,7 +97,7 @@ void nvte_rmsnorm1p_fwd(const NVTETensor x,
  * @f]
  * where
  * @f[
- * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
+ * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  * with respect to \f$x\f$ and \f$gamma\f$.
  *
@@ -139,7 +139,7 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,
  * @f]
  * where
  * @f[
- * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
+ * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  * with respect to \f$x\f$ and \f$gamma\f$.
  *
