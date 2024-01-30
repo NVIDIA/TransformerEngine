@@ -319,7 +319,7 @@ void nvte_rmsnorm1p_fwd(const NVTETensor x,      // Nxhidden_size
                         const NVTETensor gamma,  // hidden_size
                         const float epsilon, NVTETensor z, NVTETensor rsigma, cudaStream_t stream,
                         const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
-  NVTE_API_CALL(nvte_rmsnorm_fwd);
+  NVTE_API_CALL(nvte_rmsnorm1p_fwd);
   using namespace transformer_engine;
   rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
               epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma), stream,
