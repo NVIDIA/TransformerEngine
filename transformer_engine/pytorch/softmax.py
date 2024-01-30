@@ -113,6 +113,70 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         return out
 
 
+class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
+    """
+    Fused operation which performs following three operations in sequence
+    1. Scale the tensor.
+    2. Apply causal mask aligned to the bottom right corner of the input matrix
+    3. Perform softmax.
+    """
+
+    @staticmethod
+    def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
+        """ScaledAlignedCausalMaskedSoftmax fwd"""
+        scale_t = torch.tensor([scale])
+        softmax_results = tex.scaled_aligned_causal_masked_softmax_forward(
+            inputs, scale_t[0]
+        )
+        ctx.save_for_backward(softmax_results, scale_t)
+        return softmax_results
+
+    @staticmethod
+    def backward(
+        ctx, output_grads: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """ScaledAlignedCausalMaskedSoftmax bwd"""
+        softmax_results, scale_t = ctx.saved_tensors
+        input_grads = tex.scaled_aligned_causal_masked_softmax_backward(
+            output_grads, softmax_results, scale_t[0]
+        )
+
+        return input_grads, None
+
+    @staticmethod
+    @fp32_compute
+    def symbolic(g: torch.Graph, inputs: torch._C.Value, scale: float) -> torch._C.Value:
+        """ScaledAlignedCausalMaskedSoftmax symbolic method"""
+        def triangular_mask():
+            dtype =  _type_utils.JitScalarType.INT64
+            ones = torch.onnx.symbolic_opset9.ones_like(g, inputs, dtype)
+            k = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
+
+            # rectangular causal mask aligned to the bottom right corner of Attention matrix
+            rows = inputs.size(dim=-2)
+            cols = inputs.size(dim=-1)
+            diag_shift = cols - rows + 1
+
+            mask = g.op("Trilu", ones, k, upper_i=diag_shift)
+            mask = g.op("Cast", mask, to_i=_C_onnx.TensorProtoDataType.BOOL)
+            return mask
+
+        # Captures the logic of function scaled_aligned_masked_softmax_warp_forward
+        mask = triangular_mask()
+        one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
+        inv_mask = g.op("Sub", one, mask)
+
+        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
+        softmax_mask = g.op("Mul", mask, neg_tenK)
+
+        scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
+        scaled = g.op("Mul", inputs, scale_input)
+        masked_scaled = g.op("Mul", inv_mask, scaled)
+        masked = g.op("Add", masked_scaled, softmax_mask)
+        out = g.op("Softmax", masked)
+        return out
+
+
 class ScaledMaskedSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following three operations in sequence
@@ -272,13 +336,13 @@ class FusedScaleMaskSoftmax(nn.Module):
         if ( # pylint: disable=too-many-boolean-expressions
             self.scaled_masked_softmax_fusion  # user wants to fuse
             and self.input_in_float16  # input must be fp16
-            and 16 < sk <= 4096  # sk must be 16 ~ 2048
+            and 16 < sk <= 16384  # sk must be 16 ~ 16384
             and sk % 8 == 0  # sk must be divisor of 8
             and sq % 4 == 0  # sq must be divisor of 4
             and attn_batches % 4 == 0  # np * b must be divisor of 4
             and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
-            if 0 <= sk <= 4096:
+            if 0 <= sk <= 16384:
                 batch_per_block = self.get_batch_per_block(int(sk))
 
                 if self.attn_mask_type == "causal":
