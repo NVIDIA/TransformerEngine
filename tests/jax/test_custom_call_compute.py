@@ -20,7 +20,7 @@ from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quanti
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
-from transformer_engine.jax.mlp import layernrom_geglu_fp8_mlp
+from transformer_engine.jax.mlp import layernorm_geglu_fp8_mlp
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -196,7 +196,7 @@ class TestFP8Dot:
             # out = (x * y) * z
             fp8_meta_pkg = FP8MetaPackage(2, fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.mean(layernrom_geglu_fp8_mlp(x, ln_s, None, [y, z], fp8_meta_pkg, "rmsnorm"))
+            return jnp.mean(layernorm_geglu_fp8_mlp(x, ln_s, None, [y, z], fp8_meta_pkg, "rmsnorm"))
 
         def _convert_to_activation_function(fn_or_string):
             """Convert a string to an activation function."""
