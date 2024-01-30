@@ -70,8 +70,15 @@ if _flash_attn_version >= _flash_attn_version_required:
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-_num_heads, _alibi_slopes, _max_seqlen_q, _max_seqlen_kv, _alibi_bias = None, None, None, None, None
-_alibi_slopes_require_update, _alibi_bias_require_update = False, False
+_alibi_cache = {
+    "_num_heads": None,
+    "_alibi_slopes": None,
+    "_max_seqlen_q": None,
+    "_max_seqlen_kv": None,
+    "_alibi_bias": None,
+    "_alibi_slopes_require_update": False,
+    "_alibi_bias_require_update": False,
+    }
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -154,10 +161,10 @@ def get_alibi(
         `alibi_slopes` is in [batch_size, num_heads], then the bias is in
         [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     """
-    global _num_heads, _alibi_slopes, _alibi_slopes_require_update
-    if _alibi_slopes_require_update:
+    global _alibi_cache
+    if _alibi_cache["_alibi_slopes_require_update"]:
         if alibi_slopes is not None:
-            _alibi_slopes = alibi_slopes
+            _alibi_cache["_alibi_slopes"] = alibi_slopes
         else:
             n = 2 ** math.floor(math.log2(num_heads))
             m_0 = 2.0 ** (-8.0 / n)
@@ -168,29 +175,28 @@ def get_alibi(
                 m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
                 m = torch.cat([m, m_hat])
 
-            _alibi_slopes = m.to(dtype=torch.float32, device="cuda")
-        _num_heads = num_heads
-        _alibi_slopes_require_update = False
+            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
+        _alibi_cache["_num_heads"] = num_heads
+        _alibi_cache["_alibi_slopes_require_update"] = False
 
-    global _max_seqlen_q, _max_seqlen_kv, _alibi_bias, _alibi_bias_require_update
-    if _alibi_bias_require_update:
-        assert _alibi_slopes is not None, "ALiBi slopes can not be None!"
-        if _alibi_slopes.dim() == 1:
-            slopes_shape = torch.Size([1, _alibi_slopes.shape[0], 1, 1])
-        if _alibi_slopes.dim() == 2:
-            slopes_shape = torch.Size([*_alibi_slopes.shape[:], 1, 1])
+    if _alibi_cache["_alibi_bias_require_update"]:
+        assert _alibi_cache["_alibi_slopes"] is not None, "ALiBi slopes can not be None!"
+        if _alibi_cache["_alibi_slopes"].dim() == 1:
+            slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
+        if _alibi_cache["_alibi_slopes"].dim() == 2:
+            slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
         bias = torch.arange(
             1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
         bias = bias - torch.arange(
             1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
         bias = bias.abs().mul(-1)
-        bias = bias * _alibi_slopes.view(slopes_shape)
-        _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+        bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
+        _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_bias = bias.contiguous().to(dtype=bias_dtype, device="cuda")
-        _alibi_bias_require_update = False
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_cache["_alibi_bias_require_update"] = False
 
-    return _alibi_slopes, _alibi_bias
+    return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
 
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
@@ -2753,21 +2759,22 @@ class DotProductAttention(torch.nn.Module):
             use_unfused_attention = False
 
         # Filter: bias.
-        global _num_heads, _max_seqlen_q, _max_seqlen_kv
-        global _alibi_slopes_require_update, _alibi_bias_require_update
+        global _alibi_cache
         if alibi_slopes is not None:
             assert (core_attention_bias_type == "alibi"
                 ), "core_attention_bias_type must be alibi in order to use alibi_slopes!"
             if self.layer_number == 1:
-                _alibi_slopes_require_update, _alibi_bias_require_update = True, True
+                _alibi_cache["_alibi_slopes_require_update"] = True
+                _alibi_cache["_alibi_bias_require_update"] = True
         if core_attention_bias_type == "alibi":
             assert (core_attention_bias is None
                 ), "core_attention_bias must be None when core_attention_bias_type is alibi!"
-            if (_num_heads != query_layer.shape[-2]
-                or _max_seqlen_q != max_seqlen_q
-                or _max_seqlen_kv != max_seqlen_kv
-                or _alibi_slopes is None):
-                _alibi_slopes_require_update, _alibi_bias_require_update = True, True
+            if (_alibi_cache["_num_heads"] != query_layer.shape[-2]
+                or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
+                or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
+                or _alibi_cache["_alibi_slopes"] is None):
+                _alibi_cache["_alibi_slopes_require_update"] = True
+                _alibi_cache["_alibi_bias_require_update"] = True
 
         if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
             use_flash_attention = False
