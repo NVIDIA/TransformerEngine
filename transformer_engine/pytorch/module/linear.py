@@ -317,7 +317,7 @@ class _Linear(torch.autograd.Function):
         # Row Parallel Linear
         if ub_split_rs or ub_atomic_gemm_rs:
             out = rs_out
-        elif ctx.explicit_expert_comm:
+        elif explicit_expert_comm:
             out = out
         elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -956,7 +956,13 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
             )
             if inp.nelement() == 0:
-                return torch.empty(0, self.out_features, dtype=inp.dtype, device=inp.device)
+                # Enable global buffer key deletion when no tokens are passed
+                def no_tokens_backward(grad):
+                    with _prepare_backward(self.fp8, self.fp8_meta, self.tp_group, self.tp_size, name="_Linear"):
+                        pass
+                    return grad
+                inp.register_hook(no_tokens_backward)
+                return torch.matmul(inp, weight_tensor.t())
             else:
                 out = linear_fn(*args)
 
