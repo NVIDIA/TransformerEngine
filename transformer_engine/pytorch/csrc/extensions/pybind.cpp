@@ -23,7 +23,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_upper_triang_masked_softmax_backward",
             &scaled_upper_triang_masked_softmax_backward,
             "Scaled Upper-Triangular Masked Softmax BWD");
-
+  m.def("scaled_aligned_causal_masked_softmax_forward",
+            &scaled_aligned_causal_masked_softmax_forward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax FWD");
+  m.def("scaled_aligned_causal_masked_softmax_backward",
+            &scaled_aligned_causal_masked_softmax_backward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax BWD");
+            
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
   m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
