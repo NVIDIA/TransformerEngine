@@ -610,7 +610,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         if self.enable_rotary_pos_emb:
             if self.fuse_qkv and use_fused_attn:
-                if is_self_attn:
+                if is_qkvpack:
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
                 else:
                     key, value = jnp.split(kv_proj, [1], axis=-2)
@@ -620,7 +620,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             key = rotary_pos_emb(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
 
             if use_fused_attn:
-                if is_self_attn:
+                if is_qkvpack:
                     qkv_proj = jnp.concatenate([query, key, value], axis=-2)
                 else:
                     kv_proj = jnp.concatenate([key, value], axis=-2)
