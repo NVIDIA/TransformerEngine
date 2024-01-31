@@ -95,6 +95,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     }
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
+    // FIXME: We no longer rely on NVTE_UB_ATOMIC_GEMM_RS, so we cannot determine
+    // if atomic overlap is the chosen algorithm here.
+    /*
     const char *env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
     const char *env_q = std::getenv("NVTE_UB_ATOMIC_GEMM_RS");
     if (rank == 0 && env_p != nullptr && env_q != nullptr && env_q[0] == '1') {
@@ -105,6 +108,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       else
         printf("!! Using reducescatter2_userbuff_strided\n");
     }
+    */
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
