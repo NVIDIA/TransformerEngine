@@ -193,18 +193,6 @@ class TransformerLayer(torch.nn.Module):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    ub_tp_comm_overlap : bool, default = `False`
-                         if set to `True`, enables overlap of TP communication with computation.
-    ub_bulk_wgrad : bool, default = `True`
-    ub_bulk_dgrad : bool, default = `True`
-    ub_split_ag : bool, default = `True`
-                  enables split-pipelined overlap of allgather with computation.
-    ub_split_rs : bool, default = `True`
-                  enables split-pipelined overlap of reduce-scatter with computation.
-    ub_atomic_gemm_ag: bool, default = `False`
-                  if set to `True`, enables atomic overlap of allgather with computation.
-    ub_atomic_gemm_rs: bool, default = `False`
-                  if set to `True`, enables atomic overlap of reduce-scatter with computation.
 
     Optimization parameters
     -----------------------
