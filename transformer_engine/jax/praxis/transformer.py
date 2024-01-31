@@ -77,6 +77,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     attn_mask_type: str = 'causal'
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
@@ -109,6 +110,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             attn_mask_type=self.attn_mask_type,
             fuse_qkv=self.fuse_qkv,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init,
             float32_logits=self.float32_logits)
@@ -163,6 +165,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = False
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
 
@@ -230,6 +233,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             drop_path=self.drop_path,
             fuse_qkv_params=self.fuse_qkv_params,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init)
 
