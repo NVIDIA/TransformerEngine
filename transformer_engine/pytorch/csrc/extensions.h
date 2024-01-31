@@ -484,6 +484,9 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 );
 
+/***************************************************************************************************
+ * Softmax
+ **************************************************************************************************/
 
 at::Tensor scaled_softmax_forward(at::Tensor input,
                                   float scale_factor
@@ -517,6 +520,34 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
                                                        float scale_factor
 );
+
+/***************************************************************************************************
+ * Rotary positional embedding
+ **************************************************************************************************/
+
+at::Tensor fused_rope_forward(const at::Tensor &input,
+                              const at::Tensor &freqs,
+                              const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_backward(const at::Tensor &output_grads,
+                               const at::Tensor &freqs,
+                               const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_thd_forward(const at::Tensor &input,
+                                  const at::Tensor &cu_seqlens,
+                                  const at::Tensor &freqs
+);
+
+at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
+                                   const at::Tensor &cu_seqlens,
+                                   const at::Tensor &freqs
+);
+
+/***************************************************************************************************
+ * Misc
+ **************************************************************************************************/
 
 size_t get_cublasLt_version();
 

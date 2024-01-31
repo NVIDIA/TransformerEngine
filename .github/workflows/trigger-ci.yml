@@ -16,7 +16,7 @@ jobs:
 
     # This job only runs for pull request comments
     if: |
-         contains( 'ptrendx,ksivaman,schetlur-nv,timmoon10,zlsh80826,mingxu1067,cyanguwa,nzmora-nvidia,galagam,nouiz,denera,sudhakarsingh27,', format('{0},', github.actor)) &&
+         contains( 'ptrendx,ksivaman,schetlur-nv,timmoon10,zlsh80826,mingxu1067,cyanguwa,nzmora-nvidia,galagam,nouiz,denera,sudhakarsingh27,Oleg-Goncharov,', format('{0},', github.actor)) &&
          startsWith(github.event.comment.body, '/te-ci')
     steps:
       - name: Check if comment is issued by authorized person

@@ -28,66 +28,6 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
 
-class WorkspaceManager {
- public:
-    static WorkspaceManager &Instance() {
-        static thread_local WorkspaceManager instance;
-        return instance;
-    }
-
-    WorkspaceManager() {}
-    ~WorkspaceManager() { Clear_(); }
-
-    void *GetWorkspace(size_t size = 4194304) {
-        ReallocateIfNeed_(size);
-        return workspace_;
-    }
-
-    template <typename... Args>
-    inline auto GetWorkspace(Args... args) {
-        auto asks = std::array<size_t, sizeof...(Args)>{args...};
-        std::array<size_t, sizeof...(Args) + 1> offsets = {0};
-        std::array<void *, sizeof...(Args)> workspaces = {nullptr};
-        std::transform_inclusive_scan(
-            asks.cbegin(), asks.cend(), offsets.begin() + 1, std::plus<size_t>{},
-            [=](auto x) { return PadSize_(x); }, 0);
-        auto *workspace = GetWorkspace(offsets.back());
-        std::transform(offsets.cbegin(), offsets.cend() - 1, workspaces.begin(),
-                       [workspace](auto x) { return static_cast<char *>(workspace) + x; });
-        return workspaces;
-    }
-
- private:
-    void *workspace_ = nullptr;
-    size_t size_ = 0;
-
-    size_t PadSize_(size_t size) {
-        constexpr size_t alignment = 128;
-        return ((size + alignment - 1) / alignment) * alignment;
-    }
-
-    void Clear_() {
-        if (workspace_ != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(workspace_));
-        }
-        workspace_ = nullptr;
-        size_ = 0;
-    }
-
-    void Allocate_(size_t new_size) {
-        new_size = PadSize_(new_size);
-        NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
-        size_ = new_size;
-    }
-
-    void ReallocateIfNeed_(size_t new_size) {
-        if (new_size > size_) {
-            Clear_();
-            Allocate_(new_size);
-        }
-    }
-};
-
 class cudaDevicePropertiesManager {
  public:
     static cudaDevicePropertiesManager &Instance() {
