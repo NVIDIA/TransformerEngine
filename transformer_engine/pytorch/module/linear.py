@@ -157,7 +157,9 @@ class _Linear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled or (is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()):
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],

@@ -175,7 +175,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled or (is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()):
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     tex.fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -183,7 +185,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=weight_fp8._data,
                         transpose_out=weight_t_fp8._data,
-                    )        
+                    )
                 else:
                     tex.cast_to_fp8(
                         weight,

@@ -221,7 +221,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
                 )
-                if is_grad_enabled or (is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()):
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     # Fused cast-transpose kernels
                     tex.fp8_cast_transpose_fused(
                         fc1_weight,
