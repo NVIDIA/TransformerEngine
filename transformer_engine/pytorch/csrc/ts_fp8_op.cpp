@@ -7,6 +7,7 @@
 #include <torch/script.h>
 #include "extensions.h"
 
+
 namespace {
   transformer_engine::DType reverse_map_dtype(int64_t dtype) {
     if (dtype >= 0 && dtype < static_cast<int64_t>(transformer_engine::DType::kNumTypes)) {
@@ -33,6 +34,24 @@ at::Tensor cast_to_fp8_ts(const at::Tensor &input,
   return output;
 }
 
+
+void cast_to_fp8_noalloc_ts(const at::Tensor &input,
+                            const at::Tensor &scale,
+                            at::Tensor output,
+                            const at::Tensor &amax,
+                            const at::Tensor &scale_inv,
+                            int64_t fp8_tensor,
+                            int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  cast_to_fp8_noalloc(input,
+                      scale[fp8_tensor],
+                      output,
+                      amax[0][fp8_tensor],
+                      scale_inv[fp8_tensor],
+                      otype_arg);
+}
+
+
 at::Tensor cast_from_fp8_ts(const at::Tensor &input,
                             const at::Tensor &scale_inv,
                             int64_t fp8_tensor,
@@ -46,6 +65,7 @@ at::Tensor cast_from_fp8_ts(const at::Tensor &input,
                                     otype_arg);
   return output;
 }
+
 
 at::Tensor gelu_ts(at::Tensor input,
                    at::Tensor scale,
@@ -82,6 +102,7 @@ at::Tensor gelu_ts(at::Tensor input,
   return output;
 }
 
+
 at::Tensor relu_ts(at::Tensor input,
                    at::Tensor scale,
                    at::Tensor amax,
@@ -116,6 +137,7 @@ at::Tensor relu_ts(at::Tensor input,
                            otype_arg);
   return output;
 }
+
 
 at::Tensor reglu_ts(at::Tensor input,
                     at::Tensor scale,
@@ -152,6 +174,7 @@ at::Tensor reglu_ts(at::Tensor input,
   return output;
 }
 
+
 at::Tensor geglu_ts(at::Tensor input,
                     at::Tensor scale,
                     at::Tensor amax,
@@ -187,6 +210,7 @@ at::Tensor geglu_ts(at::Tensor input,
   return output;
 }
 
+
 at::Tensor swiglu_ts(at::Tensor input,
                      at::Tensor scale,
                      at::Tensor amax,
@@ -221,6 +245,7 @@ at::Tensor swiglu_ts(at::Tensor input,
                              otype_arg);
   return output;
 }
+
 
 at::Tensor te_gemm_ts(at::Tensor A,
                       at::Tensor A_scale_inverse,
@@ -286,6 +311,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
   return D;
 }
 
+
 at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                     const at::Tensor &weight,
                                     const at::Tensor &bias,
@@ -312,6 +338,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
   return output;
 }
 
+
 at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                 const at::Tensor &weight,
                                 const at::Tensor &bias,
@@ -327,6 +354,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
 
   return output;
 }
+
 
 at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                   const at::Tensor &weight,
@@ -352,6 +380,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
   return output;
 }
 
+
 at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
                               const at::Tensor &weight,
                               double eps,
@@ -366,8 +395,10 @@ at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
   return output;
 }
 
+
 TORCH_LIBRARY(tex_ts, m) {
   m.def("cast_to_fp8_ts", &cast_to_fp8_ts);
+  m.def("cast_to_fp8_noalloc_ts", &cast_to_fp8_noalloc_ts);
   m.def("cast_from_fp8_ts", &cast_from_fp8_ts);
   m.def("gelu_ts", &gelu_ts);
   m.def("relu_ts", &relu_ts);

@@ -31,11 +31,11 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
 
 
 void cast_to_fp8_noalloc(const at::Tensor &input,
-                               const at::Tensor &scale,
-                               at::Tensor output,
-                               at::Tensor amax,
-                               at::Tensor scale_inv,
-                               transformer_engine::DType otype
+                         const at::Tensor &scale,
+                         at::Tensor output,
+                         at::Tensor amax,
+                         at::Tensor scale_inv,
+                         transformer_engine::DType otype
 ) {
     using namespace transformer_engine;
     size_t N = static_cast<size_t>(input.size(0));
