@@ -297,6 +297,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(False)
         self.fp8_meta_tensors_initialized = True
 
+    def reset_fp8_meta_tensors(self) -> None:
+        """Init scales and amaxes."""
+        def reset(key):
+            if key in self.fp8_meta:
+                self.fp8_meta[key].scale.copy_(torch.ones_like(self.fp8_meta[key].scale))
+                self.fp8_meta[key].scale_inv.copy_(torch.ones_like(self.fp8_meta[key].scale_inv))
+                self.fp8_meta[key].amax_history.copy_(
+                    torch.zeros_like(self.fp8_meta[key].amax_history))
+        with torch.no_grad():
+            reset("scaling_fwd")
+            reset("scaling_bwd")
+
     def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
         state = None
@@ -532,7 +544,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 "necessary when using sequence parallelism with FP8."
 
             # Previous iteration was grad_enabled
-            if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+            if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)

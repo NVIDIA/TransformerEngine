@@ -14,6 +14,7 @@ from .attention import MultiheadAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
 from .fp8 import fp8_model_init
+from .graph import make_graphed_callables
 from .export import onnx_export
 from .distributed import checkpoint
 from .distributed import CudaRNGStatesTracker
