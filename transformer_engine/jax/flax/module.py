@@ -23,8 +23,10 @@ from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
 from ..mlp import layernorm_geglu_fp8_mlp, geglu
+from ..mlp import layernorm_gelu_fp8_mlp, gelu
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
+from ..sharding import with_sharding_constraint_by_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -502,6 +504,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         If set False, return None as the second tensor in outputs.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    layernorm_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of layernorm, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------
@@ -534,6 +544,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
+    layernorm_input_axes: Tuple[str, ...] = None
+    dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
     sharding_type = None
 
@@ -571,6 +583,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         if self.enable_layernorm:
+            inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
+
             assert self.axis == -1    # Only support axis = =-1 at this moment
             features = inputs.shape[-1]
 
@@ -626,8 +640,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                   fp8_meta_package,
                                   self.layernorm_type,
                                   zero_centered_gamma=self.zero_centered_gamma,
-                                  epsilon=self.epsilon)
+                                  epsilon=self.epsilon,
+                                  layernorm_input_axes=self.layernorm_input_axes,
+                                  dot_input_axes=self.dot_input_axes)
         else:
+            y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
             z = type_safe_dot_general(y,
                                       kernel,
                                       fp8_meta_pkg=fp8_meta_package,
@@ -730,6 +747,18 @@ class LayerNormMLP(TransformerEngineBase):
         Dimensions that will share the same dropout mask for hidden
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    layernorm_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of layernorm, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_1_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of 1st dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
+    dot_2_input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input of 2nd dot, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------
@@ -765,6 +794,9 @@ class LayerNormMLP(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
+    layernorm_input_axes: Tuple[str, ...] = None
+    dot_1_input_axes: Tuple[str, ...] = None
+    dot_2_input_axes: Tuple[str, ...] = None
     major_sharding_type = None
 
     def __post_init__(self):
@@ -812,13 +844,28 @@ class LayerNormMLP(TransformerEngineBase):
                 normalize_acts.append(act.lower())
             return tuple(normalize_acts) in geglu_act_pool
 
-        use_fused_ln_mlp = fuse_layernorm \
+        def is_gelu(acts):
+            geglu_act_pool = [('gelu',)]
+
+            normalize_acts = []
+            for act in acts:
+                if not isinstance(act, str):
+                    return False
+                normalize_acts.append(act.lower())
+            return tuple(normalize_acts) in geglu_act_pool
+
+        use_fused_ln_geglu_mlp = fuse_layernorm \
             and (not self.use_bias) and is_geglu(self.activations) \
+                and (self.intermediate_dropout_rate < 1e-3)
+
+        use_fused_ln_gelu_mlp = fuse_layernorm \
+            and self.use_bias and is_gelu(self.activations) \
                 and (self.intermediate_dropout_rate < 1e-3)
 
         # LayerNorm
         if self.enable_layernorm:
             assert self.axis == -1    # Only support axis == -1 at this moment
+            inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
 
             features = inputs.shape[-1]
 
@@ -883,7 +930,10 @@ class LayerNormMLP(TransformerEngineBase):
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
         contract_ind = tuple(range(0, len(axis)))
 
-        if use_fused_ln_mlp:
+        ffn1_ckpt_name = 'ffn1'
+        ffn2_ckpt_name = 'ffn2'
+
+        if use_fused_ln_geglu_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
             out = layernorm_geglu_fp8_mlp(y,
@@ -892,8 +942,41 @@ class LayerNormMLP(TransformerEngineBase):
                                           fp8_meta_package,
                                           self.layernorm_type,
                                           zero_centered_gamma=self.zero_centered_gamma,
-                                          epsilon=self.epsilon)
-        else:    # not use_fused_ln_mlp
+                                          epsilon=self.epsilon,
+                                          layernorm_input_axes=self.layernorm_input_axes,
+                                          dot_1_input_axes=self.dot_1_input_axes,
+                                          dot_2_input_axes=self.dot_2_input_axes,
+                                          ffn1_ckpt_name=ffn1_ckpt_name,
+                                          ffn2_ckpt_name=ffn2_ckpt_name)
+        elif use_fused_ln_gelu_mlp:
+            assert self.axis == -1    # Only support axis = =-1 at this moment
+
+            bias_1 = nn_partitioning.param_with_axes('wi_bias',
+                                                     self.bias_init,
+                                                     intermediate_dim,
+                                                     jnp.float32,
+                                                     axes=self.bias_axes_1)
+            bias_1 = bias_1.astype(self.dtype)
+
+            bias_2 = nn_partitioning.param_with_axes('wo_bias',
+                                                     self.bias_init, (hidden_size,),
+                                                     jnp.float32,
+                                                     axes=self.bias_axes_2)
+            bias_2 = bias_2.astype(self.dtype)
+
+            out = layernorm_gelu_fp8_mlp(y,
+                                         scale,
+                                         ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
+                                         fp8_meta_package,
+                                         self.layernorm_type,
+                                         zero_centered_gamma=self.zero_centered_gamma,
+                                         epsilon=self.epsilon,
+                                         layernorm_input_axes=self.layernorm_input_axes,
+                                         dot_1_input_axes=self.dot_1_input_axes,
+                                         dot_2_input_axes=self.dot_2_input_axes,
+                                         ffn1_ckpt_name=ffn1_ckpt_name,
+                                         ffn2_ckpt_name=ffn2_ckpt_name)
+        else:    # not use_fused_ln_geglu_mlp
 
             # DenseGeneral 1
             gemm1_fp8_meta_package = None if fp8_meta_package is None \
@@ -906,8 +989,11 @@ class LayerNormMLP(TransformerEngineBase):
                                       gemm1_fp8_meta_package,
                                       self.layernorm_type,
                                       zero_centered_gamma=self.zero_centered_gamma,
-                                      epsilon=self.epsilon)
+                                      epsilon=self.epsilon,
+                                      layernorm_input_axes=self.layernorm_input_axes,
+                                      dot_input_axes=self.dot_1_input_axes)
             else:
+                y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
                 x = type_safe_dot_general(y,
                                           kernel_1,
                                           fp8_meta_pkg=gemm1_fp8_meta_package,
@@ -924,11 +1010,14 @@ class LayerNormMLP(TransformerEngineBase):
                 bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
                 x += jnp.reshape(bias, bias_shape)
 
-            x = checkpoint_name(x, 'ffn1')
+            x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
             if is_geglu(self.activations):
                 z = geglu(x)
+            elif is_gelu(self.activations):
+                z = gelu(x)
+                z = jnp.reshape(z, (*z.shape[:-2], -1))
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
@@ -941,6 +1030,8 @@ class LayerNormMLP(TransformerEngineBase):
                            broadcast_dims=self.intermediate_hidden_dropout_dims,
                            rng_collection=self.intermediate_dropout_rng_name)(
                                z, deterministic=deterministic)
+
+            z = with_sharding_constraint_by_logical_axes(z, self.dot_2_input_axes)
 
             # DenseGeneral 2
             gemm2_fp8_meta_package = None if fp8_meta_package is None \
@@ -960,6 +1051,6 @@ class LayerNormMLP(TransformerEngineBase):
                 bias = bias.astype(self.dtype)
                 out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
 
-            out = checkpoint_name(out, 'ffn2')
+            out = checkpoint_name(out, ffn2_ckpt_name)
 
         return out, ln_output    # Output, layner_norm_output
