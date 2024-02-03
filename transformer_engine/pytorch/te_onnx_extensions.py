@@ -130,6 +130,13 @@ def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return quantize(g, inputs, scale_inv, fp8_tensor)
 
 
+@symbolic_helper.parse_args("v", "v", "v", "v", "fs", "i", "i")
+def onnx_cast_to_fp8_noalloc(g, inputs, scale, output, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for cast_to_fp8_noalloc"""
+    # pylint: disable=unused-argument
+    return quantize(g, inputs, scale_inv, fp8_tensor)
+
+
 @symbolic_helper.parse_args("v", "fs", "i", "i", "i")
 def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
     """ONNX graph for cast_from_fp8"""
@@ -393,10 +400,11 @@ def onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma):
     result = g.op("Mul", weight, normalized_input)
     result = g.op("Cast", result, to_i=get_TensorProtoDataType(inputs))
 
-
     return result
 
+
 register_custom_op_symbolic('tex_ts::cast_to_fp8_ts', onnx_cast_to_fp8, VER)
+register_custom_op_symbolic('tex_ts::cast_to_fp8_noalloc_ts', onnx_cast_to_fp8_noalloc, VER)
 register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
 register_custom_op_symbolic('tex_ts::gelu_ts', onnx_fp8_gelu, VER)
 register_custom_op_symbolic('tex_ts::relu_ts', onnx_fp8_relu, VER)

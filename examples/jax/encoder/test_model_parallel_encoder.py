@@ -35,6 +35,7 @@ INPUT_KEY = 'input_rng'
 class Net(nn.Module):
     """NLP Encoder"""
     num_embed: int
+    enable_seq_paral: bool
 
     @nn.compact
     def __call__(self, x, mask, disable_dropout=False):
@@ -50,10 +51,16 @@ class Net(nn.Module):
                              layer_type=te_flax.TransformerLayerType.ENCODER,
                              self_attn_mask_type='padding',
                              enable_relative_embedding=False,
+                             enable_sequence_parallel=self.enable_seq_paral,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
+
+        if self.enable_seq_paral:
+            # Trigger all-gather to collect a complete tensor alone seqence on each device.
+            x = jax.lax.with_sharding_constraint(x,
+                                                 jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None))
 
         x = te_flax.DenseGeneral(features=256,
                                  kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
@@ -266,7 +273,7 @@ def train_and_evaluate(args):
         with te.fp8_autocast(args.use_fp8,
                              mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None,
                                                            None)):
-            encoder = Net(num_embed)
+            encoder = Net(num_embed, args.enable_sp)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
@@ -379,6 +386,10 @@ def encoder_parser(args):
                         action="store_true",
                         default=False,
                         help="Use FP8 for inference and training without recalibration")
+    parser.add_argument("--enable-sp",
+                        action="store_true",
+                        default=False,
+                        help="Enable sequence parallelism.")
 
     return parser.parse_args(args)
 
@@ -401,6 +412,20 @@ class TestEncoder(unittest.TestCase):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
+        self.args.use_fp8 = True
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.45 and actual[1] > 0.79
+
+    def test_te_bf16_sp(self):
+        """Test Transformer Engine with BF16 + SP"""
+        self.args.enable_sp = True
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.45 and actual[1] > 0.79
+
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_te_fp8_sp(self):
+        """Test Transformer Engine with FP8 + SP"""
+        self.args.enable_sp = True
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79

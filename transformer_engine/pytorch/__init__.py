@@ -21,6 +21,7 @@ from .cpu_offload import get_cpu_offload_context
 # Register custom op symbolic ONNX functions
 from .te_onnx_extensions import (
     onnx_cast_to_fp8,
+    onnx_cast_to_fp8_noalloc,
     onnx_cast_from_fp8,
     onnx_fp8_gelu,
     onnx_fp8_relu,
