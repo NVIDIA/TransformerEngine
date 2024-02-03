@@ -4,7 +4,7 @@
 """
 Sharding Meta for xmap with CustomCall
 """
-
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -16,12 +16,100 @@ from jax.sharding import PartitionSpec
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
+# Axis Names
+BATCH_AXES = 'nvte_batch'
+SEQLEN_AXES = 'nvte_seqlen'
+SEQLEN_TP_AXES = 'nvte_seqlen_tp'
+HEAD_AXES = 'nvte_head'
+HIDDEN_AXES = 'nvte_hidden'
+HIDDEN_TP_AXES = 'nvte_hidden_tp'
+JOINED_AXES = 'nvte_joined'
+W_NO_SHARD_AXES = 'nvte_w_no_shard'
+W_FSDP_AXES = 'nvte_w_fsdp'
+W_TP_AXES = 'nvte_w_tp'
+W_JOINED_AXES = 'nvte_w_joined'
+
 
 def _get_mesh_info(resource: str):
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
     assert resource in mesh.axis_names, \
         f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
+
+
+def get_sharding_map_logic_axis_to_mesh_axis():
+    """
+    Generate a dict to map logical axes to mesh axes.
+    """
+    gsr = global_mesh_resource()
+
+    IS_FSDP_OUTER = bool(int(os.environ.get("NVTE_OUTER_BATCH_FSDP_DIM", False)))
+
+    batch_resources = [gsr.fsdp_resource, gsr.dp_resource] if IS_FSDP_OUTER \
+                      else [gsr.dp_resource, gsr.fsdp_resource]
+
+    batch_dim_rule = []
+    for resource in batch_resources:
+        if resource is not None and resource not in batch_dim_rule:
+            batch_dim_rule.append(resource)
+
+    if len(batch_dim_rule) <= 0:
+        batch_dim_rule = None
+    elif len(batch_dim_rule) == 1:
+        batch_dim_rule = batch_dim_rule[0]
+    else:
+        batch_dim_rule = tuple(batch_dim_rule)
+
+    te_logical_axis_to_mesh_axis = {
+        BATCH_AXES: batch_dim_rule,
+        SEQLEN_AXES: None,
+        SEQLEN_TP_AXES: gsr.tp_resource,
+        HEAD_AXES: gsr.tp_resource,
+        HIDDEN_AXES: None,
+        HIDDEN_TP_AXES: gsr.tp_resource,
+        JOINED_AXES: None,
+        W_NO_SHARD_AXES: None,
+        W_FSDP_AXES: gsr.fsdp_resource,
+        W_TP_AXES: gsr.tp_resource,
+        W_JOINED_AXES: None,
+    }
+    return te_logical_axis_to_mesh_axis
+
+
+def generate_pspec(logical_axis_names):
+    """
+    Convert logical axes to PartitionSpec
+    """
+    rules = get_sharding_map_logic_axis_to_mesh_axis()
+    mesh_axis_names = [rules[name] for name in logical_axis_names]
+    pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
+    return pspec
+
+
+def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
+    """
+    A wrapper function to jax.lax.with_sharding_constraint to
+    support the case that Mesh is empty.
+    """
+    if pspec is None:
+        return x
+
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return x
+    return jax.lax.with_sharding_constraint(x, pspec)
+
+
+def with_sharding_constraint_by_logical_axes(x: jnp.array, logical_axis_names: tuple | list):
+    """
+    A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
+    """
+    if logical_axis_names is None:
+        return x
+
+    assert len(x.shape) == len(logical_axis_names)
+    pspec = generate_pspec(logical_axis_names)
+    return with_sharding_constraint(x, pspec)
 
 
 def get_all_mesh_axes():
@@ -40,17 +128,6 @@ def get_padded_spec(spec, ndim):
         return (None,) * ndim
     assert len(spec) <= ndim
     return spec + (None,) * (ndim - len(spec))
-
-
-def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
-    """
-    A wrapper function to jax.lax.with_sharding_constraint to
-    support the case that Mesh is empty.
-    """
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-    if mesh.empty:
-        return x
-    return jax.lax.with_sharding_constraint(x, pspec)
 
 
 def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
