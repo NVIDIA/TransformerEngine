@@ -41,6 +41,8 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 
 from .. import cpp_extensions as tex
@@ -219,7 +221,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     # Fused cast-transpose kernels
                     tex.fp8_cast_transpose_fused(
                         fc1_weight,
@@ -238,18 +242,20 @@ class _LayerNormMLP(torch.autograd.Function):
                         transpose_out=fc2_weight_t_fp8._data,
                     )
                 else:
-                    fc1_weight_fp8._data = tex.cast_to_fp8(
+                    tex.cast_to_fp8(
                         fc1_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=fc1_weight_fp8._data,
                     )
                     fc1_weight_t_fp8 = None
-                    fc2_weight_fp8._data = tex.cast_to_fp8(
+                    tex.cast_to_fp8(
                         fc2_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM2_WEIGHT,
                         fp8_dtype_forward,
+                        out=fc2_weight_fp8._data,
                     )
                     fc2_weight_t_fp8 = None
 
