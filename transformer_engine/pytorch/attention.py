@@ -1976,8 +1976,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        if not d_out.is_contiguous():
-            d_out = d_out.contiguous()
+        d_out = d_out.contiguous()
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
