@@ -35,13 +35,13 @@ at::Tensor cast_to_fp8_ts(const at::Tensor &input,
 }
 
 
-void cast_to_fp8_noalloc_ts(const at::Tensor &input,
-                            const at::Tensor &scale,
-                            at::Tensor output,
-                            at::Tensor amax,
-                            at::Tensor scale_inv,
-                            int64_t fp8_tensor,
-                            int64_t otype) {
+at::Tensor cast_to_fp8_noalloc_ts(const at::Tensor &input,
+                                  const at::Tensor &scale,
+                                  at::Tensor output,
+                                  at::Tensor amax,
+                                  at::Tensor scale_inv,
+                                  int64_t fp8_tensor,
+                                  int64_t otype) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   cast_to_fp8_noalloc(input,
                       scale[fp8_tensor],
@@ -49,6 +49,7 @@ void cast_to_fp8_noalloc_ts(const at::Tensor &input,
                       amax[0][fp8_tensor],
                       scale_inv[fp8_tensor],
                       otype_arg);
+  return output;
 }
 
 

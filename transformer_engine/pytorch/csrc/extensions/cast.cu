@@ -6,6 +6,7 @@
 
 #include "extensions.h"
 
+
 at::Tensor cast_to_fp8(const at::Tensor &input,
                        const at::Tensor &scale,
                        at::Tensor amax,
