@@ -106,6 +106,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t y_ij = rs * (xf[it * NUM_ELTS + jt]);
                 compute_t g_ij = gamma[it].data.elt[jt];
+                if (params.zero_centered_gamma) {
+                  g_ij += 1;
+                }
                 compute_t temp_output = g_ij * y_ij;
 
                 if (params.fp8_out) {
@@ -236,6 +239,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t y_ij = rs * (x[it].data.elt[jt]);
                 compute_t g_ij = gamma[it].data.elt[jt];
+                if (params.zero_centered_gamma) {
+                  g_ij += 1;
+                }
                 z.data.elt[jt] = g_ij * y_ij;
             }
 
