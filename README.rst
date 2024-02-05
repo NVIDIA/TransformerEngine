@@ -226,7 +226,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
 * `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
-* `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
+* `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
 * `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!

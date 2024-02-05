@@ -361,9 +361,6 @@ def test_sanity_layernorm_linear(dtype, fp8_recipe, model, skip_wgrad,
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     sigma = 0.023
     init_method = init_method_normal(sigma)
 
@@ -427,9 +424,6 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -471,9 +465,6 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -544,9 +535,6 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -607,9 +595,6 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -823,9 +808,6 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)

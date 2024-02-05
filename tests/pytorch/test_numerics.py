@@ -21,7 +21,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
-    MultiheadAttention, RMSNorm, TransformerLayer
+    MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
@@ -215,15 +215,41 @@ class TorchDotProductAttention(torch.nn.Module):
         return context_layer
 
 
+class TorchLayerNorm(nn.Module):
+    def __init__(self, in_features: int,
+                 eps: float,
+                 zero_centered_gamma: bool):
+        super().__init__()
+        self.eps = eps
+        self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
+
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
+        self.bias = nn.Parameter(torch.zeros(in_features))
+        self.register_parameter("weight", self.weight)
+        self.register_parameter("bias", self.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.weight if not self.zero_centered_gamma else 1 + self.weight
+        w = w.to(torch.float32)
+        b = self.bias.to(torch.float32)
+        inp = x.to(torch.float32)
+        out = torch.nn.functional.layer_norm(inp, (self.in_features,), weight=w,
+                                             bias=b, eps=self.eps)
+        return out.to(x.dtype)
+
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
-    def __init__(self, in_features, eps=1e-5):
+    def __init__(self, in_features, zero_centered_gamma, eps=1e-5):
         super().__init__()
 
         self.eps = eps
         self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
 
-        self.weight = nn.Parameter(torch.ones(in_features))
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
         self.register_parameter("weight", self.weight)
 
     def forward(self, x):
@@ -234,18 +260,24 @@ class TorchRMSNorm(nn.Module):
         r_rms_x = rms_x2 ** (-1. / 2)
         x_normed = x * r_rms_x
 
-        return (self.weight.float() * x_normed).to(x.dtype)
+        w = self.weight.float()
+        if self.zero_centered_gamma:
+            w = 1 + w
+        return (w * x_normed).to(x.dtype)
 
 
 class TorchLayerNormLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int,
                  eps: float, bias: bool = True,
-                 normalization: str = "LayerNorm"):
+                 normalization: str = "LayerNorm",
+                 zero_centered_gamma: bool = False):
         super().__init__()
         if normalization == "LayerNorm":
-            self.layernorm = nn.LayerNorm(in_features, eps=eps)
+            self.layernorm = TorchLayerNorm(in_features, eps=eps,
+                                            zero_centered_gamma=zero_centered_gamma)
         elif normalization == "RMSNorm":
-            self.layernorm = TorchRMSNorm(in_features, eps=eps)
+            self.layernorm = TorchRMSNorm(in_features, eps=eps,
+                                          zero_centered_gamma=zero_centered_gamma)
         else:
             raise RuntimeError("Unsupported normalization")
 
@@ -299,9 +331,11 @@ class TorchLayerNormMLP(nn.Module):
                  normalization: str = "LayerNorm"):
         super().__init__()
         if normalization == "LayerNorm":
-            self.ln = nn.LayerNorm(hidden_size, eps=eps)
+            self.ln = TorchLayerNorm(hidden_size, eps=eps,
+                                     zero_centered_gamma=False)
         elif normalization == "RMSNorm":
-            self.ln = TorchRMSNorm(hidden_size, eps=eps)
+            self.ln = TorchRMSNorm(hidden_size, eps=eps,
+                                   zero_centered_gamma=False)
         else:
             raise RuntimeError("Unsupported normalization")
         if 'glu' in activation:
@@ -893,13 +927,15 @@ def test_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
-def test_rmsnorm_accuracy(dtype, bs, model, eps):
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     config = model_configs[model]
 
     te_rmsnorm = (
         RMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
@@ -910,6 +946,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         TorchRMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
@@ -924,17 +961,64 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
     torch_outputs = _test_granular_accuracy(torch_rmsnorm, bs, dtype, config)
 
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+    atol = {torch.float32 : 1e-7,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
+    config = model_configs[model]
+
+    te_layernorm = (
+        LayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_layernorm = (
+        TorchLayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_layernorm.weight = Parameter(te_layernorm.weight.clone())
+        torch_layernorm.bias = Parameter(te_layernorm.bias.clone())
+
+    te_outputs = _test_granular_accuracy(te_layernorm, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
+
+    # Check output.
+    atol = {torch.float32 : 1e-7,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
     config = model_configs[model]
 
     te_ln_linear = (
@@ -944,6 +1028,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
             config.eps,
             bias=True,
             normalization=normalization,
+            zero_centered_gamma=zero_centered_gamma,
         )
         .to(dtype=dtype)
         .cuda()
@@ -957,6 +1042,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
             config.eps,
             bias=True,
             normalization=normalization,
+            zero_centered_gamma=zero_centered_gamma,
         )
         .to(dtype=dtype)
         .cuda()
@@ -975,10 +1061,11 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    atol = {torch.float32 : 2e-4,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)

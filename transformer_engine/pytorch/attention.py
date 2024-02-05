@@ -1759,6 +1759,14 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic
                 )
         else:
+
+            from .cpu_offload import CPUOffloadEnabled
+            if CPUOffloadEnabled:
+                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
+                for tensor in tensor_list:
+                    if tensor is not None:
+                        tensor.activation_offloading = True
+
             with self.attention_dropout_ctx():
                 fa_optional_forward_kwargs = {}
                 if _flash_attn_2_3_plus:
@@ -1822,6 +1830,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         qkv, out, cu_seqlens = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1891,6 +1900,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1945,6 +1955,15 @@ class FusedAttnFunc(torch.autograd.Function):
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            tensor_list = [q, k, v, out, cu_seqlens_q, cu_seqlens_kv]
+            qkv_layout = 'sbhd_sbhd_sbhd'
+            for tensor in tensor_list:
+                if tensor is not None:
+                    tensor.activation_offloading = True
+
+
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
@@ -1963,6 +1982,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2813,6 +2833,13 @@ class DotProductAttention(torch.nn.Module):
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            warnings.warn(
+                           "Attention activation Offloading is only implemented"
+                           "with Flash Attention and Fused Attention!"
+                         )
+
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
         if use_unfused_attention:
@@ -2904,8 +2931,8 @@ class MultiheadAttention(torch.nn.Module):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = `True`
-                     if set to `False`, layer normalization to the input is not applied.
+    input_layernorm: bool, default = `False`
+                     if set to `True`, layer normalization to the input is applied.
     attention_type: { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
