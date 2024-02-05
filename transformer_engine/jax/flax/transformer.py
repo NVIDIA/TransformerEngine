@@ -26,7 +26,7 @@ from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
-from ..fused_attn import self_fused_attn, cross_fused_attn
+from ..fused_attn import self_fused_attn, cross_fused_attn, fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -257,27 +257,7 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
             scale_factor = self.scale_factor
         del self.scale_factor
 
-        # TODO(rewang): integrate BSHD_BSHD_BSHD kernel
-        # The BSHD_BSHD_BSHD kernel has not been integrated.
-        # Currently, a concat kernel will be involved. We will optimized it in the future.
-        qkv_layout_override = self.qkv_layout
-        if self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
-            if query.shape == key.shape == value.shape:
-                query = jnp.concatenate(list(
-                    map(functools.partial(jnp.expand_dims, axis=2), [query, key, value])),
-                                        axis=-3)
-                del key, value
-                qkv_layout_override = QKVLayout.BS3HD
-            elif key.shape == value.shape:
-                key = jnp.concatenate(list(
-                    map(functools.partial(jnp.expand_dims, axis=2), [key, value])),
-                                      axis=-3)
-                del value
-                qkv_layout_override = QKVLayout.BSHD_BS2HD
-            else:
-                raise NotImplementedError
-
-        if qkv_layout_override == QKVLayout.BS3HD:
+        if self.qkv_layout == QKVLayout.BS3HD:
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
             key: ignore
@@ -295,7 +275,7 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
                                 scaling_factor=scale_factor,
                                 dropout_probability=self.attention_dropout,
                                 is_training=not deterministic)
-        elif qkv_layout_override == QKVLayout.BSHD_BS2HD:
+        elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
             """kvpacked format, treat
             query: query tensor, shape = [..., h, d]
             key: kvpacked tensor, shape = [..., 2, h, d]
@@ -315,8 +295,22 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
                                  scaling_factor=scale_factor,
                                  dropout_probability=self.attention_dropout,
                                  is_training=not deterministic)
-        elif qkv_layout_override == QKVLayout.BSHD_BSHD_BSHD:
-            raise NotImplementedError("Code flow should not reach here.")
+        elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+            if self.transpose_batch_sequence:
+                query = query.transpose([1, 0, 2, 3])
+                key = key.transpose([1, 0, 2, 3])
+                value = value.transpose([1, 0, 2, 3])
+            x = fused_attn(query,
+                           key,
+                           value,
+                           bias,
+                           mask,
+                           seed,
+                           attn_mask_type=self.attn_mask_type,
+                           attn_bias_type=self.attn_bias_type,
+                           scaling_factor=scale_factor,
+                           dropout_probability=self.attention_dropout,
+                           is_training=not deterministic)
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
 
