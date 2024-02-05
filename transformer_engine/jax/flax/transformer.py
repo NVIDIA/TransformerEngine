@@ -326,6 +326,21 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
+    .. note::
+        The DotProductAttention module supports two backends: the unfused and the fused attention
+        mechanisms. The unfused attention is implemented using JAX native operations, providing
+        broad compatibility and flexibility. In contrast, the fused attention uses `cuDNN fused
+        attention
+        <https://github.com/NVIDIA/cudnn-frontend/blob/main/docs/operations/Attention.md>`_ for
+        higher performance and lower memory usage on the supported hardwares.
+        Users can select between these two backends via the :attr:`NVTE_FUSED_ATTN` environment
+        variable:
+
+        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention (default).
+        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If the required cuDNN fused attention
+          kernel is not available on the system, a warning will be issued, and the module will
+          automatically fall back to the unfused backend.
+
     Parameters
     ----------
     head_dim: int
@@ -422,12 +437,12 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
             The details of value tensor representation is described in :attr:`qkv_layout`.
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
-            :attr:`True` means mask out the corresponding values.
+            :attr:`True` means to mask out the corresponding values.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *:
             Below parameters are keyword only
-        deterministic: bool,default = False
+        deterministic: bool, default = False
             Disable dropout layers if set to True.
 
         Returns
@@ -749,9 +764,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
-        decode: bool,default = False
+        decode: bool, default = False
             Indicate whether to prepare and use an autoregressive cache.
-        deterministic: bool,default = False
+        deterministic: bool, default = False
             Disable dropout layers if set to True.
 
         Returns
