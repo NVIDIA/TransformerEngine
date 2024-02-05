@@ -16,6 +16,7 @@ from transformer_engine_jax import NVTE_QKV_Layout
 from .cpp_extensions import FusedAttnHelper
 from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
 from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
+from .cpp_extensions import fused_attn_fwd, fused_attn_bwd
 
 
 class AttnBiasType(Enum):
@@ -234,3 +235,98 @@ def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, d
 
 
 _cross_fused_attn.defvjp(_cross_fused_attn_fwd_rule, _cross_fused_attn_bwd_rule)
+
+
+def fused_attn(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
+               seed: jnp.ndarray, attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+               scaling_factor: float, dropout_probability: float, is_training: bool):
+    """
+    Dot product attention with the seperated query, key, value
+    """
+
+    output = _fused_attn(q,
+                         k,
+                         v,
+                         bias,
+                         mask,
+                         seed,
+                         attn_bias_type=attn_bias_type,
+                         attn_mask_type=attn_mask_type,
+                         scaling_factor=scaling_factor,
+                         dropout_probability=dropout_probability,
+                         is_training=is_training)
+
+    return output
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9, 10))
+def _fused_attn(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.ndarray,
+                mask: jnp.ndarray, seed: jnp.ndarray, attn_bias_type: AttnBiasType,
+                attn_mask_type: AttnMaskType, scaling_factor: float, dropout_probability: float,
+                is_training: bool):
+
+    output, _ = _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_type,
+                                     scaling_factor, dropout_probability, is_training)
+    return output
+
+
+def _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
+                         dropout_probability, is_training):
+    if mask is None:
+        batch, s_q, *_ = q.shape
+        s_kv = k.shape[1]
+        q_actual_seqlen = jnp.full((batch,), s_q, dtype=jnp.int32)
+        kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
+    else:
+        mask = jnp.logical_not(mask)
+        q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+            kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        else:
+            # When mask is causal, the actual seqlen is not the last row, use max to find it
+            kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+
+    output, softmax_aux, rng_state = fused_attn_fwd(q,
+                                                    k,
+                                                    v,
+                                                    bias,
+                                                    q_actual_seqlen,
+                                                    kv_actual_seqlen,
+                                                    seed,
+                                                    attn_bias_type=attn_bias_type.value,
+                                                    attn_mask_type=attn_mask_type.value,
+                                                    scaling_factor=scaling_factor,
+                                                    dropout_probability=dropout_probability,
+                                                    is_training=is_training)
+
+    return output, (q, k, v, bias, softmax_aux, rng_state, output, q_actual_seqlen,
+                    kv_actual_seqlen)
+
+
+def _fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
+                         is_training, ctx, dz):
+    q, k, v, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen = ctx
+
+    grad_q, grad_k, grad_v, grad_bias = fused_attn_bwd(q,
+                                                       k,
+                                                       v,
+                                                       bias,
+                                                       softmax_aux,
+                                                       rng_state,
+                                                       output,
+                                                       dz,
+                                                       q_actual_seqlen,
+                                                       kv_actual_seqlen,
+                                                       attn_bias_type=attn_bias_type.value,
+                                                       attn_mask_type=attn_mask_type.value,
+                                                       scaling_factor=scaling_factor,
+                                                       dropout_probability=dropout_probability,
+                                                       is_training=is_training)
+
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+
+    return grad_q, grad_k, grad_v, grad_bias, None, None
+
+
+_fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
