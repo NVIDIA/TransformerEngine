@@ -10,6 +10,7 @@ from torch._C import _graph_pool_handle
 
 from .fp8 import fp8_autocast, FP8GlobalStateManager
 from .distributed import _set_cuda_rng_state
+from .module.base import TransformerEngineBaseModule
 
 
 __all__ = ["make_graphed_callables"]
@@ -317,8 +318,10 @@ def make_graphed_callables(
 
     # Remove FP8 state from warmup.
     for module in modules:
-        if hasattr(module, 'reset_fp8_meta_tensors'):
-            module.reset_fp8_meta_tensors()
+        # Recursively handle cases, including sequential.
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                m.reset_fp8_meta_tensors()
         for p in module.parameters():
             p.grad = None
     FP8GlobalStateManager.reset()
