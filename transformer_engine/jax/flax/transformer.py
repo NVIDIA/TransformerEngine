@@ -156,7 +156,7 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
             group_size = h_q // h_kv
             grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
 
-        if transpose_batch_sequence:
+        if self.transpose_batch_sequence:
             if is_gqa:
                 attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
             else:
@@ -167,20 +167,12 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
             else:
                 attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
-        if self.transpose_batch_sequence:
-            attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
-        else:
-            attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
+        attn_weights = checkpoint_name(attn_weights, 'logits')
 
         if is_gqa:
             b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
-        attn_weights = checkpoint_name(attn_weights, 'logits')
-
-        b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
-        attn_weights_without_groups_shape = (b, h * g, q, k)
-        attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
         attn_weights = with_sharding_constraint_by_logical_axes(
             attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
@@ -195,9 +187,6 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
             fused_scale_factor = scale_factor
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
-
-        if is_gqa:
-            attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxType"""
@@ -216,7 +205,8 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
                                scale_factor=fused_scale_factor)(attn_weights, mask,
                                                                 bias).astype(self.dtype)
 
-        attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+        if is_gqa:
+            attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
         if not deterministic and self.attention_dropout > 0.:
             keep_prob = 1.0 - self.attention_dropout
@@ -227,7 +217,7 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
                           jnp.asarray(keep_prob, dtype=self.dtype))
             attn_weights = attn_weights * multiplier
 
-        if transpose_batch_sequence:
+        if self.transpose_batch_sequence:
             if is_gqa:
                 return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
             return jnp.einsum('bhqk,kbhd->qbhd', attn_weights, value)

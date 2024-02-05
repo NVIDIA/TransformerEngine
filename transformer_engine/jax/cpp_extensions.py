@@ -4274,12 +4274,9 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary,
                                                  transpose_axis_boundary)
         dbias_shape = (*x_shape[:static_axis_boundary + 1], ir_hidden_szie)
-<<<<<<< HEAD
 
         wkspace_aval = ctx.avals_out[-1]
 
-=======
->>>>>>> 73dcb036 (DPA draft)
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
