@@ -105,7 +105,6 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
     else:
         mask = jnp.logical_not(mask)
         actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-    jax.debug.print("actual_seqlen = {}", actual_seqlen)
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
                                                          actual_seqlen,
