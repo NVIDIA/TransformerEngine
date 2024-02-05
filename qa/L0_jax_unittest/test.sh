@@ -4,6 +4,8 @@
 
 set -xe
 
+export NVTE_FUSED_ATTN=1
+
 : ${TE_PATH:=/opt/transformerengine}
 pytest -Wignore -v $TE_PATH/tests/jax -k 'not distributed'
 
