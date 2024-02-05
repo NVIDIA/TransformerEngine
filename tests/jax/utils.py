@@ -340,6 +340,29 @@ class MlpBlock(nn.Module):
         return output
 
 
+def apply_rotary_pos_emb(
+    inputs: jnp.ndarray,
+    position: jnp.ndarray,
+    min_timescale: int = 1,
+    max_timescale: int = 10000,
+):
+    embedding_dim = inputs.shape[-1]
+    half_embedding_dim = embedding_dim // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / embedding_dim
+    timescale = min_timescale * (max_timescale / min_timescale)**fraction
+    timescale = jnp.expand_dims(timescale, axis=tuple(range(inputs.ndim - 1)))
+    position = jnp.expand_dims(position, axis=tuple(range(2, inputs.ndim)))
+    sinusoid_inp = position / timescale
+    sin = jnp.sin(sinusoid_inp)
+    cos = jnp.cos(sinusoid_inp)
+    first_half, second_half = jnp.split(inputs, 2, axis=-1)
+    first_part = first_half * cos - second_half * sin
+    second_part = second_half * cos + first_half * sin
+    first_part = first_part.astype(inputs.dtype)
+    second_part = second_part.astype(inputs.dtype)
+    return jnp.concatenate([first_part, second_part], axis=-1)
+
+
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
@@ -368,6 +391,7 @@ class MultiHeadAttention(nn.Module):
     float32_logits: bool = False    # computes logits in float32 for stability.
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
+    enable_rotary_pos_emb: bool = False
     fuse_qkv: bool = True
 
     def __post_init__(self):
@@ -481,6 +505,15 @@ class MultiHeadAttention(nn.Module):
                     (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+
+        if self.enable_rotary_pos_emb:
+            batch_dim = 1 if self.transpose_batch_sequence else 0
+            seq_dim = 1 - batch_dim
+
+            position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+
+            query = apply_rotary_pos_emb(query, position)
+            key = apply_rotary_pos_emb(key, position)
 
         query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
         key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
@@ -802,6 +835,7 @@ class EncoderLayer(nn.Module):
     zero_centered_gamma: bool = False
     output_layernorm: bool = False
     drop_path: float = 0.0
+    enable_rotary_pos_emb: bool = False
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -854,6 +888,7 @@ class EncoderLayer(nn.Module):
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                fuse_qkv=self.fuse_qkv_params,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                name='attention')(x,
                                                  x,
                                                  encoder_mask,
@@ -922,6 +957,7 @@ class DecoderLayer(nn.Module):
     layernorm_type: str = 'layernorm'
     zero_centered_gamma: bool = False
     drop_path: float = 0.0
+    enable_rotary_pos_emb: bool = False
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -981,6 +1017,7 @@ class DecoderLayer(nn.Module):
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                fuse_qkv=self.fuse_qkv_params,
                                name='self_attention')(x,
                                                       x,
@@ -1014,6 +1051,7 @@ class DecoderLayer(nn.Module):
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
+                               enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                fuse_qkv=self.fuse_qkv_params,
                                name='encoder_decoder_attention')(y,
                                                                  encoded,

@@ -4,6 +4,8 @@
 """JAX layernorm modules"""
 
 from functools import partial
+from typing import Tuple
+
 import jax
 import jax.numpy as jnp
 
@@ -12,6 +14,7 @@ from .cpp_extensions import rmsnorm_fwd, rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd, layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot
 from .fp8 import FP8Helper, FP8MetaPackage
+from .sharding import with_sharding_constraint_by_logical_axes
 
 
 def canonicalize_layernorm_type(x):
@@ -96,14 +99,20 @@ def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
 _layernorm.defvjp(_layernorm_fwd_rule, _layernorm_bwd_rule)
 
 
-def layernorm_fp8_dot(x: jnp.ndarray,
-                      kernel: jnp.ndarray,
-                      gamma: jnp.ndarray,
-                      beta: jnp.ndarray,
-                      fp8_meta_pkg: FP8MetaPackage,
-                      layernorm_type: str,
-                      zero_centered_gamma: bool = False,
-                      epsilon: float = 1e-6) -> jnp.ndarray:
+def layernorm_fp8_dot(
+    x: jnp.ndarray,
+    kernel: jnp.ndarray,
+    gamma: jnp.ndarray,
+    beta: jnp.ndarray,
+    fp8_meta_pkg: FP8MetaPackage,
+    layernorm_type: str,
+    zero_centered_gamma: bool = False,
+    epsilon: float = 1e-6,
+    layernorm_input_axes: Tuple[
+        str, ...] = None,    # The logic axes of sharding constraint to the layernorm input.
+    dot_input_axes: Tuple[str,
+                          ...] = None    # The logic axes of sharding constraint to the dot input.
+) -> jnp.ndarray:
     """
     Layernorm + FP8 GEMM
     """
@@ -114,18 +123,21 @@ def layernorm_fp8_dot(x: jnp.ndarray,
     fwd_dtype = FP8Helper.FWD_DTYPE
     bwd_dtype = FP8Helper.BWD_DTYPE
     output = _layernorm_fp8_dot(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
-                                layernorm_type, fwd_dtype, bwd_dtype, zero_centered_gamma, epsilon)
+                                layernorm_type, fwd_dtype, bwd_dtype, zero_centered_gamma, epsilon,
+                                layernorm_input_axes, dot_input_axes)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12))
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14))
 def _layernorm_fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                        fp8_max: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
                        scale_inv: jnp.ndarray, layernorm_type: str, fwd_dtype: jnp.dtype,
-                       bwd_dtype: jnp.dtype, zero_centered_gamma: bool, epsilon: float):
+                       bwd_dtype: jnp.dtype, zero_centered_gamma: bool, epsilon: float,
+                       layernorm_input_axes: Tuple[str, ...], dot_input_axes: Tuple[str, ...]):
     output, _ = _layernorm_fp8_dot_fwd_rule(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
                                             layernorm_type, fwd_dtype, bwd_dtype,
-                                            zero_centered_gamma, epsilon)
+                                            zero_centered_gamma, epsilon, layernorm_input_axes,
+                                            dot_input_axes)
     return output
 
 
@@ -142,7 +154,9 @@ def _layernorm_fp8_dot_fwd_rule(
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         zero_centered_gamma,
-        epsilon):
+        epsilon,
+        layernorm_input_axes,
+        dot_input_axes):
 
     x_contracting_dims = (len(x.shape) - 1,)
     k_contracting_dims = (0,)
@@ -155,6 +169,8 @@ def _layernorm_fp8_dot_fwd_rule(
     x_amax = amax[gemm_x_idx, 0:1]
     x_scale = scale[gemm_x_idx]
     x_scale_inv = scale_inv[gemm_x_idx]
+
+    x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
         ln_out, mu, rsigma, updated_x_amax = layernorm_fwd_fp8(
@@ -191,6 +207,8 @@ def _layernorm_fp8_dot_fwd_rule(
     casted_kernel, updated_kernel_amax = \
         cast_fp8(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype)
 
+    ln_out = with_sharding_constraint_by_logical_axes(ln_out, dot_input_axes)
+
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
     output = fp8_dot_impl(ln_out, casted_kernel, x_scale_inv, kernel_scale_inv, x.dtype,
                           (x_contracting_dims, k_contracting_dims),
@@ -209,6 +227,8 @@ def _layernorm_fp8_dot_bwd_rule(
         bwd_dtype,
         zero_centered_gamma,
         epsilon,
+        layernorm_input_axes,
+        dot_input_axes,    # pylint: disable=unused-argument
         ctx,
         grad):
     ln_out_, casted_kernel, fp8_max, amax, scale, scale_inv, \
@@ -243,6 +263,7 @@ def _layernorm_fp8_dot_bwd_rule(
                          (g_for_dgrad_constracting_dim, k_constracting_dim),
                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
+    dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dgrad,
                                           x,

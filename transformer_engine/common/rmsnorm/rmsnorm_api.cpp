@@ -106,7 +106,7 @@ inline size_t product(const std::vector<size_t> &shape) {
 
 void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
                  Tensor *rsigma, cudaStream_t stream, const int multiprocessorCount,
-                 Tensor *workspace, Tensor *barrier) {
+                 Tensor *workspace, Tensor *barrier, const bool zero_centered_gamma) {
     auto itype = x.data.dtype;
     auto wtype = gamma.data.dtype;
     auto otype = z->data.dtype;
@@ -149,6 +149,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     params.amax = z->amax.dptr;
     params.scale = z->scale.dptr;
     params.fp8_out = fp8_out;
+    params.zero_centered_gamma = zero_centered_gamma;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -199,7 +200,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
 void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const Tensor &gamma,
                  Tensor *dx, Tensor *dgamma, Tensor *dgamma_part, cudaStream_t stream,
-                 const int multiprocessorCount, Tensor *workspace, Tensor *barrier) {
+                 const int multiprocessorCount, Tensor *workspace, Tensor *barrier,
+                 const bool zero_centered_gamma) {
     using namespace transformer_engine;
 
     auto itype = x.data.dtype;
@@ -245,6 +247,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     params.dgamma = dgamma->data.dptr;
     params.dbeta_part = nullptr;
     params.dgamma_part = dgamma_part->data.dptr;
+    params.zero_centered_gamma = zero_centered_gamma;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -295,20 +298,53 @@ void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
   rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
               epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma), stream,
               multiprocessorCount, reinterpret_cast<Tensor *>(workspace),
-              reinterpret_cast<Tensor *>(barrier));
+              reinterpret_cast<Tensor *>(barrier), false);
 }
 
 void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
                       const NVTETensor x,       // Nxhidden_size
                       const NVTETensor rsigma,  // N, FP32!
                       const NVTETensor gamma,   // hidden_size
-                      NVTETensor dx, NVTETensor dgamma, NVTETensor dgamma_part, cudaStream_t stream,
-                      const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
+                      NVTETensor dx, NVTETensor dgamma,
+                      NVTETensor dgamma_part, cudaStream_t stream,
+                      const int multiprocessorCount, NVTETensor workspace,
+                      NVTETensor barrier) {
   NVTE_API_CALL(nvte_rmsnorm_bwd);
   using namespace transformer_engine;
   rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
               *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
               reinterpret_cast<Tensor *>(dx), reinterpret_cast<Tensor *>(dgamma),
               reinterpret_cast<Tensor *>(dgamma_part), stream, multiprocessorCount,
-              reinterpret_cast<Tensor *>(workspace), reinterpret_cast<Tensor *>(barrier));
+              reinterpret_cast<Tensor *>(workspace), reinterpret_cast<Tensor *>(barrier),
+              false);
+}
+
+void nvte_rmsnorm1p_fwd(const NVTETensor x,      // Nxhidden_size
+                        const NVTETensor gamma,  // hidden_size
+                        const float epsilon, NVTETensor z, NVTETensor rsigma, cudaStream_t stream,
+                        const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
+  NVTE_API_CALL(nvte_rmsnorm1p_fwd);
+  using namespace transformer_engine;
+  rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
+              epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma), stream,
+              multiprocessorCount, reinterpret_cast<Tensor *>(workspace),
+              reinterpret_cast<Tensor *>(barrier), true);
+}
+
+void nvte_rmsnorm1p_bwd(const NVTETensor dz,      // Nxhidden_size
+                        const NVTETensor x,       // Nxhidden_size
+                        const NVTETensor rsigma,  // N, FP32!
+                        const NVTETensor gamma,   // hidden_size
+                        NVTETensor dx, NVTETensor dgamma,
+                        NVTETensor dgamma_part, cudaStream_t stream,
+                        const int multiprocessorCount, NVTETensor workspace,
+                        NVTETensor barrier) {
+  NVTE_API_CALL(nvte_rmsnorm1p_bwd);
+  using namespace transformer_engine;
+  rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
+              *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
+              reinterpret_cast<Tensor *>(dx), reinterpret_cast<Tensor *>(dgamma),
+              reinterpret_cast<Tensor *>(dgamma_part), stream, multiprocessorCount,
+              reinterpret_cast<Tensor *>(workspace), reinterpret_cast<Tensor *>(barrier),
+              true);
 }
