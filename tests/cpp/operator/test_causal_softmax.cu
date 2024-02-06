@@ -15,16 +15,17 @@ using namespace transformer_engine;
 
 namespace {
 
+using compute_t = float;
+
 template <typename Type>
 void compute_single_head_fwd(
   Type *softmax_out,
   const Type *data_in,
+  compute_t *buff,
   const float scaling_factor,
   const int rows,
   const int cols)
 {
-  using compute_t = float;
-
   for (int i = 0; i < rows; ++i) {
     size_t offset = i * cols;
 
@@ -32,20 +33,20 @@ void compute_single_head_fwd(
     compute_t max_value = static_cast<compute_t>(-10'000.f);
     for (int j = 0; j < masked_elements; ++j) {
       compute_t tmp = scaling_factor * static_cast<compute_t>(data_in[offset + j]);
-      softmax_out[offset + j] = static_cast<Type>(tmp);
+      buff[offset + j] = tmp;
       max_value = std::max(max_value, tmp);
     }
 
     compute_t accumulator = static_cast<compute_t>(0.f);
     for (int j = 0; j < masked_elements; ++j) {
-      compute_t tmp = std::exp(static_cast<compute_t>(softmax_out[offset + j]) - max_value);
-      softmax_out[offset + j] = static_cast<Type>(tmp);
+      compute_t tmp = std::exp(buff[offset + j] - max_value);
+      buff[offset + j] = tmp;
       accumulator += tmp;
     }
 
     for (int j = 0; j < cols; ++j) {
       if (j < masked_elements) {
-        compute_t tmp = static_cast<compute_t>(softmax_out[offset + j]) / accumulator;
+        compute_t tmp = buff[offset + j] / accumulator;
         softmax_out[offset + j] = static_cast<Type>(tmp);
       } else {
         softmax_out[offset + j] = static_cast<Type>(0.f);
@@ -59,14 +60,13 @@ void compute_single_head_bwd(
   Type *grad_out,
   const Type *grad_in,
   const Type *softmax_in,
+  compute_t *buff,
   const float scaling_factor,
   const int batches,
   const int heads,
   const int rows,
   const int cols)
 {
-  using compute_t = float;
-
   for (int i = 0; i < rows; ++i) {
     size_t offset = i * cols;
 
@@ -75,13 +75,13 @@ void compute_single_head_bwd(
     for (int j = 0; j < masked_elements; ++j) {
       compute_t tmp = static_cast<compute_t>(softmax_in[offset + j])
                       * static_cast<compute_t>(grad_in[offset + j]);
-      grad_out[offset + j] = static_cast<Type>(tmp);
+      buff[offset + j] = tmp;
       accumulator += tmp;
     }
 
     for (int j = 0; j < cols; ++j) {
       if (j < masked_elements) {
-        compute_t tmp = static_cast<compute_t>(grad_out[offset + j])
+        compute_t tmp = buff[offset + j]
                         - static_cast<compute_t>(softmax_in[offset + j]) * accumulator;
         grad_out[offset + j] = static_cast<Type>(scaling_factor * tmp);
       } else {
@@ -95,21 +95,21 @@ template <typename Type>
 void compute_fwd_ref(
   Type *softmax_out,
   const Type *data_in,
+  compute_t *buff,
   const float scaling_factor,
   const int batches,
   const int heads,
   const int rows,
   const int cols)
 {
-  using compute_t = float;
   size_t head_size = rows * cols;
   size_t batch_size = heads * head_size;
 
   for (int b = 0; b < batches; ++b) {
     for (int h = 0; h < heads; ++h) {
       size_t offset = b * batch_size + h * head_size;
-      compute_single_head_fwd(
-          softmax_out + offset, data_in + offset, scaling_factor, rows, cols);
+      compute_single_head_fwd(softmax_out + offset, data_in + offset,
+                              buff + offset, scaling_factor, rows, cols);
     }
   }
 }
@@ -119,21 +119,21 @@ void compute_bwd_ref(
   Type *grad_out,
   const Type *grad_in,
   const Type *softmax_in,
+  compute_t *buff,
   const float scaling_factor,
   const int batches,
   const int heads,
   const int rows,
   const int cols)
 {
-  using compute_t = float;
   size_t head_size = rows * cols;
   size_t batch_size = heads * head_size;
 
   for (int b = 0; b < batches; ++b) {
     for (int h = 0; h < heads; ++h) {
       size_t offset = b * batch_size + h * head_size;
-      compute_single_head_bwd(grad_out + offset, grad_in + offset, softmax_in + offset,
-                              scaling_factor, batches, heads, rows, cols);
+      compute_single_head_bwd(grad_out + offset, grad_in + offset, softmax_in + offset, 
+                              buff + offset, scaling_factor, batches, heads, rows, cols);
     }
   }
 }
@@ -162,6 +162,7 @@ void performTest(
   const size_t elements_total = batches * heads * rows * cols;
   std::unique_ptr<Type[]> softmax_out_ref = std::make_unique<Type[]>(elements_total);
   std::unique_ptr<Type[]> grads_out_ref = std::make_unique<Type[]>(elements_total);
+  std::unique_ptr<compute_t[]> compute_buffer = std::make_unique<compute_t[]>(elements_total);
 
   fillUniform(&data_in);
   fillUniform(&softmax_in);
@@ -175,9 +176,9 @@ void performTest(
 
   // Reference implementations
   compute_fwd_ref(softmax_out_ref.get(), data_in.cpu_dptr<Type>(),
-                  scaling_factor, batches, heads, rows, cols);
+                  compute_buffer.get(), scaling_factor, batches, heads, rows, cols);
   compute_bwd_ref(grads_out_ref.get(), grads_in.cpu_dptr<Type>(), softmax_in.cpu_dptr<Type>(),
-                  scaling_factor, batches, heads, rows, cols);
+                  compute_buffer.get(), scaling_factor, batches, heads, rows, cols);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
