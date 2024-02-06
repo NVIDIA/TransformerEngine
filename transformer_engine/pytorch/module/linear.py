@@ -34,6 +34,8 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -155,7 +157,9 @@ class _Linear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -165,11 +169,12 @@ class _Linear(torch.autograd.Function):
                         transpose_out=weight_t_fp8._data,
                     )
                 else:
-                    weight_fp8._data = cast_to_fp8(
+                    cast_to_fp8(
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=weight_fp8._data,
                     )
                     weight_t_fp8 = None
 
