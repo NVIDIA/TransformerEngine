@@ -713,8 +713,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
     if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
         devPtrBias = input_Bias->data.dptr;
         devPtrdBias = output_dBias->data.dptr;
-        bias_b = input_Bias->data.shape[0];
-        bias_h = input_Bias->data.shape[1];
+        bias_b = output_dBias->data.shape[0];
+        bias_h = output_dBias->data.shape[1];
     }
 
     void *devPtrdQKV = output_dQKV->data.dptr;
@@ -906,8 +906,8 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
     if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
         devPtrBias = input_Bias->data.dptr;
         devPtrdBias = output_dBias->data.dptr;
-        bias_b = input_Bias->data.shape[0];
-        bias_h = input_Bias->data.shape[1];
+        bias_b = output_dBias->data.shape[0];
+        bias_h = output_dBias->data.shape[1];
     }
 
     void *devPtrdQ = output_dQ->data.dptr;
@@ -1084,8 +1084,8 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
     if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
         devPtrBias = input_Bias->data.dptr;
         devPtrdBias = output_dBias->data.dptr;
-        bias_b = input_Bias->data.shape[0];
-        bias_h = input_Bias->data.shape[1];
+        bias_b = output_dBias->data.shape[0];
+        bias_h = output_dBias->data.shape[1];
     }
 
     void *devPtrdQ = output_dQ->data.dptr;
