@@ -974,6 +974,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def __init__(
         self,
         dim: int,
+        rotary_percent: float = 1.0,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
     ):
@@ -982,6 +983,8 @@ class RotaryPositionEmbedding(torch.nn.Module):
         ----------
         dim: int
             rotary embedding dimension
+        rotary_percent: float
+            Percent of rotary dimension to use for rotary position embeddings.
         seq_len_interpolation_factor: int
             if not None, discrete positions will be interpolated by this factor via the trick in
             https://arxiv.org/abs/2306.15595
@@ -989,8 +992,16 @@ class RotaryPositionEmbedding(torch.nn.Module):
             pre-trained max_position_embeddings before position interpolation
         """
         super().__init__()
+        if rotary_percent < 1.0:
+            dim = int(dim * rotary_percent)
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (
+            10000
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
+                / dim
+            )
+        )
         self.register_buffer('inv_freq', inv_freq)
         self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
 
@@ -1005,8 +1016,10 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             fixed offset for freqencies
         """
-        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
-        seq = seq.type_as(self.inv_freq)
+        seq = (
+            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+            + offset
+        )
 
         if (self.pretrained_max_position_embeddings is not None
             and self.seq_len_interpolation_factor is not None):
@@ -1025,6 +1038,58 @@ class RotaryPositionEmbedding(torch.nn.Module):
         # emb [seq_length, .., dim]
         return emb.reshape(emb.size(0), 1, 1, emb.size(1))
 
+
+class FusedRoPEFunc(torch.autograd.Function):
+    """
+    Function for FusedRoPE
+
+    This implementation assumes the input tensor to be in `sbhd`, `bshd` or `thd` format and
+    the RoPE tensor to be of shape (s, 1, 1, d). It accepts arbitrary memory layouts to avoid
+    the expensive `.contiguous()` calls, thus it may not achieve the best memory access pattern.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        t: torch.Tensor,
+        freqs: torch.Tensor,
+        tensor_format: str = "sbhd",
+        cu_seqlens: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        if tensor_format == "sbhd":
+            output = tex.fused_rope_forward(t, freqs, False)
+        elif tensor_format == "bshd":
+            output = tex.fused_rope_forward(
+                t.transpose(0, 1), freqs, True
+            ).transpose(0, 1)
+        elif tensor_format == "thd":
+            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
+        else:
+            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+        ctx.save_for_backward(freqs, cu_seqlens)
+        ctx.tensor_format = tensor_format
+
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        freqs, cu_seqlens = ctx.saved_tensors
+        if ctx.tensor_format == "sbhd":
+            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
+        elif ctx.tensor_format == "bshd":
+            grad_input = tex.fused_rope_backward(
+                grad_output.transpose(0, 1), freqs, True
+            ).transpose(0, 1)
+        elif ctx.tensor_format == "thd":
+            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
+        else:
+            raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
+
+        return grad_input, None, None, None, None
+
+
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
     change sign so the last dimension becomes [-odd, +even]
@@ -1034,18 +1099,66 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb(
+    t: torch.Tensor,
+    freqs: torch.Tensor,
+    tensor_format: str = "sbhd",
+    fused: bool = False,
+    cu_seqlens: Union[torch.Tensor, None] = None,
+) -> torch.Tensor:
     """
-    input tensor t is of shape [seq_length, ..., dim]
-    rotary positional embeding tensor `freqs` is of shape [seq_length, ..., dim]
+    Apply rotary positional embedding tensor to the input tensor.
+
+    Parameters
+    ----------
+    t: torch.Tensor
+        Input tensor of shape `[s, b, h, d]`, `[s, b, h, d]` or `[t, h, d]`, on which
+        rotary positional embedding will be applied.
+    freqs: torch.Tensor
+        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
+    fused: bool, default = False
+        Whether to use a fused applying RoPE implementation.
+    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+        is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+        of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
+    cu_seqlens: torch.Tensor, default = None.
+        Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
+        dtype torch.int32. Only valid when `tensor_format` is 'thd'.
     """
+    if fused:
+        assert (
+            tensor_format != "thd" or cu_seqlens is not None
+        ), "cu_seqlens must not be None when tensor_format is 'thd'."
+        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens)
+
+    assert tensor_format in ("sbhd", "bshd"), (
+        "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
+        f"when fused is False, got {tensor_format}."
+    )
+
+    max_seq_len = freqs.shape[0]
+    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+
+    # Only apply the rotary embeddings up to the sequence length of the running
+    # input.
+    assert cur_seq_len <= max_seq_len, (
+        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    )
+    freqs = freqs[:cur_seq_len]
+    if tensor_format == "bshd":
+        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    # cos/sin first then dtype conversion for better precision
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
+
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    t = (t * cos_) + (_rotate_half(t) * sin_)
     return torch.cat((t, t_pass), dim=-1)
 
 
@@ -1639,6 +1752,14 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic
                 )
         else:
+
+            from .cpu_offload import CPUOffloadEnabled
+            if CPUOffloadEnabled:
+                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
+                for tensor in tensor_list:
+                    if tensor is not None:
+                        tensor.activation_offloading = True
+
             with self.attention_dropout_ctx():
                 fa_optional_forward_kwargs = {}
                 if _flash_attn_2_3_plus:
@@ -1702,6 +1823,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         qkv, out, cu_seqlens = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1771,6 +1893,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1825,6 +1948,15 @@ class FusedAttnFunc(torch.autograd.Function):
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            tensor_list = [q, k, v, out, cu_seqlens_q, cu_seqlens_kv]
+            qkv_layout = 'sbhd_sbhd_sbhd'
+            for tensor in tensor_list:
+                if tensor is not None:
+                    tensor.activation_offloading = True
+
+
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
@@ -1843,6 +1975,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2705,6 +2838,13 @@ class DotProductAttention(torch.nn.Module):
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            warnings.warn(
+                           "Attention activation Offloading is only implemented"
+                           "with Flash Attention and Fused Attention!"
+                         )
+
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
         if use_unfused_attention:
@@ -2796,8 +2936,8 @@ class MultiheadAttention(torch.nn.Module):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = `True`
-                     if set to `False`, layer normalization to the input is not applied.
+    input_layernorm: bool, default = `False`
+                     if set to `True`, layer normalization to the input is applied.
     attention_type: { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
@@ -2821,6 +2961,14 @@ class MultiheadAttention(torch.nn.Module):
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
+    qkv_format: str, default = `sbhd`
+            dimension format for `query_layer`, `key_layer` and `value_layer`,
+            {`sbhd`, `bshd`}. `s` stands for the sequence length, `b` batch size,
+            `h` the number of heads and `d` head size. `sbhd` and `bshd` formats
+            are used for when sequences in a batch are of equal length or padded to
+            equal length. Please note that these formats do not reflect how
+            tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
+            For that, please use `_get_qkv_layout` to gain the layout information.
 
     Parallelism parameters
     ----------------------
@@ -2899,9 +3047,11 @@ class MultiheadAttention(torch.nn.Module):
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
+        qkv_format: str = "sbhd",
     ) -> None:
         super().__init__()
 
+        self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.window_size = check_set_window_size(attn_mask_type, self.window_size)
@@ -3045,11 +3195,13 @@ class MultiheadAttention(torch.nn.Module):
             kv_channels,
             num_gqa_groups=self.num_gqa_groups,
             attention_dropout=attention_dropout,
+            qkv_format=self.qkv_format,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
             layer_number=self.layer_number,
+            attention_type=self.attention_type,
         )
 
         # Linear
@@ -3398,14 +3550,14 @@ class MultiheadAttention(torch.nn.Module):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format)
 
         context_layer = self.core_attention(
             query_layer,
             key_layer,
             value_layer,
-            qkv_format='sbhd',
+            qkv_format=self.qkv_format,
             cu_seqlens_q=None,
             cu_seqlens_kv=None,
             attention_mask=attention_mask,

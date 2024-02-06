@@ -1349,12 +1349,6 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
                                 Tensor *dbias,
                                 Tensor *workspace,
                                 cudaStream_t stream) {
-  CheckInputTensor(input, "cast_transpose_dbias_dgelu_input");
-  CheckInputTensor(gelu_input, "gelu_input");
-  CheckOutputTensor(*cast_output, "cast_output");
-  CheckOutputTensor(*transposed_output, "transposed_output");
-  CheckOutputTensor(*dbias, "dbias");
-
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
   NVTE_CHECK(transposed_output->data.shape.size() == 2,
@@ -1395,6 +1389,12 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
         populate_cast_transpose_dbias_workspace_config(*cast_output, workspace, nvec_out);
         return;
       }
+
+      CheckInputTensor(input, "cast_transpose_dbias_dgelu_input");
+      CheckInputTensor(gelu_input, "gelu_input");
+      CheckOutputTensor(*cast_output, "cast_output");
+      CheckOutputTensor(*transposed_output, "transposed_output");
+      CheckOutputTensor(*dbias, "dbias");
 
       NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
       NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");

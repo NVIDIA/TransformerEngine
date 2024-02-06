@@ -30,6 +30,7 @@ from ..jit import (
 from ..utils import (
     divide,
     get_default_init_method,
+    init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -38,9 +39,10 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 
 from .. import cpp_extensions as tex
@@ -50,7 +52,6 @@ from ..jit import no_torch_dynamo
 
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
-
 
 __all__ = ["LayerNormMLP"]
 
@@ -95,6 +96,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -219,7 +221,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     # Fused cast-transpose kernels
                     tex.fp8_cast_transpose_fused(
                         fc1_weight,
@@ -238,18 +242,20 @@ class _LayerNormMLP(torch.autograd.Function):
                         transpose_out=fc2_weight_t_fp8._data,
                     )
                 else:
-                    fc1_weight_fp8._data = tex.cast_to_fp8(
+                    tex.cast_to_fp8(
                         fc1_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=fc1_weight_fp8._data,
                     )
                     fc1_weight_t_fp8 = None
-                    fc2_weight_fp8._data = tex.cast_to_fp8(
+                    tex.cast_to_fp8(
                         fc2_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM2_WEIGHT,
                         fp8_dtype_forward,
+                        out=fc2_weight_fp8._data,
                     )
                     fc2_weight_t_fp8 = None
 
@@ -420,6 +426,27 @@ class _LayerNormMLP(torch.autograd.Function):
                 clear_tensor_data(gelu_out)
 
         if is_grad_enabled:
+            if cpu_offloading:
+                if fuse_wgrad_accumulation:
+                    fc1_weight.main_grad.weight_offloading = True
+                    fc2_weight.main_grad.weight_offloading = True
+                if fp8 and fc1_weight_t_fp8 is not None:
+                    fc1_weight_t_fp8.weight_offloading = True
+                if fp8 and fc2_weight_t_fp8 is not None:
+                    fc2_weight_t_fp8.weight_offloading = True
+                ln_weight.weight_offloading = True
+                fc1_weight.weight_offloading = True
+                fc2_weight.weight_offloading = True
+                fc1_bias.weight_offloading = True
+
+                inputmat.activation_offloading = True
+                if normalization == "LayerNorm":
+                    mu.activation_offloading = True
+                rsigma.activation_offloading = True
+                ln_out.activation_offloading = True
+                fc1_out.activation_offloading = True
+                gelu_out.activation_offloading = True
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
@@ -429,8 +456,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out,
                 gelu_out,
                 fc1_weight,
+                fc1_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc1_weight_t_fp8,
                 fc2_weight,
+                fc2_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -440,6 +469,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_fc1_bias = use_fc1_bias
             ctx.use_fc2_bias = use_fc2_bias
@@ -492,12 +522,21 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out,
                 gelu_out,
                 fc1_weight,
+                fc1_weight_main_grad,
                 fc1_weight_t_fp8,
                 fc2_weight,
+                fc2_weight_main_grad,
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                fc1_weight = Parameter(fc1_weight, False)
+                fc2_weight = Parameter(fc2_weight, False)
+
+                fc1_weight.main_grad = fc1_weight_main_grad
+                fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
             if ctx.fp8 and fc1_weight_t_fp8 is None:
@@ -993,6 +1032,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1170,90 +1210,70 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # LN init
         self.eps = eps
-        self.layer_norm_weight = Parameter(
+        layer_norm_weight = Parameter(
             torch.empty(hidden_size, device=device, dtype=params_dtype)
         )
-        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+        self.register_parameter('layer_norm_weight', layer_norm_weight,
+                                init_fn=init_method_constant(float(not self.zero_centered_gamma)))
         if self.normalization != "RMSNorm":
-            self.layer_norm_bias = Parameter(
+            layer_norm_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            self.register_parameter('layer_norm_bias', layer_norm_bias,
+                                    init_fn=init_method_constant(0.0))
         else:
             self.layer_norm_bias = None
-        self.reset_layer_norm_parameters()
 
+        # FC1 init
         if self.activation in ['reglu', 'geglu', 'swiglu']:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
-        # FC1 init
-        fc1_temp_weight = torch.empty(
-            fc1_output_features, hidden_size, device=device, dtype=params_dtype)
 
-        initialize_affine_weight_gpu(
-            fc1_temp_weight,
-            init_method,
-            get_rng_state_tracker,
-            set_tp_attributes=False,
+        fc1_weight = Parameter(
+            torch.empty(
+                fc1_output_features, hidden_size, device=device, dtype=params_dtype
+            )
         )
+        self.register_parameter('fc1_weight', fc1_weight,
+                                init_fn=init_method,
+                                get_rng_state_tracker=get_rng_state_tracker,
+                                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
+        self.fp8_weight_shapes.append(self.fc1_weight.shape)
+
+        if self.use_bias:
+            fc1_bias = Parameter(
+                torch.empty(fc1_output_features, device=device, dtype=params_dtype)
+            )
+            self.register_parameter('fc1_bias', fc1_bias,
+                                    init_fn=init_method_constant(0.0))
+        else:
+            self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
+
+        # FC2 init
+        fc2_weight = Parameter(
+            torch.empty(hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
+        )
+        self.register_parameter('fc2_weight', fc2_weight,
+                                init_fn=output_layer_init_method,
+                                get_rng_state_tracker=get_rng_state_tracker,
+                                fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT)
+        self.fp8_weight_shapes.append(self.fc2_weight.shape)
+
+        if self.use_bias:
+            fc2_bias = Parameter(
+                torch.empty(hidden_size, device=device, dtype=params_dtype)
+            )
+            self.register_parameter('fc2_bias', fc2_bias,
+                                    init_fn=init_method_constant(0.0))
+        else:
+            self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
 
-            fc1_temp_weight = Float8Tensor.to_float8(
-                fc1_temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-
-        self.fc1_weight = Parameter(fc1_temp_weight)
-        set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
-        self.fp8_weight_shapes.append(self.fc1_weight.shape)
-
-        if self.use_bias:
-            self.fc1_bias = Parameter(
-                torch.empty(fc1_output_features, device=device, dtype=params_dtype)
-            )
-            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
-        else:
-            self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
-
-        with torch.no_grad():
-            self.fc1_bias.zero_()
-
-        # FC2 init
-        fc2_temp_weight = torch.empty(
-            hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
-
-        initialize_affine_weight_gpu(
-            fc2_temp_weight,
-            output_layer_init_method,
-            get_rng_state_tracker,
-            set_tp_attributes=False,
-        )
-
-        if self.primary_weights_in_fp8:
-            fc2_temp_weight = Float8Tensor.to_float8(
-                fc2_temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
-            )
-
-        self.fc2_weight = Parameter(fc2_temp_weight)
-        set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
-        self.fp8_weight_shapes.append(self.fc2_weight.shape)
-
-        if self.use_bias:
-            self.fc2_bias = Parameter(
-                torch.empty(hidden_size, device=device, dtype=params_dtype)
-            )
-            # RPL
-            if self.set_parallel_mode:
-                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)
-        else:
-            self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -1261,9 +1281,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
-
-        with torch.no_grad():
-            self.fc2_bias.zero_()
 
         if self.bias_gelu_nvfusion:
             set_jit_fusion_options()
@@ -1281,12 +1298,35 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNormMLP.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.layer_norm_weight)
         else:
             init.zeros_(self.layer_norm_weight)
         if self.layer_norm_bias is not None:
             init.zeros_(self.layer_norm_bias)
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+
+        if not defer_init:
+            # Set parallel attributes for layer norm parameters
+            setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+            if self.normalization != "RMSNorm":
+                setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+
+            # Set parallel attributes for linear parameters
+            set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
+            set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
+            if self.use_bias:
+                set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+                if self.set_parallel_mode:
+                    setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)
 
     def get_fp8_weights_scratchpad(
         self,
@@ -1348,6 +1388,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         is_first_microbatch
                 )
 
+            from ..cpu_offload import CPUOffloadEnabled
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
@@ -1374,6 +1416,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
+                CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

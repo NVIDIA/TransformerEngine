@@ -64,6 +64,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
 
     head_dim: int = 64
     num_heads: int = 16
+    num_gqa_groups: int | None = None
     dropout_rate: float = 0.
     dropout_rng_name: str = 'dropout'
     layernorm_type: str = "layernorm"
@@ -76,9 +77,15 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     attn_mask_type: str = 'causal'
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
+
+    def __post_init__(self):
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_heads
+        super().__post_init__()
 
     def setup(self) -> None:
         """setup"""
@@ -89,6 +96,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             dtype=self.dtype,
             head_dim=self.head_dim,
             num_heads=self.num_heads,
+            num_gqa_groups=self.num_gqa_groups,
             dropout_rate=self.dropout_rate,
             dropout_rng_name=self.dropout_rng_name,
             layernorm_type=self.layernorm_type,
@@ -102,6 +110,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             attn_mask_type=self.attn_mask_type,
             fuse_qkv=self.fuse_qkv,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init,
             float32_logits=self.float32_logits)
@@ -131,6 +140,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     hidden_size: int = 512
     mlp_hidden_size: int = 2048
     num_attention_heads: int = 8
+    num_gqa_groups: int | None = None
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
@@ -148,13 +158,21 @@ class TransformerLayer(TransformerEngineBaseLayer):
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
+    enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     enable_relative_embedding: bool = True
     relative_embedding: pax_fiddle.Config[RelativePositionBiases] = pax_fiddle.template_field(None)
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = False
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
+
+    def __post_init__(self):
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_attention_heads
+        super().__post_init__()
 
     def setup(self) -> None:
         """setup"""
@@ -186,6 +204,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             hidden_size=self.hidden_size,
             mlp_hidden_size=self.mlp_hidden_size,
             num_attention_heads=self.num_attention_heads,
+            num_gqa_groups=self.num_gqa_groups,
             layernorm_type=self.layernorm_type,
             layernorm_epsilon=self.layernorm_epsilon,
             zero_centered_gamma=self.zero_centered_gamma,
@@ -207,11 +226,14 @@ class TransformerLayer(TransformerEngineBaseLayer):
             float32_attention_logits=self.float32_attention_logits,
             layer_type=self.layer_type,
             self_attn_mask_type=self.self_attn_mask_type,
+            enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+            rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             enable_relative_embedding=self.enable_relative_embedding,
             relative_embedding=relative_embedding_flax_module,
             drop_path=self.drop_path,
             fuse_qkv_params=self.fuse_qkv_params,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init)
 

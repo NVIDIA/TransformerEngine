@@ -75,6 +75,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
 
+  // fused apply rope
+  m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD");
+  m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD");
+  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format");
+  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format");
+
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");

@@ -25,6 +25,7 @@ from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
     get_default_init_method,
+    init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
@@ -33,15 +34,15 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
-    initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
-
 
 __all__ = ["LayerNormLinear"]
 
@@ -68,6 +69,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -173,7 +175,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     tex.fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -183,11 +187,12 @@ class _LayerNormLinear(torch.autograd.Function):
                         transpose_out=weight_t_fp8._data,
                     )
                 else:
-                    weight_fp8._data = tex.cast_to_fp8(
+                    tex.cast_to_fp8(
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=weight_fp8._data,
                     )
                     weight_t_fp8 = None
 
@@ -239,12 +244,27 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
         if is_grad_enabled:
+            if cpu_offloading:
+                if fuse_wgrad_accumulation:
+                    weight.main_grad.weight_offloading = True
+                if fp8 and weight_t_fp8 is not None:
+                    weight_t_fp8.weight_offloading = True
+                ln_weight.weight_offloading = True
+                weight.weight_offloading = True
+
+                inputmat.activation_offloading = True
+                if normalization == "LayerNorm":
+                    mu.activation_offloading = True
+                rsigma.activation_offloading = True
+                ln_out.activation_offloading = True
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
                 mu,
                 rsigma,
                 weight,
+                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
                 ln_out,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -254,6 +274,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
@@ -298,10 +319,15 @@ class _LayerNormLinear(torch.autograd.Function):
                 mu,
                 rsigma,
                 weight,
+                main_grad,
                 weight_t_fp8,
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                weight = torch.nn.Parameter(weight, False)
+                weight.main_grad = main_grad
 
             # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
@@ -582,6 +608,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -749,42 +776,23 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         self.eps = eps
-        self.layer_norm_weight = torch.nn.Parameter(
+        layer_norm_weight = torch.nn.Parameter(
             torch.empty(in_features, device=device, dtype=params_dtype)
         )
-        setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+        self.register_parameter('layer_norm_weight', layer_norm_weight,
+                                init_fn=init_method_constant(float(not self.zero_centered_gamma)))
         if self.normalization != "RMSNorm":
-            self.layer_norm_bias = torch.nn.Parameter(
+            layer_norm_bias = torch.nn.Parameter(
                 torch.empty(in_features, device=device, dtype=params_dtype)
             )
-            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+            self.register_parameter('layer_norm_bias', layer_norm_bias,
+                                    init_fn=init_method_constant(0.0))
         else:
             self.layer_norm_bias = None
-        self.reset_layer_norm_parameters()
 
-        temp_weight = torch.empty(
+        self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
             device=device, dtype=params_dtype)
-
-        initialize_affine_weight_gpu(
-            temp_weight,
-            init_method,
-            get_rng_state_tracker,
-            partition_dim=1 if self.parallel_mode == "row" else 0,
-            stride=1,
-        )
-
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
-
-            self.weight_tensor = Float8Tensor.to_float8(
-                temp_weight,
-                fp8_meta=self.fp8_meta,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-            )
-        else:
-            self.weight_tensor = temp_weight
 
         if self.use_bias:
             self.bias_tensor = torch.empty(
@@ -793,9 +801,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 dtype=params_dtype)
         else:
             self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
-
-        with torch.no_grad():
-            self.bias_tensor.zero_()
 
         # Configure parameter splits
         self.weight_names = []
@@ -861,7 +866,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if is_subview:
                 weight = weight[split_start:split_end]
             weight = torch.nn.Parameter(weight)
-            self.register_parameter(self.weight_names[i], weight)
+            self.register_parameter(self.weight_names[i], weight,
+                                    init_fn=init_method,
+                                    get_rng_state_tracker=get_rng_state_tracker,
+                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
 
             # Construct bias parameter if needed
             if self.use_bias:
@@ -869,22 +877,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if is_subview:
                     bias = bias[split_start:split_end]
                 bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias)
-                if parallel_mode == "row":
-                    bias.sequence_parallel = sequence_parallel
+                self.register_parameter(self.bias_names[i], bias,
+                                        init_fn=init_method_constant(0.0))
             else:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
                 setattr(self, self.bias_names[i], bias)
-
-            # Configure tensor parallelism
-            set_tensor_model_parallel_attributes(
-                tensor=weight,
-                is_parallel=True,
-                dim=1 if parallel_mode == "row" else 0,
-                stride=1,
-            )
-            if parallel_mode == "column":
-                set_tensor_model_parallel_attributes(bias, True, 0, 1)
 
             # Concatenated tensors are not needed if not splitting
             # into multiple parameters
@@ -892,8 +889,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 del self.weight_tensor
                 del self.bias_tensor
 
-        self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
+        if self.primary_weights_in_fp8:
+            self.init_fp8_metadata()
+            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
+        self.reset_parameters(defer_init=(device == 'meta'))
+
+        self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -911,12 +913,45 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNormLinear.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.layer_norm_weight)
         else:
             init.zeros_(self.layer_norm_weight)
         if self.layer_norm_bias is not None:
             init.zeros_(self.layer_norm_bias)
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+
+        if not defer_init:
+            # Set parallelism attributes for layer norm parameters
+            setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+            if self.normalization != "RMSNorm":
+                setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+
+            # Set parallelism attributes for linear weights
+            for weight in self.weight_names:
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, weight),
+                    is_parallel=True,
+                    dim=1 if self.parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+            # Set parallelism attributes for linear biases
+            if self.use_bias:
+                for bias in self.bias_names:
+                    if self.parallel_mode == "row":
+                        setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
+                    elif self.parallel_mode == "column":
+                        set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
+
 
     def get_fp8_weights_scratchpad(
         self,
@@ -999,6 +1034,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 is_first_microbatch
             )
 
+            from ..cpu_offload import CPUOffloadEnabled
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
                 args = []
@@ -1020,6 +1057,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
+                CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
