@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import os
 from functools import partial
 from typing import Dict
 
@@ -14,6 +15,7 @@ import pytest
 
 from utils import assert_allclose
 
+from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_fp8_metas, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
@@ -39,6 +41,16 @@ DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]
 DTYPE = [jnp.float32, jnp.bfloat16]
 ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
+
+
+@pytest.fixture(autouse=True, scope='module')
+def enable_fused_attn():
+    """
+    Enable fused attn for hopper+ arch.
+    Fused attn kernels on pre-hopper arch are not deterministic.
+    """
+    if get_device_compute_capability(0) >= 90:
+        os.environ["NVTE_FUSED_ATTN"] = "1"
 
 
 @pytest.fixture(autouse=True, scope='function')

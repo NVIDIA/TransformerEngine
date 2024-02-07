@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import os
 from functools import partial
 
 import flax
@@ -18,6 +19,14 @@ from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 
 is_fp8_supported, reason = is_fp8_available()
+
+
+@pytest.fixture(autouse=True, scope='module')
+def enable_fused_attn():
+    """
+    Enable fused attention
+    """
+    os.environ["NVTE_FUSED_ATTN"] = "1"
 
 
 @pytest.fixture(autouse=True, scope='function')
