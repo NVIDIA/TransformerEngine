@@ -65,8 +65,8 @@ class RelativePositionBiases(TransformerEngineBaseLayer):
 class DotProductAttention(TransformerEngineBaseLayer):
     """DotProductAttention"""
 
-    head_dim: int = 64
-    num_attention_heads: int = 16
+    head_dim: int = 0
+    num_attention_heads: int = 0
     num_gqa_groups: int | None = None
     attention_dropout: float = 0.
     attn_mask_type: AttnMaskType = 'causal'
@@ -80,6 +80,9 @@ class DotProductAttention(TransformerEngineBaseLayer):
     def setup(self) -> None:
         """setup"""
         super().setup()
+
+        assert self.head_dim > 0, f'{self.head_dim=}'
+        assert self.num_attention_heads > 0, f'{self.num_attention_heads=}'
 
         dpa_cls = partial(flax_DotProductAttention,
                           head_dim=self.head_dim,
@@ -117,8 +120,8 @@ class DotProductAttention(TransformerEngineBaseLayer):
 class MultiHeadAttention(TransformerEngineBaseLayer):
     """MultiHeadAttention"""
 
-    head_dim: int = 64
-    num_attention_heads: int = 16
+    head_dim: int = 0
+    num_attention_heads: int = 0
     num_gqa_groups: int | None = None
     attention_dropout: float = 0.
     dropout_rng_name: str = 'dropout'
@@ -177,6 +180,9 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     def setup(self) -> None:
         """setup"""
         super().setup()
+
+        assert self.head_dim > 0, f'{self.head_dim=}'
+        assert self.num_attention_heads > 0, f'{self.num_attention_heads=}'
 
         mha_cls = partial(
             flax_MultiHeadAttention,
