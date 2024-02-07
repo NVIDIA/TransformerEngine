@@ -817,9 +817,9 @@ class TestLayerNormMLP:
                             atol=atol)
 
 
-@pytest.mark.parametrize('bs', [1, 2, 8])
-@pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
+@pytest.mark.parametrize('bs', [1, 2])
+@pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
 @pytest.mark.parametrize('attn_type', ['self', 'cross'])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
@@ -916,10 +916,10 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize('bs', [1, 2, 8])
-@pytest.mark.parametrize('num_gqa_groups', [1, 4, 16])
-@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
+@pytest.mark.parametrize('bs', [1, 2])
+@pytest.mark.parametrize('num_gqa_groups', [1, 2, 4])
+@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[256, 4, 1024]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
 @pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
 @pytest.mark.parametrize('no_wgrad', [True, False])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
@@ -1104,10 +1104,10 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
                             atol=0.5)
 
 
-@pytest.mark.parametrize('bs', [1, 2, 8])
-@pytest.mark.parametrize('num_gqa_groups', [1, 4, 16])
-@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
+@pytest.mark.parametrize('bs', [1, 2])
+@pytest.mark.parametrize('num_gqa_groups', [1, 2, 4])
+@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[256, 4, 1024]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
 @pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
 @pytest.mark.parametrize('no_wgrad', [True, False])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])

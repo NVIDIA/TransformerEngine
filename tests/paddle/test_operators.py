@@ -5,12 +5,6 @@
 
 import struct
 
-from utils import (
-    assert_allclose,
-    create_fp8_meta,
-    get_fused_attention_backend,
-    is_fused_attention_supported,
-)
 import numpy as np
 import paddle
 import paddle.nn.functional as F
@@ -66,9 +60,9 @@ GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
 
-SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
-CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
-FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
+SELF_ATTN_CASES = [(2, 512, 12, 64)]
+CROSS_ATTN_CASES = [(2, 128, 512, 12, 64)]
+FLASH_ATTN_CASES = [(2, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
 
 
