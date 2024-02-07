@@ -81,14 +81,16 @@ def _prepare_backward(
         # Update amax and scale; Skip all setup for global amax reduction
         if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
             # From previous iteration
-            FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
+            # FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
             amax_and_scale_update(fp8_meta, False)
-            FP8GlobalStateManager.set_amax_buffer_key_deletion(fp8_meta, forward=False)
+            # FP8GlobalStateManager.set_amax_buffer_key_deletion(fp8_meta, forward=False)
 
             # Get new backward key.
             fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
-            FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+            if not fp8_meta["bwd_amax_added_to_buffer"]:
+                FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+                fp8_meta["bwd_amax_added_to_buffer"] = True
         else:
             amax_and_scale_update(fp8_meta, False)
 
@@ -104,7 +106,7 @@ def _prepare_backward(
                 tp_size,
                 forward=False
             )
-            FP8GlobalStateManager.delete_key_from_amax_buffer(forward=False)
+            # FP8GlobalStateManager.delete_key_from_amax_buffer(forward=False)
 
 
 def initialize_ub(
@@ -235,6 +237,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
+        self.fp8_meta["fwd_amax_added_to_buffer"] = False
+        self.fp8_meta["bwd_amax_added_to_buffer"] = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -547,11 +551,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
-                    FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                    # FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
                     )
-                    FP8GlobalStateManager.set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+                    # FP8GlobalStateManager.set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
                 else:
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -576,7 +580,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     self.fp8_meta["autocast_id_fwd_stack"].append(
                         self.fp8_meta["autocast_id_fwd"]
                     )
-                    FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
+                    if not self.fp8_meta["fwd_amax_added_to_buffer"]:
+                        FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
+                        self.fp8_meta["fwd_amax_added_to_buffer"] = True
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False

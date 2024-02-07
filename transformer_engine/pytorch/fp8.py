@@ -169,8 +169,8 @@ class FP8GlobalStateManager:
     def get_amax_buffer_key(fp8_meta: Dict[str, Any], forward: bool = True) -> str:
         """Return a key in `_global_fp8_buffer` for the AMAX storage."""
         if forward:
-            return f"FWD_AMAX_{fp8_meta['autocast_id_fwd']}"
-        return f"BWD_AMAX_{fp8_meta['autocast_id_bwd']}"
+            return f"FWD_AMAX"
+        return f"BWD_AMAX"
 
     @classmethod
     def get_amax_reduce_handle_fwd(cls) -> Union[bool, None]:
@@ -348,11 +348,10 @@ class FP8GlobalStateManager:
         forward: bool = True,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        amax_buffer_key = cls.get_amax_buffer_key(fp8_meta, forward=forward)
+        if len(cls.global_fp8_buffer) == 0:
+            return
 
-        # Key already deleted.
-        if amax_buffer_key not in cls.global_fp8_buffer:
-            return None
+        amax_buffer_key = "FWD_AMAX" if forward else "BWD_AMAX"
 
         # Reduce AMAX in DP-domain at an interval.
         # `NVTE_DP_AMAX_REDUCE_INTERVAL` should be set as an integer value larger than 0. If
@@ -394,7 +393,11 @@ class FP8GlobalStateManager:
             fp8_meta["async_amax_reduction"],
         )
 
-        cls.global_fp8_buffer[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
+        reduced_amaxes = list(contiguous_amax.split(chunk_sizes))
+
+        for orig, reduced in zip(cls.global_fp8_buffer[amax_buffer_key], reduced_amaxes):
+            orig.copy_(reduced)
+
         return wait_handle
 
     @classmethod
@@ -409,7 +412,6 @@ class FP8GlobalStateManager:
         if cls.FP8_AUTOCAST_DEPTH == 0:
             if callable(cls.amax_forward_global_reduce_func):
                 cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
-            cls.delete_key_from_amax_buffer(forward=True)
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating
