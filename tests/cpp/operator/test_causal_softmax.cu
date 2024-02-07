@@ -184,7 +184,9 @@ void performTest(
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   auto [atol, rtol] = getTolerances(itype);
-  atol = 1e-3;
+  if(itype == DType::kBFloat16) {
+    atol = 1e-3;
+  }
   compareResults("softmax_fwd", softmax_out, softmax_out_ref.get(), atol, rtol);
   compareResults("softmax_bwd", grads_out, grads_out_ref.get(), atol, rtol);
 }
