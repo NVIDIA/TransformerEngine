@@ -4,14 +4,16 @@
 
 """Attention."""
 import collections
-import os
-import warnings
-import math
-from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union, Dict
-from pkg_resources import packaging
+import functools
+from importlib.metadata import version
+import math
+import os
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import warnings
+
 import numpy as np
+from pkg_resources import packaging
 
 import torch
 import torch.nn.functional as F
@@ -68,7 +70,6 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
 
 
-_cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 
@@ -212,6 +213,26 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
                     mode="constant", value=float(bs * max_seqlen))
 
     return indices
+
+
+@functools.lru_cache
+def _get_full_cu_seqlens(
+    batch_size: int,
+    max_seqlen: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Cumulative sequence lengths in full data batch
+
+    All sequences in batch have the maximum sequence length.
+
+    """
+    return torch.arange(
+        0,
+        (batch_size + 1) * max_seqlen,
+        step=max_seqlen,
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 @jit_fuser
@@ -1652,7 +1673,6 @@ class FlashAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [x.contiguous()
                 for x in (query_layer, key_layer, value_layer)]
 
-        global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
         batch_size = query_layer.shape[0]
 
         if qkv_format in ['sbhd', 'bshd']:
@@ -1671,58 +1691,45 @@ class FlashAttention(torch.nn.Module):
                     assert (
                         max_seqlen_q == max_seqlen_kv
                     ), "Maximum sequence length for Q and KV should be the same."
-                    if self.layer_number == 1:
-                        if cu_seqlens_q is None:
-                            assert (attention_mask is not None
-                                ), "Please provide attention_mask for padding!"
-                            _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
-                        else:
-                            _cu_seqlens_q = cu_seqlens_q
-                            _indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                    _cu_seqlens_kv = _cu_seqlens_q
-                    query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
-                        _indices_q, query_layer, key_layer, value_layer
-                    )
-                else:
-                    if self.layer_number == 1:
-                        if cu_seqlens_q is None or cu_seqlens_kv is None:
-                            assert (attention_mask is not None
-                                ), "Please provide attention_mask for padding!"
-                            _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(
-                                attention_mask[0])
-                            _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(
-                                attention_mask[1])
-                        else:
-                            _cu_seqlens_q = cu_seqlens_q
-                            _cu_seqlens_kv = cu_seqlens_kv
-                            _indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                            _indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer_packed = PackTensors.apply(_indices_q, query_layer)
-                    key_layer_packed, value_layer_packed = PackTensors.apply(
-                        _indices_kv, key_layer, value_layer
-                    )
-                query_layer, key_layer, value_layer = (
-                    query_layer_packed, key_layer_packed, value_layer_packed)
-                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
-            else:
-                if self.layer_number == 1:
                     if cu_seqlens_q is None:
-                        cu_seqlens_q = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_q,
-                                step=max_seqlen_q,
-                                dtype=torch.int32,
-                                device=query_layer.device)
-                    if cu_seqlens_kv is None:
-                        cu_seqlens_kv = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_kv,
-                                step=max_seqlen_kv,
-                                dtype=torch.int32,
-                                device=key_layer.device)
-                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
+                        assert (attention_mask is not None
+                                ), "Please provide attention_mask for padding!"
+                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                    else:
+                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                    cu_seqlens_kv = cu_seqlens_q
+                    query_layer, key_layer, value_layer = PackTensors.apply(
+                        indices_q, query_layer, key_layer, value_layer
+                    )
                 else:
-                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                    if cu_seqlens_q is None or cu_seqlens_kv is None:
+                        assert (attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
+                            attention_mask[0])
+                        cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(
+                            attention_mask[1])
+                    else:
+                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                        indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
+                    query_layer = PackTensors.apply(indices_q, query_layer)
+                    key_layer, value_layer = PackTensors.apply(
+                        indices_kv, key_layer, value_layer
+                    )
+            else:
+                # Cumulative sequence lengths for unpadded data
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_q,
+                        query_layer.device,
+                    )
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_kv,
+                        key_layer.device,
+                    )
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format not supported with context parallelism!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
@@ -1777,7 +1784,7 @@ class FlashAttention(torch.nn.Module):
                 )
 
         if 'padding' in attn_mask_type:
-            output = UnpackTensor.apply(_indices_q, batch_size * max_seqlen_q, output)
+            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
 
         if qkv_format == 'sbhd':
             # (bs)hd -> bs(hd) -> sb(hd)
@@ -2135,42 +2142,30 @@ class FusedAttention(torch.nn.Module):
             if 'padding' in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
 
-                global _cu_seqlens_q, _cu_seqlens_kv
-                if (cu_seqlens_q is not None and cu_seqlens_kv is not None):
-                    # use cu_seqlens when both cu_seqlens and attention_mask are present
-                    if self.layer_number == 1:
-                        _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
-                elif attention_mask is not None:
+                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                    if attention_mask is None:
+                        raise RuntimeError(
+                            "Please provide attention_mask or cu_seqlens for padding!"
+                        )
                     if self.attention_type == "self":
-                        if self.layer_number == 1:
-                            _cu_seqlens_q = get_cu_seqlens(attention_mask)
-                            _cu_seqlens_kv = _cu_seqlens_q
+                        cu_seqlens_q = get_cu_seqlens(attention_mask)
+                        cu_seqlens_kv = cu_seqlens_q
                     else:
-                        if self.layer_number == 1:
-                            _cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            _cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
-                else:
-                    raise Exception("Please provide attention_mask or cu_seqlens for padding!")
-                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                        cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                        cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
             else:
-                if self.layer_number == 1:
-                    if cu_seqlens_q is None:
-                        cu_seqlens_q = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_q,
-                                step=max_seqlen_q,
-                                dtype=torch.int32,
-                                device=query_layer.device)
-                    if cu_seqlens_kv is None:
-                        cu_seqlens_kv = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_kv,
-                                step=max_seqlen_kv,
-                                dtype=torch.int32,
-                                device=key_layer.device)
-                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
-                else:
-                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_q,
+                        query_layer.device,
+                    )
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_kv,
+                        key_layer.device,
+                    )
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
