@@ -27,6 +27,8 @@ def enable_fused_attn():
     Enable fused attention
     """
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    yield
+    del os.environ["NVTE_FUSED_ATTN"]
 
 
 @pytest.fixture(autouse=True, scope='function')

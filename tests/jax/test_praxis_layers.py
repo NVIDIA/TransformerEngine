@@ -51,6 +51,9 @@ def enable_fused_attn():
     """
     if get_device_compute_capability(0) >= 90:
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    yield
+    if "NVTE_FUSED_ATTN" in os.environ:
+        del os.environ["NVTE_FUSED_ATTN"]
 
 
 @pytest.fixture(autouse=True, scope='function')
