@@ -525,6 +525,7 @@ class TransformerLayer(torch.nn.Module):
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
@@ -583,6 +584,10 @@ class TransformerLayer(torch.nn.Module):
                     Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
+                     to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         inference_params: InferenceParams, default = None
@@ -633,6 +638,7 @@ class TransformerLayer(torch.nn.Module):
             rotary_pos_emb=rotary_pos_emb,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
+            alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
         )
 
@@ -658,6 +664,7 @@ class TransformerLayer(torch.nn.Module):
                 checkpoint_core_attention=checkpoint_core_attention,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
+                alibi_slopes=alibi_slopes,
                 fast_zero_fill=fast_zero_fill,
             )
             if self.apply_residual_connection_post_layernorm:

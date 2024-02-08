@@ -33,8 +33,7 @@ list(APPEND transformer_engine_SOURCES
      util/system.cpp
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
-     fused_softmax/scaled_masked_softmax.cu
-     fused_softmax/scaled_upper_triang_masked_softmax.cu
+     fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
@@ -87,6 +86,7 @@ target_include_directories(transformer_engine PRIVATE
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
+                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
