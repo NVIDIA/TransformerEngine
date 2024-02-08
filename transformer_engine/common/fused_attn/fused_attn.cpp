@@ -135,6 +135,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
                         || (bias_type == NVTE_Bias_Type::NVTE_ALIBI
                             && attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK
+                            && attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK
                             && sm_arch_ == 90)
                         || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS
                             && sm_arch_ == 90))))
