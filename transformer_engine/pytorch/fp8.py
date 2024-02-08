@@ -636,9 +636,6 @@ def _fused_amax_and_scale_update(
     update_weight_scale_inv: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Update amax history and FP8 scaling factors"""
-    updated_amax_history = torch.empty_like(amax_history)
-    updated_scale = torch.empty_like(scale)
-    updated_scale_inv = torch.empty_like(scale)
     if update_weight_scale_inv:
         non_weight_mask = torch.Tensor()
     tex.fused_amax_and_scale_update(
@@ -646,14 +643,14 @@ def _fused_amax_and_scale_update(
         scale,
         scale_inv,
         non_weight_mask,
-        updated_amax_history,
-        updated_scale,
-        updated_scale_inv,
+        amax_history,
+        scale,
+        scale_inv,
         amax_compute_algo,
         fp8_dtype,
         margin,
     )
-    return updated_amax_history, updated_scale, updated_scale_inv
+    return amax_history, scale, scale_inv
 
 
 def _compute_amax(
