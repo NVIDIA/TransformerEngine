@@ -276,6 +276,8 @@ def make_graphed_callables(
     for extensive documentation.
     """
 
+    assert num_warmup_iters > 0, "Warmup is required for graph capture."
+
     just_one_callable = False
     if not isinstance(modules, tuple):
         just_one_callable = True

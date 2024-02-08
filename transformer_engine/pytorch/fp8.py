@@ -61,14 +61,10 @@ class FP8GlobalStateManager:
     FP8_DISTRIBUTED_GROUP = None
     FP8_PARAMETERS = False
     IS_FIRST_FP8_MODULE = False
-    FP8_AUTOCAST_COUNTER = 0
-    FP8_CURRENT_CONTEXT_ID = 0
     FP8_AUTOCAST_DEPTH = 0
     global_fp8_buffer = {}
     fp8_tensors_recompute_buffer = []
     amax_forward_global_reduce_func = None
-    buffer_delete_key_fwd = None
-    buffer_delete_key_bwd = None
     amax_reduce_handle_fwd = None
     fp8_available = None
     reason_for_no_fp8 = ""
@@ -84,14 +80,10 @@ class FP8GlobalStateManager:
         cls.FP8_RECIPE = None
         cls.FP8_DISTRIBUTED_GROUP = None
         cls.IS_FIRST_FP8_MODULE = False
-        cls.FP8_AUTOCAST_COUNTER = 0
-        cls.FP8_CURRENT_CONTEXT_ID = 0
         cls.FP8_AUTOCAST_DEPTH = 0
         cls.global_fp8_buffer = {}
         cls.fp8_tensors_recompute_buffer = []
         cls.amax_forward_global_reduce_func = None
-        cls.buffer_delete_key_fwd = None
-        cls.buffer_delete_key_bwd = None
         cls.amax_reduce_handle_fwd = None
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
@@ -113,11 +105,7 @@ class FP8GlobalStateManager:
         # changes in global state variables in order to make setting the
         # checkpoint backwards compatible.
         global_fp8_state = {}
-        global_fp8_state["FP8_AUTOCAST_COUNTER"] = cls.FP8_AUTOCAST_COUNTER
-        global_fp8_state["FP8_CURRENT_CONTEXT_ID"] = cls.FP8_CURRENT_CONTEXT_ID
         global_fp8_state["FP8_AUTOCAST_DEPTH"] = cls.FP8_AUTOCAST_DEPTH
-        global_fp8_state["buffer_delete_key_fwd"] = cls.buffer_delete_key_fwd
-        global_fp8_state["buffer_delete_key_bwd"] = cls.buffer_delete_key_bwd
         global_fp8_state["dp_amax_reduce_interval"] = cls.dp_amax_reduce_interval
         global_fp8_state["dp_amax_reduce_forward_idx"] = cls.dp_amax_reduce_forward_idx
         global_fp8_state["dp_amax_reduce_backward_idx"] = cls.dp_amax_reduce_backward_idx
@@ -152,18 +140,9 @@ class FP8GlobalStateManager:
         return "scaling_bwd"
 
     @staticmethod
-    def get_buffer_position_key(forward: bool = True) -> str:
-        """Returns module position key in `fp8_meta`."""
-        if forward:
-            return "global_fp8_buffer_pos_fwd"
-        return "global_fp8_buffer_pos_bwd"
-
-    @staticmethod
     def get_amax_buffer_key(forward: bool = True) -> str:
-        """Return a key in `_global_fp8_buffer` for the AMAX storage."""
-        if forward:
-            return "FWD_AMAX"
-        return "BWD_AMAX"
+        """Return a key in `cls.global_fp8_buffer` for the AMAX storage."""
+        return "forward" if forward else "backward"
 
     @classmethod
     def get_amax_reduce_handle_fwd(cls) -> Union[bool, None]:
@@ -178,26 +157,21 @@ class FP8GlobalStateManager:
     @classmethod
     def add_amax_to_global_buffer(cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
         """Append 1D tensor `amax` to global buffer."""
-        buffer_key = cls.get_amax_buffer_key(forward=forward)
+        key = cls.get_amax_buffer_key(forward)
         fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
-        buffer_position_key = cls.get_buffer_position_key(forward=forward)
 
-        if buffer_key not in cls.global_fp8_buffer:
-            cls.global_fp8_buffer[buffer_key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+        # Every module must call this function exactly once since
+        # the amax tensors are static. Ensures that compatibility
+        # with non-graphed modules is maintained.
+        amax_added_key = f"{key}_amax_added_to_buffer"
+        if amax_added_key in fp8_meta:
+            fp8_meta[amax_added_key] = True
+            return
+
+        if key not in cls.global_fp8_buffer:
+            cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
         else:
-            cls.global_fp8_buffer[buffer_key].append(
-                fp8_meta[fp8_meta_tensor_key].amax_history[0]
-            )
-
-        if buffer_position_key not in fp8_meta:
-            fp8_meta[buffer_position_key] = len(cls.global_fp8_buffer[buffer_key]) - 1
-
-        # Catch incorrect fp8_autocast usage.
-        assert fp8_meta[buffer_position_key] == len(cls.global_fp8_buffer[buffer_key]) - 1, \
-            "Same module is being invoked more than once inside an `fp8_autocast` " \
-            "region when using FP8 with amax reduction. This behavior is currently" \
-            " unsupported. For more details and correct usage, please see " \
-            "https://github.com/NVIDIA/TransformerEngine/pull/93."
+            cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -282,7 +256,7 @@ class FP8GlobalStateManager:
         if len(cls.global_fp8_buffer) == 0:
             return None
 
-        amax_buffer_key = "FWD_AMAX" if forward else "BWD_AMAX"
+        amax_buffer_key = cls.get_amax_buffer_key(forward)
 
         # Reduce AMAX in DP-domain at an interval.
         # `NVTE_DP_AMAX_REDUCE_INTERVAL` should be set as an integer value larger than 0. If
@@ -351,7 +325,6 @@ class FP8GlobalStateManager:
 
         if cls.FP8_AUTOCAST_DEPTH == 0:
             cls.IS_FIRST_FP8_MODULE = True
-            cls.FP8_AUTOCAST_COUNTER += 1
         cls.FP8_AUTOCAST_DEPTH += 1
 
         if enabled:

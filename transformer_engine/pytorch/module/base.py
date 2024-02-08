@@ -79,14 +79,9 @@ def _prepare_backward(
             _amax_reduce_handle_bwd = None
 
         # Update amax and scale; Skip all setup for global amax reduction
+        amax_and_scale_update(fp8_meta, False)
         if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
-            amax_and_scale_update(fp8_meta, False)
-
-            if not fp8_meta["bwd_amax_added_to_buffer"]:
-                FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
-                fp8_meta["bwd_amax_added_to_buffer"] = True
-        else:
-            amax_and_scale_update(fp8_meta, False)
+            FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
@@ -560,9 +555,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         amax_reduce_handle_fwd = FP8GlobalStateManager.get_amax_reduce_handle_fwd()
                         if amax_reduce_handle_fwd is not None:
                             amax_reduce_handle_fwd.wait()
-                    if not self.fp8_meta["fwd_amax_added_to_buffer"]:
-                        FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
-                        self.fp8_meta["fwd_amax_added_to_buffer"] = True
+                    FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
