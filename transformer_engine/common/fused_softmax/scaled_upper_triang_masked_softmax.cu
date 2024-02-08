@@ -368,7 +368,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(
     int softmax_elements_stride,
     int attn_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048, "Unsupported shape.");
+    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 16384, "Unsupported shape.");
     if (softmax_elements == 0) {
         return;
     } else {
@@ -506,6 +506,33 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(
                                                      softmax_elements_stride,
                                                      softmax_elements);
                 break;
+            case 12:  // 4096
+                scaled_upper_triang_masked_softmax_warp_forward<input_t, output_t, acc_t, 12>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
+            case 13:  // 8192
+                scaled_upper_triang_masked_softmax_warp_forward<input_t, output_t, acc_t, 13>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
+            case 14:  // 16384
+                scaled_upper_triang_masked_softmax_warp_forward<input_t, output_t, acc_t, 14>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
             default:
                 break;
         }
@@ -522,7 +549,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(
     int softmax_elements_stride,
     int attn_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048, "Unsupported shape.");
+    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 16384, "Unsupported shape.");
     if (softmax_elements == 0) {
        return;
     } else {
@@ -653,6 +680,33 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(
                 break;
             case 11:  // 2048
                 scaled_upper_triang_masked_softmax_warp_backward<input_t, output_t, acc_t, 11>
+                    <<<blocks, threads, 0, stream>>>(grad_input,
+                                                     grad, output,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
+            case 12:  // 4096
+                scaled_upper_triang_masked_softmax_warp_backward<input_t, output_t, acc_t, 12>
+                    <<<blocks, threads, 0, stream>>>(grad_input,
+                                                     grad, output,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
+            case 13:  // 8192
+                scaled_upper_triang_masked_softmax_warp_backward<input_t, output_t, acc_t, 13>
+                    <<<blocks, threads, 0, stream>>>(grad_input,
+                                                     grad, output,
+                                                     scale,
+                                                     batch_count,
+                                                     softmax_elements_stride,
+                                                     softmax_elements);
+                break;
+            case 14:  // 16384
+                scaled_upper_triang_masked_softmax_warp_backward<input_t, output_t, acc_t, 14>
                     <<<blocks, threads, 0, stream>>>(grad_input,
                                                      grad, output,
                                                      scale,

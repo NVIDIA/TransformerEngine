@@ -521,6 +521,17 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        float scale_factor
 );
 
+
+at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input,
+                                                        float scale_factor
+);
+
+
+at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
+                                                         at::Tensor softmax_results_,
+                                                         float scale_factor
+);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/

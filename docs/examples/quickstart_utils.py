@@ -205,8 +205,9 @@ def share_parameters_with_transformerlayer_te_model(te_model, basic_model):
 def cast_to_representable(inp, scale = 1., fp8_format='e4m3'):
     import transformer_engine.pytorch.cpp_extensions as texcpp
     import transformer_engine_extensions as tex
+    from transformer_engine.pytorch.constants import TE_DType
     fp8_type = tex.DType.kFloat8E4M3 if fp8_format == 'e4m3' else tex.DType.kFloat8E5M2
-    input_type = texcpp.TE_DType[inp.dtype]
+    input_type = TE_DType[inp.dtype]
     meta = tex.FP8TensorMeta()
     meta.scale = torch.ones(1,dtype=torch.float32, device="cuda") * scale
     meta.scale_inv = torch.ones(1, dtype=torch.float32, device="cuda") / scale
