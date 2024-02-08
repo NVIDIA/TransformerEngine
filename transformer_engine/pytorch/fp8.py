@@ -159,18 +159,11 @@ class FP8GlobalStateManager:
         return "global_fp8_buffer_pos_bwd"
 
     @staticmethod
-    def get_autocast_key(forward: bool = True) -> str:
-        """Returns module position key in `fp8_meta`."""
-        if forward:
-            return "autocast_id_fwd"
-        return "autocast_id_bwd"
-
-    @staticmethod
-    def get_amax_buffer_key(fp8_meta: Dict[str, Any], forward: bool = True) -> str:
+    def get_amax_buffer_key(forward: bool = True) -> str:
         """Return a key in `_global_fp8_buffer` for the AMAX storage."""
         if forward:
-            return f"FWD_AMAX"
-        return f"BWD_AMAX"
+            return "FWD_AMAX"
+        return "BWD_AMAX"
 
     @classmethod
     def get_amax_reduce_handle_fwd(cls) -> Union[bool, None]:
@@ -185,7 +178,7 @@ class FP8GlobalStateManager:
     @classmethod
     def add_amax_to_global_buffer(cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
         """Append 1D tensor `amax` to global buffer."""
-        buffer_key = cls.get_amax_buffer_key(fp8_meta, forward=forward)
+        buffer_key = cls.get_amax_buffer_key(forward=forward)
         fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
         buffer_position_key = cls.get_buffer_position_key(forward=forward)
 
@@ -205,68 +198,6 @@ class FP8GlobalStateManager:
             "region when using FP8 with amax reduction. This behavior is currently" \
             " unsupported. For more details and correct usage, please see " \
             "https://github.com/NVIDIA/TransformerEngine/pull/93."
-
-    @classmethod
-    def copy_amax_from_global_buffer(
-        cls, fp8_meta: Dict[str, Any], forward: bool = True
-    ) -> None:
-        """Populate current amax with the correct location from buffer."""
-        fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
-        buffer_position_key = cls.get_buffer_position_key(forward=forward)
-        if buffer_position_key not in fp8_meta:
-            return
-
-        amax_buffer_key = cls.get_amax_buffer_key(fp8_meta, forward=forward)
-        assert amax_buffer_key in cls.global_fp8_buffer, "TE internal error."
-
-        fp8_meta[fp8_meta_tensor_key].amax_history[0] = cls.global_fp8_buffer[amax_buffer_key][
-            fp8_meta[buffer_position_key]
-        ]
-
-    @classmethod
-    def set_amax_buffer_key_deletion(
-        cls, fp8_meta: Dict[str, Any], forward: bool = True
-    ) -> None:
-        """Delete this amax key from global buffer during autocast end."""
-        if cls.get_autocast_key(forward=forward) not in fp8_meta:
-            return
-        if forward:
-            cls.buffer_delete_key_fwd = cls.get_amax_buffer_key(fp8_meta, forward=forward)
-        else:
-            cls.buffer_delete_key_bwd = cls.get_amax_buffer_key(fp8_meta, forward=forward)
-
-    @classmethod
-    def delete_key_from_amax_buffer(cls, forward: bool = True) -> None:
-        """Delete the key from global amax buffer."""
-        if forward:
-            if (
-                cls.buffer_delete_key_fwd is not None
-                and cls.buffer_delete_key_fwd in cls.global_fp8_buffer
-            ):
-                del cls.global_fp8_buffer[cls.buffer_delete_key_fwd]
-        else:
-            if (
-                cls.buffer_delete_key_bwd is not None
-                and cls.buffer_delete_key_bwd in cls.global_fp8_buffer
-            ):
-                del cls.global_fp8_buffer[cls.buffer_delete_key_bwd]
-
-    @classmethod
-    def get_fp8_context_id(cls) -> int:
-        """Returns an ID for the current FP8 context."""
-        return cls.FP8_CURRENT_CONTEXT_ID
-
-    @classmethod
-    def set_fp8_context_id(cls, ctx_id: int) -> None:
-        """Sets the current FP8 context."""
-        cls.FP8_CURRENT_CONTEXT_ID = ctx_id
-
-    @classmethod
-    def new_fp8_context_id(cls) -> int:
-        """Returns global autocast counter as a proxy to be used
-        as the autocast ID for FP8 modules.
-        """
-        return cls.FP8_AUTOCAST_COUNTER
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -349,7 +280,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
         if len(cls.global_fp8_buffer) == 0:
-            return
+            return None
 
         amax_buffer_key = "FWD_AMAX" if forward else "BWD_AMAX"
 
