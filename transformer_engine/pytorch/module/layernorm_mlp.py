@@ -262,59 +262,53 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
+
+            # Perform FP8 GEMM
+            fp8_gemm_args = (
+                fc1_weight_fp8._data,
+                fp8_meta["scaling_fwd"].scale_inv,
+                tex.FP8FwdTensors.GEMM1_WEIGHT,
+                fp8_dtype_forward,
+                ln_out_total,
+                fp8_meta["scaling_fwd"].scale_inv,
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fp8_dtype_forward,
+                activation_dtype,
+                get_workspace(),
+            )
+            fp8_gemm_kwargs = dict(
+                bias=fc1_bias,
+                use_bias=use_fc1_bias,
+                use_split_accumulator=_2X_ACC_FPROP,
+                ub_algo=ub_algo,
+                ub=ub_obj_lnout if ub_overlap_ag else None,
+                extra_output_tensor=ln_out if ub_overlap_ag else None,
+            )
             if gemm_gelu_fusion:
-                gelu_out, fc1_out = tex.fp8_gemm(
-                    fc1_weight_fp8._data,
-                    fp8_meta["scaling_fwd"].scale_inv,
-                    tex.FP8FwdTensors.GEMM1_WEIGHT,
-                    fp8_dtype_forward,
-                    ln_out_total,
-                    fp8_meta["scaling_fwd"].scale_inv,
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    torch.uint8, # fp8_dtype_forward?
-                    get_workspace(),
-                    gelu=True,
-                    out_index=tex.FP8FwdTensors.GEMM2_INPUT,
-                    fp8_meta_tensor=fp8_meta["scaling_fwd"],
-                    bias=fc1_bias,
-                    use_bias=use_fc1_bias,
-                    use_split_accumulator=_2X_ACC_FPROP,
-                    D_dtype=fp8_dtype_forward,
-                    ub_algo=ub_algo,
-                    ub=ub_obj_lnout if ub_overlap_ag else None,
-                    extra_output_tensor=ln_out if ub_overlap_ag else None,
+                fp8_gemm_args[8] = torch.uint8  # out_dtype
+                fp8_gemm_kwargs.update(
+                    dict(
+                        gelu=True,
+                        out_index=tex.FP8FwdTensors.GEMM2_INPUT,
+                        fp8_meta_tensor=fp8_meta["scaling_fwd"],
+                        D_dtype=fp8_dtype_forward,
+                    )
                 )
-            else:
-                fc1_out, _ = tex.fp8_gemm(
-                    fc1_weight_fp8._data,
-                    fp8_meta["scaling_fwd"].scale_inv,
-                    tex.FP8FwdTensors.GEMM1_WEIGHT,
-                    fp8_dtype_forward,
-                    ln_out_total,
-                    fp8_meta["scaling_fwd"].scale_inv,
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    activation_dtype,
-                    get_workspace(),
-                    bias=fc1_bias,
-                    use_bias=use_fc1_bias,
-                    use_split_accumulator=_2X_ACC_FPROP,
-                    ub_algo=ub_algo,
-                    ub=ub_obj_lnout if ub_overlap_ag else None,
-                    extra_output_tensor=ln_out if ub_overlap_ag else None,
-                )
+            fp8_gemm_out = tex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
             if not is_grad_enabled:
                 clear_tensor_data(ln_out_total)
 
-            if not gemm_gelu_fusion:
+            # Perform activation
+            if gemm_gelu_fusion:
+                gelu_out, fc1_out = fp8_gemm_out
+            else:
+                fc1_out, _ = fp8_gemm_out
                 gelu_out = activation_func(
                     fc1_out,
                     fp8_meta["scaling_fwd"],
                     tex.FP8FwdTensors.GEMM2_INPUT,
                     fp8_dtype_forward,
                 )
-
             if not is_grad_enabled:
                 clear_tensor_data(fc1_out)
 
