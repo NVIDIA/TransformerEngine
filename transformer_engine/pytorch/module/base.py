@@ -223,10 +223,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
-        self.fp8_meta["fwd_amax_added_to_buffer"] = False
-        self.fp8_meta["bwd_amax_added_to_buffer"] = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+
+        # Register hook for backward reduction of amaxes.
+        self.fp8_meta["bwd_amax_reduce_hook"] = (self.register_full_backward_hook(
+            TransformerEngineBaseModule.bwd_hook_for_amax_reduction))
+        self.fp8_meta["first_module"] = False
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -799,3 +802,26 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         is_first_microbatch: Union[bool, None],
     ) -> List[torch.Tensor]:
         """Needs override."""
+
+    @staticmethod
+    def bwd_hook_for_amax_reduction(module, inp, output): # pylint: disable=unused-argument
+        """
+        Backward hook that must be attached to first module within the fp8_autocast region
+        in order to execute global reduction of backward amaxes outside the module itself.
+        This is necessary for expert-model like cases where certain devices could skip fwd
+        or bwd passes, thus resulting in a hang during the communication.
+
+        There are 2 scenarios in which this hook is fired:
+        Case 1: This is an FP8 base module in which case we can check for `first_module`'s
+                and delete the hook (if needed) to minimize pytorch overhead in subsequent
+                calls. This module may or may not be graphed.
+        Case 2: Not a base FP8 module. This module is always graphed, and hooks should not
+                not be tampered with.
+        """
+        if (isinstance(module, TransformerEngineBaseModule)
+            and not module.fp8_meta["first_module"]
+            and module.fp8_meta["bwd_amax_reduce_hook"] is not None):
+            module.fp8_meta["bwd_amax_reduce_hook"].remove()
+        if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
+            FP8GlobalStateManager.amax_reduce_handle_bwd = (
+                FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable

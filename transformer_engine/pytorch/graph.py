@@ -8,7 +8,7 @@ from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
-from .fp8 import fp8_autocast, FP8GlobalStateManager
+from .fp8 import fp8_autocast
 from .distributed import _set_cuda_rng_state
 from .module.base import TransformerEngineBaseModule
 
@@ -302,6 +302,14 @@ def make_graphed_callables(
         forward_funcs.append(module)
         per_callable_module_params.append(tuple(module.parameters()))
 
+        # This is not strictly necessary since adding bwd hooks to children modules
+        # is okay for graph capture as long it's just for kernel launches, but it's
+        # safer to remove these hooks now and re-add them post capture.
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                if m.fp8_meta["bwd_amax_reduce_hook"] is not None:
+                    m.fp8_meta["bwd_amax_reduce_hook"].remove()
+
     if just_one_callable:
         forward_funcs = forward_funcs[0]
     else:
@@ -329,6 +337,7 @@ def make_graphed_callables(
         if enabled and fp8_recipe.reduce_amax:
             # This works because we know that every `module`'s
             # forward is wrapped by `fp8_autocast` already.
-            module.register_full_backward_hook(FP8GlobalStateManager.bwd_hook_for_amax_reduction)
+            module.register_full_backward_hook(
+                TransformerEngineBaseModule.bwd_hook_for_amax_reduction)
 
     return graphed_callables

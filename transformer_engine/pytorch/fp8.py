@@ -320,18 +320,6 @@ class FP8GlobalStateManager:
 
         return wait_handle
 
-    @staticmethod
-    def bwd_hook_for_amax_reduction(module, inp, output): # pylint: disable=unused-argument
-        """
-        Backward hook that must be attached to first module within the fp8_autocast region
-        in order to execute global reduction of backward amaxes outside the module itself.
-        This is necessary for expert-model like cases where certain devices could skip fwd
-        or bwd passes, thus resulting in a hang during the communication.
-        """
-        if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
-            FP8GlobalStateManager.amax_reduce_handle_bwd = (
-                FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable
-
     @classmethod
     def fp8_autocast_enter(
         cls,
