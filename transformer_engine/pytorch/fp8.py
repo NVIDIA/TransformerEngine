@@ -550,41 +550,31 @@ def _compute_scaling_factor_inverse(
     return scale_inv
 
 
-@torch.jit.script
 def _fused_amax_and_scale_update(
     amax_history: torch.Tensor,
     scale: torch.Tensor,
     scale_inv: torch.Tensor,
-    fp8_max: float,
+    fp8_dtype: tex.DType,
     margin: int,
     amax_compute_algo: str,
     non_weight_mask: torch.Tensor,
     update_weight_scale_inv: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Amax to scale conversion."""
-
-    # Get amax from history.
-    amax_history, amax = _default_get_amax_and_update_history(
+    """Update amax history and FP8 scaling factors"""
+    if update_weight_scale_inv:
+        non_weight_mask = torch.Tensor()
+    tex.fused_amax_and_scale_update(
         amax_history,
-        amax_compute_algo,
-    )
-
-    # Calculate new scaling factor.
-    scale = _default_sf_compute(
-        amax,
-        scale,
-        fp8_max,
-        margin,
-    )
-
-    # Calculate new inverse of scaling factor.
-    scale_inv = _compute_scaling_factor_inverse(
         scale,
         scale_inv,
         non_weight_mask,
-        update_weight_scale_inv,
+        amax_history,
+        scale,
+        scale_inv,
+        amax_compute_algo,
+        fp8_dtype,
+        margin,
     )
-
     return amax_history, scale, scale_inv
 
 
@@ -642,7 +632,7 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key].amax_history,
             fp8_meta[fp8_meta_tensor_key].scale,
             fp8_meta[fp8_meta_tensor_key].scale_inv,
-            fp8_meta[fp8_max_key],
+            get_fp8_te_dtype(fp8_meta["recipe"], fwd_update),
             fp8_meta["recipe"].margin,
             fp8_meta["recipe"].amax_compute_algo,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],

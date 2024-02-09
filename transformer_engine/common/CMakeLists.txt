@@ -34,7 +34,8 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
-     fused_rope/fused_rope.cu)
+     fused_rope/fused_rope.cu
+     recipe/delayed_scaling.cu)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")

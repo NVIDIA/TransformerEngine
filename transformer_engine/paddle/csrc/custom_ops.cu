@@ -1189,54 +1189,31 @@ void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads
         softmax_results.stream());
 }
 
-__global__ void UpdateFP8MetaKernel(const float *amax, const float *rolled_amax_history,
-                                    const bool *non_weight_mask, float *amax_history, float *scale,
-                                    float *scale_inv, bool update_weight_scale_inv, float margin,
-                                    float fp8_max, size_t history_numel, size_t amax_numel) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx >= history_numel) {
-        return;
-    }
-
-    amax_history[idx] = rolled_amax_history[idx];
-
-    if (idx < amax_numel) {
-        float sf = (fp8_max / amax[idx]) / powf(2.0f, margin);
-        float scale_reg = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
-        scale[idx] = scale_reg;
-        if (update_weight_scale_inv || non_weight_mask[idx]) scale_inv[idx] = 1.0f / scale_reg;
-        amax_history[idx] = 0.0f;
-    }
-}
-
 constexpr int BLOCK_SIZE = 512;
 
 void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
                                    paddle::Tensor &scale,         // NOLINT
                                    paddle::Tensor &scale_inv,     // NOLINT
                                    const paddle::Tensor &non_weight_mask,
-                                   bool update_weight_scale_inv, float fp8_max, float margin,
+                                   int64_t fp8_dtype,
+                                   float margin,
                                    const std::string &amax_compute) {
-    NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
-
-    paddle::Tensor amax;
-
-    if (amax_compute == "max") {
-        amax = amax_history.max({0});
-    } else {
-        amax = amax_history.slice(0, 1);
-    }
-
-    const auto rolled_amax_history = amax_history.roll({-1}, {0});
-
-    auto size = amax_history.numel();
-    size_t num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    UpdateFP8MetaKernel<<<num_blocks, BLOCK_SIZE, 0, amax_history.stream()>>>(
-        amax.data<float>(), rolled_amax_history.data<float>(), non_weight_mask.data<bool>(),
-        amax_history.data<float>(), scale.data<float>(), scale_inv.data<float>(),
-        update_weight_scale_inv, margin, fp8_max, amax_history.numel(), amax.numel());
-    NVTE_CHECK_CUDA(cudaGetLastError());
+  auto amax_history_ = MakeNvteTensor(amax_history);
+  auto scale_ = MakeNvteTensor(scale);
+  auto scale_inv_ = MakeNvteTensor(scale_inv);
+  const auto non_weight_mask_ = MakeNvteTensor(non_weight_mask);
+  nvte_delayed_scaling_recipe_amax_and_scale_update(
+    amax_history_.data(),
+    scale_.data(),
+    scale_inv_.data(),
+    non_weight_mask_.data(),
+    amax_history_.data(),
+    scale_.data(),
+    scale_inv_.data(),
+    amax_compute.c_str(),
+    static_cast<NVTEDType>(fp8_dtype),
+    margin,
+    amax_history.stream());
 }
 
 void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
@@ -1567,8 +1544,7 @@ PD_BUILD_OP(amax_and_scale_update_inplace)
     .SetInplaceMap({{"_amax_history", "amax_history"},
                     {"_scale", "scale"},
                     {"_scale_inv", "scale_inv"}})
-    .Attrs({"update_weight_scale_inv: bool", "fp8_max: float", "margin: float",
-            "amax_compute: std::string"})
+    .Attrs({"fp8_dtype: int64_t", "margin: float", "amax_compute: std::string"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace));
 
 PD_BUILD_OP(update_latest_amax_history_inplace)
