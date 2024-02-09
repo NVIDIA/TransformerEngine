@@ -118,6 +118,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_atomic_gemm_rs: bool,
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
+        gemm_gelu_fusion: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -261,33 +262,59 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
-            fc1_out, _ = tex.fp8_gemm(
-                fc1_weight_fp8._data,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_WEIGHT,
-                fp8_dtype_forward,
-                ln_out_total,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-                activation_dtype,
-                get_workspace(),
-                bias=fc1_bias,
-                use_bias=use_fc1_bias,
-                use_split_accumulator=_2X_ACC_FPROP,
-                ub_algo=ub_algo,
-                ub=ub_obj_lnout if ub_overlap_ag else None,
-                extra_output_tensor=ln_out if ub_overlap_ag else None,
-            )
+            if gemm_gelu_fusion:
+                gelu_out, fc1_out = tex.fp8_gemm(
+                    fc1_weight_fp8._data,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    fp8_dtype_forward,
+                    ln_out_total,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                    torch.uint8, # fp8_dtype_forward?
+                    get_workspace(),
+                    gelu=True,
+                    out_index=tex.FP8FwdTensors.GEMM2_INPUT,
+                    fp8_meta_tensor=fp8_meta["scaling_fwd"],
+                    bias=fc1_bias,
+                    use_bias=use_fc1_bias,
+                    use_split_accumulator=_2X_ACC_FPROP,
+                    D_dtype=fp8_dtype_forward,
+                    ub_algo=ub_algo,
+                    ub=ub_obj_lnout if ub_overlap_ag else None,
+                    extra_output_tensor=ln_out if ub_overlap_ag else None,
+                )
+            else:
+                fc1_out, _ = tex.fp8_gemm(
+                    fc1_weight_fp8._data,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    fp8_dtype_forward,
+                    ln_out_total,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                    activation_dtype,
+                    get_workspace(),
+                    bias=fc1_bias,
+                    use_bias=use_fc1_bias,
+                    use_split_accumulator=_2X_ACC_FPROP,
+                    ub_algo=ub_algo,
+                    ub=ub_obj_lnout if ub_overlap_ag else None,
+                    extra_output_tensor=ln_out if ub_overlap_ag else None,
+                )
             if not is_grad_enabled:
                 clear_tensor_data(ln_out_total)
 
-            gelu_out = activation_func(
-                fc1_out,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM2_INPUT,
-                fp8_dtype_forward,
-            )
+            if not gemm_gelu_fusion:
+                gelu_out = activation_func(
+                    fc1_out,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM2_INPUT,
+                    fp8_dtype_forward,
+                )
+
             if not is_grad_enabled:
                 clear_tensor_data(fc1_out)
 
@@ -1033,6 +1060,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1152,6 +1180,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_atomic_gemm_rs: bool = False,
         ub_split_ag: bool = False,
         ub_atomic_gemm_ag: bool = False,
+        gemm_gelu_fusion: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1175,6 +1204,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        self.gemm_gelu_fusion = gemm_gelu_fusion
 
         if (ub_bulk_wgrad # pylint: disable=too-many-boolean-expressions
             or ub_bulk_dgrad
@@ -1190,6 +1220,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
             warnings.warn(
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
+
+        if gemm_gelu_fusion:
+            assert (
+                ub_split_ag
+            ), "GEMM-GELU fusion is currently only supported with split GEMM-AG overlap."
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1438,6 +1473,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_atomic_gemm_rs,
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
+                self.gemm_gelu_fusion,
             )
             out = fwd_fn(*args)
 
