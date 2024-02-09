@@ -26,7 +26,6 @@ def graph_pool_handle():
 def _make_graphed_callables(
     callables,
     sample_args,
-    parameters=None,
     num_warmup_iters=3,
     allow_unused_input=False,
 ):
@@ -78,7 +77,7 @@ def _make_graphed_callables(
     per_callable_module_params = [
         tuple(c.parameters()) if isinstance(c, torch.nn.Module) else ()
         for c in callables
-    ] if parameters is None else parameters
+    ]
     per_callable_static_input_surfaces = [
         flatten_sample_args[i] + per_callable_module_params[i]
         for i in range(len(callables))
@@ -295,12 +294,10 @@ def make_graphed_callables(
         block.forward = forward_func
 
     forward_funcs = []
-    per_callable_module_params = []
     for module in modules:
         assert isinstance(module, torch.nn.Module), f"Graphing for {type(module)} is not supported."
         wrap_autocast(module)
         forward_funcs.append(module)
-        per_callable_module_params.append(tuple(module.parameters()))
 
         # This is not strictly necessary since adding bwd hooks to children modules
         # is okay for graph capture as long it's just for kernel launches, but it's
@@ -319,8 +316,7 @@ def make_graphed_callables(
     cuda_rng_state = torch.cuda.get_rng_state()
 
     graphed_callables = _make_graphed_callables(
-        forward_funcs, sample_args, per_callable_module_params,
-        num_warmup_iters=num_warmup_iters,
+        forward_funcs, sample_args, num_warmup_iters=num_warmup_iters,
         allow_unused_input=allow_unused_input)
 
     # Ensures warmup does not affect numerics for ops such as dropout.
