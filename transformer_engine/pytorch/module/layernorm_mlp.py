@@ -264,7 +264,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
 
             # Perform FP8 GEMM
-            fp8_gemm_args = (
+            fp8_gemm_args = [
                 fc1_weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -275,7 +275,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_forward,
                 activation_dtype,
                 get_workspace(),
-            )
+            ]
             fp8_gemm_kwargs = dict(
                 bias=fc1_bias,
                 use_bias=use_fc1_bias,
