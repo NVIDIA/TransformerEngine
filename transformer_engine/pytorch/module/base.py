@@ -44,7 +44,6 @@ _2X_ACC_WGRAD = True
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
-_amax_reduce_handle_bwd = None
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -73,10 +72,10 @@ def _prepare_backward(
 ) -> Generator[None, None, None]:
     """Checks and prep for BWD."""
     if fp8:
-        global _amax_reduce_handle_bwd
-        if _amax_reduce_handle_bwd is not None:
-            _amax_reduce_handle_bwd.wait()
-            _amax_reduce_handle_bwd = None
+        # Wait for the prior AMAX reduction to finish
+        amax_reduce_handle_bwd = FP8GlobalStateManager.get_amax_reduce_handle_bwd()
+        if amax_reduce_handle_bwd is not None:
+            amax_reduce_handle_bwd.wait()
 
         # Update amax and scale; Skip all setup for global amax reduction
         amax_and_scale_update(fp8_meta, False)
@@ -88,13 +87,14 @@ def _prepare_backward(
 
     if (fp8 and fp8_meta["recipe"].reduce_amax
         and get_distributed_world_size(fp8_meta["fp8_group"]) > 1):
-        if fp8_meta["first_module"]:
-            _amax_reduce_handle_bwd = FP8GlobalStateManager.global_amax_reduction(
-                fp8_meta,
-                tp_group,
-                tp_size,
-                forward=False
-            )
+        reduce_func = partial(
+            FP8GlobalStateManager.global_amax_reduction,
+            fp8_meta,
+            tp_group,
+            tp_size,
+            forward=False
+        )
+        FP8GlobalStateManager.setup_amax_backward_global_reduce_func(reduce_func)
 
 def initialize_ub(
     shape: list,
@@ -551,7 +551,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
-                        # Wait for the prior AMAX reduction to finish
+                        # Wait for the prior AMAX reduction to finish.
                         amax_reduce_handle_fwd = FP8GlobalStateManager.get_amax_reduce_handle_fwd()
                         if amax_reduce_handle_fwd is not None:
                             amax_reduce_handle_fwd.wait()

@@ -65,7 +65,9 @@ class FP8GlobalStateManager:
     global_fp8_buffer = {}
     fp8_tensors_recompute_buffer = []
     amax_forward_global_reduce_func = None
+    amax_backward_global_reduce_func = None
     amax_reduce_handle_fwd = None
+    amax_reduce_handle_bwd = None
     fp8_available = None
     reason_for_no_fp8 = ""
     dp_amax_reduce_interval = None
@@ -84,7 +86,9 @@ class FP8GlobalStateManager:
         cls.global_fp8_buffer = {}
         cls.fp8_tensors_recompute_buffer = []
         cls.amax_forward_global_reduce_func = None
+        cls.amax_backward_global_reduce_func = None
         cls.amax_reduce_handle_fwd = None
+        cls.amax_reduce_handle_bwd = None
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
         cls.dp_amax_reduce_interval = None
@@ -146,13 +150,23 @@ class FP8GlobalStateManager:
 
     @classmethod
     def get_amax_reduce_handle_fwd(cls) -> Union[bool, None]:
-        """Return AMAX reduction wait handle of forward prop."""
+        """Return amax reduction wait handle for fprop."""
         return cls.amax_reduce_handle_fwd
 
     @classmethod
+    def get_amax_reduce_handle_bwd(cls) -> Union[bool, None]:
+        """Return amax reduction wait handle for backprop."""
+        return cls.amax_reduce_handle_bwd
+
+    @classmethod
     def setup_amax_forward_global_reduce_func(cls, f: Callable) -> None:
-        """Sets up the function to call during autocast exit."""
+        """Sets up call to forward amax reduction during autocast entry."""
         cls.amax_forward_global_reduce_func = f
+
+    @classmethod
+    def setup_amax_backward_global_reduce_func(cls, f: Callable) -> None:
+        """Sets up call to backward amax reduction after completion of backward pass."""
+        cls.amax_backward_global_reduce_func = f
 
     @classmethod
     def add_amax_to_global_buffer(cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
@@ -164,8 +178,9 @@ class FP8GlobalStateManager:
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
         amax_added_key = f"{key}_amax_added_to_buffer"
-        if amax_added_key in fp8_meta:
+        if amax_added_key not in fp8_meta:
             fp8_meta[amax_added_key] = True
+        else:
             return
 
         if key not in cls.global_fp8_buffer:
@@ -304,6 +319,18 @@ class FP8GlobalStateManager:
             orig.copy_(reduced)
 
         return wait_handle
+
+    @staticmethod
+    def bwd_hook_for_amax_reduction(module, inp, output): # pylint: disable=unused-argument
+        """
+        Backward hook that must be attached to first module within the fp8_autocast region
+        in order to execute global reduction of backward amaxes outside the module itself.
+        This is necessary for expert-model like cases where certain devices could skip fwd
+        or bwd passes, thus resulting in a hang during the communication.
+        """
+        if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
+            FP8GlobalStateManager.amax_reduce_handle_bwd = (
+                FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable
 
     @classmethod
     def fp8_autocast_enter(

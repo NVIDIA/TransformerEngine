@@ -326,6 +326,9 @@ def make_graphed_callables(
                 m.reset_fp8_meta_tensors()
         for p in module.parameters():
             p.grad = None
-    FP8GlobalStateManager.reset()
+        if enabled and fp8_recipe.reduce_amax:
+            # This works because we know that every `module`'s
+            # forward is wrapped by `fp8_autocast` already.
+            module.register_full_backward_hook(FP8GlobalStateManager.bwd_hook_for_amax_reduction)
 
     return graphed_callables
