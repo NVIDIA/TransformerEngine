@@ -309,6 +309,8 @@ class Float8Tensor(torch.Tensor):
 
         # Cached transpose
         self._transpose: Optional[Float8Tensor] = None
+        # Avoid recalculating cached transpose if possible
+        self._lazy_transpose_cache: bool = False
 
         # FP8 scale-inverse
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
@@ -460,7 +462,10 @@ class Float8Tensor(torch.Tensor):
                       returned if available and otherwise the
                       transpose is computed. Caching is only supported
                       for basic 2D transposes and the cache is reset
-                      after any in-place operations.
+                      after any in-place operations. Setting
+                      `_lazy_transpose_cache=True` as an attribute
+                      changes the behavior so that the cache is not
+                      updated if it is already available.
 
         """
 
@@ -478,7 +483,7 @@ class Float8Tensor(torch.Tensor):
             return super().transpose(dim0, dim1)
 
         # Clear cache if needed
-        if update_cache:
+        if update_cache and not self._lazy_transpose_cache:
             self._transpose = None
 
         # Compute transpose if needed
