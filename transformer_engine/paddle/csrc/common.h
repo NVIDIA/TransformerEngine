@@ -17,6 +17,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
+#include <transformer_engine/recipe.h>
 #include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
