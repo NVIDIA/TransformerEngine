@@ -2523,6 +2523,7 @@ class DotProductAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -2616,6 +2617,8 @@ class DotProductAttention(torch.nn.Module):
                      to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
+        inference_params: Optional[InferenceParams], default = `None`
+                    Efficienly calculates and stores the context during inference.
         """
 
         assert (
@@ -2642,6 +2645,24 @@ class DotProductAttention(torch.nn.Module):
 
         if qkv_format is None:
             qkv_format = self.qkv_format
+
+        if inference_params is not None:
+            (inference_key_memory, inference_value_memory,
+            ) = inference_params.key_value_memory_dict[self.layer_number]
+
+            batch_start = inference_params.batch_size_offset
+            batch_end = batch_start + key_layer.size(1)
+            assert batch_end <= inference_key_memory.size(1)
+
+            sequence_start = inference_params.sequence_len_offset
+            sequence_end = sequence_start + key_layer.size(0)
+            assert sequence_end <= inference_key_memory.size(0)
+
+            # Copy key and values.
+            inference_key_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
+            inference_value_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
+            key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
+            value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
 
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
@@ -2721,12 +2742,15 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         # Filter: cross attention + causal mask.
-        if (_flash_attn_2_1_plus
+        # (in training mode)
+        if (inference_params is None
+            and _flash_attn_2_1_plus
             and "causal" in attn_mask_type
-            and max_seqlen_q != max_seqlen_kv):
+            and max_seqlen_q != max_seqlen_kv
+        ):
             warnings.warn(
-                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior "
-                "for causal mask in cross attention. See "
+                "In training mode, disable the use of FlashAttention since version 2.1+ has "
+                "changed its behavior for causal mask in cross attention. See "
                 "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
             )
             use_flash_attention = False
@@ -2753,7 +2777,11 @@ class DotProductAttention(torch.nn.Module):
         if attn_mask_type == "arbitrary":
             use_flash_attention = False
             use_fused_attention = False
-        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+
+        if (inference_params is None
+            and "causal" in attn_mask_type 
+            and max_seqlen_q != max_seqlen_kv
+        ):
             use_unfused_attention = False
 
         # Filter: bias.
@@ -3593,29 +3621,15 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
         if inference_params and self.layer_number is not None:
-            batch_start = inference_params.batch_size_offset
-            batch_end = batch_start + key_layer.size(1)
-            assert batch_end <= inference_key_memory.size(1)
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)
             assert sequence_end <= inference_key_memory.size(0)
-            # Copy key and values.
-            inference_key_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...
-            ] = key_layer
-            inference_value_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...
-            ] = value_layer
-            key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-            value_layer = inference_value_memory[
-                :sequence_end, batch_start:batch_end, ...
-            ]
 
             # adjust the key rotary positional embedding
             if rotary_pos_emb is not None:
                 q_pos_emb, k_pos_emb = rotary_pos_emb
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, :, :, :]
-                k_pos_emb = k_pos_emb[:sequence_end, :, :, :]
+                k_pos_emb = k_pos_emb[sequence_start:sequence_end, :, :, :]
                 rotary_pos_emb = (q_pos_emb, k_pos_emb)
 
         # ==================================
@@ -3643,6 +3657,7 @@ class MultiheadAttention(torch.nn.Module):
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
+            inference_params=inference_params,
         )
 
         # =================

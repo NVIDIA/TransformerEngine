@@ -333,32 +333,40 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if ( # pylint: disable=too-many-boolean-expressions
-            self.scaled_masked_softmax_fusion  # user wants to fuse
-            and self.input_in_float16  # input must be fp16
-            and 16 <= sk <= 16384  # sk must be 16 ~ 16384
-            and sk % 8 == 0  # sk must be divisor of 8
-            and sq % 4 == 0  # sq must be divisor of 4
-            and attn_batches % 4 == 0  # np * b must be divisor of 4
+        if ( # pylint: disable=too-many-boolean-expressions)
+            not(self.scaled_masked_softmax_fusion)  # user doesn't want to fuse
+            or not(self.input_in_float16)           # input must be fp16
+            or not(16 <= sk <= 16384)               # sk must be 16 ~ 16384
+            or not(sk % 8 == 0)                     # sk must be divisor of 8
+            or self.attn_mask_type == "arbitrary"   # Custom masks not supported
+        ):
+            return False
+
+        if (self.attn_mask_type == "causal"         # unfused causal softmax kernel
+            and sq != sk
+        ):
+            return True
+
+        if (sq % 4 == 0                             # sq must be divisor of 4
+            and attn_batches % 4 == 0               # np * b must be divisor of 4
             and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
-            if 0 <= sk <= 16384:
-                batch_per_block = self.get_batch_per_block(int(sk))
+            batch_per_block = self.get_batch_per_block(int(sk))
 
-                if self.attn_mask_type == "causal":
-                    if attn_batches % batch_per_block == 0:
-                        return True
-                elif self.attn_mask_type == "padding":
-                    if (
-                        mask is not None
-                        and sq % batch_per_block == 0
-                        and mask.shape[-2] == sq
-                        and mask.shape[-1] == sk
-                    ):
-                        return True
-                else:
-                    if sq % batch_per_block == 0:
-                        return True
+            if self.attn_mask_type == "causal":
+                if attn_batches % batch_per_block == 0:
+                    return True
+            elif self.attn_mask_type == "padding":
+                if (
+                    mask is not None
+                    and sq % batch_per_block == 0
+                    and mask.shape[-2] == sq
+                    and mask.shape[-1] == sk
+                ):
+                    return True
+            else:
+                if sq % batch_per_block == 0:
+                    return True
         return False
 
     def forward_fused_softmax(
@@ -369,12 +377,15 @@ class FusedScaleMaskSoftmax(nn.Module):
         scale = 1.0 if scale is None else scale
 
         if self.attn_mask_type == "causal":
-            assert sq == sk, "causal mask is only for self attention"
+            if sq == sk:
+                # input is 3D tensor (attn_batches, sq, sk)
+                inp = inp.view(-1, sq, sk)
+                probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
+                return probs.view(b, np, sq, sk)
+            else:
+                # input is 4D tensor (b, np, sq, sk)
+                return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
 
-            # input is 3D tensor (attn_batches, sq, sk)
-            inp = inp.view(-1, sq, sk)
-            probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
-            return probs.view(b, np, sq, sk)
         # input is 4D tensor (b, np, sq, sk)
         if mask is not None and self.attn_mask_type != "no_mask":
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
