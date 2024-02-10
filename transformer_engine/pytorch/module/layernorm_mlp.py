@@ -1215,10 +1215,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
 
-        if gemm_gelu_fusion:
-            assert (
-                ub_split_ag
-            ), "GEMM-GELU fusion is currently only supported with split GEMM-AG overlap."
+        if gemm_gelu_fusion and not ub_split_ag:
+            warnings.warn(
+                "Disabling GEMM-GELU fusion as it is only supported with split GEMM-AG overlap."
+            )
+            self.gemm_gelu_fusion = False
 
         if tp_group is None:
             self.tp_size = tp_size
