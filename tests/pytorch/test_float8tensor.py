@@ -310,7 +310,7 @@ class TestFloat8Tensor:
                 **tols,
             )
             x_fp8_data = x_fp8._data.clone()
-            x_fp8._data.zero()
+            x_fp8._data.zero_()
             torch.testing.assert_close(
                 x_fp8.transpose(*transpose_dims),
                 x_ref.transpose(*transpose_dims),
@@ -322,9 +322,6 @@ class TestFloat8Tensor:
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
-
-            # Check that non-lazy transpose caching recalculates
-            # transpose
             x_fp8._lazy_transpose_cache = False
             torch.testing.assert_close(
                 x_fp8.transpose(*transpose_dims, update_cache=True),
@@ -333,6 +330,7 @@ class TestFloat8Tensor:
                 atol=0,
             )
             x_fp8._data.copy_(x_fp8_data)
+            x_fp8._reset_caches()
 
             # Make sure cache is reset after in-place operation
             x_fp8.transpose(*transpose_dims, update_cache=True)
