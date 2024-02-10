@@ -1907,9 +1907,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
         batch_size = reduce(operator.mul, batch_shape)
-        wkspace_info = transformer_engine_jax.get_self_fused_attn_fwd_workspace_sizes(
-            batch_size, max_seqlen, num_heads, head_dim, scaling_factor, dropout_probability,
-            attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+        wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
+            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, scaling_factor,
+            dropout_probability, attn_bias_type, attn_mask_type, NVTE_QKV_Layout.NVTE_BS3HD,
+            jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
         wkspace_aval = qkv_aval.update(shape=wkspace_info[0],
                                        dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
 
@@ -2076,10 +2077,10 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
         batch_size = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = \
-            transformer_engine_jax.get_self_fused_attn_bwd_workspace_sizes(
-                batch_size, max_seqlen, num_heads, head_dim,
+            transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
+                batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim,
                 scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-                jax_dtype_to_te_dtype(qkv_aval.dtype), is_training
+                NVTE_QKV_Layout.NVTE_BS3HD, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training
             )
 
         dqkv_aval = qkv_aval.update(shape=qkv_aval.shape, dtype=qkv_dtype)
@@ -2296,10 +2297,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
         batch_size = reduce(operator.mul, q_batch_shape)
-        wkspace_info = transformer_engine_jax.get_cross_fused_attn_fwd_workspace_sizes(
+        wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+            NVTE_QKV_Layout.NVTE_BSHD_BS2HD, jax_dtype_to_te_dtype(q_aval.dtype), is_training)
         wkspace_aval = q_aval.update(shape=wkspace_info[0],
                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
 
@@ -2484,10 +2485,10 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
 
         batch_size = reduce(operator.mul, q_batch_shape)
         wkspace_shape, wkspace_dtype = \
-            transformer_engine_jax.get_cross_fused_attn_bwd_workspace_sizes(
+            transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
                 batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
                 scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-                jax_dtype_to_te_dtype(q_aval.dtype), is_training
+                NVTE_QKV_Layout.NVTE_BSHD_BS2HD, jax_dtype_to_te_dtype(q_aval.dtype), is_training
             )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -2725,7 +2726,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+            NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD, jax_dtype_to_te_dtype(q_aval.dtype), is_training)
         wkspace_aval = q_aval.update(shape=wkspace_info[0],
                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
 
@@ -2916,6 +2917,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
                 batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
                 scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+                NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
                 jax_dtype_to_te_dtype(q_aval.dtype), is_training
             )
 
