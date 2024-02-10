@@ -2030,7 +2030,7 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
                         scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Wrapper for TE self fused attention fwd
-    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Return BMM1 -> (PreScaleBias) -> Scale -> (PostScaleBias) -> Softmax -> (Dropout) -> BMM2
     """
     checker = _FusedAttnRNGStateChecker()
     seed = checker.check_seed(seed, dropout_probability, is_training)
@@ -2428,7 +2428,7 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_s
                          dropout_probability: float, is_training: bool):
     """
     Wrapper for TE cross fused attention fwd
-    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Return BMM1 -> (PreScaleBias) -> Scale -> (PostScaleBias) -> Softmax -> (Dropout) -> BMM2
     """
     checker = _FusedAttnRNGStateChecker()
     seed = checker.check_seed(seed, dropout_probability, is_training)
@@ -2855,7 +2855,7 @@ def fused_attn_fwd(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.nda
                    scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Wrapper for TE fused attention fwd, where query, key, value are seperated tensors
-    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Return BMM1 -> (PreScaleBias) -> Scale -> (PostScaleBias) -> Softmax -> (Dropout) -> BMM2
     """
     checker = _FusedAttnRNGStateChecker()
     seed = checker.check_seed(seed, dropout_probability, is_training)
