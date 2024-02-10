@@ -67,14 +67,14 @@ class DotProductAttention(TransformerEngineBaseLayer):
 
     head_dim: int = 0
     num_attention_heads: int = 0
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     attention_dropout: float = 0.
     attn_mask_type: AttnMaskType = 'causal'
     attn_bias_type: AttnBiasType = None
     dropout_rng_name: str = 'dropout'
     float32_logits: bool = False
     qkv_layout: str = 'bshd_bshd_bshd'
-    scale_factor: float | None = None
+    scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
 
     def setup(self) -> None:
@@ -122,7 +122,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
 
     head_dim: int = 0
     num_attention_heads: int = 0
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     attention_dropout: float = 0.
     dropout_rng_name: str = 'dropout'
     input_layernorm: bool = True
@@ -133,7 +133,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     use_bias: bool = False
     bias_init: WeightInit = WeightInit.Constant(0.0)
     attn_mask_type: str = 'causal'
-    attn_bias_type: str | None = None
+    attn_bias_type: Optional[str] = None
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
@@ -142,11 +142,11 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     float32_logits: bool = False
 
     # Deprecated parameters
-    num_heads: int | None = None
-    dropout_rate: float | None = None
-    output_layernorm: bool | None = None
-    apply_residual_connection_post_layernorm: bool | None = None
-    fuse_qkv: bool | None = None
+    num_heads: Optional[int] = None
+    dropout_rate: Optional[float] = None
+    output_layernorm: Optional[bool] = None
+    apply_residual_connection_post_layernorm: Optional[bool] = None
+    fuse_qkv: Optional[bool] = None
 
     def __post_init__(self):
         # Deal with the deprecated parameters
@@ -234,7 +234,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     hidden_size: int = 512
     mlp_hidden_size: int = 2048
     num_attention_heads: int = 8
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
@@ -252,7 +252,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
-    self_attn_bias_type: str | None = None
+    self_attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     enable_relative_embedding: bool = True

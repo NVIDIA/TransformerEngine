@@ -112,10 +112,10 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
 class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
-    attn_bias_type: AttnBiasType | None = None
+    attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
     float32_logits: bool = False
-    scale_factor: float | None = None
+    scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
 
     @nn.compact
@@ -126,7 +126,7 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
                  mask: Optional[Array] = None,
                  bias: Optional[Array] = None,
                  *,
-                 dropout_rng: PRNGKey | None = None,
+                 dropout_rng: Optional[PRNGKey] = None,
                  deterministic: bool = False) -> Array:
         assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
         batch_dim = 1 if self.transpose_batch_sequence else 0
@@ -230,10 +230,10 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
 class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
-    attn_bias_type: AttnBiasType | None = None
+    attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
-    scale_factor: float | None = None
+    scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
 
     @nn.compact
@@ -244,7 +244,7 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
                  mask: Optional[Array] = None,
                  bias: Optional[Array] = None,
                  *,
-                 dropout_rng: PRNGKey | None = None,
+                 dropout_rng: Optional[PRNGKey] = None,
                  deterministic: bool = False) -> Array:
 
         seed = None
@@ -361,7 +361,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         Type of the attention mask passed into softmax operation in the self attention.
         Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
         Introduced in v0.10.0.
-    attn_bias_type: str | None, default = None
+    attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the self attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
@@ -390,7 +390,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         * h: num_attention_heads or num_gqa_groups
         * d: head dimension
 
-    scale_factor: float | None, default = None
+    scale_factor: Optional[float], default = None
         Scale factor to apply on query. When :attr:`None` is present, the scale factor is equal
         to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
         need to apply scale on query, which is to set :attr:`scale_factor=1.`.
@@ -406,7 +406,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     """
     head_dim: int
     num_attention_heads: int
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     attention_dropout: float = 0.
     attn_mask_type: AttnMaskType = 'causal'
     attn_bias_type: AttnBiasType = None
@@ -414,7 +414,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     dropout_rng_name: str = 'dropout'
     float32_logits: bool = False
     qkv_layout: str = 'bshd_bshd_bshd'
-    scale_factor: float | None = None
+    scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
 
     @nn.compact
@@ -599,7 +599,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         Type of the attention mask passed into softmax operation in the attention.
         Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
         Introduced in v0.10.0.
-    attn_bias_type: str | None, default = None
+    attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
@@ -678,7 +678,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
     head_dim: int
     num_attention_heads: int
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     attention_dropout: float = 0.
     dropout_rng_name: str = 'dropout'
     input_layernorm: bool = True
@@ -690,7 +690,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     attn_mask_type: str = 'causal'
-    attn_bias_type: str | None = None
+    attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     dtype: DType = jnp.float32
@@ -702,11 +702,11 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     float32_logits: bool = False
 
     # Deprecated parameters
-    num_heads: int | None = None
-    dropout_rate: float | None = None
-    output_layernorm: bool | None = None
-    apply_residual_connection_post_layernorm: bool | None = None
-    fuse_qkv: bool | None = None
+    num_heads: Optional[int] = None
+    dropout_rate: Optional[float] = None
+    output_layernorm: Optional[bool] = None
+    apply_residual_connection_post_layernorm: Optional[bool] = None
+    fuse_qkv: Optional[bool] = None
 
     def __post_init__(self):
         # Deal with the deprecated parameters
@@ -1249,7 +1249,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         Type of the attention mask passed into softmax operation in the self attention.
         Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
         Introduced in v0.10.0.
-    self_attn_bias_type: str | None, default = None
+    self_attn_bias_type: Optional[str], default = None
         Type of the attention bias passed into the self attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
@@ -1298,7 +1298,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     hidden_size: int = 512
     mlp_hidden_size: int = 2048
     num_attention_heads: int = 8
-    num_gqa_groups: int | None = None
+    num_gqa_groups: Optional[int] = None
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
@@ -1318,7 +1318,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
     self_attn_mask_type: str = 'causal'
-    self_attn_bias_type: str | None = None
+    self_attn_bias_type: Optional[str] = None
     enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     enable_rotary_pos_emb: bool = False
