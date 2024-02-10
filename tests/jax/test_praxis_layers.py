@@ -718,6 +718,10 @@ class DotProductAttnAttr:
         ATTN_MASK_TYPE: 'causal',
         TRANSPOSE_BS: False,
         SCALE_FACTOR: 1.,
+    }, {
+        ATTN_MASK_TYPE: 'no_mask',
+        TRANSPOSE_BS: False,
+        SCALE_FACTOR: 1.,
     }]
 
 
