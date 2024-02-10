@@ -295,8 +295,6 @@ class TransformerLayer(torch.nn.Module):
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
 
-        gemm_gelu_fusion = (activation == 'gelu'
-                            and bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0"))))
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
@@ -430,7 +428,6 @@ class TransformerLayer(torch.nn.Module):
             ub_split_ag=ub_split_ag,
             ub_atomic_gemm_rs=ub_atomic_gemm_rs,
             ub_atomic_gemm_ag=ub_atomic_gemm_ag,
-            gemm_gelu_fusion=gemm_gelu_fusion,
             activation=activation,
             normalization=normalization,
             device=device,

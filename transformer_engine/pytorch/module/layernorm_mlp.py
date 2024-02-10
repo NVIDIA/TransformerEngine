@@ -1174,7 +1174,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_atomic_gemm_rs: bool = False,
         ub_split_ag: bool = False,
         ub_atomic_gemm_ag: bool = False,
-        gemm_gelu_fusion: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1198,7 +1197,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
-        self.gemm_gelu_fusion = gemm_gelu_fusion
+        # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
+        self.gemm_gelu_fusion = (bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0"))) and
+                                 self.activation == 'gelu' and self.ub_split_ag)
 
         if (ub_bulk_wgrad # pylint: disable=too-many-boolean-expressions
             or ub_bulk_dgrad
@@ -1214,12 +1215,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             warnings.warn(
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
-
-        if gemm_gelu_fusion and not ub_split_ag:
-            warnings.warn(
-                "Disabling GEMM-GELU fusion as it is only supported with split GEMM-AG overlap."
-            )
-            self.gemm_gelu_fusion = False
 
         if tp_group is None:
             self.tp_size = tp_size
