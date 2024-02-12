@@ -8,7 +8,11 @@ from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
-from .fp8 import fp8_autocast
+from .fp8 import (
+    fp8_autocast,
+    set_fp8_graph_capture_start,
+    set_fp8_graph_capture_end,
+)
 from .distributed import _set_cuda_rng_state
 from .module.base import TransformerEngineBaseModule
 
@@ -275,7 +279,9 @@ def make_graphed_callables(
     for extensive documentation.
     """
 
-    assert num_warmup_iters > 0, "Warmup is required for graph capture."
+    if enabled:
+        set_fp8_graph_capture_start()
+        assert num_warmup_iters > 0, "Warmup is required for FP8 graph capture."
 
     just_one_callable = False
     if not isinstance(modules, tuple):
@@ -336,4 +342,5 @@ def make_graphed_callables(
             module.register_full_backward_hook(
                 TransformerEngineBaseModule.bwd_hook_for_amax_reduction)
 
+    set_fp8_graph_capture_end()
     return graphed_callables

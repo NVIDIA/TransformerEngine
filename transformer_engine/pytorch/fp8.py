@@ -18,6 +18,7 @@ from .jit import jit_fuser
 
 
 __all__ = ["fp8_autocast", "fp8_model_init"]
+_IN_FP8_CUDA_GRAPH_CAPTURE = False
 
 
 def check_fp8_support() -> Tuple[bool, str]:
@@ -327,7 +328,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
         if cls.FP8_AUTOCAST_DEPTH == 0:
-            if callable(cls.amax_forward_global_reduce_func):
+            if callable(cls.amax_forward_global_reduce_func) and not in_fp8_graph_capture_mode():
                 cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
 
         cls.FP8_ENABLED = enabled
@@ -663,3 +664,20 @@ def split_and_copy(
     """Split `buffer` by `chunk_sizes` and copy into `outputs`."""
     splits = buffer.split(chunk_sizes)
     torch._foreach_copy_(outputs, splits)
+
+
+def set_fp8_graph_capture_start():
+    """Being capture."""
+    global _IN_FP8_CUDA_GRAPH_CAPTURE
+    _IN_FP8_CUDA_GRAPH_CAPTURE = True
+
+
+def set_fp8_graph_capture_end():
+    """End capture."""
+    global _IN_FP8_CUDA_GRAPH_CAPTURE
+    _IN_FP8_CUDA_GRAPH_CAPTURE = False
+
+
+def in_fp8_graph_capture_mode():
+    """Is cuda graph being captured."""
+    return _IN_FP8_CUDA_GRAPH_CAPTURE
