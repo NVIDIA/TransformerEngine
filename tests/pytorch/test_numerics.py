@@ -1073,8 +1073,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
-@pytest.mark.parametrize("ub_split_ag", all_boolean)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ub_split_ag):
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     config = model_configs[model]
 
     te_ln_mlp = (
@@ -1083,7 +1082,6 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ub_
             4 * config.hidden_size,
             activation=activation,
             normalization=normalization,
-            ub_split_ag=ub_split_ag,
         )
         .to(dtype=dtype)
         .cuda()
