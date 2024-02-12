@@ -313,10 +313,7 @@ class FP8GlobalStateManager:
             fp8_meta["async_amax_reduction"],
         )
 
-        reduced_amaxes = list(contiguous_amax.split(chunk_sizes))
-
-        for orig, reduced in zip(cls.global_fp8_buffer[amax_buffer_key], reduced_amaxes):
-            orig.copy_(reduced)
+        split_and_copy(contiguous_amax, cls.global_fp8_buffer[amax_buffer_key], chunk_sizes)
 
         return wait_handle
 
@@ -655,3 +652,14 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
             update_weight_scale_inv,
         )
+
+
+@jit_fuser
+def split_and_copy(
+    buffer: torch.Tensor,
+    outputs: List[torch.Tensor],
+    chunk_sizes: List[int],
+) -> None:
+    """Split `buffer` by `chunk_sizes` and copy into `outputs`."""
+    splits = buffer.split(chunk_sizes)
+    torch._foreach_copy_(outputs, splits)
