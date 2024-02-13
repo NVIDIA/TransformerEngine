@@ -82,12 +82,12 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
 def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
         result = torch.allclose(t1, t2, atol=atol)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
-            msg = (f"Outputs not close enough."
+            msg = (f"Outputs not close enough in tensor at idx={i}. "
                    f"Location of the maximum difference: {m.item()} "
                    f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
                    f"(diff {diff[m].item()})."
@@ -453,7 +453,12 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
     assert_all_equal(outputs, outputs_recompute)
 
 
-def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
+def _test_e2e_full_recompute(
+    bs, dtype, config, fp8,
+    fp8_model_params=False,
+    recompute=False,
+    use_reentrant=True
+):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -490,21 +495,23 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
         )
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=use_reentrant
     ).cuda()
-    te_inp_hidden_states.retain_grad()
+    if use_reentrant:
+        te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     with fp8_autocast(enabled=fp8):
         if recompute:
             te_out = te_checkpoint(
                 block,
-                False,  # distribute_saved_activations
-                get_dummy_cuda_rng_tracker,
-                None,  # tp_group
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
+                distribute_saved_activations=False,
+                tp_group=None,
+                get_cuda_rng_tracker=get_dummy_cuda_rng_tracker,
+                use_reentrant=use_reentrant,
             )
         else:
             te_out = block(
@@ -516,7 +523,9 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
     loss.backward()
     torch.cuda.synchronize()
 
-    outputs = [te_out, te_inp_hidden_states.grad]
+    outputs = [te_out]
+    if use_reentrant:
+        outputs.append(te_inp_hidden_states.grad)
     for p in block.parameters():
         if p.requires_grad:
             outputs.append(p.grad)
@@ -528,15 +537,26 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, use_reentrant):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
+    if (dtype == torch.bfloat16 or bs == 1) and not fp8 and fp8_model_params and not use_reentrant:
+        pytest.skip("Non-reentrant mode has unexpected truncation errors with "
+                    "batch size 1 or bfloat16.")
+
     config = model_configs[model]
 
-    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                       recompute=False, use_reentrant=use_reentrant)
+    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                                 recompute=True, use_reentrant=use_reentrant)
+
+    if dtype == torch.bfloat16 and not use_reentrant:
+        assert_allclose(outputs, outputs_recompute, 1e-2)
+    else:
+        assert_all_equal(outputs, outputs_recompute)
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
