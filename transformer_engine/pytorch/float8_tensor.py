@@ -309,8 +309,6 @@ class Float8Tensor(torch.Tensor):
 
         # Cached transpose
         self._transpose: Optional[Float8Tensor] = None
-        # Avoid recalculating cached transpose if possible
-        self._lazy_transpose_cache: bool = False
 
         # FP8 scale-inverse
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
