@@ -510,7 +510,7 @@ def _test_e2e_full_recompute(
                 checkpoint_core_attention=False,
                 distribute_saved_activations=False,
                 tp_group=None,
-                get_cuda_rng_tracker=get_dummy_cuda_rng_tracker,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 use_reentrant=use_reentrant,
             )
         else:

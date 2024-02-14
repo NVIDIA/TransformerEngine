@@ -191,7 +191,7 @@ class _CheckpointFunction(torch.autograd.Function):
         ctx,
         run_function: Callable,
         distribute_saved_activations: bool,
-        get_cuda_rng_tracker: Union[Callable, None],
+        get_rng_state_tracker: Union[Callable, None],
         tp_group: Union[dist_group_type, None],
         kwargs: Dict[str, Any],
         *args: Tuple[torch.Tensor, ...],
@@ -204,8 +204,8 @@ class _CheckpointFunction(torch.autograd.Function):
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
         ctx.fwd_cuda_rng_state = torch.cuda.get_rng_state()
-        if get_cuda_rng_tracker is not None:
-            ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        if get_rng_state_tracker is not None:
+            ctx.fwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
         with torch.no_grad():
             with activation_recompute_forward(
@@ -229,7 +229,7 @@ class _CheckpointFunction(torch.autograd.Function):
         tensor_inputs = [arg if torch.is_tensor(arg) else None for arg in args]
         ctx.save_for_backward(*tensor_inputs)
 
-        ctx.get_cuda_rng_tracker = get_cuda_rng_tracker
+        ctx.get_rng_state_tracker = get_rng_state_tracker
         ctx.tp_group = tp_group
         ctx.kwargs = kwargs
 
@@ -251,7 +251,7 @@ class _CheckpointFunction(torch.autograd.Function):
             for (t, arg) in zip(ctx.saved_tensors, ctx.inputs)
         )
 
-        get_cuda_rng_tracker = ctx.get_cuda_rng_tracker
+        get_rng_state_tracker = ctx.get_rng_state_tracker
 
         if ctx.distribute_saved_activations:
             safely_set_viewless_tensor_data(
@@ -264,14 +264,14 @@ class _CheckpointFunction(torch.autograd.Function):
         # Store the current states.
         bwd_cpu_rng_state = torch.get_rng_state()
         bwd_cuda_rng_state = torch.cuda.get_rng_state()
-        if get_cuda_rng_tracker is not None:
-            bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        if get_rng_state_tracker is not None:
+            bwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
         # Set the states to what it used to be before the forward pass.
         torch.set_rng_state(ctx.fwd_cpu_rng_state)
         _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
-        if get_cuda_rng_tracker is not None:
-            get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
+        if get_rng_state_tracker is not None:
+            get_rng_state_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
@@ -284,8 +284,8 @@ class _CheckpointFunction(torch.autograd.Function):
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
         _set_cuda_rng_state(bwd_cuda_rng_state)
-        if get_cuda_rng_tracker is not None:
-            get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
+        if get_rng_state_tracker is not None:
+            get_rng_state_tracker().set_states(bwd_cuda_rng_state_tracker)
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
@@ -316,12 +316,12 @@ class _CheckpointFrame:
     def __init__(
         self,
         recompute_fn: Callable,
-        get_cuda_rng_tracker: Callable
+        get_rng_state_tracker: Callable
     ):
         self.recompute_fn = recompute_fn
         self.recomputed = []
         self.count = 0
-        self.get_cuda_rng_tracker = get_cuda_rng_tracker
+        self.get_rng_state_tracker = get_rng_state_tracker
         self.fwd_rng_states = None
         self.bwd_rng_states = None
 
@@ -331,8 +331,8 @@ class _CheckpointFrame:
             torch.get_rng_state(),
             torch.cuda.get_rng_state(),
         )
-        if self.get_cuda_rng_tracker is not None:
-            rng_states += (self.get_cuda_rng_tracker().get_states(), )
+        if self.get_rng_state_tracker is not None:
+            rng_states += (self.get_rng_state_tracker().get_states(), )
 
         if forward:
             self.fwd_rng_states = rng_states
@@ -347,8 +347,8 @@ class _CheckpointFrame:
 
         torch.set_rng_state(rng_states[0])
         _set_cuda_rng_state(rng_states[1])
-        if self.get_cuda_rng_tracker is not None:
-            self.get_cuda_rng_tracker().set_states(rng_states[2])
+        if self.get_rng_state_tracker is not None:
+            self.get_rng_state_tracker().set_states(rng_states[2])
 
 
 
@@ -443,12 +443,6 @@ def checkpoint(
         valid outputs with the inputs :attr:`args` and :attr:`kwargs`.
 
     .. warning::
-
-        `distribute_saved_activations=True` has no effect when `use_reentrant=False`. The
-        non-reentrant checkpointing implementation does not store inputs for recompute, and instead
-        utilizes PyTorch autograd engine's packing/unpacking hooks.
-
-    .. warning::
         `use_reentrant=False` does not support early stopping, and will execute the entire forward
         pass for the checkpointed module when recomputing activations in the backward pass.
 
@@ -461,7 +455,7 @@ def checkpoint(
             if set to `True` and `use_reentrant=True`, first tensor argument is distributed
             across the specified tensor parallel group (`tp_group`) before saving it for the
             backward pass. This has no effect when `use_reentrant=False`.
-    get_cuda_rng_tracker: `Callable`
+    get_rng_state_tracker: `Callable`
             python callable which returns an instance of :func:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup
             tensor parallel process group. Required only when `distribute_saved_activations=True`
@@ -477,7 +471,7 @@ def checkpoint(
     # Pop out te.distributed.checkpoint() arguments
     distribute_saved_activations = kwargs.pop("distribute_saved_activations", False)
     tp_group = kwargs.pop("tp_group", None)
-    get_cuda_rng_tracker = kwargs.pop("get_cuda_rng_tracker", None)
+    get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
 
     # Pop out and discard te.utils.checkpoint.checkpoint() arguments for wrapper compatibility
     context_fn = kwargs.pop("context_fn", noop_context_fn)
@@ -506,7 +500,7 @@ def checkpoint(
         return _CheckpointFunction.apply(
             function,
             distribute_saved_activations,
-            get_cuda_rng_tracker,
+            get_rng_state_tracker,
             tp_group,
             kwargs,
             *args,
@@ -537,7 +531,7 @@ def checkpoint(
         # Initialize a new checkpoint frame for each new forward pass.
         new_frame = _CheckpointFrame(
             recompute_fn,
-            get_cuda_rng_tracker,
+            get_rng_state_tracker,
         )
         new_frame.cache_rng_states(forward=True)
 
@@ -615,7 +609,7 @@ class CudaRNGStatesTracker:
         _set_cuda_rng_state(orig_rng_state)
 
     @contextmanager
-    def fork(self, name: str = "model-parallel-rng") -> None:
+    def fork(self, name: str = "model-parallel-rng"):
         """
         Fork the cuda rng state, perform operations, and exit with
         the original state.
