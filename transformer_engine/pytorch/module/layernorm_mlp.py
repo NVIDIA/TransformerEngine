@@ -92,6 +92,7 @@ class _LayerNormMLP(torch.autograd.Function):
         use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Union[torch.Tensor, None],
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
@@ -128,7 +129,11 @@ class _LayerNormMLP(torch.autograd.Function):
             assert_dim_for_fp8_exec(fc1_weight)
             assert_dim_for_fp8_exec(fc2_weight)
 
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        update_fp8_weights = (
+            is_first_microbatch is None
+            or is_first_microbatch
+            or skip_fp8_weight_update is not None
+        )
 
         activation_func = _act_func(activation)[0]
 
@@ -232,6 +237,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=fc1_weight_fp8._data,
                         transpose_out=fc1_weight_t_fp8._data,
+                        noop_tensor=skip_fp8_weight_update,
                     )
                     tex.fp8_cast_transpose_fused(
                         fc2_weight,
@@ -240,6 +246,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=fc2_weight_fp8._data,
                         transpose_out=fc2_weight_t_fp8._data,
+                        noop_tensor=skip_fp8_weight_update,
                     )
                 else:
                     tex.cast_to_fp8(
@@ -1033,6 +1040,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1355,7 +1363,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     @no_torch_dynamo()
     def forward(
-        self, inp: torch.Tensor, is_first_microbatch: Optional[bool] = None
+        self,
+        inp: torch.Tensor,
+        skip_fp8_weight_update: Optional[torch.Tensor] = None,
+        is_first_microbatch: Optional[bool] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a feedforward network (MLP Block).
@@ -1412,6 +1423,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
+                skip_fp8_weight_update,
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,

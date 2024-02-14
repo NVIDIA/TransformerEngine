@@ -33,6 +33,7 @@ def _make_graphed_callables(
     sample_args,
     num_warmup_iters=3,
     allow_unused_input=False,
+    fp8_weight_caching=False,
 ):
     """
     Helper method for `make_graphed_callables`
@@ -69,6 +70,8 @@ def _make_graphed_callables(
                 + ":func:`~make_graphed_callables`, only parameters may be trainable. "
                 + "All buffers must have ``requires_grad=False``."
             )
+        if fp8_weight_caching:
+            args += (torch.empty(1, device="cuda"),)
         flatten_arg, _ = _tree_flatten(args)
         flatten_sample_args.append(tuple(flatten_arg))
         assert all(isinstance(arg, torch.Tensor) for arg in flatten_arg), (
@@ -214,11 +217,19 @@ def _make_graphed_callables(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )
 
-        def functionalized(*user_args):
+        def functionalized(*user_args, **user_kwargs):
             # Runs the autograd function with inputs == all
             # inputs to the graph that might require grad
             # (explicit user args + module parameters)
             # Assumes module params didn't change since capture.
+            if fp8_weight_caching:
+                assert (
+                    ("is_first_microbatch" in user_kwargs
+                     and isinstance(user_kwargs["is_first_microbatch"], bool))
+                ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
+                f = torch.zeros if user_kwargs["is_first_microbatch"] else torch.ones
+                user_args += (f(1, device="cuda"),)
+
             flatten_user_args, _ = _tree_flatten(user_args)
             out = Graphed.apply(*(tuple(flatten_user_args) + module_params))
             return _tree_unflatten(out, output_unflatten_spec)
@@ -243,12 +254,12 @@ def _make_graphed_callables(
         if isinstance(func, torch.nn.Module):
 
             def make_graphed_forward(func, graph_training_state, graphed, orig_fwd):
-                def new_fwd(*user_args):
+                def new_fwd(*user_args, **user_kwargs):
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
-                        return graphed(*user_args)
-                    return orig_fwd(*user_args)
+                        return graphed(*user_args, **user_kwargs)
+                    return orig_fwd(*user_args, **user_kwargs)
 
                 return new_fwd
 
@@ -272,6 +283,7 @@ def make_graphed_callables(
     calibrating = False,
     fp8_recipe = None,
     fp8_group = None,
+    fp8_weight_caching=False,
 ):
     """
     Accepts TransformerEngine modules and returns graphed versions. This function is based
@@ -293,12 +305,12 @@ def make_graphed_callables(
 
     def wrap_autocast(block):
         old_forward = block.forward
-        def forward_func(*args):
+        def forward_func(*args, **kwargs):
             with fp8_autocast(enabled=enabled,
                               calibrating=calibrating,
                               fp8_recipe=fp8_recipe,
                               fp8_group=fp8_group):
-                outputs = old_forward(*args)
+                outputs = old_forward(*args, **kwargs)
             return outputs
         block.forward = forward_func
 
@@ -326,7 +338,8 @@ def make_graphed_callables(
 
     graphed_callables = _make_graphed_callables(
         forward_funcs, sample_args, num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input)
+        allow_unused_input=allow_unused_input,
+        fp8_weight_caching=fp8_weight_caching)
 
     # Ensures warmup does not affect numerics for ops such as dropout.
     _set_cuda_rng_state(cuda_rng_state)

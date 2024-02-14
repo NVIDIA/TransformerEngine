@@ -66,6 +66,7 @@ class _Linear(torch.autograd.Function):
         bias: torch.Tensor,
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Union[torch.Tensor, None],
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
@@ -93,7 +94,11 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
 
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        update_fp8_weights = (
+            is_first_microbatch is None
+            or is_first_microbatch
+            or skip_fp8_weight_update is not None
+        )
 
         if ub_split_rs or ub_atomic_gemm_rs:
             tp_world_size = get_distributed_world_size(tp_group)
@@ -167,6 +172,7 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=weight_fp8._data,
                         transpose_out=weight_t_fp8._data,
+                        noop_tensor=skip_fp8_weight_update,
                     )
                 else:
                     cast_to_fp8(
@@ -542,6 +548,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -846,6 +853,7 @@ class Linear(TransformerEngineBaseModule):
     def forward(
         self,
         inp: torch.Tensor,
+        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -915,6 +923,7 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
+                skip_fp8_weight_update,
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,

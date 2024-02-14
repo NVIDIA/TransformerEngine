@@ -3344,6 +3344,7 @@ class MultiheadAttention(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         encoder_output: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
@@ -3468,6 +3469,7 @@ class MultiheadAttention(torch.nn.Module):
             if self.input_layernorm:
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
+                    skip_fp8_weight_update=skip_fp8_weight_update,
                     is_first_microbatch=is_first_microbatch,
                 )
                 if self.return_layernorm_output:
@@ -3477,6 +3479,7 @@ class MultiheadAttention(torch.nn.Module):
             else:
                 mixed_x_layer = self.qkv(
                     hidden_states,
+                    skip_fp8_weight_update=skip_fp8_weight_update,
                     is_first_microbatch=is_first_microbatch,
                 )
 
@@ -3528,6 +3531,7 @@ class MultiheadAttention(torch.nn.Module):
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
                 encoder_output,
+                skip_fp8_weight_update=skip_fp8_weight_update,
                 is_first_microbatch=is_first_microbatch,
             )
 
@@ -3564,6 +3568,7 @@ class MultiheadAttention(torch.nn.Module):
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
+                    skip_fp8_weight_update=skip_fp8_weight_update,
                     is_first_microbatch=is_first_microbatch,
                 )
                 if self.return_layernorm_output:
@@ -3573,6 +3578,7 @@ class MultiheadAttention(torch.nn.Module):
             else:
                 query_layer = self.query_layer(
                     hidden_states,
+                    skip_fp8_weight_update=skip_fp8_weight_update,
                     is_first_microbatch=is_first_microbatch,
                 )
 
@@ -3650,7 +3656,9 @@ class MultiheadAttention(torch.nn.Module):
         # =================
 
         projection_output = self.proj(
-            context_layer, is_first_microbatch=is_first_microbatch
+            context_layer,
+            skip_fp8_weight_update=skip_fp8_weight_update,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.return_bias:
