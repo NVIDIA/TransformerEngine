@@ -7,6 +7,7 @@ set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      transformer_engine.cpp
      transpose/cast_transpose.cu
+     transpose/cast_transpose_noop.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu

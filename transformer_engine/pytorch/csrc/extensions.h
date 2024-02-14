@@ -223,6 +223,17 @@ void fused_cast_transpose(at::Tensor input,
 );
 
 
+void fused_cast_transpose_noop(at::Tensor input,
+                               at::Tensor noop,
+                               at::Tensor scale,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               at::Tensor input_cast,
+                               at::Tensor input_transpose,
+                               transformer_engine::DType otype
+);
+
+
 std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,

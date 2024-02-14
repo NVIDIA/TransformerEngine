@@ -22,6 +22,7 @@ def fp8_cast_transpose_fused(
     otype: tex.DType,
     cast_out: Optional[torch.Tensor] = None,
     transpose_out: Optional[torch.Tensor] = None,
+    noop_tensor: Optional[torch.Tensor] = None,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor], None]:
     """Cast + Transpose with FP8 output"""
 
@@ -33,8 +34,12 @@ def fp8_cast_transpose_fused(
         )
         return_outputs = True
 
-    tex.fused_cast_transpose(
+    if noop_tensor is None:
+        noop_tensor = torch.zeros(1, device="cuda")
+
+    tex.fused_cast_transpose_noop(
         inp,
+        noop_tensor,
         fp8_meta_tensor.scale[fp8_tensor],
         fp8_meta_tensor.amax_history[0][fp8_tensor],
         fp8_meta_tensor.scale_inv[fp8_tensor],

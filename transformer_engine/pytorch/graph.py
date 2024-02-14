@@ -12,6 +12,7 @@ from .fp8 import (
     fp8_autocast,
     set_fp8_graph_capture_start,
     set_fp8_graph_capture_end,
+    get_default_fp8_recipe,
 )
 from .distributed import _set_cuda_rng_state
 from .module.base import TransformerEngineBaseModule
@@ -282,6 +283,8 @@ def make_graphed_callables(
     if enabled:
         set_fp8_graph_capture_start()
         assert num_warmup_iters > 0, "Warmup is required for FP8 graph capture."
+
+    fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
 
     just_one_callable = False
     if not isinstance(modules, tuple):

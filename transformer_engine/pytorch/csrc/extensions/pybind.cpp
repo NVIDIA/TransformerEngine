@@ -42,6 +42,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD");
   m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
+  m.def("fused_cast_transpose_noop", &fused_cast_transpose_noop, "Fused Cast + Transpose");
   m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
