@@ -23,6 +23,7 @@ from ..fp8 import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     amax_and_scale_update,
+    in_fp8_graph_capture_mode,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -552,7 +553,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # Setup for amax reduction
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
-                    self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
+                    if not in_fp8_graph_capture_mode():
+                        self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
                         # Wait for the prior AMAX reduction to finish.
                         amax_reduce_handle_fwd = FP8GlobalStateManager.get_amax_reduce_handle_fwd()

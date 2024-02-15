@@ -10,6 +10,7 @@ from torch._C import _graph_pool_handle
 
 from .fp8 import (
     fp8_autocast,
+    FP8GlobalStateManager,
     set_fp8_graph_capture_start,
     set_fp8_graph_capture_end,
 )
@@ -188,6 +189,7 @@ def _make_graphed_callables(
             @staticmethod
             def forward(ctx, *inputs):
                 # At this stage, only the user args may (potentially) be new tensors.
+                ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 for i in range(len_user_args):
                     if static_input_surface[i].data_ptr() != inputs[i].data_ptr():
                         static_input_surface[i].copy_(inputs[i])
@@ -206,6 +208,11 @@ def _make_graphed_callables(
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
                 bwd_graph.replay()
+
+                if ctx.is_first_module:
+                    if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
+                        FP8GlobalStateManager.amax_reduce_handle_bwd = (
+                            FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable
 
                 # Input args that didn't require grad expect a None gradient.
                 assert isinstance(static_grad_inputs, tuple)
@@ -336,11 +343,6 @@ def make_graphed_callables(
                 m.reset_fp8_meta_tensors()
         for p in module.parameters():
             p.grad = None
-        if enabled and fp8_recipe.reduce_amax:
-            # This works because we know that every `module`'s
-            # forward is wrapped by `fp8_autocast` already.
-            module.register_full_backward_hook(
-                TransformerEngineBaseModule.bwd_hook_for_amax_reduction)
 
     set_fp8_graph_capture_end()
     return graphed_callables
