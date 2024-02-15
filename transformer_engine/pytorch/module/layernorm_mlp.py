@@ -560,10 +560,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
+            update_transpose_cache = "reuse_only" if ctx.is_first_microbatch is None else "lazy"
             if ctx.fp8 and fc1_weight_t_fp8 is None:
-                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=ctx.is_first_microbatch)
+                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=update_transpose_cache)
             if ctx.fp8 and fc2_weight_t_fp8 is None:
-                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=ctx.is_first_microbatch)
+                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=update_transpose_cache)
 
             activation_func = _act_func(ctx.activation)[1]
 
