@@ -2661,8 +2661,10 @@ class DotProductAttention(torch.nn.Module):
             inference_params.sequence_len_offset = sequence_end
 
             # Copy keys and values into KV-cache
-            inference_key_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
-            inference_value_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
+            inference_key_memory[
+                sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
+            inference_value_memory[
+                sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
             key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
 
@@ -2781,7 +2783,7 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         if (inference_params is None
-            and "causal" in attn_mask_type 
+            and "causal" in attn_mask_type
             and max_seqlen_q != max_seqlen_kv
         ):
             use_unfused_attention = False

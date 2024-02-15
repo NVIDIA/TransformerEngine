@@ -330,7 +330,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         assert (
             scale is None or self.softmax_in_fp32
         ), "softmax should be in fp32 when scaled"
-        
+
         if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
@@ -340,10 +340,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         attn_batches = b * np
 
         if ( # pylint: disable=too-many-boolean-expressions)
-            not(self.scaled_masked_softmax_fusion)  # user doesn't want to fuse
-            or not(self.input_in_float16)           # input must be fp16
-            or not(16 <= sk <= 16384)               # sk must be 16 ~ 16384
-            or not(sk % 8 == 0)                     # sk must be divisor of 8
+            not self.scaled_masked_softmax_fusion   # user doesn't want to fuse
+            or not self.input_in_float16            # input must be fp16
+            or sk < 16
+            or sk > 16384                           # sk must be 16 ~ 16384
+            or sk % 8 != 0                          # sk must be divisor of 8
             or self.attn_mask_type == "arbitrary"   # Custom masks not supported
         ):
             return False
@@ -374,7 +375,6 @@ class FusedScaleMaskSoftmax(nn.Module):
         self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
     ) -> torch.Tensor:
         """Fused masked softmax kernel"""
-        b, np, sq, sk = inp.size()
         scale = 1.0 if scale is None else scale
 
         if self.attn_mask_type == "causal":
