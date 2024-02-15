@@ -1180,7 +1180,7 @@ def apply_rotary_pos_emb(
     Parameters
     ----------
     t: torch.Tensor
-        Input tensor of shape `[s, b, h, d]`, `[s, b, h, d]` or `[t, h, d]`, on which
+        Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
         rotary positional embedding will be applied.
     freqs: torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
@@ -2653,12 +2653,14 @@ class DotProductAttention(torch.nn.Module):
             batch_start = inference_params.batch_size_offset
             batch_end = batch_start + key_layer.size(1)
             assert batch_end <= inference_key_memory.size(1)
+            # inference_params.batch_size_offset = batch_end
 
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)
             assert sequence_end <= inference_key_memory.size(0)
+            inference_params.sequence_len_offset = sequence_end
 
-            # Copy key and values.
+            # Copy keys and values into KV-cache
             inference_key_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
             inference_value_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
             key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
@@ -3469,7 +3471,7 @@ class MultiheadAttention(torch.nn.Module):
 
         if inference_params and self.layer_number is not None:
             if self.layer_number not in inference_params.key_value_memory_dict:
-                inf_max_seq_len = inference_params.max_sequence_len
+                inf_max_seq_len = inference_params.max_sequence_length
                 inf_max_batch_size = inference_params.max_batch_size
                 inference_key_memory = self._allocate_memory(
                     inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
@@ -3621,15 +3623,20 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
         if inference_params and self.layer_number is not None:
+            batch_start = inference_params.batch_size_offset
+            batch_end = batch_start + key_layer.size(1)
+            assert batch_end <= inference_key_memory.size(1)
+
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)
             assert sequence_end <= inference_key_memory.size(0)
 
             # adjust the key rotary positional embedding
             if rotary_pos_emb is not None:
+                delta = sequence_end - sequence_start
                 q_pos_emb, k_pos_emb = rotary_pos_emb
-                q_pos_emb = q_pos_emb[sequence_start:sequence_end, :, :, :]
-                k_pos_emb = k_pos_emb[sequence_start:sequence_end, :, :, :]
+                q_pos_emb = q_pos_emb[:delta, :, :, :]
+                k_pos_emb = k_pos_emb[:delta, :, :, :]
                 rotary_pos_emb = (q_pos_emb, k_pos_emb)
 
         # ==================================
