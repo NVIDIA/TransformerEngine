@@ -347,7 +347,9 @@ class _Linear(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
+                weight_t_fp8 = weight.transpose(
+                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
+                )
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)

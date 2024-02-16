@@ -3648,8 +3648,8 @@ class MultiheadAttention(torch.nn.Module):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
 
         context_layer = self.core_attention(
             query_layer,

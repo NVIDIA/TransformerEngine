@@ -298,22 +298,44 @@ class TestFloat8Tensor:
 
         # Check transpose caching
         if x_fp8.dim() == 2 and transpose_dims[0] != transpose_dims[1]:
+
+            # Check that cached transpose is returned when expected
+            # Note: Sneakily destroy data so that recalculating
+            # transpose would give wrong answer.
             x_fp8 += 0.5
             x_ref = x_fp8.from_float8()
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, update_cache=True),
+                x_fp8.transpose(*transpose_dims, update_cache="lazy"),
+                x_ref.transpose(*transpose_dims),
+                **tols,
+            )
+            x_fp8_data = x_fp8._data.clone()
+            x_fp8._data.zero_()
+            torch.testing.assert_close(
+                x_fp8.transpose(*transpose_dims),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, update_cache=True),
+                x_fp8.transpose(*transpose_dims, update_cache="lazy"),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
+            torch.testing.assert_close(
+                x_fp8.transpose(*transpose_dims, update_cache="force"),
+                torch.zeros_like(x_ref.transpose(*transpose_dims)),
+                rtol=0,
+                atol=0,
+            )
+            x_fp8._data.copy_(x_fp8_data)
+            x_fp8._reset_caches()
+
+            # Make sure cache is reset after in-place operation
+            x_fp8.transpose(*transpose_dims, update_cache="force")
             x_fp8 += 0.5
             x_ref = x_fp8.from_float8()
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, update_cache=True),
+                x_fp8.transpose(*transpose_dims),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
