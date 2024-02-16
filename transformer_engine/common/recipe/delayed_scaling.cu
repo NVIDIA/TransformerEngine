@@ -54,6 +54,7 @@ kernel(const float* amax_history_ptr,
        const float* scale_ptr,
        const float* scale_inv_ptr,
        const unsigned char* scale_inv_mask_ptr,
+       const float* skip_scale_inv_update_ptr,
        float* updated_amax_history_ptr,
        float* updated_scale_ptr,
        float* updated_scale_inv_ptr,
@@ -124,7 +125,9 @@ kernel(const float* amax_history_ptr,
 
     // Update scale inverse
     float scale_inv;
-    if (scale_inv_mask_ptr == nullptr || scale_inv_mask_ptr[bid]) {
+    if (skip_scale_inv_update_ptr != nullptr && skip_scale_inv_update_ptr[0] == 1.0f) {
+      scale_inv = scale_inv_ptr[bid];
+    } else if (scale_inv_mask_ptr == nullptr || scale_inv_mask_ptr[bid]) {
       scale_inv = 1 / scale;
     } else {
       scale_inv = scale_inv_ptr[bid];
@@ -142,6 +145,7 @@ void amax_and_scale_update(const Tensor &amax_history,
                            const Tensor &scale,
                            const Tensor &scale_inv,
                            const Tensor &scale_inv_mask,
+                           const Tensor &skip_scale_inv_update,
                            Tensor *updated_amax_history_,
                            Tensor *updated_scale_,
                            Tensor *updated_scale_inv_,
@@ -184,6 +188,12 @@ void amax_and_scale_update(const Tensor &amax_history,
                "but found ", numel(scale_inv_mask), ".");
     NVTE_CHECK(scale_inv_mask.data.dtype == DType::kByte,
                "Found ", dtype_name(scale_inv_mask.data.dtype), ".");
+  }
+  if (skip_scale_inv_update.data.dptr != nullptr) {
+    NVTE_CHECK(numel(skip_scale_inv_update) == 1,
+               "Expected 1 element, ",
+               "but found ", numel(skip_scale_inv_update), ".");
+    NVTE_CHECK(skip_scale_inv_update.data.dtype == DType::kFloat32);
   }
   NVTE_CHECK(updated_amax_history.data.shape.size() == 2,
              "Found ", updated_amax_history.data.shape.size(), " dims.");
@@ -228,6 +238,7 @@ void amax_and_scale_update(const Tensor &amax_history,
       static_cast<const float*>(scale.data.dptr),
       static_cast<const float*>(scale_inv.data.dptr),
       static_cast<const unsigned char*>(scale_inv_mask.data.dptr),
+      static_cast<const float*>(skip_scale_inv_update.data.dptr),
       static_cast<float*>(updated_amax_history.data.dptr),
       static_cast<float*>(updated_scale.data.dptr),
       static_cast<float*>(updated_scale_inv.data.dptr),
@@ -245,6 +256,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_his
                                                        const NVTETensor scale,
                                                        const NVTETensor scale_inv,
                                                        const NVTETensor scale_inv_mask,
+                                                       const NVTETensor skip_scale_inv_update,
                                                        NVTETensor updated_amax_history,
                                                        NVTETensor updated_scale,
                                                        NVTETensor updated_scale_inv,
@@ -259,6 +271,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_his
     *reinterpret_cast<const Tensor*>(scale),
     *reinterpret_cast<const Tensor*>(scale_inv),
     *reinterpret_cast<const Tensor*>(scale_inv_mask),
+    *reinterpret_cast<const Tensor*>(skip_scale_inv_update),
     reinterpret_cast<Tensor*>(updated_amax_history),
     reinterpret_cast<Tensor*>(updated_scale),
     reinterpret_cast<Tensor*>(updated_scale_inv),

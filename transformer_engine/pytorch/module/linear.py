@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import _noop_cat
-from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
+from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager, in_fp8_graph_capture_mode
 from ..utils import (
     divide,
     cast_if_needed,
@@ -878,7 +878,14 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        with self.prepare_forward(inp, is_first_microbatch) as inp:
+        if skip_fp8_weight_update is not None:
+            assert (
+                in_fp8_graph_capture_mode()
+            ), "`skip_fp8_weight_update` must only be set during cuda graph capture."
+            warnings.warn("`skip_fp8_weight_update` set!")
+            is_first_microbatch = False
+
+        with self.prepare_forward(inp, is_first_microbatch, skip_fp8_weight_update) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
 

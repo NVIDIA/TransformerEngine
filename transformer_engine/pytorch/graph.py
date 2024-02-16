@@ -71,8 +71,8 @@ def _make_graphed_callables(
                 + ":func:`~make_graphed_callables`, only parameters may be trainable. "
                 + "All buffers must have ``requires_grad=False``."
             )
-        if fp8_weight_caching:
-            args += (torch.empty(1, device="cuda"),)
+        # if fp8_weight_caching:
+        #     args += (torch.empty(1, device="cuda"),)
         flatten_arg, _ = _tree_flatten(args)
         flatten_sample_args.append(tuple(flatten_arg))
         assert all(isinstance(arg, torch.Tensor) for arg in flatten_arg), (
@@ -229,13 +229,13 @@ def _make_graphed_callables(
             # inputs to the graph that might require grad
             # (explicit user args + module parameters)
             # Assumes module params didn't change since capture.
-            if fp8_weight_caching:
-                assert (
-                    ("is_first_microbatch" in user_kwargs
-                     and isinstance(user_kwargs["is_first_microbatch"], bool))
-                ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
-                f = torch.zeros if user_kwargs["is_first_microbatch"] else torch.ones
-                user_args += (f(1, device="cuda"),)
+            # if fp8_weight_caching:
+            #     assert (
+            #         ("is_first_microbatch" in user_kwargs
+            #          and isinstance(user_kwargs["is_first_microbatch"], bool))
+            #     ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
+            #     f = torch.zeros if user_kwargs["is_first_microbatch"] else torch.ones
+            #     user_args += (f(1, device="cuda"),)
 
             flatten_user_args, _ = _tree_flatten(user_args)
             out = Graphed.apply(*(tuple(flatten_user_args) + module_params))

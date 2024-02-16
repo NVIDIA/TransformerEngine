@@ -556,16 +556,20 @@ def _fused_amax_and_scale_update(
     margin: int,
     amax_compute_algo: str,
     non_weight_mask: torch.Tensor,
-    update_weight_scale_inv: bool,
+    skip_scale_inv_update: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Update amax history and FP8 scaling factors"""
-    if update_weight_scale_inv:
-        non_weight_mask = torch.Tensor()
+    if isinstance(skip_scale_inv_update, bool):
+        if not skip_scale_inv_update:
+            non_weight_mask = torch.Tensor()
+        skip_scale_inv_update = torch.Tensor()
+
     tex.fused_amax_and_scale_update(
         amax_history,
         scale,
         scale_inv,
         non_weight_mask,
+        skip_scale_inv_update,
         amax_history,
         scale,
         scale_inv,
@@ -613,7 +617,7 @@ def _compute_scaling_factor(
 def amax_and_scale_update(
     fp8_meta: Dict[str, Any],
     fwd_update: bool,
-    update_weight_scale_inv: bool = True,
+    skip_scale_inv_update: bool = False,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
@@ -634,9 +638,12 @@ def amax_and_scale_update(
             fp8_meta["recipe"].margin,
             fp8_meta["recipe"].amax_compute_algo,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
-            update_weight_scale_inv,
+            skip_scale_inv_update,
         )
     else:
+        assert (
+            isinstance(skip_scale_inv_update, bool)
+         ), "`skip_scale_inv_update` must be a boolean for unfused amax and scale update."
         fp8_meta[fp8_meta_tensor_key].amax_history, amax = _compute_amax_and_update_history(
             fp8_meta[fp8_meta_tensor_key].amax_history,
             fp8_meta["recipe"],
@@ -651,7 +658,7 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key].scale,
             fp8_meta[fp8_meta_tensor_key].scale_inv,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
-            update_weight_scale_inv,
+            not skip_scale_inv_update,
         )
 
 

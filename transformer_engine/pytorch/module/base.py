@@ -505,6 +505,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         num_gemms: int = 1,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
@@ -531,7 +532,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if is_first_microbatch is not None and not self.primary_weights_in_fp8:
                 self.set_fp8_weights()
 
-            update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
+            if skip_fp8_weight_update is None:
+                skip_fp8_weight_update = (is_first_microbatch is not None) and (not is_first_microbatch)
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, \
                 "Amax reduction across tensor parallel group is " \
@@ -542,11 +544,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        self.fp8_meta, True, skip_scale_inv_update=skip_fp8_weight_update
                     )
                 else:
                     amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        self.fp8_meta, True, skip_scale_inv_update=skip_fp8_weight_update
                     )
 
             if self.fp8 and self.training:

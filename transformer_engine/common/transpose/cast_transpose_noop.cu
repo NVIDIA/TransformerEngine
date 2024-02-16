@@ -175,7 +175,7 @@ cast_transpose_kernel_notaligned(const IType * const input,
                                  const size_t num_rows,
                                  const size_t num_tiles) {
   if (noop[0] == 1.0f) return;
-  
+
   using IVec = Vec<IType, nvec_in>;
   using OVec = Vec<OType, nvec_out>;
 

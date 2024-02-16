@@ -48,6 +48,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_his
                                                        const NVTETensor scale,
                                                        const NVTETensor scale_inv,
                                                        const NVTETensor scale_inv_mask,
+                                                       const NVTETensor skip_scale_inv_update,
                                                        NVTETensor updated_amax_history,
                                                        NVTETensor updated_scale,
                                                        NVTETensor updated_scale_inv,
