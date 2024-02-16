@@ -811,7 +811,7 @@ def _run_transformer_layer(
     rotary_pos_emb = None
     if RoPE:
         PE = RotaryPositionEmbedding(dim=config.head_dim)
-        rotary_pos_emb = PE(config.max_seqlen_q).to(dtype=dtype, device="cuda")
+        rotary_pos_emb = PE(config.max_seqlen_q).to(device="cuda")
 
     # Set up model
     block = (
