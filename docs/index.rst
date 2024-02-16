@@ -19,6 +19,8 @@ Transformer Engine documentation
    :start-after: overview-begin-marker-do-not-remove
    :end-before: overview-end-marker-do-not-remove
 
+.. include:: ../examples/pytorch/hf_lama/tutorial_accelerate_hf_llama_with_te.ipynb
+
 .. toctree::
    :hidden:
 
@@ -44,6 +46,7 @@ Transformer Engine documentation
 
    examples/fp8_primer.ipynb
    examples/advanced_optimizations.ipynb
+   tutorial_accelerate_hf_llama_with_te.ipynb
 
 .. toctree::
    :hidden:
