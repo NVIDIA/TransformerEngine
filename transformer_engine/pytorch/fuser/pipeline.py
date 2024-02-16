@@ -8,7 +8,8 @@ from typing import Any, Optional
 
 import torch
 
-from .ops import FusableOperation, OperationAutogradContext
+from ..utils import clear_tensor_data
+from .ops import FusableOperation, OperationContext
 
 ### TODO Handle no_grad
 class _PipelineAutogradFunction(torch.autograd.Function):
@@ -16,23 +17,27 @@ class _PipelineAutogradFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         func_ctx: Any,
-        op_ctxs: list[OperationAutogradContext],
+        input_: torch.Tensor,
         forward_ops: list[FusableOperation],
         backward_ops: list[FusableOperation],
-        input_: torch.Tensor,
+        unfused_ops: list[FusableOperation],
+        unfused_op_ctxs: list[OperationContext],
+        unfused_op_kwargs: list[dict[str, Any]],
+        *params: torch.nn.Parameter,
     ) -> torch.Tensor:
 
         # Apply forward ops
         x = input_
-        for op, ctx_idxs in forward_ops:
+        for op, unfused_op_idxs in forward_ops:
             x = op._pipeline_forward(
-                tuple(op_ctxs[idx] for idx in ctx_idxs),
+                [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 x,
+                [unfused_op_kwargs[idx] for idx in unfused_op_idxs],
             )
 
         # Flatten list of saved tensors
         to_save = []
-        for ctx in op_ctxs:
+        for ctx in unfused_op_ctxs:
             range_start = len(to_save)
             if ctx.to_save is not None:
                 to_save.extend(ctx.to_save)
@@ -43,7 +48,8 @@ class _PipelineAutogradFunction(torch.autograd.Function):
 
         # Other context for backward pass
         func_ctx.backward_ops = backward_ops
-        func_ctx.op_ctx = op_ctxs
+        func_ctx.unfused_ops = unfused_ops
+        func_ctx.unfused_op_ctxs = unfused_op_ctxs
 
         return x
 
@@ -54,42 +60,69 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         grad_output: torch.Tensor,
     ) -> tuple[Optional[torch.Tensor], ...]:
 
+        # Operations and autograd state
+        backward_ops = func_ctx.backward_ops
+        unfused_ops = func_ctx.unfused_ops
+        unfused_op_ctxs = func_ctx.unfused_op_ctxs
+
         # Unflatten list of saved tensors
-        op_ctxs = func_ctx.op_ctxs
         saved_tensors = func_ctx.saved_tensors
-        func_ctx.saved_tensors = None
-        for ctx in op_ctxs:
-            ctx.saved_tensors = saved_tensors[slice(ctx.saved_tensors_range)]
+        for ctx in unfused_op_ctxs:
+            ctx.saved_tensors = saved_tensors[slice(*ctx.saved_tensors_range)]
             ctx.saved_tensors_range = None
-        del saved_tensors
 
         # Apply backward ops
         dx = grad_output
-        for op, ctx_idxs in func_ctx.backward_ops:
-            dx = op._pipeline_backward(
-                tuple(op_ctxs[idx] for idx in ctx_idxs),
+        grad_params = [None for _ in range(len(unfused_ops))]
+        for op, unfused_op_idxs in backward_ops:
+            dx, fused_op_dparams = op._pipeline_backward(
+                [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 dx,
             )
+            for idx, unfused_op_dparams in zip(unfused_op_idxs, fused_op_dparams):
+                grad_params[idx] = unfused_op_dparams
+                clear_tensor_data(*unfused_op_ctxs[idx].saved_tensors)
+
+        # Flatten list of parameter gradients
+        grad_params_flat = []
+        for idx, dparams in enumerate(grad_params):
+            params = list(unfused_ops[idx].parameters(recurse=False))
+            if dparams is None:
+                dparams = [None for _ in range(len(params))]
+            else:
+                dparams = list(dparams)
+            if len(dparams) != len(params):
+                raise RuntimeError(
+                    f"Expected op {idx} to generate {len(params)} param grads, "
+                    f"but got {len(dparams)}"
+                )
+            grad_params_flat.extend(dparams)
 
         return (
-            None,  # op_ctxs
+            dx,    # input_
             None,  # forward_ops
             None,  # backward_ops
-            dx,    # input_
+            None,  # unfused_ops
+            None,  # unfused_op_ctxs
+            None,  # unfused_op_kwargs
+            *grad_params_flat,  # params
         )
-
 
 class Pipeline:
 
-    def __init__(self, ops, fuse_ops=True):
+    def __init__(
+        self,
+        ops: list[FusableOperation],
+        fuse_ops: bool = True,
+    ):
 
         # Unfused ops for forward and backward pass
         self._num_unfused_ops: int = len(ops)
+        self._unfused_ops: list[FusableOperation] = ops
         self._forward_ops: list[tuple[FusableOperation, list[int]]]
         self._backward_ops: list[tuple[FusableOperation, list[int]]]
-        self._forward_ops = [(op, (idx,)) for idx, op in enumerate(ops)]
-        self._backward_ops = self._forward_ops.copy()
-        self._backward_ops.reverse()
+        self._forward_ops = [(op, [idx]) for idx, op in enumerate(ops)]
+        self._backward_ops = [op for op in reversed(self._forward_ops)]
 
         # Fuse ops if needed
         if fuse_ops:
@@ -105,11 +138,32 @@ class Pipeline:
         self._forward_ops = self._fuse_forward_ops(self._forward_ops)
         self._backward_ops = self._fuse_backward_ops(self._backward_ops)
 
-    def __call__(self, input: torch.Tensor) -> torch.Tensor:
-        ctxs = [OperationAutogradContext() for _ in range(self._num_unfused_ops)]
+    def __call__(
+        self,
+        input: torch.Tensor,
+        unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
+    ) -> torch.Tensor:
+
+        # Construct autograd contexts
+        num_unfused_ops = len(self._unfused_ops)
+        unfused_op_ctxs = [OperationContext() for _ in range(num_unfused_ops)]
+
+        # Canonicalize op kwargs
+        if unfused_op_kwargs is None:
+            unfused_op_kwargs = [dict() for _ in range(num_unfused_ops)]
+
+        # Flatten list of parameters
+        params = []
+        for op in self._unfused_ops:
+            params.extend(op.parameters(recurse=False))
+
+        # Pipeline forward pass
         return _PipelineAutogradFunction.apply(
-            ctxs,
+            input,
             self._forward_ops,
             self._backward_ops,
-            input,
+            self._unfused_ops,
+            unfused_op_ctxs,
+            unfused_op_kwargs,
+            *params,
         )

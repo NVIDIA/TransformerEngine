@@ -45,7 +45,7 @@ class Sequential(torch.nn.Module):
         def maybe_add_pipeline():
             nonlocal fusable_ops
             if fusable_ops:
-                module_groups.append(Pipeline(fusable_ops, fuse=True))
+                module_groups.append(Pipeline(fusable_ops, fuse_ops=True))
                 fusable_ops = []
         for module in modules:
             if isinstance(module, FusableOperation):

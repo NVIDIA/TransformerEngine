@@ -2,9 +2,11 @@
 #
 # See LICENSE for license information.
 
-from .op import FusableOperation, OperationAutogradContext
+from .linear import Linear
+from .op import FusableOperation, OperationContext
 
 __all__ = [
     "FusableOperation",
-    "OperationAutogradContext",
+    "Linear,"
+    "OperationContext",
 ]
