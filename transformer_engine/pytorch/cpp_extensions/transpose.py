@@ -35,7 +35,7 @@ def fp8_cast_transpose_fused(
         return_outputs = True
 
     if noop_tensor is None:
-        noop_tensor = torch.zeros(1, device="cuda")
+        noop_tensor = torch.Tensor()
 
     tex.fused_cast_transpose_noop(
         inp,
