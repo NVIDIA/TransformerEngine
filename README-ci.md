@@ -116,6 +116,19 @@ the CI results to GitHub.
 We launch GitLab CI pipelines on the `te_ci` branch. See the above
 discussion for more information.
 
+### Adding a developer
+
+- Give their GitHub account write access to the TE GitHub repository.
+- Add their GitHub username to
+  [`.github/workflows/trigger-ci.yml`](https://github.com/NVIDIA/TransformerEngine/blob/main/.github/workflows/trigger-ci.yml)
+  in the TE GitHub repository.
+- File an NVBug ticket to "IPP - Blossom Support" with the TE GitHub
+  repository, their GitHub username, and their NVIDIA email. See an
+  [example](https://nvbugspro.nvidia.com/bug/4476510) and the
+  [documentation for Blossom GitHub support](https://confluence.nvidia.com/display/BLOS/Github+Support+User+Documentation).
+- Request Duo Access. See
+  [these instructions](https://nvidia.service-now.com/esc?id=kb_article&sysparm_article=KB0021726).
+
 ## QA workflow
 
 QA expects the TE team to provide test containers that are compatible
