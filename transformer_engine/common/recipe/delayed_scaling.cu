@@ -123,11 +123,16 @@ kernel(const float* amax_history_ptr,
     }
     updated_scale_ptr[bid] = scale;
 
+    bool update_weight_scale_inv;
+    if (skip_scale_inv_update_ptr == nullptr) {
+      update_weight_scale_inv = scale_inv_mask_ptr == nullptr;
+    } else {
+      update_weight_scale_inv = skip_scale_inv_update_ptr[0] == 0.0f;
+    }
+
     // Update scale inverse
     float scale_inv;
-    if (skip_scale_inv_update_ptr != nullptr && skip_scale_inv_update_ptr[0] == 1.0f) {
-      scale_inv = scale_inv_ptr[bid];
-    } else if (scale_inv_mask_ptr == nullptr || scale_inv_mask_ptr[bid]) {
+    if (update_weight_scale_inv || scale_inv_mask_ptr[bid]) {
       scale_inv = 1 / scale;
     } else {
       scale_inv = scale_inv_ptr[bid];
@@ -194,6 +199,7 @@ void amax_and_scale_update(const Tensor &amax_history,
                "Expected 1 element, ",
                "but found ", numel(skip_scale_inv_update), ".");
     NVTE_CHECK(skip_scale_inv_update.data.dtype == DType::kFloat32);
+    NVTE_CHECK(scale_inv_mask.data.dptr != nullptr);
   }
   NVTE_CHECK(updated_amax_history.data.shape.size() == 2,
              "Found ", updated_amax_history.data.shape.size(), " dims.");
