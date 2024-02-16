@@ -305,10 +305,25 @@ void cast_transpose(const Tensor &input,
                     Tensor *transposed_output,
                     cudaStream_t stream) {
   CheckInputTensor(input, "cast_transpose_input");
-  CheckInputTensor(noop, "noop_signal_input");
   CheckOutputTensor(*cast_output, "cast_output");
   CheckOutputTensor(*transposed_output, "transposed_output");
 
+  // Number of elements in tensor
+  auto numel = [] (const Tensor &tensor) -> size_t {
+    size_t acc = 1;
+    for (const auto& dim : tensor.data.shape) {
+      acc *= dim;
+    }
+    return acc;
+  };
+
+  if (noop.data.dptr != nullptr) {
+    NVTE_CHECK(numel(noop) == 1,
+               "Expected 1 element, ",
+               "but found ", numel(noop), ".");
+    NVTE_CHECK(noop.data.dtype == DType::kFloat32);
+    NVTE_CHECK(noop.data.dptr != nullptr);
+  }
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
   NVTE_CHECK(transposed_output->data.shape.size() == 2, "T output must have 2 dimensions.");

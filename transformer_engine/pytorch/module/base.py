@@ -533,7 +533,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.set_fp8_weights()
 
             if skip_fp8_weight_update is None:
-                skip_fp8_weight_update = (is_first_microbatch is not None) and (not is_first_microbatch)
+                skip_fp8_weight_update = (
+                    is_first_microbatch is not None and not is_first_microbatch)
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, \
                 "Amax reduction across tensor parallel group is " \
