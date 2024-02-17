@@ -10,6 +10,7 @@ from typing import Any, Dict, Union, Optional, Callable, Tuple
 import torch
 from torch.cuda import _lazy_call
 from torch.utils.checkpoint import detach_variable, noop_context_fn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
@@ -24,6 +25,8 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "partition_dim": -1,
     "partition_stride": 1,
 }
+
+_USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
 _FP8_ACTIVATION_RECOMPUTE_ENABLED = False
 _FP8_ACTIVATION_RECOMPUTE_PHASE = False
@@ -420,6 +423,9 @@ class _CheckpointHook(torch.autograd.graph.saved_tensors_hooks):
         super().__init__(pack_hook, unpack_hook)
 
 
+def use_reentrant_activation_recompute():
+    return _USE_REENTRANT_ACTIVATION_RECOMPUTE
+
 def checkpoint(
     function: Callable,
     *args: Tuple[torch.Tensor, ...],
@@ -490,6 +496,8 @@ def checkpoint(
     del context_fn, determinism_check, debug
 
     use_reentrant = kwargs.pop("use_reentrant", True)
+    global _USE_REENTRANT_ACTIVATION_RECOMPUTE
+    _USE_REENTRANT_ACTIVATION_RECOMPUTE = use_reentrant
     if use_reentrant:
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.

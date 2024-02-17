@@ -4,6 +4,7 @@
 
 import math
 import os
+import sys
 from typing import List, Optional
 import pytest
 import copy
@@ -72,11 +73,16 @@ def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
 
-def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
+def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
-        assert torch.equal(t1, t2), "Output mismatch."
+    failed = False
+    failed_tensors = ""
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
+        if not torch.equal(t1, t2):
+            failed = True
+            failed_tensors += f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
+    assert not failed, "Output mismatches in:\n" + failed_tensors
 
 
 def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
@@ -524,12 +530,16 @@ def _test_e2e_full_recompute(
     torch.cuda.synchronize()
 
     outputs = [te_out]
+    names = ["output"]
     if use_reentrant:
         outputs.append(te_inp_hidden_states.grad)
-    for p in block.parameters():
+        names.append("input")
+    for name, p in block.named_parameters():
         if p.requires_grad:
             outputs.append(p.grad)
-    return outputs
+            names.append(name)
+
+    return outputs, names
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -542,21 +552,14 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
-    if (dtype == torch.bfloat16 or bs == 1) and not fp8 and fp8_model_params and not use_reentrant:
-        pytest.skip("Non-reentrant mode has unexpected truncation errors with "
-                    "batch size 1 or bfloat16.")
-
     config = model_configs[model]
 
-    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+    outputs, names = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
                                        recompute=False, use_reentrant=use_reentrant)
-    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+    outputs_recompute, _ = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
                                                  recompute=True, use_reentrant=use_reentrant)
 
-    if dtype == torch.bfloat16 and not use_reentrant:
-        assert_allclose(outputs, outputs_recompute, 1e-2)
-    else:
-        assert_all_equal(outputs, outputs_recompute)
+    assert_all_equal(outputs, outputs_recompute, names=names)
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
