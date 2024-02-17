@@ -41,6 +41,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
+    is_bf16_compatible,
 )
 import transformer_engine_extensions as tex
 from transformer_engine_extensions import NVTE_Fused_Attn_Backend
@@ -54,6 +55,8 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
+
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 def reset_rng_states() -> None:
     """Revert back to initial RNG state"""
@@ -80,6 +83,7 @@ class ModelConfig:
         dropout_p: float,
         attn_mask_type: str,
         attn_bias_type: str,
+        alibi_type: str = "none",
         num_layers: int = 1,
     ):
         self.batch_size = batch_size
@@ -93,6 +97,7 @@ class ModelConfig:
         self.dropout_p = dropout_p
         self.attn_mask_type  = attn_mask_type
         self.attn_bias_type  = attn_bias_type
+        self.alibi_type  = alibi_type
         self.attn_type  = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
 
@@ -166,7 +171,7 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
     """Check if FlashAttention supports a model configuration"""
     if get_device_compute_capability() < (8, 0):
         return False
-    if config.attn_bias_type != "no_bias":
+    if config.attn_bias_type not in ["no_bias", "alibi"]:
         return False
     if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
         return False
@@ -194,7 +199,7 @@ model_configs_base = {
 }
 
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
@@ -282,18 +287,26 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         )
 
     if unfused_attn_supported and fused_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_dot_product_attention]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if unfused_attn_supported and flash_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_dot_product_attention]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backend) == 2:
+        if _NVTE_DEBUG:
+            print("[test_dot_product_attention]: fused attn backend 0 vs 1")
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
@@ -380,6 +393,21 @@ model_configs_swa = {
 def test_dpa_sliding_window(dtype, model_configs, model):
     """Test DotProductAttention module with sliding window attention"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, True)
+
+model_configs_alibi_slopes = {
+    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
+    "alibi_1_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "causal", "alibi", alibi_type="vanilla"),
+    "alibi_1_1": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "causal", "alibi", alibi_type="vanilla"),
+    "alibi_2_0": ModelConfig(2, 24, 24, 128, 1024, 1024, 0.0, "causal", "alibi", alibi_type= "custom"),
+    "alibi_2_1": ModelConfig(1, 24, 24, 128, 1024, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
+}
+@pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_alibi_slopes])
+@pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
+def test_dpa_alibi_slopes(dtype, model_configs, model):
+    """Test DotProductAttention module with ALiBi slopes"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
@@ -476,8 +504,16 @@ def _run_dot_product_attention(
                     attention_mask_q.to(device="cuda"), attention_mask_kv.to(device="cuda"))
     if swa:
         window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
+    elif "causal" in config.attn_mask_type:
+        window_size, attention_mask = (-1, 0), None
     else:
         window_size, attention_mask = None, None
+
+    alibi_slopes = None
+    if config.attn_bias_type == "alibi":
+        if config.alibi_type == "custom":
+            alibi_slopes = torch.randn(
+                config.num_heads).abs().to(dtype=torch.float32, device="cuda")
 
     # Create input tensors
     dim_to_num = {
@@ -569,6 +605,7 @@ def _run_dot_product_attention(
             checkpoint_core_attention=ckpt_attn,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias=bias,
+            alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
     out.backward(out_grad)
 
@@ -582,6 +619,8 @@ model_configs_te_layer = {
     "te_2_0": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,  "causal",         "no_bias"),
     "te_2_1": ModelConfig(2, 16, 16,  64, 2048, 2048, 0.0, "no_mask",         "no_bias"),
     "te_2_2": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding",         "no_bias"),
+    "te_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,  "causal",           "alibi"),
+    "te_3_1": ModelConfig(4, 16, 16,  64, 2048, 2048, 0.0,  "causal",           "alibi"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
@@ -653,12 +692,18 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         )
 
     if unfused_attn_supported and fused_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_transformer_layer]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
     if unfused_attn_supported and flash_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_transformer_layer]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
     if fused_attn_supported and flash_attn_supported:
+        if _NVTE_DEBUG:
+            print("[test_transformer_layer]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
@@ -757,34 +802,16 @@ def _run_transformer_layer(
             rate.item() for rate in torch.linspace(0, drop_path_rate, config.num_layers)]
 
     # Create bias
-    if config.attn_bias_type == 'no_bias':
-        bias = None
+    bias = None
     if config.attn_bias_type == 'post_scale_bias':
         bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
                 dtype=dtype, device="cuda")
-    elif config.attn_bias_type == 'alibi':
-        if os.environ['NVTE_FUSED_ATTN_BACKEND'] == '0':
-            config.attn_bias_type = 'post_scale_bias'
-            n = 2 ** math.floor(math.log2(config.num_heads))
-            m_0 = 2.0 ** (-8.0 / n)
-            m = torch.pow(m_0, torch.arange(1, 1 + n))
-
-            a = torch.ones(config.max_seqlen_q, config.max_seqlen_kv)
-            b = torch.triu(a,diagonal=1)
-            c = b.cumsum(dim=-1)
-            d = c - torch.transpose(c, 0, 1)
-            bias = d.expand(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv)
-            for i in range(config.num_heads):
-                bias[0,i,:,:] = m[i] *  bias[0,i,:,:]
-            bias = bias.to(dtype=dtype, device="cuda")
-        else:
-            bias = None
 
     # Create RoPE
     rotary_pos_emb = None
     if RoPE:
         PE = RotaryPositionEmbedding(dim=config.head_dim)
-        rotary_pos_emb = PE(config.max_seqlen_q).to(dtype=dtype, device="cuda")
+        rotary_pos_emb = PE(config.max_seqlen_q).to(device="cuda")
 
     # Set up model
     block = (
@@ -824,6 +851,12 @@ def _run_transformer_layer(
         .to(dtype=dtype, device="cuda")
     )
 
+    # Create ALiBi slopes
+    alibi_slopes = None
+    if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
+        alibi_slopes = torch.randn(
+            config.num_heads).abs().to(dtype=torch.float32, device="cuda")
+
     # Run a forward and backward pass
     out = block(inp,
         attention_mask=attention_mask,
@@ -831,7 +864,8 @@ def _run_transformer_layer(
         checkpoint_core_attention=False,
         rotary_pos_emb=rotary_pos_emb,
         core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias)
+        core_attention_bias=bias,
+        alibi_slopes=alibi_slopes)
     loss = out.sum()
     loss.backward()
 

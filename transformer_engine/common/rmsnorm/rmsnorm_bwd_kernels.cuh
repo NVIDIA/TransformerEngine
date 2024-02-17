@@ -97,7 +97,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t x_tmp = x[it].data.elt[jt];
                 compute_t y_tmp = rs_r * (x_tmp);
-                compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]);
+                const compute_t dy_tmp_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
+                compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]) + dy_tmp_shift;
                 dy_tmp *= compute_t(dz[it].data.elt[jt]);
                 compute_t dz_tmp = dz[it].data.elt[jt];
 
@@ -356,7 +357,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t x_ij = x.data.elt[jt];
                 compute_t y_ij = rs * (x_ij);
-                compute_t g_ij = gamma[it].data.elt[jt];
+                const compute_t g_ij_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
+                compute_t g_ij = gamma[it].data.elt[jt] + g_ij_shift;
                 compute_t dz_ij = dz.data.elt[jt];
                 compute_t dy_ij = g_ij * dz_ij;
 

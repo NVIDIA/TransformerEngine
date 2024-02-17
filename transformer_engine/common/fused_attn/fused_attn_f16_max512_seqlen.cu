@@ -642,8 +642,6 @@ void fused_attn_max_512_fwd_impl(
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
     cudnnDataType_t tensorType, cudaStream_t stream, cudnnHandle_t handle) {
     try {
-        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
-
         FADescriptor descriptor{b,           h,
                                 s_q,         s_kv,
                                 d,           scaling_factor,
@@ -754,6 +752,10 @@ void fused_attn_max_512_fwd_impl(
             return;
         }
 
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
         // Prepare actual seqlen
         constexpr size_t nthreads_per_block = 128;
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
@@ -845,9 +847,6 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                  size_t *workspace_size, cudnnDataType_t tensorType,
                                  cudaStream_t stream, cudnnHandle_t handle) {
     try {
-        // Create cudnn handle
-        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
-
         FADescriptor descriptor{
             b,      h,         s_q,       s_kv,      d, scaling_factor, true, dropout_probability,
             layout, bias_type, mask_type, tensorType, false};
@@ -1193,6 +1192,10 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
             return;
         }
+
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
         constexpr size_t nthreads_per_block = 128;
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;

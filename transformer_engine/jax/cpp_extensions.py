@@ -10,13 +10,6 @@ import operator
 import os
 import warnings
 
-import transformer_engine_jax
-from transformer_engine_jax import DType as TEDType
-from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
-
 import numpy as np
 import jax.numpy as jnp
 from jax.lib import xla_client
@@ -27,6 +20,13 @@ from jax.interpreters.mlir import ir, dtype_to_ir_type
 from jax.sharding import PartitionSpec, NamedSharding
 from jax._src.interpreters import batching
 from jax._src import dispatch
+
+import transformer_engine_jax
+from transformer_engine_jax import DType as TEDType
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
@@ -58,6 +58,7 @@ def te_dtype_to_jax_dtype(te_dtype):
         TEDType.kInt64: jnp.int64,
         TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
         TEDType.kFloat8E5M2: jnp.float8_e5m2,
+        TEDType.kByte: jnp.uint8
     }
 
     if te_dtype not in converter:
@@ -94,6 +95,7 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.int64.dtype: TEDType.kInt64,
         jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
         jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
+        jnp.uint8.dtype: TEDType.kByte,
     }
 
     if jax_dtype not in converter:
@@ -124,7 +126,7 @@ def _check_valid_batch_dims(bdims):
 
 class BasePrimitive(metaclass=ABCMeta):
     """
-    jax premitive
+    jax primitive
     """
 
     @staticmethod
@@ -134,6 +136,13 @@ class BasePrimitive(metaclass=ABCMeta):
         to describe computing graph
         """
         return NotImplemented
+
+    @classmethod
+    def outer_abstract(cls, *args, **kwargs):
+        """
+        optional abstract wrapper to eliminate workspace tensors
+        """
+        return cls.abstract(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -196,7 +205,7 @@ def register_primitive(cls):
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
     outer_p.multiple_results = cls.multiple_results
     outer_p.def_impl(cls.impl)
-    outer_p.def_abstract_eval(cls.abstract)
+    outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
     outer_p_lower.def_partition(infer_sharding_from_operands=cls.infer_sharding_from_operands,
@@ -287,9 +296,9 @@ class LayerNormFwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(x_aval, gamma_aval, beta_aval, **kwargs):    # pylint: disable=unused-argument
+    def abstract(x_aval, gamma_aval, beta_aval, **kwargs):
         """
-        LayerNorm fwd abstract
+        LayerNorm fwd inner primitive abstract
         """
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -303,6 +312,29 @@ class LayerNormFwdPrimitive(BasePrimitive):
         hidden_size = gamma_aval.size
         assert x_aval.size % hidden_size == 0
 
+        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+            x_aval.size // hidden_size,    # batch size
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
+            jax_dtype_to_te_dtype(x_aval.dtype),    # out te_dtype (same as input for Fp16/Bf16)
+            True,
+            kwargs['zero_centered_gamma'],
+            kwargs['epsilon'])
+        wkspace_aval = out_aval.update(shape=wkspace_info[0],
+                                       dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = out_aval.update(shape=barrier_info[0],
+                                       dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+
+        return out_aval, mu_aval, rsigma_aval, wkspace_aval, barrier_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        LayerNorm fwd outer primitive abstract
+        """
+        out_aval, mu_aval, rsigma_aval, _, _ = \
+            LayerNormFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, mu_aval, rsigma_aval
 
     @staticmethod
@@ -333,10 +365,14 @@ class LayerNormFwdPrimitive(BasePrimitive):
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
+        wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+
         out_types = [
             ir.RankedTensorType.get(out_shape, output_type),
             ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
         ]
         operands = [x, gamma, beta]
         operand_shapes = [x_shape, g_shape, b_shape]
@@ -347,8 +383,16 @@ class LayerNormFwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            0,    # no dgamma_part in FWD pass
+            0,    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            TEDType.kByte,    # dummy dgamma_part te_dtype
+            TEDType.kByte,    # dummy dbeta_part te_dtype
             zero_centered_gamma,
             epsilon,
             sm_margin,
@@ -364,7 +408,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         to describe implementation
         """
         assert LayerNormFwdPrimitive.inner_primitive is not None
-        out, mu, rsigma = LayerNormFwdPrimitive.inner_primitive.bind(
+        out, mu, rsigma, _, _ = LayerNormFwdPrimitive.inner_primitive.bind(
             x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
         return out, mu, rsigma
 
@@ -449,9 +493,9 @@ class LayerNormBwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(dz_aval, x_aval, mu_aval, rsigma_aval, gamma_aval, **kwargs):    # pylint: disable=unused-argument
+    def abstract(dz_aval, x_aval, mu_aval, rsigma_aval, gamma_aval, **kwargs):
         """
-        Layernorm bwd abstract
+        Layernorm bwd inner primitive abstract
         """
         w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
         mu_dtype = dtypes.canonicalize_dtype(mu_aval.dtype)
@@ -464,6 +508,34 @@ class LayerNormBwdPrimitive(BasePrimitive):
 
         dx_aval = core.raise_to_shaped(dz_aval)
         dgamma_aval = dbeta_aval = core.raise_to_shaped(gamma_aval)
+
+        wkspace_info, barrier_info, dgamma_part_info, dbeta_part_info = \
+            transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
+                x_aval.size // gamma_aval.size,           # batch size
+                gamma_aval.size,                          # hidden size
+                jax_dtype_to_te_dtype(x_aval.dtype),      # input te_dtype
+                jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+                True, kwargs['zero_centered_gamma'], kwargs['epsilon']
+            )
+        wkspace_aval = dx_aval.update(shape=wkspace_info[0],
+                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = dx_aval.update(shape=barrier_info[0],
+                                      dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+        dgamma_part_aval = dgamma_aval.update(shape=dgamma_part_info[0],
+                                              dtype=te_dtype_to_jax_dtype(dgamma_part_info[1]))
+        dbeta_part_aval = dbeta_aval.update(shape=dbeta_part_info[0],
+                                            dtype=te_dtype_to_jax_dtype(dbeta_part_info[1]))
+
+        return dx_aval, dgamma_aval, dbeta_aval, wkspace_aval, barrier_aval, \
+               dgamma_part_aval, dbeta_part_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        LayerNorm bwd outer primitive abstract
+        """
+        dx_aval, dgamma_aval, dbeta_aval, _, _, _, _ = \
+            LayerNormBwdPrimitive.abstract(*args, **kwargs)
         return dx_aval, dgamma_aval, dbeta_aval
 
     @staticmethod
@@ -489,21 +561,30 @@ class LayerNormBwdPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         out_types = [
-            ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(g_shape, g_type.element_type),
-            ir.RankedTensorType.get(b_shape, b_type.element_type),
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
         ]
+
         operands = [dz, mu, rsigma, x, gamma]
         operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
+        wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            dgamma_part_aval.size,
+            dbeta_part_aval.size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            jax_dtype_to_te_dtype(dgamma_part_aval.dtype),
+            jax_dtype_to_te_dtype(dbeta_part_aval.dtype),
             zero_centered_gamma,
             epsilon,
             sm_margin,
@@ -516,7 +597,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, mu, rsigma, gamma, zero_centered_gamma, epsilon):
         assert LayerNormBwdPrimitive.inner_primitive is not None
-        dx, dgamma, dbeta = LayerNormBwdPrimitive.inner_primitive.bind(
+        dx, dgamma, dbeta, _, _, _, _ = LayerNormBwdPrimitive.inner_primitive.bind(
             dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
         return dx, dgamma, dbeta
 
@@ -609,9 +690,9 @@ class RmsNormFwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(x_aval, gamma_aval, **kwargs):    # pylint: disable=unused-argument
+    def abstract(x_aval, gamma_aval, **kwargs):
         """
-        RMSNorm fwd abstract
+        RMSNorm fwd inner primitive abstract
         """
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -624,6 +705,28 @@ class RmsNormFwdPrimitive(BasePrimitive):
         hidden_size = gamma_aval.size
         assert x_aval.size % hidden_size == 0
 
+        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+            x_aval.size // hidden_size,    # batch size
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
+            jax_dtype_to_te_dtype(x_aval.dtype),    # out te_dtype (same as input for Fp16/Bf16)
+            False,
+            False,
+            kwargs['epsilon'])
+        wkspace_aval = out_aval.update(shape=wkspace_info[0],
+                                       dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = out_aval.update(shape=barrier_info[0],
+                                       dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+
+        return out_aval, rsigma_aval, wkspace_aval, barrier_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        RMSNorm fwd outer primitive abstract
+        """
+        out_aval, rsigma_aval, _, _ = RmsNormFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, rsigma_aval
 
     @staticmethod
@@ -643,9 +746,13 @@ class RmsNormFwdPrimitive(BasePrimitive):
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
+        wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+
         out_types = [
             ir.RankedTensorType.get(out_shape, x_type.element_type),
             ir.RankedTensorType.get(batch_shape, rsigma_element_type),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
         ]
         operands = [x, gamma]
         operand_shapes = [x_shape, g_shape]
@@ -656,8 +763,16 @@ class RmsNormFwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            0,    # no dgamma_part in FWD pass
+            0,    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            TEDType.kByte,    # dummy dgamma_part te_dtype
+            TEDType.kByte,    # dummy dbeta_part te_dtype
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
@@ -673,7 +788,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         to describe implementation
         """
         assert RmsNormFwdPrimitive.inner_primitive is not None
-        out, rsigma = RmsNormFwdPrimitive.inner_primitive.bind(x, gamma, epsilon=epsilon)
+        out, rsigma, _, _ = RmsNormFwdPrimitive.inner_primitive.bind(x, gamma, epsilon=epsilon)
         return out, rsigma
 
     @staticmethod
@@ -744,15 +859,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(
-            dz_aval,
-            x_aval,
-            rsigma_aval,
-            gamma_aval,
-            **kwargs    # pylint: disable=unused-argument
-    ):
+    def abstract(dz_aval, x_aval, rsigma_aval, gamma_aval, **kwargs):
         """
-        RMSNorm bwd abstract
+        RMSNorm bwd inner primitive abstract
         """
         w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
         rsigma_dtype = dtypes.canonicalize_dtype(rsigma_aval.dtype)
@@ -764,6 +873,30 @@ class RmsNormBwdPrimitive(BasePrimitive):
 
         dx_aval = core.raise_to_shaped(dz_aval)
         dgamma_aval = core.raise_to_shaped(gamma_aval)
+
+        wkspace_info, barrier_info, dgamma_part_info, _ = \
+            transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
+                x_aval.size // gamma_aval.size,           # batch size
+                gamma_aval.size,                          # hidden size
+                jax_dtype_to_te_dtype(x_aval.dtype),      # in te_dtype
+                jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+                False, False, kwargs['epsilon']
+            )
+        wkspace_aval = dx_aval.update(shape=wkspace_info[0],
+                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = dx_aval.update(shape=barrier_info[0],
+                                      dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+        dgamma_part_aval = dgamma_aval.update(shape=dgamma_part_info[0],
+                                              dtype=te_dtype_to_jax_dtype(dgamma_part_info[1]))
+
+        return dx_aval, dgamma_aval, wkspace_aval, barrier_aval, dgamma_part_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        RMSNorm bwd outer primitive abstract
+        """
+        dx_aval, dgamma_aval, _, _, _ = RmsNormBwdPrimitive.abstract(*args, **kwargs)
         return dx_aval, dgamma_aval
 
     @staticmethod
@@ -782,9 +915,15 @@ class RmsNormBwdPrimitive(BasePrimitive):
         hidden_size = reduce(operator.mul, g_shape)
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
+        wkspace_aval, barrier_aval, dgamma_part_aval = ctx.avals_out[-3:]
+
         out_types = [
             ir.RankedTensorType.get(x_shape, x_type.element_type),
             ir.RankedTensorType.get(g_shape, g_type.element_type),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+            ir.RankedTensorType.get(dgamma_part_aval.shape,
+                                    jax_dtype_to_ir_dtype(dgamma_part_aval.dtype))
         ]
         operands = [dz, rsigma, x, gamma]
         operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
@@ -795,8 +934,16 @@ class RmsNormBwdPrimitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            dgamma_part_aval.size,
+            0,    # no dbeta_part for RMSnorm
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            jax_dtype_to_te_dtype(dgamma_part_aval.dtype),
+            TEDType.kByte,    # dummy dbeta_part te_dtype
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
@@ -809,7 +956,8 @@ class RmsNormBwdPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, rsigma, gamma, epsilon):
         assert RmsNormBwdPrimitive.inner_primitive is not None
-        dx, dgamma = RmsNormBwdPrimitive.inner_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
+        dx, dgamma, _, _, _ = \
+            RmsNormBwdPrimitive.inner_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
         return dx, dgamma
 
     @staticmethod
@@ -1721,40 +1869,58 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     def abstract(qkv_aval, bias_aval, seqlen_or_cu_seqlen_aval, seed_aval, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
-        Self fused attention fwd abstract
+        Self fused attention fwd inner primitive abstract
         """
-        # outer_primitve is seqlen, inner_primitive is cu_seqlen
-        del seqlen_or_cu_seqlen_aval, scaling_factor, is_training
+        # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
+        del seqlen_or_cu_seqlen_aval
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
-        *batch_shape, max_seqlen, nqkv, num_head, head_dim = qkv_aval.shape
+        *batch_shape, max_seqlen, nqkv, num_heads, head_dim = qkv_aval.shape
         assert nqkv == 3
         assert qkv_aval.dtype == bias_aval.dtype
 
-        output_shape = (*batch_shape, max_seqlen, num_head, head_dim)
-        output_dtype = qkv_dtype
+        output_shape = (*batch_shape, max_seqlen, num_heads, head_dim)
+        out_aval = qkv_aval.update(shape=output_shape, dtype=qkv_dtype)
 
+        # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
-                                  attn_mask_type, dropout_probability, num_head, num_head,
+                                  attn_mask_type, dropout_probability, num_heads, num_heads,
                                   max_seqlen, max_seqlen, head_dim).get_fused_attn_backend()
-
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_aux_shape = (*batch_shape, num_head, max_seqlen, max_seqlen)
+            softmax_shape = (*batch_shape, num_heads, max_seqlen, max_seqlen)
             softmax_dtype = qkv_dtype
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_aux_shape = (*batch_shape, num_head, max_seqlen, 1)
+            softmax_shape = (*batch_shape, num_heads, max_seqlen, 1)
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f'Unsupported {backend=}')
+        softmax_aux_aval = qkv_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
+        # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
+        # 32-bit unsigned int to get the buffer size we need in the C++ kernel
         checker = _FusedAttnRNGStateChecker()
         seed_dtype = dtypes.canonicalize_dtype(seed_aval.dtype)
         assert seed_dtype == checker.rng_state_dtype
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
-        rng_state_dtype = seed_dtype
+        rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        out_aval = qkv_aval.update(shape=output_shape, dtype=output_dtype)
-        softmax_aux_aval = qkv_aval.update(shape=softmax_aux_shape, dtype=softmax_dtype)
-        rng_state_aval = qkv_aval.update(shape=rng_state_shape, dtype=rng_state_dtype)
+        # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
+        # prepare for the active fused-attn backend
+        batch_size = reduce(operator.mul, batch_shape)
+        wkspace_info = transformer_engine_jax.get_self_fused_attn_fwd_workspace_sizes(
+            batch_size, max_seqlen, num_heads, head_dim, scaling_factor, dropout_probability,
+            attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+        wkspace_aval = qkv_aval.update(shape=wkspace_info[0],
+                                       dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+
+        return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Self fused attention fwd outer primitive abstract
+        """
+        out_aval, softmax_aux_aval, rng_state_aval, _ = \
+            SelfFusedAttnFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, softmax_aux_aval, rng_state_aval
 
     @staticmethod
@@ -1763,23 +1929,25 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         """
         Self fused attention fwd lowering rules
         """
-        qkv_aval, _, _, _ = ctx.avals_in
-
-        *batch_shape, max_seqlen, _, num_head, head_dim = qkv_aval.shape
-        batch = reduce(operator.mul, batch_shape)
-
         operands = [qkv, bias, cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
             for output in ctx.avals_out
         ]
-
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        qkv_aval = ctx.avals_in[0]
+        *batch_shape, max_seqlen, _, num_heads, head_dim = qkv_aval.shape
+        batch_size = reduce(operator.mul, batch_shape)
+
+        wkspace_aval = ctx.avals_out[-1]
+
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor,
-            dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            is_training)
 
         out = custom_caller(SelfFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -1792,7 +1960,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 
         cu_seqlen = generate_cu_seqlen(seqlen)
 
-        output, softmax_aux, rng_state = SelfFusedAttnFwdPrimitive.inner_primitive.bind(
+        output, softmax_aux, rng_state, _ = SelfFusedAttnFwdPrimitive.inner_primitive.bind(
             qkv,
             bias,
             cu_seqlen,
@@ -1897,16 +2065,35 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         """
         Self fused attention bwd abstract
         """
-        del softmax_aux_aval, rng_state_aval
-        # outer_primitve is seqlen, inner_primitive is cu_seqlen
-        del seqlen_or_cu_seqlen_aval, attn_bias_type, attn_mask_type
-        del scaling_factor, dropout_probability, is_training
+        del softmax_aux_aval, rng_state_aval, seqlen_or_cu_seqlen_aval
+
+        assert qkv_aval.dtype == bias_aval.dtype == output_aval.dtype == doutput_aval.dtype
+        *batch_shape, max_seqlen, nqkv, num_heads, head_dim = qkv_aval.shape
+        assert nqkv == 3
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
-        assert qkv_aval.dtype == bias_aval.dtype == output_aval.dtype == doutput_aval.dtype
+
+        batch_size = reduce(operator.mul, batch_shape)
+        wkspace_shape, wkspace_dtype = \
+            transformer_engine_jax.get_self_fused_attn_bwd_workspace_sizes(
+                batch_size, max_seqlen, num_heads, head_dim,
+                scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+                jax_dtype_to_te_dtype(qkv_aval.dtype), is_training
+            )
 
         dqkv_aval = qkv_aval.update(shape=qkv_aval.shape, dtype=qkv_dtype)
         dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
+        wkspace_aval = qkv_aval.update(shape=wkspace_shape,
+                                       dtype=te_dtype_to_jax_dtype(wkspace_dtype))
+
+        return dqkv_aval, dbias_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Self fused attention bwd outer primitive abstract
+        """
+        dqkv_aval, dbias_aval, _ = SelfFusedAttnBwdPrimitive.abstract(*args, **kwargs)
         return dqkv_aval, dbias_aval
 
     @staticmethod
@@ -1915,24 +2102,25 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         """
         Self fused attention bwd lowering rules
         """
-        qkv_aval, _, _, _, _, _, _ = ctx.avals_in
-
-        *batch_shape, max_seqlen, _, num_head, head_dim = qkv_aval.shape
-        batch = reduce(operator.mul, batch_shape)
-
         operands = [qkv, bias, softmax_aux, rng_state, output, doutput, cu_seqlen]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
             for output in ctx.avals_out
         ]
-
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        qkv_aval = ctx.avals_in[0]
+        *batch_shape, max_seqlen, _, num_heads, head_dim = qkv_aval.shape
+        batch_size = reduce(operator.mul, batch_shape)
+
+        wkspace_aval = ctx.avals_out[-1]
+
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor,
-            dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+            batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            is_training)
 
         out = custom_caller(SelfFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -1945,7 +2133,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
         cu_seqlen = generate_cu_seqlen(seqlen)
 
-        dqkv, dbias = SelfFusedAttnBwdPrimitive.inner_primitive.bind(
+        dqkv, dbias, _ = SelfFusedAttnBwdPrimitive.inner_primitive.bind(
             qkv,
             bias,
             softmax_aux,
@@ -2067,50 +2255,61 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         """
         Cross fused attention fwd abstract
         """
-        # outer_primitve is seqlen, inner_primitive is cu_seqlen
-        del scaling_factor, is_training
-
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
-        *q_batch_shape, q_max_seqlen, q_num_head, q_head_dim = q_aval.shape
-
         kv_dtype = dtypes.canonicalize_dtype(kv_aval.dtype)
-        *kv_batch_shape, kv_max_seqlen, nkv, kv_num_head, kv_head_dim = kv_aval.shape
-
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
-
         assert q_dtype == kv_dtype == bias_dtype
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+
+        *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+        *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = kv_aval.shape
         assert q_batch_shape == kv_batch_shape
         assert q_head_dim == kv_head_dim
         assert nkv == 2
-        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+        out_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
 
-        output_shape = q_aval.shape
-        output_dtype = q_dtype
-
+        # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(q_dtype, kv_dtype, NVTE_QKV_Layout.NVTE_BSHD_BS2HD,
-                                  attn_bias_type, attn_mask_type, dropout_probability, q_num_head,
-                                  kv_num_head, q_max_seqlen, kv_max_seqlen,
+                                  attn_bias_type, attn_mask_type, dropout_probability, num_heads,
+                                  num_gqa_groups, q_max_seqlen, kv_max_seqlen,
                                   q_head_dim).get_fused_attn_backend()
-
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_aux_shape = (*q_batch_shape, q_num_head, q_max_seqlen, kv_max_seqlen)
-            softmax_aux_dtype = q_dtype
+            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, kv_max_seqlen)
+            softmax_dtype = q_dtype
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_aux_shape = (*q_batch_shape, q_num_head, q_max_seqlen, 1)
-            softmax_aux_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, 1)
+            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f'Unsupported {backend=}')
+        softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
+        # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
+        # 32-bit unsigned int to get the buffer size we need in the C++ kernel
         checker = _FusedAttnRNGStateChecker()
         seed_dtype = dtypes.canonicalize_dtype(seed_aval.dtype)
         assert seed_dtype == checker.rng_state_dtype
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
-        rng_state_dtype = seed_dtype
+        rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        out_aval = q_aval.update(shape=output_shape, dtype=output_dtype)
-        softmax_aux_aval = q_aval.update(shape=softmax_aux_shape, dtype=softmax_aux_dtype)
-        rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=rng_state_dtype)
+        # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
+        # prepare for the active fused-attn backend
+        batch_size = reduce(operator.mul, q_batch_shape)
+        wkspace_info = transformer_engine_jax.get_cross_fused_attn_fwd_workspace_sizes(
+            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+        wkspace_aval = q_aval.update(shape=wkspace_info[0],
+                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
 
+        return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Cross fused attention fwd outer primitive abstract
+        """
+        out_aval, softmax_aux_aval, rng_state_aval, _ = \
+            CrossFusedAttnFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, softmax_aux_aval, rng_state_aval
 
     @staticmethod
@@ -2119,25 +2318,26 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         """
         Cross fused attention fwd lowering rules
         """
-        q_aval, kv_aval, *_ = ctx.avals_in
-        assert q_aval.dtype == kv_aval.dtype
-
-        *batch_shape, q_max_seqlen, num_head, head_dim = q_aval.shape
-        batch = reduce(operator.mul, batch_shape)
-        kv_max_seqlen, kv_num_head = kv_aval.shape[-4], kv_aval.shape[-2]
-
         operands = [q, kv, bias, q_cu_seqlen, kv_cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
             for output in ctx.avals_out
         ]
-
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        q_aval, kv_aval, *_ = ctx.avals_in
+        *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
+        *_, kv_max_seqlen, _, num_gqa_groups, _ = kv_aval.shape
+        batch_size = reduce(operator.mul, batch_shape)
+
+        wkspace_aval = ctx.avals_out[-1]
+
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, kv_num_head, q_max_seqlen, kv_max_seqlen, head_dim,
-            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
+            wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            is_training)
 
         out = custom_caller(CrossFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -2151,7 +2351,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         q_cu_seqlen = generate_cu_seqlen(q_seqlen)
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen)
 
-        output, softmax_aux, rng_state = CrossFusedAttnFwdPrimitive.inner_primitive.bind(
+        output, softmax_aux, rng_state, _ = CrossFusedAttnFwdPrimitive.inner_primitive.bind(
             q,
             kv,
             bias,
@@ -2266,7 +2466,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         Cross fused attention bwd abstract
         """
         del softmax_aux_aval, rng_state_aval, output_aval
-        del attn_bias_type, attn_mask_type, scaling_factor, dropout_probability, is_training
+
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
@@ -2274,9 +2474,35 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == kv_dtype == bias_dtype == doutput_dtype
         assert q_cu_seqlen_aval.dtype == kv_cu_seqlen_aval.dtype
 
+        *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+        *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = kv_aval.shape
+        assert q_batch_shape == kv_batch_shape
+        assert q_head_dim == kv_head_dim
+        assert nkv == 2
+
+        batch_size = reduce(operator.mul, q_batch_shape)
+        wkspace_shape, wkspace_dtype = \
+            transformer_engine_jax.get_cross_fused_attn_bwd_workspace_sizes(
+                batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+                scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+                jax_dtype_to_te_dtype(q_aval.dtype), is_training
+            )
+
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
         dkv_aval = kv_aval.update(shape=kv_aval.shape, dtype=kv_dtype)
         dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
+        wkspace_aval = q_aval.update(shape=wkspace_shape,
+                                     dtype=te_dtype_to_jax_dtype(wkspace_dtype))
+
+        return dq_aval, dkv_aval, dbias_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Cross fused attention fwd outer primitive abstract
+        """
+        dq_aval, dkv_aval, dbias_aval, _ = \
+            CrossFusedAttnBwdPrimitive.abstract(*args, **kwargs)
         return dq_aval, dkv_aval, dbias_aval
 
     @staticmethod
@@ -2286,13 +2512,6 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         """
         Cross fused attention bwd lowering rules
         """
-        q_aval, kv_aval, *_ = ctx.avals_in
-        assert q_aval.dtype == kv_aval.dtype
-
-        *batch_shape, q_max_seqlen, num_head, head_dim = q_aval.shape
-        batch = reduce(operator.mul, batch_shape)
-        kv_max_seqlen, kv_num_head = kv_aval.shape[-4], kv_aval.shape[-2]
-
         operands = [q, kv, bias, softmax_aux, rng_state, output, doutput, q_cu_seqlen, kv_cu_seqlen]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
@@ -2302,12 +2521,18 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        # the dropout elements are encoded in the forward auxiliary tensor
-        # so seed is not needed in backward
+        q_aval, kv_aval, *_ = ctx.avals_in
+        *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
+        *_, kv_max_seqlen, _, num_gqa_groups, _ = kv_aval.shape
+        batch_size = reduce(operator.mul, batch_shape)
+
+        wkspace_aval = ctx.avals_out[-1]
+
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, kv_num_head, q_max_seqlen, kv_max_seqlen, head_dim,
-            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
+            wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            is_training)
 
         out = custom_caller(CrossFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -2321,7 +2546,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         q_cu_seqlen = generate_cu_seqlen(q_seqlen)
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen)
 
-        dq, dkv, dbias = CrossFusedAttnBwdPrimitive.inner_primitive.bind(
+        dq, dkv, dbias, _ = CrossFusedAttnBwdPrimitive.inner_primitive.bind(
             q,
             kv,
             bias,
@@ -2435,6 +2660,222 @@ def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
                                                            scaling_factor=scaling_factor,
                                                            dropout_probability=dropout_probability,
                                                            is_training=is_training)
+
+
+class GeluPrimitive(BasePrimitive):
+    """
+    Gelu Froward Primitive
+    """
+    name = "te_gelu"
+    multiple_results = False
+    inner_primitive = None
+    outer_primitive = None
+    impl_static_args = ()
+
+    @staticmethod
+    def abstract(x_aval):
+        """
+        gated_gelu abstract
+        """
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        out_aval = core.raise_to_shaped(x_aval)
+        return out_aval
+
+    @staticmethod
+    def lowering(ctx, x):
+        """
+        gated_gelu lowering rules
+        """
+        (x_aval,) = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        ir_x_type = ir.RankedTensorType(x.type)
+        ir_x_shape = ir_x_type.shape
+        out_shape = ir_x_shape
+
+        out_types = [
+            ir.RankedTensorType.get(out_shape, ir_x_type.element_type),
+        ]
+        operands = [x]
+        operand_shapes = [ir_x_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        hidden_size = ir_x_shape[-1]
+        batch_size = reduce(operator.mul, ir_x_shape[:-1])
+        in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
+        opaque = transformer_engine_jax.pack_common_descriptor((batch_size, hidden_size), in_dtype,
+                                                               in_dtype)
+
+        out = custom_caller(GeluPrimitive.name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def impl(x):
+        assert GeluPrimitive.inner_primitive is not None
+        out = GeluPrimitive.inner_primitive.bind(x)
+        return out
+
+    @staticmethod
+    def batcher(batched_args, batch_dims):
+        """
+        gated_gelu batcher
+        """
+        _check_valid_batch_dims(batch_dims)
+        assert GeluPrimitive.outer_primitive is not None
+        inputs, = batched_args
+        inputs_bdim, = batch_dims
+
+        out_bdims = inputs_bdim
+        return GeluPrimitive.outer_primitive.bind(inputs), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(mesh, arg_infos, result_infos):
+        """
+        gated_gelu infer_sharding_from_operands
+        """
+        del result_infos    # Unused.
+        x_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        return out_sharding
+
+    @staticmethod
+    def partition(mesh, arg_infos, result_infos):
+        """
+        gated_gelu partitioning
+        """
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        impl = GeluPrimitive.impl
+        return mesh, impl, out_sharding, arg_shardings
+
+
+register_primitive(GeluPrimitive)
+
+
+def gelu(inputs: jnp.ndarray) -> jnp.ndarray:
+    """
+    gelu wrapper
+    Return geglu(inputs)
+    Assume inputs has two dimensions shape and the memory layout is (N..., H)
+    """
+    return GeluPrimitive.outer_primitive.bind(inputs)
+
+
+class DGeluPrimitive(BasePrimitive):
+    """
+    Dgated Gelu Primitive
+    """
+    name = "te_dgelu"
+    multiple_results = False
+    inner_primitive = None
+    outer_primitive = None
+    impl_static_args = ()
+
+    @staticmethod
+    def abstract(dz_aval, x_aval):
+        """
+        dgelu abstract
+        """
+        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dtype
+        assert dz_aval.shape == x_aval.shape
+
+        out_aval = core.raise_to_shaped(x_aval)
+        return out_aval
+
+    @staticmethod
+    def lowering(ctx, dz, x):
+        """
+        dgelu lowering rules
+        """
+        in_aval, gi_aval = ctx.avals_in
+        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert gi_aval.dtype == in_aval.dtype
+        ir_in_type = ir.RankedTensorType(dz.type)
+        ir_in_shape = ir_in_type.shape
+        gi_type = ir.RankedTensorType(x.type)
+        gi_shape = gi_type.shape
+        assert ir_in_shape == gi_shape
+
+        ir_batch_size = reduce(operator.mul, ir_in_shape[:-1])
+        i_hidden_size = ir_in_shape[-1]
+        out_dtype = ir_in_type.element_type
+        out_shape = gi_shape
+
+        out_types = [
+            ir.RankedTensorType.get(out_shape, out_dtype),
+        ]
+        operands = [dz, x]
+        operand_shapes = [ir_in_shape, gi_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
+        opaque = transformer_engine_jax.pack_common_descriptor((ir_batch_size, i_hidden_size),
+                                                               in_dtype, in_dtype)
+
+        out = custom_caller(DGeluPrimitive.name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def impl(dz, x):
+        """
+        dgelu implementation
+        """
+        assert DGeluPrimitive.inner_primitive is not None
+        dx = DGeluPrimitive.inner_primitive.bind(dz, x)
+        return dx
+
+    @staticmethod
+    def batcher(batched_args, batch_dims):
+        """
+        dgelu batcher
+        """
+        _check_valid_batch_dims(batch_dims)
+        assert DGeluPrimitive.outer_primitive is not None
+        dz, x = batched_args
+        _, x_bdim = batch_dims
+
+        out_bdims = x_bdim
+        return DGeluPrimitive.outer_primitive.bind(dz, x), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(mesh, arg_infos, result_infos):
+        """
+        dgelu infer_sharding_from_operands
+        """
+        del result_infos    # Unused.
+        gelu_out_spec = get_padded_spec(arg_infos[1])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*gelu_out_spec))
+        return dx_sharding
+
+    @staticmethod
+    def partition(mesh, arg_infos, result_infos):
+        """
+        dgelu partition
+        """
+        del result_infos
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = dx_sharding
+        impl = DGeluPrimitive.impl
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(DGeluPrimitive)
+
+
+def dgelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
+    """
+    dgelu fusion wrapper
+    Return dgeglu(inputs)
+    """
+    return DGeluPrimitive.outer_primitive.bind(inputs, gelu_inputs)
 
 
 class GatedGeluPrimitive(BasePrimitive):
@@ -2961,7 +3402,7 @@ class CastFP8Primitive(BasePrimitive):
         x, amax, scale, scale_inv = batched_args
         x_bdim, amax_bdim, *_ = batch_dims
 
-        out_bdims = x_bdim, x_bdim, amax_bdim
+        out_bdims = x_bdim, amax_bdim
         return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv,
                                                      out_dtype=out_dtype), out_bdims
 
@@ -3143,9 +3584,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
     def abstract(x_aval, gamma_aval, beta_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
                  zero_centered_gamma, epsilon):
         """
-        LayerNorm fwd (fp8 out) abstract
+        LayerNorm fwd (fp8 out) inner primitive abstract
         """
-        del zero_centered_gamma, epsilon
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -3157,10 +3597,33 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
 
         assert gamma_aval.size == beta_aval.size
 
+        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+            x_aval.size // gamma_aval.size,    # batch size
+            gamma_aval.size,    # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),    # in type
+            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight type
+            jax_dtype_to_te_dtype(out_dtype),
+            True,
+            zero_centered_gamma,
+            epsilon)
+
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
+        wkspace_aval = x_aval.update(shape=wkspace_info[0],
+                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = x_aval.update(shape=barrier_info[0],
+                                     dtype=te_dtype_to_jax_dtype(barrier_info[1]))
 
+        return out_aval, mu_aval, rsigma_aval, updated_amax_aval, wkspace_aval, barrier_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        LayerNorm fwd (fp8 out) outer primitive abstract
+        """
+        out_aval, mu_aval, rsigma_aval, updated_amax_aval, _, _ = \
+            LayerNormFwdFp8Primitive.abstract(*args, **kwargs)
         return out_aval, mu_aval, rsigma_aval, updated_amax_aval
 
     @staticmethod
@@ -3204,11 +3667,15 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
+        wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+
         out_types = [
             ir.RankedTensorType.get(out_shape, ir_out_dtype),
             ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
         ]
         operands = [x, gamma, beta, amax, scale, scale_inv]
         operand_shapes = [
@@ -3221,8 +3688,16 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            0,    # no dgamma_part in FWD pass
+            0,    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            TEDType.kByte,    # dummy dgamma_part te_dtype
+            TEDType.kByte,    # dummy dbeta_part te_dtype
             zero_centered_gamma,
             epsilon,
             sm_margin,
@@ -3242,7 +3717,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert LayerNormFwdFp8Primitive.inner_primitive is not None
-        out, mu, rsigma, updated_amax = LayerNormFwdFp8Primitive.inner_primitive.bind(
+        out, mu, rsigma, updated_amax, _, _ = LayerNormFwdFp8Primitive.inner_primitive.bind(
             x,
             gamma,
             beta,
@@ -3359,9 +3834,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
     @staticmethod
     def abstract(x_aval, gamma_aval, amax_aval, scale_aval, scale_inv_aval, out_dtype, epsilon):
         """
-        RMSNorm fwd (fp8 out) abstract
+        RMSNorm fwd (fp8 out) inner primitive abstract
         """
-        del epsilon
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -3374,10 +3848,32 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
 
         rsigama_dtype = jnp.float32
 
+        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+            x_aval.size // hidden_size,    # batch_size
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
+            jax_dtype_to_te_dtype(out_dtype),    # out te_dtype
+            False,
+            False,
+            epsilon)
+
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=rsigama_dtype)
         amax_aval = out_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
+        wkspace_aval = x_aval.update(shape=wkspace_info[0],
+                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+        barrier_aval = x_aval.update(shape=barrier_info[0],
+                                     dtype=te_dtype_to_jax_dtype(barrier_info[1]))
 
+        return out_aval, rsigma_aval, amax_aval, wkspace_aval, barrier_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        RMSNorm fwd (fp8 out) outer primitive abstract
+        """
+        out_aval, rsigma_aval, amax_aval, _, _ = RmsNormFwdFp8Primitive.abstract(*args, **kwargs)
         return out_aval, rsigma_aval, amax_aval
 
     @staticmethod
@@ -3414,10 +3910,14 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
+        wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+
         out_types = [
             ir.RankedTensorType.get(out_shape, ir_out_dtype),
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
         ]
         operands = [x, gamma, amax, scale, scale_inv]
         operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -3428,8 +3928,16 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
+            wkspace_aval.size,
+            barrier_aval.size,
+            0,    # no dgamma_part in FWD pass
+            0,    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype),
+            jax_dtype_to_te_dtype(barrier_aval.dtype),
+            TEDType.kByte,    # dummy dgamma_part te_dtype
+            TEDType.kByte,    # dummy dbeta_part te_dtype
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
@@ -3449,13 +3957,13 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert RmsNormFwdFp8Primitive.inner_primitive is not None
-        out, rsigma, amax = RmsNormFwdFp8Primitive.inner_primitive.bind(x,
-                                                                        gamma,
-                                                                        amax,
-                                                                        scale,
-                                                                        scale_inv,
-                                                                        out_dtype=out_dtype,
-                                                                        epsilon=epsilon)
+        out, rsigma, amax, _, _ = RmsNormFwdFp8Primitive.inner_primitive.bind(x,
+                                                                              gamma,
+                                                                              amax,
+                                                                              scale,
+                                                                              scale_inv,
+                                                                              out_dtype=out_dtype,
+                                                                              epsilon=epsilon)
         return out, rsigma, amax
 
     @staticmethod
@@ -3536,6 +4044,379 @@ def rmsnorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, amax: jnp.ndarray, scale
                                                        scale_inv,
                                                        out_dtype=out_dtype,
                                                        epsilon=epsilon)
+
+
+class GeluFp8Primitive(BasePrimitive):
+    """
+    Gelu FP8 Primitive
+    """
+    name = "te_gelu_fp8"
+    multiple_results = True
+    impl_static_args = (4,)    #out_dtype
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype):
+        """
+        te_gelu_p abstract
+        """
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        # Currently only support casting to E4M3 only in C side.
+        assert out_dtype == jnp.float8_e4m3fn
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+
+        out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
+        updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
+
+        return out_aval, updated_amax_aval
+
+    @staticmethod
+    def lowering(ctx, x, amax, scale, scale_inv, *, out_dtype):
+        """
+        te_gated_gelu_p lowering rules
+        """
+        x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+        ir_x_type = ir.RankedTensorType(x.type)
+        ir_x_shape = ir_x_type.shape
+        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+        ir_amax_type = ir.RankedTensorType(amax.type)
+        ir_amax_dtype = ir_amax_type.element_type
+        ir_amax_shape = ir_amax_type.shape
+        ir_scale_shape = ir_amax_shape
+        ir_scale_inv_shape = ir_amax_shape
+
+        hidden_size = ir_x_shape[-1]
+        batch_size = reduce(operator.mul, ir_x_shape[:-1])
+        out_shape = ir_x_shape
+        out_types = [
+            ir.RankedTensorType.get(out_shape, ir_out_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+        ]
+        operands = [x, amax, scale, scale_inv]
+        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_common_descriptor((batch_size, hidden_size),
+                                                               jax_dtype_to_te_dtype(x_aval.dtype),
+                                                               jax_dtype_to_te_dtype(out_dtype))
+
+        out = custom_caller(GeluFp8Primitive.name,
+                            args,
+                            opaque,
+                            False,
+                            operand_output_aliases={1: 1})
+
+        return out
+
+    @staticmethod
+    def impl(x, amax, scale, scale_inv, out_dtype):
+        """
+        to describe implementation
+        """
+        assert GeluFp8Primitive.inner_primitive is not None
+        out, updated_amax = GeluFp8Primitive.inner_primitive.bind(x,
+                                                                  amax,
+                                                                  scale,
+                                                                  scale_inv,
+                                                                  out_dtype=out_dtype)
+        return out, updated_amax
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, out_dtype):
+        """
+        to describe batch rules for vmap
+        """
+        _check_valid_batch_dims(batch_dims)
+        assert GeluFp8Primitive.outer_primitive is not None
+        x, amax, scale, scale_inv = batched_args
+        x_bdim, amax_bdim, _, _ = batch_dims
+
+        out_bdims = x_bdim, amax_bdim
+        return GeluFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv,
+                                                     out_dtype=out_dtype), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(out_dtype, mesh, arg_infos, result_infos):
+        del out_dtype, result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        return (out_sharding, amax_sharding)
+
+    @staticmethod
+    def partition(out_dtype, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (out_sharding, amax_sharding)
+
+        def sharded_impl(x, amax, scale, scale_inv):
+            local_x, local_amax = GeluFp8Primitive.impl(x,
+                                                        amax,
+                                                        scale,
+                                                        scale_inv,
+                                                        out_dtype=out_dtype)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+
+            return local_x, global_updated_amax
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(GeluFp8Primitive)
+
+
+def gelu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
+             out_dtype: jnp.dtype) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    gated gelu wrapper
+    Return FP8(geglu(x))
+    """
+    return GeluFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
+
+
+class DGeluDBiasCastTransposePrimitive(BasePrimitive):
+    """
+    DGelu DBias Cast Transpose Primitive
+    """
+    name = "te_dgelu_dbias_cast_transpose"
+    multiple_results = True
+    # out_dtype, static_axis_boundary, transpose_axis_boundary
+    impl_static_args = (5, 6, 7)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
+                 static_axis_boundary, transpose_axis_boundary):
+        """
+        te_dgelu_dbais_cast_transpose_p abstract
+        """
+        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dtype
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+        ir_hidden_szie = dz_aval.shape[-1]
+        gi_hidden_size = x_aval.shape[-1]
+        assert ir_hidden_szie == gi_hidden_size
+        t_shape = _multidim_transpose(x_aval.shape, static_axis_boundary, transpose_axis_boundary)
+        out = dz_aval.update(shape=x_aval.shape, dtype=out_dtype)
+        t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
+
+        dbias_shape = (*x_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
+        dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
+
+        updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
+
+        wkspace_info, = transformer_engine_jax.get_dgelu_dbias_ct_workspace_sizes(
+            x_aval.size // gi_hidden_size,
+            gi_hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),
+            jax_dtype_to_te_dtype(out_dtype),
+        )
+        wkspace_aval = x_aval.update(shape=wkspace_info[0],
+                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+
+        return out, t_out, dbias, updated_amax_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        te_dgelu_dbais_cast_transpose_p outer abstract
+        """
+
+        out, t_out, dbias, updated_amax_aval, _ = \
+            DGeluDBiasCastTransposePrimitive.abstract(*args, **kwargs)
+        return out, t_out, dbias, updated_amax_aval
+
+    @staticmethod
+    def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary,
+                 transpose_axis_boundary):
+        """
+        te_dgated_gelu_cast_transpose_p lowering rules
+        """
+        dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
+        assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_aval.dtype
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+        ir_dz_type = ir.RankedTensorType(dz.type)
+        ir_dz_shape = ir_dz_type.shape
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        assert ir_dz_shape == x_shape
+
+        batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        ir_hidden_szie = ir_dz_shape[-1]
+        contracted_x_shape = (batch_szie, ir_hidden_szie)
+
+        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+        ir_amax_type = ir.RankedTensorType(amax.type)
+        ir_amax_dtype = ir_amax_type.element_type
+        ir_amax_shape = ir_amax_type.shape
+        ir_scale_shape = ir_amax_shape
+        ir_scale_inv_shape = ir_amax_shape
+        transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary,
+                                                 transpose_axis_boundary)
+        dbias_shape = (*x_shape[:static_axis_boundary + 1], ir_hidden_szie)
+
+        wkspace_aval = ctx.avals_out[-1]
+
+        out_types = [
+            ir.RankedTensorType.get(x_shape, ir_out_dtype),
+            ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
+            ir.RankedTensorType.get(dbias_shape, ir_dz_type.element_type),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+        ]
+        operands = [dz, x, amax, scale, scale_inv]
+        operand_shapes = [ir_dz_shape, x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_common_wk_descriptor(
+            contracted_x_shape, wkspace_aval.shape, jax_dtype_to_te_dtype(dz_aval.dtype),
+            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype))
+
+        out = custom_caller(DGeluDBiasCastTransposePrimitive.name,
+                            args,
+                            opaque,
+                            False,
+                            operand_output_aliases={2: 3})
+
+        return out
+
+    @staticmethod
+    def impl(dz, x, amax, scale, scale_inv, out_dtype, static_axis_boundary,
+             transpose_axis_boundary):
+        """
+        to describe implementation
+        """
+        assert DGeluDBiasCastTransposePrimitive.inner_primitive is not None
+        out, t_out, dbias, updated_amax, _ = DGeluDBiasCastTransposePrimitive.inner_primitive.bind(
+            dz,
+            x,
+            amax,
+            scale,
+            scale_inv,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary)
+        return out, t_out, dbias, updated_amax
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary,
+                transpose_axis_boundary):
+        """
+        to describe batch rules for vmap
+        """
+        del static_axis_boundary
+        _check_valid_batch_dims(batch_dims)
+        assert DGeluDBiasCastTransposePrimitive.outer_primitive is not None
+        dz, x, amax, scale, scale_inv = batched_args
+        x_bdim, _, amax_bdim, _, _ = batch_dims
+
+        # Minus batch dim.
+        transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, x.ndim - 1)
+        transpose_axis_boundary += 1    # Plus batch dim
+
+        out_bdims = x_bdim, x_bdim, x_bdim, amax_bdim
+        return DGeluDBiasCastTransposePrimitive.outer_primitive.bind(
+            dz,
+            x,
+            amax,
+            scale,
+            scale_inv,
+            out_dtype=out_dtype,
+            static_axis_boundary=x_bdim,
+            transpose_axis_boundary=transpose_axis_boundary), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh,
+                                     arg_infos, result_infos):
+        del out_dtype, result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
+
+    @staticmethod
+    def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh, arg_infos,
+                  result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
+
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (casted_x_sharding, casted_transposed_x_sharding, dbias_shaprding,
+                         amax_sharding)
+
+        def sharded_impl(dz, x, amax, scale, scale_inv):
+            local_out, local_t_out, local_dbias, local_amax = DGeluDBiasCastTransposePrimitive.impl(
+                dz,
+                x,
+                amax,
+                scale,
+                scale_inv,
+                out_dtype=out_dtype,
+                static_axis_boundary=static_axis_boundary,
+                transpose_axis_boundary=transpose_axis_boundary)
+            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            return local_out, local_t_out, global_dbias, global_updated_amax
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(DGeluDBiasCastTransposePrimitive)
+
+
+def dgelu_dbias_cast_transpose(
+        dz: jnp.ndarray,
+        x: jnp.ndarray,
+        amax: jnp.ndarray,
+        scale: jnp.ndarray,
+        scale_inv: jnp.ndarray,
+        out_dtype: TEDType,
+        static_axis_boundary: int,
+        transpose_axis_boundary: int = -1) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    cast transpose dgelu and dbias fusion wrapper
+    Return FP8(dgeglu(inputs)), dbias
+    """
+    if static_axis_boundary < 0:
+        static_axis_boundary = -1    # means no static axes
+
+    return DGeluDBiasCastTransposePrimitive.outer_primitive.bind(
+        dz,
+        x,
+        amax,
+        scale,
+        scale_inv,
+        out_dtype=out_dtype,
+        static_axis_boundary=static_axis_boundary,
+        transpose_axis_boundary=transpose_axis_boundary)
 
 
 class GatedGeluFp8Primitive(BasePrimitive):

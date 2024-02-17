@@ -34,6 +34,8 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -155,7 +157,9 @@ class _Linear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -165,11 +169,12 @@ class _Linear(torch.autograd.Function):
                         transpose_out=weight_t_fp8._data,
                     )
                 else:
-                    weight_fp8._data = cast_to_fp8(
+                    cast_to_fp8(
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=weight_fp8._data,
                     )
                     weight_t_fp8 = None
 
@@ -275,7 +280,7 @@ class _Linear(torch.autograd.Function):
                 if cpu_offloading:
                     if fuse_wgrad_accumulation:
                         weight.main_grad.weight_offloading = True
-                    if fp8:
+                    if fp8 and weight_t_fp8 is not None:
                         weight_t_fp8.weight_offloading = True
                     weight.weight_offloading = True
 
@@ -342,7 +347,9 @@ class _Linear(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
+                weight_t_fp8 = weight.transpose(
+                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
+                )
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)

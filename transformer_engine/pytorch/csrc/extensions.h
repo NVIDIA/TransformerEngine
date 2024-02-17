@@ -7,6 +7,10 @@
 #include "common.h"
 #include "common/common.h"
 
+/***************************************************************************************************
+ * Attention
+ **************************************************************************************************/
+
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
@@ -149,8 +153,11 @@ std::vector<at::Tensor> fused_attn_bwd(
                 c10::optional<at::Tensor> amax_dQKV);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
-
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+/***************************************************************************************************
+ * GEMM
+ **************************************************************************************************/
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -201,6 +208,10 @@ void te_atomic_gemm(at::Tensor A,
                     bool gemm_producer,
                     at::Tensor counter
 );
+
+/***************************************************************************************************
+ * Transpose
+ **************************************************************************************************/
 
 void fused_cast_transpose(at::Tensor input,
                           at::Tensor scale,
@@ -496,6 +507,9 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 );
 
+/***************************************************************************************************
+ * Softmax
+ **************************************************************************************************/
 
 at::Tensor scaled_softmax_forward(at::Tensor input,
                                   float scale_factor
@@ -529,6 +543,60 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
                                                        float scale_factor
 );
+
+
+at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input,
+                                                        float scale_factor
+);
+
+
+at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
+                                                         at::Tensor softmax_results_,
+                                                         float scale_factor
+);
+
+/***************************************************************************************************
+ * FP8 recipe
+ **************************************************************************************************/
+
+void fused_amax_and_scale_update(const at::Tensor &amax_history,
+                                 const at::Tensor &scale,
+                                 const at::Tensor &scale_inv,
+                                 const at::Tensor &scale_inv_mask,
+                                 at::Tensor updated_amax_history,
+                                 at::Tensor updated_scale,
+                                 at::Tensor updated_scale_inv,
+                                 const std::string& amax_compute_algo,
+                                 transformer_engine::DType fp8_dtype,
+                                 float margin);
+
+/***************************************************************************************************
+ * Rotary positional embedding
+ **************************************************************************************************/
+
+at::Tensor fused_rope_forward(const at::Tensor &input,
+                              const at::Tensor &freqs,
+                              const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_backward(const at::Tensor &output_grads,
+                               const at::Tensor &freqs,
+                               const bool transpose_output_memory
+);
+
+at::Tensor fused_rope_thd_forward(const at::Tensor &input,
+                                  const at::Tensor &cu_seqlens,
+                                  const at::Tensor &freqs
+);
+
+at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
+                                   const at::Tensor &cu_seqlens,
+                                   const at::Tensor &freqs
+);
+
+/***************************************************************************************************
+ * Miscellaneous
+ **************************************************************************************************/
 
 size_t get_cublasLt_version();
 
