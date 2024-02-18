@@ -94,11 +94,11 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t paddin
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, size_t wkspace_size, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
-    DType wkspace_dtype, bool is_training) {
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training) {
     return PackOpaque(CustomCallFusedAttnDescriptor{
         batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim, wkspace_size,
-        scaling_factor, dropout_probability, bias_type, mask_type, dtype, wkspace_dtype,
+        scaling_factor, dropout_probability, bias_type, mask_type, qkv_layout, dtype, wkspace_dtype,
         is_training});
 }
 
@@ -1030,15 +1030,17 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     // input buffers from XLA
     void *qkv = buffers[0];
-    void *bias = buffers[1];
-    void *cu_seqlens = buffers[2];
-    void *seed = buffers[3];
+    void *_not_used0 = buffers[1];
+    void *_not_used1 = buffers[2];
+    void *bias = buffers[3];
+    void *cu_seqlens = buffers[4];
+    void *seed = buffers[5];
 
     // output buffers from XLA
-    void *output = buffers[4];
-    void *softmax_aux = buffers[5];
-    void *rng_state = buffers[6];
-    void *workspace = buffers[7];
+    void *output = buffers[6];
+    void *softmax_aux = buffers[7];
+    void *rng_state = buffers[8];
+    void *workspace = buffers[9];
 
     // tensor sizes
     auto batch_size = descriptor.batch_size;

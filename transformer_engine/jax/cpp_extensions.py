@@ -1866,8 +1866,9 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(qkv_aval, bias_aval, seqlen_or_cu_seqlen_aval, seed_aval, *, attn_bias_type,
-                 attn_mask_type, scaling_factor, dropout_probability, is_training):
+    def abstract(qkv_aval, _not_used0, _not_used1, bias_aval, seqlen_or_cu_seqlen_aval, seed_aval,
+                 *, attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
+                 is_training):
         """
         Self fused attention fwd inner primitive abstract
         """
@@ -1926,12 +1927,12 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out_aval, softmax_aux_aval, rng_state_aval
 
     @staticmethod
-    def lowering(ctx, qkv, bias, cu_seqlen, seed, *, attn_bias_type, attn_mask_type, scaling_factor,
-                 dropout_probability, is_training):
+    def lowering(ctx, qkv, not_used0, not_used1, bias, cu_seqlen, seed, *, attn_bias_type,
+                 attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Self fused attention fwd lowering rules
         """
-        operands = [qkv, bias, cu_seqlen, seed]
+        operands = [qkv, not_used0, not_used1, bias, cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
@@ -1945,9 +1946,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BS3HD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
-            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type, qkv_layout,
             jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
 
@@ -1956,14 +1958,16 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(qkv, bias, seqlen, seed, attn_bias_type, attn_mask_type, scaling_factor,
-             dropout_probability, is_training):
+    def impl(qkv, not_used0, not_used1, bias, seqlen, seed, attn_bias_type, attn_mask_type,
+             scaling_factor, dropout_probability, is_training):
         assert SelfFusedAttnFwdPrimitive.inner_primitive is not None
 
         cu_seqlen = generate_cu_seqlen(seqlen)
 
         output, softmax_aux, rng_state, _ = SelfFusedAttnFwdPrimitive.inner_primitive.bind(
             qkv,
+            not_used0,
+            not_used1,
             bias,
             cu_seqlen,
             seed,
@@ -1979,7 +1983,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
                 dropout_probability, is_training):
         _check_valid_batch_dims(batch_dims)
         assert SelfFusedAttnFwdPrimitive.outer_primitive is not None
-        qkv_bdim, _, _, seed_bdim = batch_dims
+        qkv_bdim, _, _, _, _, seed_bdim = batch_dims
 
         out_bdims = qkv_bdim, qkv_bdim, seed_bdim
         return SelfFusedAttnFwdPrimitive.outer_primitive.bind(
@@ -2039,7 +2043,11 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
+
+    not_used = jnp.zeros(0, qkv.dtype)
     return SelfFusedAttnFwdPrimitive.outer_primitive.bind(qkv,
+                                                          not_used,
+                                                          not_used,
                                                           bias,
                                                           seqlen,
                                                           seed,
@@ -2118,9 +2126,10 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BS3HD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, max_seqlen, max_seqlen, num_heads, num_heads, head_dim, wkspace_aval.size,
-            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type, qkv_layout,
             jax_dtype_to_te_dtype(qkv_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
 
@@ -2336,11 +2345,12 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
-            is_training)
+            qkv_layout, jax_dtype_to_te_dtype(q_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype), is_training)
 
         out = custom_caller(CrossFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -2531,11 +2541,12 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
-            is_training)
+            qkv_layout, jax_dtype_to_te_dtype(q_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype), is_training)
 
         out = custom_caller(CrossFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -2763,11 +2774,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
-            is_training)
+            qkv_layout, jax_dtype_to_te_dtype(q_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype), is_training)
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
@@ -2965,11 +2977,12 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
+        qkv_layout = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
-            is_training)
+            qkv_layout, jax_dtype_to_te_dtype(q_aval.dtype),
+            jax_dtype_to_te_dtype(wkspace_aval.dtype), is_training)
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
