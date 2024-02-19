@@ -2499,25 +2499,37 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(attn_bias_type, attn_mask_type, qkv_layout, scaling_factor,
                                      dropout_probability, is_training, mesh, arg_infos,
                                      result_infos):
-        del attn_bias_type, attn_mask_type, qkv_layout, scaling_factor
+        del attn_bias_type, attn_mask_type, scaling_factor
         del dropout_probability, is_training, result_infos
-        q_spec = get_padded_spec(arg_infos[0])    # (...batch, q_seqlen, head, hidden)
-        k_spec = get_padded_spec(arg_infos[1])    # (...batch, kv_seqlen, head, hidden)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-        softmax_aux_sharding = NamedSharding(
-            mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-3]))
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
+            # q_spec = (...batch, q_seqlen, head, hidden)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
+            softmax_aux_sharding = NamedSharding(
+                mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None))
+        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+            # q_spec = (...batch, q_seqlen, head, hidden)
+            # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+            softmax_aux_sharding = NamedSharding(
+                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-4]))
+        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+            # q_spec = (...batch, q_seqlen, head, hidden)
+            # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+            softmax_aux_sharding = NamedSharding(
+                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-3]))
+        else:
+            raise ValueError(f"Unsupported {qkv_layout=}")
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
         return (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
     @staticmethod
     def partition(attn_bias_type, attn_mask_type, qkv_layout, scaling_factor, dropout_probability,
                   is_training, mesh, arg_infos, result_infos):
-        del result_infos
-        q_spec = get_padded_spec(arg_infos[0])    # (...batch, q_seqlen, head, hidden)
-        k_spec = get_padded_spec(arg_infos[1])    # (...batch, kv_seqlen, head, hidden)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-        softmax_aux_sharding = NamedSharding(
-            mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-3]))
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
         rng_state_sharding = seed_sharding = NamedSharding(mesh,
                                                            PartitionSpec(get_all_mesh_axes(), None))
         arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos[:-1]] + [seed_sharding])
