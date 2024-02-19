@@ -295,44 +295,44 @@ class TestActivation:
         assert_allclose(dbias, x.grad.sum(axis=0), rtol=0.1, atol=0.01)
 
     @staticmethod
-    def test_silu_bf16():
+    def test_swiglu_bf16():
         """
-        Test BF16 SiLU Forward
+        Test BF16 SwiGLU Forward
         """
         a = paddle.rand(shape=(16, 32), dtype='bfloat16') * 2 - 1
-        silu_out = swiglu(a, otype=tex.DType.kBFloat16)
-        silu_ref = swiglu_pd(a)
+        swiglu_out = swiglu(a, otype=tex.DType.kBFloat16)
+        swiglu_ref = swiglu_pd(a)
 
-        assert_allclose(silu_out, silu_ref, rtol=1e-2)
+        assert_allclose(swiglu_out, swiglu_ref, rtol=1e-2)
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_dtype', [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
-    def test_silu_fp8(fp8_dtype):
+    def test_swiglu_fp8(fp8_dtype):
         """
-        Test FP8 SiLU Forward
+        Test FP8 SwiGLU Forward
         """
         a = paddle.rand(shape=(16, 32), dtype='float32') * 2 - 1
         fp8_meta = create_fp8_meta()
 
-        silu_out_fp8 = swiglu_fp8(a, fp8_meta, FP8FwdTensors.GEMM1_INPUT, otype=fp8_dtype)
+        swiglu_out_fp8 = swiglu_fp8(a, fp8_meta, FP8FwdTensors.GEMM1_INPUT, otype=fp8_dtype)
 
-        silu_out = cast_from_fp8(silu_out_fp8,
-                                 fp8_meta,
-                                 FP8FwdTensors.GEMM1_INPUT,
-                                 itype=fp8_dtype,
-                                 otype=tex.DType.kFloat32)
+        swiglu_out = cast_from_fp8(swiglu_out_fp8,
+                                   fp8_meta,
+                                   FP8FwdTensors.GEMM1_INPUT,
+                                   itype=fp8_dtype,
+                                   otype=tex.DType.kFloat32)
 
-        silu_ref = swiglu_pd(a)
+        swiglu_ref = swiglu_pd(a)
 
-        assert_allclose(silu_out, silu_ref, rtol=0.1, atol=0.01)
+        assert_allclose(swiglu_out, swiglu_ref, rtol=0.1, atol=0.01)
 
     @staticmethod
-    def test_silu_bwd():
+    def test_swiglu_bwd():
         """
-        Test SiLU Backward
+        Test SwiGLU Backward
         """
-        # y = SiLU(x), calculate ref
+        # y = SwiGLU(x), calculate ref
         x = paddle.rand(shape=(16, 32), dtype='bfloat16') * 2 - 1
         x.stop_gradient = False
         y = swiglu_pd(x)
