@@ -576,6 +576,79 @@ def _fused_amax_and_scale_update(
     return amax_history, scale, scale_inv
 
 
+def _fused_amax_and_scale_update_after_reduction(
+    amax_reduction_buffer: torch.Tensor,
+    amax_histories: List[torch.Tensor],
+    scales: List[torch.Tensor],
+    scale_invs: List[torch.Tensor],
+    fp8_dtype: tex.DType,
+    margin: int,
+    amax_compute_algo: str,
+    non_weight_masks: List[torch.Tensor],
+    update_weight_scale_inv: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    After forward or backward reduction of DP/TP groups,
+    split the global buffer into chunks and use them to
+    update the local amax_history, scale, scale_inv in
+    each FP8 module.
+
+    Parameters
+    ----------
+    amax_reduction_buffer: torch.Tensor
+        The amax buffer used during reduction. Should be contiguous
+        and have the length of `sum(local_amax_histories[i].shape[1])`.
+    amax_histories: List[torch.Tensor]
+        A list of amax histories from different FP8 modules. Typically,
+        this should be `FP8GlobalStateManager.global_fp8_buffer["forward"]`
+        or `FP8GlobalStateManager.global_fp8_buffer["backward"]`, which is
+        a collection of `module.fp8_meta["amax_histories"]` for FP8 modules.
+    scales: List[torch.Tensor]
+        Similiar to `amax_histories`, this is a list of scales for FP8 modules,
+        i.e. `[m.fp8_meta["scaling_fwd"].scale for m in modules]` or
+        `[m.fp8_meta["scaling_bwd"].scale for m in modules]`.
+    scale_invs: List[torch.Tensor]
+        Similiar to `scales`, this is a list of scale_invs for FP8 modules,
+        i.e. `[m.fp8_meta["scaling_fwd"].scale_inv for m in modules]` or
+        `[m.fp8_meta["scaling_bwd"].scale_inv for m in modules]`.
+    fp8_dtype: tex.DType
+        FP8 format in tex.DType.
+    margin: int
+        Margin used to calculate FP8 scale and scale_inv.
+    amax_compute_algo: str
+        The algorithm for calculating amax, {'max', 'most_recent'}.
+    non_weight_masks: List[torch.Tensor]
+        Similiar to `scale_invs`, this is a list of non-weight masks for FP8 modules,
+        i.e. `[m.fp8_meta["scaling_fwd_non_weight_mask"] for m in modules]` or
+        `[m.fp8_meta["scaling_bwd_non_weight_mask"] for m in modules]`.
+    update_weight_scale_inv: bool
+        Whether to update the weight tensor's scale_inv.
+
+    Return
+    ----------
+    amax_histories: List[torch.Tensor]
+        The updated `amax histories`.
+    scales: List[torch.Tensor]
+        The updated `scales`.
+    scale_invs: List[torch.Tensor]
+        The updated `scale_invs`.
+    """
+
+    if update_weight_scale_inv:
+        non_weight_masks = [torch.Tensor()] * len(amax_histories)
+    tex.fused_amax_and_scale_update_after_reduction(
+        amax_reduction_buffer,
+        amax_histories,
+        scales,
+        scale_invs,
+        non_weight_masks,
+        amax_compute_algo,
+        fp8_dtype,
+        margin,
+    )
+    return amax_histories, scales, scale_invs
+
+
 def _compute_amax_and_update_history(
     amax_history: torch.Tensor,
     recipe: DelayedScaling,

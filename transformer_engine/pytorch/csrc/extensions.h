@@ -558,6 +558,15 @@ void fused_amax_and_scale_update(const at::Tensor &amax_history,
                                  transformer_engine::DType fp8_dtype,
                                  float margin);
 
+void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
+                                 std::vector<at::Tensor> &amax_histories,
+                                 std::vector<at::Tensor> &scales,
+                                 std::vector<at::Tensor> &scale_invs,
+                                 std::vector<at::Tensor> &scale_inv_masks,
+                                 const std::string &amax_compute_algo,
+                                 transformer_engine::DType fp8_dtype,
+                                 float margin);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
