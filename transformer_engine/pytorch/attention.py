@@ -2618,7 +2618,7 @@ class DotProductAttention(torch.nn.Module):
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         inference_params: Optional[InferenceParams], default = `None`
-                    Efficienly calculates and stores the context during inference.
+                    Inference context.
         """
 
         assert (
@@ -2647,13 +2647,14 @@ class DotProductAttention(torch.nn.Module):
             qkv_format = self.qkv_format
 
         if inference_params is not None:
+            assert qkv_format == "sbhd"
+            assert self.layer_number is not None
             (inference_key_memory, inference_value_memory,
             ) = inference_params.key_value_memory_dict[self.layer_number]
 
             batch_start = inference_params.batch_size_offset
             batch_end = batch_start + key_layer.size(1)
             assert batch_end <= inference_key_memory.size(1)
-            # inference_params.batch_size_offset = batch_end
 
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)

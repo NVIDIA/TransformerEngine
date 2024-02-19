@@ -23,7 +23,7 @@ _default_causal_mask = {}
 def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if sq == 1:
-        return torch.zeros((1, sk), device="cuda").bool()
+        return torch.zeros((1, sk), dtype=torch.bool, device="cuda")
 
     matrix_shape = (sq, sk)
     if matrix_shape not in _default_causal_mask:
@@ -339,7 +339,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if ( # pylint: disable=too-many-boolean-expressions)
+        if ( # pylint: disable=too-many-boolean-expressions
             not self.scaled_masked_softmax_fusion   # user doesn't want to fuse
             or not self.input_in_float16            # input must be fp16
             or sk < 16
