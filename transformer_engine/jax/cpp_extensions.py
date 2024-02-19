@@ -1859,21 +1859,21 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     """
     Self Fused Attention Forward Primitive
     """
-    name = "te_self_fused_attn_forward"
+    name = "te_fused_attn_forward"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8)
+    impl_static_args = (7, 8, 9, 10, 11)
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(qkv_aval, _not_used0, _not_used1, bias_aval, seqlen_or_cu_seqlen_aval, seed_aval,
-                 *, attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
-                 is_training):
+    def abstract(qkv_aval, _not_used0, _not_used1, bias_aval, q_seqlen_or_cu_seqlen_aval,
+                 kv_seqlen_or_cu_seqlen_aval, seed_aval, *, attn_bias_type, attn_mask_type,
+                 scaling_factor, dropout_probability, is_training):
         """
         Self fused attention fwd inner primitive abstract
         """
         # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
-        del seqlen_or_cu_seqlen_aval
+        del q_seqlen_or_cu_seqlen_aval, kv_seqlen_or_cu_seqlen_aval
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
         *batch_shape, max_seqlen, nqkv, num_heads, head_dim = qkv_aval.shape
         assert nqkv == 3
@@ -1927,12 +1927,12 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out_aval, softmax_aux_aval, rng_state_aval
 
     @staticmethod
-    def lowering(ctx, qkv, not_used0, not_used1, bias, cu_seqlen, seed, *, attn_bias_type,
-                 attn_mask_type, scaling_factor, dropout_probability, is_training):
+    def lowering(ctx, qkv, _not_used0, _not_used1, bias, q_cu_seqlen, kv_cu_seqlen, seed, *,
+                 attn_bias_type, attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Self fused attention fwd lowering rules
         """
-        operands = [qkv, not_used0, not_used1, bias, cu_seqlen, seed]
+        operands = [qkv, _not_used0, _not_used1, bias, q_cu_seqlen, kv_cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
@@ -1958,18 +1958,21 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(qkv, not_used0, not_used1, bias, seqlen, seed, attn_bias_type, attn_mask_type,
-             scaling_factor, dropout_probability, is_training):
+    def impl(qkv, _not_used0, _not_used1, bias, q_seqlen, kv_seqlen, seed, attn_bias_type,
+             attn_mask_type, scaling_factor, dropout_probability, is_training):
+        del kv_seqlen
         assert SelfFusedAttnFwdPrimitive.inner_primitive is not None
 
-        cu_seqlen = generate_cu_seqlen(seqlen)
+        q_cu_seqlen = generate_cu_seqlen(q_seqlen)
+        kv_cu_seqlen = q_cu_seqlen
 
         output, softmax_aux, rng_state, _ = SelfFusedAttnFwdPrimitive.inner_primitive.bind(
             qkv,
-            not_used0,
-            not_used1,
+            _not_used0,
+            _not_used1,
             bias,
-            cu_seqlen,
+            q_cu_seqlen,
+            kv_cu_seqlen,
             seed,
             attn_bias_type=attn_bias_type,
             attn_mask_type=attn_mask_type,
@@ -1983,7 +1986,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
                 dropout_probability, is_training):
         _check_valid_batch_dims(batch_dims)
         assert SelfFusedAttnFwdPrimitive.outer_primitive is not None
-        qkv_bdim, _, _, _, _, seed_bdim = batch_dims
+        qkv_bdim, *_, seed_bdim = batch_dims
 
         out_bdims = qkv_bdim, qkv_bdim, seed_bdim
         return SelfFusedAttnFwdPrimitive.outer_primitive.bind(
@@ -2044,11 +2047,12 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
 
-    not_used = jnp.zeros(0, qkv.dtype)
+    _not_used = jnp.zeros(0, qkv.dtype)
     return SelfFusedAttnFwdPrimitive.outer_primitive.bind(qkv,
-                                                          not_used,
-                                                          not_used,
+                                                          _not_used,
+                                                          _not_used,
                                                           bias,
+                                                          seqlen,
                                                           seqlen,
                                                           seed,
                                                           attn_bias_type=attn_bias_type,
@@ -2253,19 +2257,20 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
     """
     Cross Fused Attention Forward Primitive
     """
-    name = "te_cross_fused_attn_forward"
+    name = "te_fused_attn_forward"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10)
+    impl_static_args = (7, 8, 9, 10, 11)
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(q_aval, kv_aval, bias_aval, q_seqlen_or_cu_seqlen_aval,
+    def abstract(q_aval, kv_aval, _not_used, bias_aval, q_seqlen_or_cu_seqlen_aval,
                  kv_seqlen_or_cu_seqlen_aval, seed_aval, *, attn_bias_type, attn_mask_type,
                  scaling_factor, dropout_probability, is_training):
         """
         Cross fused attention fwd abstract
         """
+        del _not_used
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
@@ -2325,12 +2330,12 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         return out_aval, softmax_aux_aval, rng_state_aval
 
     @staticmethod
-    def lowering(ctx, q, kv, bias, q_cu_seqlen, kv_cu_seqlen, seed, *, attn_bias_type,
+    def lowering(ctx, q, kv, _not_used, bias, q_cu_seqlen, kv_cu_seqlen, seed, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Cross fused attention fwd lowering rules
         """
-        operands = [q, kv, bias, q_cu_seqlen, kv_cu_seqlen, seed]
+        operands = [q, kv, _not_used, bias, q_cu_seqlen, kv_cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
@@ -2357,8 +2362,8 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(q, kv, bias, q_seqlen, kv_seqlen, seed, attn_bias_type, attn_mask_type, scaling_factor,
-             dropout_probability, is_training):
+    def impl(q, kv, _not_used, bias, q_seqlen, kv_seqlen, seed, attn_bias_type, attn_mask_type,
+             scaling_factor, dropout_probability, is_training):
         assert CrossFusedAttnFwdPrimitive.inner_primitive is not None
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen)
@@ -2367,6 +2372,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         output, softmax_aux, rng_state, _ = CrossFusedAttnFwdPrimitive.inner_primitive.bind(
             q,
             kv,
+            _not_used,
             bias,
             q_cu_seqlen,
             kv_cu_seqlen,
@@ -2450,6 +2456,7 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_s
 
     return CrossFusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                            kv,
+                                                           jnp.zeros(0, q.dtype),
                                                            bias,
                                                            q_seqlen,
                                                            kv_seqlen,
