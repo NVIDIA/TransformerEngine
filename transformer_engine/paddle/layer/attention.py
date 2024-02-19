@@ -59,7 +59,7 @@ class RotaryPositionEmbedding(paddle.nn.Layer):
     def __init__(
         self,
         dim: int,
-        max_position_embeddings: Optional[int] = None,
+        max_position_embeddings: int,
     ):
         """
         Parameters
