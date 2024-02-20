@@ -1166,7 +1166,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         assert dz_aval.shape == softmax_out_aval.shape
 
-        dx_aval = core.raise_to_shaped(softmax_out_aval)
+        dx_aval = core.raise_to_shaped(dz_aval)
         return dx_aval
 
     @staticmethod
@@ -1189,7 +1189,7 @@ class SoftmaxPrimitive(BasePrimitive):
         softmax_out_type = ir.RankedTensorType(softmax_out.type)
         softmax_out_shape = softmax_out_type.shape
 
-        out_types = [ir.RankedTensorType.get(softmax_out_shape, softmax_out_type.element_type)]
+        out_types = [ir.RankedTensorType.get(dz_shape, dz_type.element_type)]
         operands = [dz, softmax_out]
         operand_shapes = [dz_shape, softmax_out_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
@@ -1229,14 +1229,14 @@ class SoftmaxPrimitive(BasePrimitive):
         softmax_backward infer_sharding_from_operands
         """
         del scale_factor, result_infos    # Unused.
-        softmax_out_spec = get_padded_spec(arg_infos[1])
-        if softmax_out_spec[-1] is not None:
+        dz_spec = get_padded_spec(arg_infos[0])
+        if dz_spec[-1] is not None:
             warnings.warn(
                 f"Sharding the hidden dimension is not supported in {cls.name}! " \
                 f"Forcing XLA to not shard the hidden dim, which might introduce extra " \
                 f"collective ops and hurt performance."
             )
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*softmax_out_spec[:-1], None))
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*dz_spec[:-1], None))
         return dx_sharding
 
     @classmethod
@@ -1245,6 +1245,7 @@ class SoftmaxPrimitive(BasePrimitive):
         softmax_backward partition
         """
         del result_infos
+
         dz_spec = get_padded_spec(arg_infos[0])
         softmax_out_spec = get_padded_spec(arg_infos[1])
         if dz_spec[-1] is not None or softmax_out_spec[-1] is not None:
@@ -1253,11 +1254,13 @@ class SoftmaxPrimitive(BasePrimitive):
                 f"Forcing XLA to not shard the hidden dim, which might introduce extra " \
                 f"collective ops and hurt performance."
             )
-        dz_spec = NamedSharding(mesh, PartitionSpec(*dz_spec[:-1], None))
-        softmax_out_spec = NamedSharding(mesh, PartitionSpec(*softmax_out_spec[:-1], None))
-        dx_spec = softmax_out_spec
-        arg_shardings = (dz_spec, softmax_out_spec)
-        out_shardings = dx_spec
+
+        dz_sharding = NamedSharding(mesh, PartitionSpec(*dz_spec[:-1], None))
+        softmax_out_sharding = NamedSharding(mesh, PartitionSpec(*softmax_out_spec[:-1], None))
+        dx_sharding = dz_sharding
+        arg_shardings = (dz_sharding, softmax_out_sharding)
+        out_shardings = dx_sharding
+
         impl = partial(impl, scale_factor=scale_factor)
         return mesh, impl, out_shardings, arg_shardings
 
