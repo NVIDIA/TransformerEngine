@@ -204,7 +204,9 @@ def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mas
                                                           scaling_factor=scaling_factor,
                                                           dropout_probability=dropout_probability,
                                                           is_training=is_training)
-
+    output = checkpoint_name(output, 'context')
+    softmax_aux = checkpoint_name(softmax_aux, 'context')
+    rng_state = checkpoint_name(rng_state, 'context')
     return output, (q, kv, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen)
 
 
@@ -297,7 +299,9 @@ def _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_ty
                                                     scaling_factor=scaling_factor,
                                                     dropout_probability=dropout_probability,
                                                     is_training=is_training)
-
+    output = checkpoint_name(output, 'context')
+    softmax_aux = checkpoint_name(softmax_aux, 'context')
+    rng_state = checkpoint_name(rng_state, 'context')
     return output, (q, k, v, bias, softmax_aux, rng_state, output, q_actual_seqlen,
                     kv_actual_seqlen)
 
