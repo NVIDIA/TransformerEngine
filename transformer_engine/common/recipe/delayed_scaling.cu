@@ -11,11 +11,12 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/cuda_runtime.h"
 
-#if CUDA_VERSION >= 12010
-#define AMAX_UPDATE_PARAM_LIMIT  1024 // 32KB
+#if CUDART_VERSION >= 12010
+#define AMAX_UPDATE_PARAM_LIMIT 818
 #else
-#define AMAX_UPDATE_PARAM_LIMIT  128 // 4KB
+#define AMAX_UPDATE_PARAM_LIMIT 101
 #endif
 
 namespace transformer_engine {
@@ -353,6 +354,31 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
                            DType fp8_dtype,
                            float margin,
                            cudaStream_t stream) {
+  using namespace transformer_engine;
+  // get sm and cuda version
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
+  int cuda_runtime_version = 0;
+  cudaRuntimeGetVersion(&cuda_runtime_version);
+
+  // calculate a more accurate limit of params
+  // Volta+ and CUDA 12.1+: 32KB; otherwise, 4KB
+  struct OtherParams {
+    float* a;
+    size_t b;
+    AmaxComputeAlgo c;
+    float d;
+  };
+  size_t kernel_param_limit = 0;
+  if ((sm_arch_ >= 70) && (cuda_runtime_version >=12010)) {
+    kernel_param_limit = (32768 - sizeof(OtherParams)) / sizeof(AmaxParam);
+  } else {
+    kernel_param_limit = (4096 - sizeof(OtherParams)) / sizeof(AmaxParam);
+  }
+  if (kernel_param_limit > AMAX_UPDATE_PARAM_LIMIT) {
+    kernel_param_limit = AMAX_UPDATE_PARAM_LIMIT;
+  }
+
   // amax value to use for updating scaling factor
   AmaxComputeAlgo amax_compute_algo_ = AmaxComputeAlgo::INVALID;
   if (amax_compute_algo == "max") {
@@ -377,7 +403,7 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
 
   // Number of tensors in the bulk
   const size_t num_tensors = amax_histories.size();
-  const size_t num_kernels = (num_tensors+AMAX_UPDATE_PARAM_LIMIT-1)/AMAX_UPDATE_PARAM_LIMIT;
+  const size_t num_kernels = (num_tensors+kernel_param_limit-1)/kernel_param_limit;
   size_t amax_history_length = 0;
   if (num_tensors > 0) {
     amax_history_length = amax_histories[0]->data.shape[0];
@@ -389,9 +415,9 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
   for (size_t iter=0; iter<num_kernels; iter++) {
     size_t kernel_num_scales = 0;
     size_t kernel_num_tensors = (iter == (num_kernels -1))
-          ? num_tensors % AMAX_UPDATE_PARAM_LIMIT : AMAX_UPDATE_PARAM_LIMIT;
+          ? num_tensors % kernel_param_limit: kernel_param_limit;
     for (size_t pi=0; pi<kernel_num_tensors; pi++) {
-      size_t i = iter * AMAX_UPDATE_PARAM_LIMIT + pi;
+      size_t i = iter * kernel_param_limit + pi;
 
       // Check tensors
       size_t num_scale = amax_histories[i]->data.shape[1];
