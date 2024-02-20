@@ -290,7 +290,8 @@ struct Vec {
                                           size_t idx = 0,
                                           size_t count = NUM_ELT) {
         const Elt_type *elt_ptr = static_cast<const Elt_type *>(base_ptr) + idx;
-        if ( count < NUM_ELT || idx % NUM_ELT != 0 ) {
+        if ( count < NUM_ELT
+             || reinterpret_cast<uint64_t>(elt_ptr) % BYTES != 0 ) {
             #pragma unroll
             for ( int it = 0; it < NUM_ELT; it++ ) {
                 this->data.elt[it] = (it < count
@@ -308,7 +309,8 @@ struct Vec {
                                          size_t idx = 0,
                                          size_t count = NUM_ELT) const {
         Elt_type *elt_ptr = static_cast<Elt_type *>(base_ptr) + idx;
-        if ( count < NUM_ELT || idx % NUM_ELT != 0 ) {
+        if ( count < NUM_ELT
+             || reinterpret_cast<uint64_t>(elt_ptr) % BYTES != 0 ) {
             #pragma unroll
             for ( int it = 0; it < NUM_ELT; it++ ) {
                 if ( it < count ) {
