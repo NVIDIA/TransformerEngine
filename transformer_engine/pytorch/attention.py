@@ -3626,13 +3626,8 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
         if inference_params and self.layer_number is not None:
-            batch_start = inference_params.batch_size_offset
-            batch_end = batch_start + key_layer.size(1)
-            assert batch_end <= inference_key_memory.size(1)
-
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)
-            assert sequence_end <= inference_key_memory.size(0)
 
             # adjust the key rotary positional embedding
             if rotary_pos_emb is not None:
