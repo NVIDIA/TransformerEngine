@@ -205,12 +205,6 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
-void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                           size_t opaque_len);
-
-void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                            size_t opaque_len);
-
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
