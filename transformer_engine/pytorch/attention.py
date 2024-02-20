@@ -2659,7 +2659,6 @@ class DotProductAttention(torch.nn.Module):
             sequence_start = inference_params.sequence_len_offset
             sequence_end = sequence_start + key_layer.size(0)
             assert sequence_end <= inference_key_memory.size(0)
-            inference_params.sequence_len_offset = sequence_end
 
             # Copy keys and values into KV-cache
             inference_key_memory[
