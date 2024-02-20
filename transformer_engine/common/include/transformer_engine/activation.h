@@ -47,8 +47,8 @@ void nvte_dgelu(const NVTETensor grad,
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_geglu(const NVTETensor input,
-                      NVTETensor output,
-                      cudaStream_t stream);
+                NVTETensor output,
+                cudaStream_t stream);
 
 /*! \brief Compute GeGLU gradient.
  *  \param[in]     grad      Incoming gradient of shape [N, H].
@@ -113,8 +113,8 @@ void nvte_dswiglu(const NVTETensor grad,
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_reglu(const NVTETensor input,
-                 NVTETensor output,
-                 cudaStream_t stream);
+                NVTETensor output,
+                cudaStream_t stream);
 
 /*! \brief Compute ReGLU gradient.
  *  \param[in]     grad      Incoming gradient of shape [N, H].
@@ -123,9 +123,31 @@ void nvte_reglu(const NVTETensor input,
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_dreglu(const NVTETensor grad,
-                  const NVTETensor input,
-                  NVTETensor output,
-                  cudaStream_t stream);
+                 const NVTETensor input,
+                 NVTETensor output,
+                 cudaStream_t stream);
+
+/*! \brief Compute QuickGELU activation of the input.
+ *
+ *  \param[in]     input     Input tensor for QuickGELU activation.
+ *  \param[in,out] output    Output tensor. Approximates GELU as input x sigmoid(1.702 x input).
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_qgelu(const NVTETensor input,
+                NVTETensor output,
+                cudaStream_t stream);
+
+/*! \brief Compute QuickGELU activation gradient.
+ *
+ *  \param[in]     grad      Incoming gradient.
+ *  \param[in]     input     Input tensor for QuickGELU activation.
+ *  \param[in,out] output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dqgelu(const NVTETensor grad,
+                 const NVTETensor input,
+                 NVTETensor output,
+                 cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
