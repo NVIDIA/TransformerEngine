@@ -3004,9 +3004,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 dropout_probability, is_training):
         _check_valid_batch_dims(batch_dims)
         assert FusedAttnBwdPrimitive.outer_primitive is not None
-        q_bdim, kv_bdim, *_ = batch_dims
+        q_bdim, k_bdim, v_bdim, *_ = batch_dims
 
-        out_bdims = q_bdim, kv_bdim, q_bdim
+        out_bdims = q_bdim, k_bdim, v_bdim, q_bdim
         return FusedAttnBwdPrimitive.outer_primitive.bind(*batched_args,
                                                           attn_bias_type=attn_bias_type,
                                                           attn_mask_type=attn_mask_type,
