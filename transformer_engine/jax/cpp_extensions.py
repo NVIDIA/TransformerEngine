@@ -1781,16 +1781,16 @@ class FusedAttnHelper:
     Helper for the fused attention backend
     """
 
-    q_type: jnp.dtype
-    kv_type: jnp.dtype
+    q_dtype: jnp.dtype
+    kv_dtype: jnp.dtype
     qkv_layout: NVTE_QKV_Layout
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
-    num_heads_q: int
-    num_heads_kv: int
-    max_seqlen_q: int
-    max_seqlen_kv: int
+    q_num_heads: int
+    kv_num_heads: int
+    q_max_seqlen: int
+    kv_max_seqlen: int
     head_dim: int
 
     def is_fused_attn_kernel_available(self):
@@ -1800,9 +1800,9 @@ class FusedAttnHelper:
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
         return transformer_engine_jax.get_fused_attn_backend(
-            jax_dtype_to_te_dtype(self.q_type), jax_dtype_to_te_dtype(self.kv_type),
+            jax_dtype_to_te_dtype(self.q_dtype), jax_dtype_to_te_dtype(self.kv_dtype),
             self.qkv_layout, self.attn_bias_type, self.attn_mask_type, self.dropout_probability,
-            self.num_heads_q, self.num_heads_kv, self.max_seqlen_q, self.max_seqlen_kv,
+            self.q_num_heads, self.kv_num_heads, self.q_max_seqlen, self.kv_max_seqlen,
             self.head_dim)
 
     @staticmethod

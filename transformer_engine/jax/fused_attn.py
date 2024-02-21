@@ -55,15 +55,15 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
                      "supported attn_mask_type={'no_mask', 'padding', 'causal', 'padding_causal'}")
 
 
-def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
-                                   dropout_probability, num_heads_q, num_heads_kv, max_seqlen_q,
-                                   max_seqlen_kv, head_dim):
+def is_fused_attn_kernel_available(q_dtype, kv_dtype, qkv_layout, attn_bias_type, attn_mask_type,
+                                   dropout_probability, q_num_heads, kv_num_heads, q_max_seqlen,
+                                   kv_max_seqlen, head_dim):
     """
     To check whether the fused attention kernel is available
     """
-    return FusedAttnHelper(q_type, kv_type, qkv_layout.value, attn_bias_type.value,
-                           attn_mask_type.value, dropout_probability, num_heads_q, num_heads_kv,
-                           max_seqlen_q, max_seqlen_kv, head_dim).is_fused_attn_kernel_available()
+    return FusedAttnHelper(q_dtype, kv_dtype, qkv_layout.value, attn_bias_type.value,
+                           attn_mask_type.value, dropout_probability, q_num_heads, kv_num_heads,
+                           q_max_seqlen, kv_max_seqlen, head_dim).is_fused_attn_kernel_available()
 
 
 def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
