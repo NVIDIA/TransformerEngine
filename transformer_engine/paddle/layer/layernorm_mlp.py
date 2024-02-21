@@ -12,13 +12,17 @@ import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
 from .base import TransformerEngineBaseLayer
-from .layernorm_linear import _layernorm_fwd_fp8_cast, _layernorm_bwd
+from .layernorm_linear import _apply_normalization_fwd, _apply_normalization_bwd
 from .linear import _linear_fwd_fp8, _linear_fwd_non_fp8, _linear_bwd_fp8, _linear_bwd_non_fp8
 from ..constants import TE_DType, FP8FwdTensors, FP8BwdTensors, dist_group_type
 from ..cpp_extensions import (
     cast_from_fp8,
-    dgelu_cast_transpose_bgrad_fp8,
     gelu_fp8,
+    swiglu_fp8,
+    swiglu,
+    dswiglu,
+    cast_transpose_bgrad,
+    dgelu_cast_transpose_bgrad_fp8,
 )
 from ..distributed import (
     allreduce,
@@ -91,13 +95,22 @@ def _mlp_forward(
             is_grad_enabled,
             is_first_microbatch,
         )
-
-        gelu_out = gelu_fp8(
-            fc1_out,
-            fp8_meta["scaling_fwd"],
-            fc2_input_fp8_index,
-            fp8_dtype_forward,
-        )
+        if activation == "gelu":
+            gelu_out = gelu_fp8(
+                fc1_out,
+                fp8_meta["scaling_fwd"],
+                fc2_input_fp8_index,
+                fp8_dtype_forward,
+            )
+        elif activation == "swiglu":
+            gelu_out = swiglu_fp8(
+                fc1_out,
+                fp8_meta["scaling_fwd"],
+                fc2_input_fp8_index,
+                fp8_dtype_forward,
+            )
+        else:
+            raise NotImplementedError("Activation type " + activation + " is not supported!")
 
         fc2_out, fc2_weight_t_fp8 = _linear_fwd_fp8(
             gelu_out,
@@ -118,7 +131,7 @@ def _mlp_forward(
             is_first_microbatch,
         )
     else:
-        fc1_out, gelu_out = _linear_fwd_non_fp8(
+        fc1_outputs = _linear_fwd_non_fp8(
             inputmat,
             inputmat_fp8_index,
             fc1_weight,
@@ -134,6 +147,14 @@ def _mlp_forward(
             tp_group,
             activation=activation,
         )
+
+        if activation == "gelu":
+            fc1_out, gelu_out = fc1_outputs
+        elif activation == "swiglu":
+            fc1_out = fc1_outputs
+            gelu_out = swiglu(fc1_out, TE_DType[activation_dtype])
+        else:
+            raise NotImplementedError("Activation type " + activation + " is not supported!")
 
         fc2_out = _linear_fwd_non_fp8(
             gelu_out,
@@ -234,14 +255,23 @@ def _mlp_backward(
             tp_group,
         )
 
-        # GELU Bwd
-        dgelu, dgelu_t, fc1_bgrad_ = dgelu_cast_transpose_bgrad_fp8(
-            fc2_dgrad,
-            fc1_out,
-            fp8_meta["scaling_bwd"],
-            fc1_grad_output_fp8_index,
-            fp8_dtype_backward,
-        )
+        if activation == "gelu":
+            # GELU Bwd
+            dgelu, dgelu_t, fc1_bgrad_ = dgelu_cast_transpose_bgrad_fp8(
+                fc2_dgrad,
+                fc1_out,
+                fp8_meta["scaling_bwd"],
+                fc1_grad_output_fp8_index,
+                fp8_dtype_backward,
+            )
+        elif activation == "swiglu":
+            dgelu = dswiglu(fc2_dgrad, fc1_out, TE_DType[fc2_dgrad.dtype])
+            fc1_bgrad_, dgelu, dgelu_t = cast_transpose_bgrad(
+                dgelu,
+                fp8_meta["scaling_bwd"],
+                fc1_grad_output_fp8_index,
+                fp8_dtype_backward,
+            )
 
         if requires_fc1_bgrad:
             fc1_bgrad = fc1_bgrad_
@@ -301,6 +331,10 @@ def _mlp_backward(
             gelu_input=fc1_out,
             activation=activation,
         )
+
+        if activation == "swiglu":
+            dgelu = dswiglu(dgelu, fc1_out, TE_DType[dgelu.dtype])
+
         fc1_dgrad, fc1_wgrad, fc1_bgrad = _linear_bwd_non_fp8(
             fc1_input,
             fc1_weight,
@@ -331,7 +365,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         ctx,
         inp: paddle.Tensor,
         ln_weight: paddle.Tensor,
-        ln_bias: paddle.Tensor,
+        ln_bias: Union[paddle.Tensor, None],
         fc1_weight: paddle.Tensor,
         fc1_weight_fp8: Optional[paddle.Tensor],
         fc1_weight_t_fp8: Optional[paddle.Tensor],
@@ -352,6 +386,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        normalization: str,
         activation: str,
         set_parallel_mode: bool,
         tensor_parallel: bool,
@@ -360,6 +395,10 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         tp_size: int,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
+        if normalization == "RMSNorm":
+            assert ln_bias is None, "RMSNorm does not support bias!"
+        else:    # LayerNorm
+            assert ln_bias is not None, "LayerNorm requires bias!"
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -370,7 +409,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             assert_dim_for_fp8_forward_exec(fc2_weight)
 
         # only support gelu for now
-        assert activation == 'gelu'
+        assert activation in ["gelu", "swiglu"], "Only gelu and swiglu are supported for now"
 
         # LayerNorm Fwd + FP8 Cast
         (
@@ -378,7 +417,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ln_out,
             mu,
             rsigma,
-        ) = _layernorm_fwd_fp8_cast(
+        ) = _apply_normalization_fwd(
+            normalization,
             inputmat,
             ln_weight,
             ln_bias,
@@ -463,9 +503,11 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.requires_fc2_wgrad = not fc2_weight.stop_gradient
             ctx.requires_fc1_bgrad = use_fc1_bias and not fc1_bias.stop_gradient
             ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
-            ctx.requires_ln_bgrad = not ln_bias.stop_gradient
+            ctx.requires_ln_bgrad = ln_bias is not None and not ln_bias.stop_gradient
             ctx.requires_ln_wgrad = not ln_weight.stop_gradient
             ctx.is_first_microbatch = is_first_microbatch
+            ctx.has_ln_bias = ln_bias is not None
+            ctx.normalization = normalization
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
@@ -549,7 +591,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc2_bgrad = fc2_bgrad_
 
             # LayerNorm Bwd
-            dxmat, dgamma, dbeta = _layernorm_bwd(
+            dxmat, dgamma, dbeta = _apply_normalization_bwd(
+                ctx.normalization,
                 inputmat,
                 fc1_dgrad,
                 ln_weight,
@@ -565,6 +608,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             fc2_bgrad = fc2_bgrad if ctx.requires_fc2_bgrad else None
             fc1_bgrad_out = (fc1_bgrad,) if ctx.use_fc1_bias else ()
             fc2_bgrad_out = (fc2_bgrad,) if ctx.use_fc2_bias else ()
+            dbeta = dbeta if ctx.requires_ln_bgrad else None
+            dbeta_out = (dbeta,) if ctx.has_ln_bias else ()
 
             if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
                 fc1_weight_cache_grad = ()
@@ -577,7 +622,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 dgamma if ctx.requires_ln_wgrad else None,
-                dbeta if ctx.requires_ln_bgrad else None,
+                *dbeta_out,
                 fc1_wgrad if ctx.requires_fc1_wgrad else None,
                 *fc1_weight_cache_grad,
                 *fc1_bgrad_out,
@@ -604,6 +649,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 optional `paddle.ParamAttr` for weight.
     bias_attr: Union[paddle.ParamAttr, None, bool], default = None
               optional `paddle.ParamAttr` for bias.
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
           Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu'.
@@ -641,6 +688,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         eps: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        normalization: str = "LayerNorm",
         activation: str = "gelu",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
@@ -654,6 +702,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self.hidden_size = hidden_size
         self.ffn_hidden_size = ffn_hidden_size
         self.eps = eps
+        self.normalization = normalization
+        assert normalization in ["LayerNorm", "RMSNorm"], "Normalization type not supported"
         self.activation = activation
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
@@ -684,22 +734,31 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             is_bias=False,
         )
 
-        self.ln_bias = self.create_parameter(
-            shape=[self.hidden_size],
-            attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
-            dtype=self._dtype,
-            is_bias=True,
-        )
+        if self.normalization != "RMSNorm":
+            self.ln_bias = self.create_parameter(
+                shape=[self.hidden_size],
+                attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
+                dtype=self._dtype,
+                is_bias=True,
+            )
+        else:
+            self.ln_bias = None
 
         if self.sequence_parallel:
             mark_as_sequence_parallel_parameter(self.ln_weight)
-            mark_as_sequence_parallel_parameter(self.ln_bias)
+            if self.ln_bias is not None:
+                mark_as_sequence_parallel_parameter(self.ln_bias)
 
         # FC1 weights
+        if self.activation in ["swiglu"]:
+            fc1_output_features = self.size_per_partition * 2
+        else:
+            fc1_output_features = self.size_per_partition
+
         with track_rng_state(enable=self.tensor_parallel):
             self.fc1_weight = self.create_parameter(
-                shape=[self.size_per_partition, self.hidden_size] if self.backend
-                == 'transformer_engine' else [self.hidden_size, self.size_per_partition],
+                shape=[fc1_output_features, self.hidden_size] if self.backend
+                == 'transformer_engine' else [self.hidden_size, fc1_output_features],
                 attr=self._weight_attr,
                 dtype=self._dtype,
                 is_bias=False,
@@ -717,7 +776,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
         if self.has_bias:
             self.fc1_bias = self.create_parameter(
-                shape=[self.size_per_partition],
+                shape=[fc1_output_features],
                 attr=self._bias_attr,
                 dtype=self._dtype,
                 is_bias=True,
@@ -809,6 +868,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.normalization,
                 self.activation,
                 self.set_parallel_mode,
                 self.tensor_parallel,
@@ -842,14 +902,18 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             warnings.warn(
                 "`is_first_microbatch` is not supported for paddle backend and is ignored.")
 
-        ln_out = F.layer_norm(x=inp,
-                              normalized_shape=inp.shape[-1],
-                              weight=self.ln_weight,
-                              bias=self.ln_bias,
-                              epsilon=self.eps)
+        if self.normalization == "RMSNorm":
+            norm = paddle.rsqrt(paddle.mean(inp**2, axis=-1, keepdim=True) + self.eps)
+            norm_out = inp * norm * self.ln_weight
+        else:    # LayerNorm
+            norm_out = F.layer_norm(x=inp,
+                                    normalized_shape=inp.shape[-1],
+                                    weight=self.ln_weight,
+                                    bias=self.ln_bias,
+                                    epsilon=self.eps)
         if self.set_parallel_mode and self.tensor_parallel:
-            ln_out = identity(ln_out, self.tp_group)
-        fc1_out = F.linear(ln_out, self.fc1_weight, self.fc1_bias)
+            norm_out = identity(norm_out, self.tp_group)
+        fc1_out = F.linear(norm_out, self.fc1_weight, self.fc1_bias)
         act_func = get_paddle_act_func(self.activation)
         act_out = act_func(fc1_out)
         out = F.linear(act_out, self.fc2_weight,
@@ -858,7 +922,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             out, _ = allreduce(out, self.tp_group)
             out = out + self.fc2_bias if self.fc2_bias is not None else out
         if self.return_layernorm_output:
-            return out, ln_out
+            return out, norm_out
         return out
 
     def forward(self, *args, **kwargs):

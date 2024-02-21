@@ -10,6 +10,10 @@ from typing import Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
+try:
+    from paddle.incubate.nn.functional import fused_rotary_position_embedding
+except ImportError:
+    fused_rotary_position_embedding = None
 import transformer_engine_paddle as tex
 
 from .layernorm_linear import LayerNormLinear
@@ -30,7 +34,7 @@ from ..distributed import get_tp_group_and_world_size, track_rng_state
 from ..utils import attention_mask_func, divide
 from ..recompute import recompute
 
-__all__ = ["DotProductAttention", "MultiHeadAttention"]
+__all__ = ["DotProductAttention", "MultiHeadAttention", "RotaryPositionEmbedding"]
 
 
 def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
@@ -45,6 +49,81 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
 
     hidden_states = hidden_states.unsqueeze(-2).tile([1, 1, 1, n_rep, 1])
     return hidden_states.reshape([batch, seqlen, num_gqa_groups * n_rep, head_size])
+
+
+class RotaryPositionEmbedding(paddle.nn.Layer):
+    """
+    Implements Rotary Position Embedding from https://arxiv.org/abs/2104.09864.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        max_position_embeddings: int,
+    ):
+        """
+        Parameters
+        ----------
+        dim: int
+            rotary embedding dimension
+        max_position_embeddings: int
+            max_position_embeddings before position interpolation
+        """
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.inv_freq = 1.0 / (10000**(paddle.cast(paddle.arange(0, dim, 2), dtype='float32') /
+                                       self.dim))
+        self._set_cos_sin_cache(seq_len=max_position_embeddings)
+
+    def _set_cos_sin_cache(self, seq_len):
+        self.max_seq_len_cached = seq_len
+        # [seq_len]
+        t = paddle.arange(seq_len, dtype="float32")
+        # [seq_len, dim/2]
+        freqs = paddle.einsum("i,j->ij", t, self.inv_freq)
+        # [seq_len, dim]
+        emb = paddle.concat([freqs, freqs], axis=-1)
+        # [1, seqlen, 1, dim]
+        self.cos_cached = emb.cos()[None, :, None, :]
+        self.sin_cached = emb.sin()[None, :, None, :]
+
+    def forward(self, max_seq_len: int):
+        """
+        Create rotary position embedding frequencies
+
+        Parameters
+        ----------
+        max_seq_len: int
+            sequence length of a sample
+        """
+        cos = self.cos_cached[:, :, :max_seq_len, ...]
+        sin = self.sin_cached[:, :, :max_seq_len, ...]
+        return (cos, sin)
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return paddle.concat([-x2, x1], axis=-1)    # shape is the same as x
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None):
+    """Applies rotary positional embedding to the input."""
+
+    if position_ids is None:
+        # Note: Only for LlamaForCausalLMPipe model pretraining
+        cos = cos[:, :q.shape[1], :, :]    # [bs, seq_len, 1, dim]
+        sin = sin[:, :q.shape[1], :, :]    # [bs, seq_len, 1, dim]
+    else:
+        cos = cos.squeeze(axis=[0, 2])    # [seq_len, dim]
+        sin = sin.squeeze(axis=[0, 2])    # [seq_len, dim]
+        cos = cos[position_ids].unsqueeze(2)    # [bs, seq_len, 1, dim]
+        sin = sin[position_ids].unsqueeze(2)    # [bs, seq_len, 1, dim]
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
 
 
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
@@ -450,6 +529,8 @@ class MultiHeadAttention(paddle.nn.Layer):
                     whether to apply layernorm to the input.
     attention_type: {'self', 'cross'}, default = `self`
                     type of attention operation.
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
     zero_centered_gamma: bool, default = `False`
                     whether to zero initialize the gamma of the layernorm operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
@@ -491,11 +572,13 @@ class MultiHeadAttention(paddle.nn.Layer):
         layernorm_epsilon: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        max_sequence_length: Optional[int] = None,
         attn_mask_type: str = "causal",
         params_dtype: Optional[paddle.dtype] = None,
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",
+        normalization: str = "LayerNorm",
         zero_centered_gamma: bool = False,
         set_parallel_mode: bool = False,
         sequence_parallel: bool = False,
@@ -509,6 +592,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.attention_type = attention_type
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = paddle.get_default_dtype() if params_dtype is None else params_dtype
+        self.max_sequence_length = max_sequence_length
         self.weight_attr = weight_attr
         self.bias_attr = bias_attr
         self.attn_mask_type = attn_mask_type
@@ -544,6 +628,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     weight_attr=self.weight_attr,
                     bias_attr=self.bias_attr,
                     return_layernorm_output=return_layernorm_output,
+                    normalization=normalization,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
@@ -571,6 +656,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     weight_attr=self.weight_attr,
                     bias_attr=self.bias_attr,
                     return_layernorm_output=return_layernorm_output,
+                    normalization=normalization,
                     zero_centered_gamma=zero_centered_gamma,
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
@@ -628,6 +714,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         hidden_states: paddle.Tensor,
         attention_mask: Optional[paddle.Tensor] = None,
         encoder_output: Optional[paddle.Tensor] = None,
+        rotary_pos_emb: Optional[Tuple[paddle.Tensor, paddle.Tensor]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
@@ -645,6 +732,9 @@ class MultiHeadAttention(paddle.nn.Layer):
                         Boolean tensor used to mask out softmax input when not using attention.
         encoder_output : Optional[paddle.Tensor], default = `None`
                         Output of the encoder layer.
+        rotary_pos_emb: Tuple[paddle.Tensor, paddle.Tensor], default = `None`
+                       Embeddings for query and key tensors for applying rotary position
+                       embedding. By default no input embedding is applied.
         core_attention_bias_type: str, default = `no_bias`
                                 only support no_bias type currently, {`no_bias`}
         core_attention_bias: Optional[paddle.Tensor], default = `None`
@@ -675,8 +765,8 @@ class MultiHeadAttention(paddle.nn.Layer):
         if input_dim == 2:
             # hidden_states: [b * s_q, hidden_size]
             # need to get max_seq_len from attention_mask
-            assert attention_mask is not None
-            max_seq_len = attention_mask.shape[-1]
+            assert self.max_sequence_length is not None, "max_sequence_length must be provided"
+            max_seq_len = self.max_sequence_length
         elif input_dim == 3:
             # hidden_states: [b, s_q, hidden_size]
             max_seq_len = hidden_states.shape[1]
@@ -723,30 +813,6 @@ class MultiHeadAttention(paddle.nn.Layer):
                 shape=[x.shape[0], x.shape[1], -1, self.hidden_size_per_attention_head])
                                                    for x in (query_layer, key_layer, value_layer))
 
-            with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
-                if recompute_core_attention:
-                    context_layer = recompute(
-                        self.core_attention,
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        attention_mask,
-                        core_attention_bias_type,
-                        core_attention_bias,
-                        set_zero,
-                        use_reentrant=False,
-                    )
-                else:
-                    context_layer = self.core_attention(
-                        query_layer=query_layer,
-                        key_layer=key_layer,
-                        value_layer=value_layer,
-                        attention_mask=attention_mask,
-                        core_attention_bias_type=core_attention_bias_type,
-                        core_attention_bias=core_attention_bias,
-                        set_zero=set_zero,
-                    )
-
         else:    # cross attention
             mixed_kv_layer = self.key_value(
                 encoder_output,
@@ -785,29 +851,46 @@ class MultiHeadAttention(paddle.nn.Layer):
                 -1, max_seq_len, self.num_attention_heads_per_partition,
                 self.hidden_size_per_attention_head
             ])
-            with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
-                if recompute_core_attention:
-                    context_layer = recompute(
-                        self.core_attention,
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        attention_mask,
-                        core_attention_bias_type,
-                        core_attention_bias,
-                        set_zero,
-                        use_reentrant=False,
-                    )
-                else:
-                    context_layer = self.core_attention(
-                        query_layer=query_layer,
-                        key_layer=key_layer,
-                        value_layer=value_layer,
-                        attention_mask=attention_mask,
-                        core_attention_bias_type=core_attention_bias_type,
-                        core_attention_bias=core_attention_bias,
-                        set_zero=set_zero,
-                    )
+
+        if rotary_pos_emb is not None:
+            q_pos_emb, k_pos_emb = rotary_pos_emb
+            if fused_rotary_position_embedding is None:
+                query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, q_pos_emb,
+                                                              k_pos_emb)
+            else:
+                query_layer, key_layer, _ = fused_rotary_position_embedding(
+                    query_layer,
+                    key_layer,
+                    v=None,
+                    sin=k_pos_emb,
+                    cos=q_pos_emb,
+                    position_ids=None,
+                    use_neox_rotary_style=False,
+                )
+
+        with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
+            if recompute_core_attention:
+                context_layer = recompute(
+                    self.core_attention,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    attention_mask,
+                    core_attention_bias_type,
+                    core_attention_bias,
+                    set_zero,
+                    use_reentrant=False,
+                )
+            else:
+                context_layer = self.core_attention(
+                    query_layer=query_layer,
+                    key_layer=key_layer,
+                    value_layer=value_layer,
+                    attention_mask=attention_mask,
+                    core_attention_bias_type=core_attention_bias_type,
+                    core_attention_bias=core_attention_bias,
+                    set_zero=set_zero,
+                )
 
         if input_dim == 3:
             context_layer = paddle.reshape(
