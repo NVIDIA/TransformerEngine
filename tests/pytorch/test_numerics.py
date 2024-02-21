@@ -1364,69 +1364,116 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
 
 
-
 model_configs_inference = {
     # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(8, 1e-5, 1, 8, 12, 64),
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
 }
+backends_inference = ["FlashAttention", "UnfusedAttention"]
+module_inference = ["TransformerLayer", "MultiheadAttention"]
+input_formats_inference = ["sbhd", "bshd"]
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs_inference.keys())
+@pytest.mark.parametrize("model_key", model_configs_inference.keys())
 @pytest.mark.parametrize("use_RoPE", all_boolean)
-@pytest.mark.parametrize("use_flash_attn", all_boolean)
-def test_te_layer_kv_cache_accuracy(dtype, bs, model, use_RoPE, use_flash_attn):
+@pytest.mark.parametrize("input_format", input_formats_inference)
+@pytest.mark.parametrize("module", module_inference)
+@pytest.mark.parametrize("backend", backends_inference)
+def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
     os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"     # suppress for testing
-    
-    if use_flash_attn:
-        os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
 
-    config = model_configs_inference[model]
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    elif backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+
+    config = model_configs_inference[model_key]
 
     S = config.seq_len
     B = bs
     H = config.num_attention_heads
     D = config.hidden_size
-    head_size = config.embed    
+    head_size = config.embed
     layer_number = 1
 
     # Limits the max size of KV-cache
-    B_max = B           
-    S_max = 2 * S
+    B_max = B
+    S_max = S + 2
 
-    TE_layer = (
-        TransformerLayer(
-            hidden_size=D,
-            ffn_hidden_size= 4 * D,
-            num_attention_heads=H,
-            attn_input_format='sbhd',
-            layer_number=layer_number,
+    if module == "TransformerLayer":
+        model = (
+            TransformerLayer(
+                hidden_size=D,
+                ffn_hidden_size= 4 * D,
+                num_attention_heads=H,
+                attn_input_format=input_format,
+                layer_number=layer_number,
+                attention_dropout = 0.0
+            )
+            .to(dtype=dtype)
+            .cuda()
+            .eval()
         )
-        .to(dtype=dtype)
-        .cuda()
-    ) 
+    else:
+        model = (
+            MultiheadAttention(
+                hidden_size=D,
+                num_attention_heads=H,
+                qkv_format=input_format,
+                layer_number=layer_number,
+                attention_dropout = 0.0
+            )
+            .to(dtype=dtype)
+            .cuda()
+            .eval()
+        )
 
     inference_params = InferenceParams(max_batch_size=B_max, max_sequence_length=S_max)
-    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=dtype, device="cuda")
-    
-    input = torch.randn((S, B, D), dtype=dtype, device="cuda")
-    incremental_output = [None] * S
+    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
 
-    # Generate output for the entire sequence 
-    full_output = TE_layer(input)
+    input = torch.randn((S, B, D), dtype=dtype, device="cuda")
+    if input_format == "bshd":
+        input = input.transpose(0, 1).contiguous()
+
+    incremental_output = torch.zeros_like(input)
+
+    # Generate output for the entire sequence
+    full_output = model(
+        hidden_states=input,
+        rotary_pos_emb=rotary_freqs if use_RoPE else None)
 
     # Incrementaly generate outputs using KV-cache
     for i in range(S):
-        incremental_output[i] = TE_layer(
-            hidden_states=input[i].view(1,B,D), 
-            inference_params=inference_params, 
+        if input_format == "sbhd":
+            incremental_input = input[i].view(1,B,D)
+        else:
+            incremental_input = input[:, i, :].view(B,1,D)
+
+        line_output = model(
+            hidden_states=incremental_input,
+            inference_params=inference_params,
             rotary_pos_emb=rotary_freqs if use_RoPE else None)
 
-    atol = {
-        torch.float32 : 2e-2,
-        torch.half    : 2e-2,
-        torch.bfloat16: 5e-2,
-    }
-    # Check if the fully generated output matches the one generated incrementally 
+        inference_params.sequence_len_offset += 1
+
+        if input_format == "sbhd":
+            incremental_output[i] = line_output.view(B,D)
+        else:
+            incremental_output[:, i, :] = line_output.view(B,D)
+
+    if module == "TransformerLayer":
+        atol = {
+            torch.float32 : 5e-3,
+            torch.half    : 5e-3,
+            torch.bfloat16: 5e-2,
+        }
+    else:
+        atol = {
+            torch.float32 : 8e-4,
+            torch.half    : 8e-4,
+            torch.bfloat16: 8e-3,
+        }
+
+    # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])

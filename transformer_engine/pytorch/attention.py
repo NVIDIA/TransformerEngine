@@ -84,7 +84,6 @@ _alibi_cache = {
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
 
-
 class InferenceParams: # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
@@ -2647,8 +2646,12 @@ class DotProductAttention(torch.nn.Module):
             qkv_format = self.qkv_format
 
         if inference_params is not None:
-            assert qkv_format == "sbhd"
             assert self.layer_number is not None
+
+            if qkv_format == "bshd":
+                key_layer = key_layer.transpose(0, 1)
+                value_layer = value_layer.transpose(0, 1)
+
             (inference_key_memory, inference_value_memory,
             ) = inference_params.key_value_memory_dict[self.layer_number]
 
@@ -2667,6 +2670,10 @@ class DotProductAttention(torch.nn.Module):
                 sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
             key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+            
+            if qkv_format == "bshd":
+                key_layer = key_layer.transpose(0, 1)
+                value_layer = value_layer.transpose(0, 1)
 
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
@@ -3468,7 +3475,7 @@ class MultiheadAttention(torch.nn.Module):
                 ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         # =================================================
-        # Pre-allocate memory for key-values for inference.
+        # Pre-allocate memory for key-values for inference
         # =================================================
 
         if inference_params and self.layer_number is not None:
@@ -3491,9 +3498,9 @@ class MultiheadAttention(torch.nn.Module):
                     inference_value_memory,
                 ) = inference_params.key_value_memory_dict[self.layer_number]
 
-        # =====================
+        # ======================
         # Query, Key, and Value
-        # =====================
+        # ======================
 
         if self.attention_type == "self":
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn]
@@ -3615,36 +3622,36 @@ class MultiheadAttention(torch.nn.Module):
             )
             query_layer = query_layer.view(*new_tensor_shape)
 
-        # ==================================
-        # Adjust key and value for inference
-        # ==================================
+        # ======================================================
+        # Apply relative positional encoding (rotary embedding)
+        # ======================================================
 
-        # duplicate the pos_emb for self attention
         if rotary_pos_emb is not None:
+            # duplicate the pos_emb for self attention
             if not isinstance(rotary_pos_emb, tuple):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
-        if inference_params and self.layer_number is not None:
-            sequence_start = inference_params.sequence_len_offset
-            sequence_end = sequence_start + key_layer.size(0)
-
-            # adjust the key rotary positional embedding
-            if rotary_pos_emb is not None:
-                delta = sequence_end - sequence_start
-                q_pos_emb, k_pos_emb = rotary_pos_emb
-                q_pos_emb = q_pos_emb[:delta, :, :, :]
-                k_pos_emb = k_pos_emb[:delta, :, :, :]
-                rotary_pos_emb = (q_pos_emb, k_pos_emb)
-
-        # ==================================
-        # core attention computation
-        # ==================================
-
-        # apply relative positional encoding (rotary embedding)
-        if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
+
+            # adjust key and value for inference
+            if inference_params is not None:
+                if self.qkv_format == "sbhd":
+                    sequence_length = key_layer.size(0)
+                elif self.qkv_format == "bshd":
+                    sequence_length = key_layer.size(1)
+
+                sequence_start = inference_params.sequence_len_offset
+                sequence_end = sequence_start + sequence_length
+
+                q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
+                k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+
+        # ===========================
+        # Core attention computation
+        # ===========================
 
         context_layer = self.core_attention(
             query_layer,
@@ -3664,9 +3671,9 @@ class MultiheadAttention(torch.nn.Module):
             inference_params=inference_params,
         )
 
-        # =================
+        # ===================
         # Output. [sq, b, h]
-        # =================
+        # ===================
 
         projection_output = self.proj(
             context_layer, is_first_microbatch=is_first_microbatch
