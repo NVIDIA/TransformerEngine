@@ -441,6 +441,7 @@ class Float8Tensor(torch.Tensor):
         dim1: int = 1,
         *,
         update_cache: str | bool = "reuse_only",
+        noop: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Swap tensor dimensions
