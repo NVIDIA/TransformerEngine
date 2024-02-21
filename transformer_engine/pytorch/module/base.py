@@ -255,6 +255,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_weight_shapes = []
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.fsdp_wrapped = False
+        self.fsdp_group = None
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.

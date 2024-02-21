@@ -43,7 +43,9 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    use_reentrant_activation_recompute,
+    use_reentrant_activation_recompute
+    _distribute_and_save_activations,
+    _gather_distributed_activations,
 )
 
 from .. import cpp_extensions as tex
@@ -123,6 +125,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         gemm_gelu_fusion: bool,
+        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument,
+        fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -500,7 +504,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out.activation_offloading = True
                 gelu_out.activation_offloading = True
 
-            ctx.save_for_backward(
+            ctx = _distribute_and_save_activations(
+                ctx,
                 inputmat,
                 ln_weight,
                 mu,
@@ -517,7 +522,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
+                process_group=fsdp_group,
             )
+
             ctx.activation_dtype = activation_dtype
             ctx.activation = activation
             ctx.fp8 = fp8
@@ -593,7 +600,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fwd_scale_inverses,
                 skip_fp8_weight_update,
-            ) = ctx.saved_tensors
+            ) = _gather_distributed_activations(ctx)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 fc1_weight = Parameter(fc1_weight, False)
@@ -1591,6 +1598,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.gemm_gelu_fusion,
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+                self.dummy_tensor,
+=======
+                self.fsdp_group,
+>>>>>>> 6b1a0d9 (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
+>>>>>>> c2e712f (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
             )
             out = fwd_fn(*args)
 

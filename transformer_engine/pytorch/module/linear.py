@@ -36,6 +36,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _distribute_and_save_activations,
+    _gather_distributed_activations,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -85,7 +87,12 @@ class _Linear(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         ub_name: str,
+<<<<<<< HEAD
         is_first_module_in_mha: bool,
+=======
+        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
+        fsdp_group: Union[dist_group_type, None],
+>>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
         if is_input_fp8:
@@ -336,7 +343,8 @@ class _Linear(torch.autograd.Function):
                     if saved_inputmat is not None:
                         saved_inputmat.activation_offloading = True
 
-            ctx.save_for_backward(
+            ctx = _distribute_and_save_activations(
+                ctx,
                 saved_inputmat,
                 saved_inputmat_t,
                 weight,
@@ -344,7 +352,9 @@ class _Linear(torch.autograd.Function):
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
+                process_group=fsdp_group,
             )
+
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
@@ -398,7 +408,7 @@ class _Linear(torch.autograd.Function):
                 weight_t_fp8,
                 fwd_scale_inverses,
                 skip_fp8_weight_update,
-            ) = ctx.saved_tensors
+            ) = _gather_distributed_activations(ctx)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -644,6 +654,10 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+<<<<<<< HEAD
+=======
+            None,
+>>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
         )
 
 
@@ -1036,7 +1050,12 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.ub_name,
+<<<<<<< HEAD
                 is_first_module_in_mha,
+=======
+                self.dummy_tensor,
+                self.fsdp_group,
+>>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
             )
             out = linear_fn(*args)
 
