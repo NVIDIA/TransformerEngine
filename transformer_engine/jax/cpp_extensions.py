@@ -1805,6 +1805,33 @@ class FusedAttnHelper:
             self.num_heads_q, self.num_heads_kv, self.max_seqlen_q, self.max_seqlen_kv,
             self.head_dim)
 
+    @staticmethod
+    def parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout):
+        """Parse qkv aval"""
+        match qkv_layout:
+            case NVTE_QKV_Layout.NVTE_BS3HD:
+                *q_batch_shape, q_max_seqlen, nqkv, num_heads, q_head_dim = q_aval.shape
+                kv_batch_shape = q_batch_shape
+                kv_max_seqlen = q_max_seqlen
+                num_gqa_groups = num_heads
+                kv_head_dim = q_head_dim
+                assert nqkv == 3
+            case NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+                *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+                *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = k_aval.shape
+                assert nkv == 2
+            case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+                *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+                *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
+                assert k_aval.shape == v_aval.shape
+            case _:
+                raise ValueError(f"Unexpected {qkv_layout=}")
+        assert q_batch_shape == kv_batch_shape
+        assert q_head_dim == kv_head_dim
+        assert q_aval.dtype == k_aval.dtype == v_aval.dtype
+
+        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim)
+
 
 @dataclass(frozen=True)
 class _FusedAttnRNGStateChecker:
@@ -1879,38 +1906,22 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
-            *q_batch_shape, q_max_seqlen, nqkv, num_heads, q_head_dim = q_aval.shape
-            kv_batch_shape = q_batch_shape
-            kv_max_seqlen = q_max_seqlen
-            num_gqa_groups = num_heads
-            kv_head_dim = q_head_dim
-            assert nqkv == 3
-        else:
-            *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
-            if qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
-                *kv_batch_shape, kv_max_seqlen, _, num_gqa_groups, kv_head_dim = k_aval.shape
-            elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
-                *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
-                assert k_aval.shape == v_aval.shape
-            else:
-                raise ValueError(f"Unexpected {qkv_layout=}")
-            assert q_batch_shape == kv_batch_shape
-            assert q_head_dim == kv_head_dim
-        assert q_aval.dtype == k_aval.dtype == v_aval.dtype == bias_aval.dtype
-        output_shape = (*q_batch_shape, q_max_seqlen, num_heads, q_head_dim)
+        batch_shape, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim = \
+            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout)
+
+        output_shape = (*batch_shape, q_max_seqlen, num_heads, head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
-        backend = FusedAttnHelper(q_dtype, k_dtype, NVTE_QKV_Layout.NVTE_BSHD_BS2HD, attn_bias_type,
-                                  attn_mask_type, dropout_probability, num_heads, num_gqa_groups,
-                                  q_max_seqlen, kv_max_seqlen, q_head_dim).get_fused_attn_backend()
+        backend = FusedAttnHelper(q_dtype, k_dtype, qkv_layout, attn_bias_type, attn_mask_type,
+                                  dropout_probability, num_heads, num_gqa_groups, q_max_seqlen,
+                                  kv_max_seqlen, head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, kv_max_seqlen)
+            softmax_shape = (*batch_shape, num_heads, q_max_seqlen, kv_max_seqlen)
             softmax_dtype = q_dtype
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, 1)
+            softmax_shape = (*batch_shape, num_heads, q_max_seqlen, 1)
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f'Unsupported {backend=}')
@@ -1926,9 +1937,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
-        batch_size = reduce(operator.mul, q_batch_shape)
+        batch_size = reduce(operator.mul, batch_shape)
         wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
-            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type, qkv_layout,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
         wkspace_aval = q_aval.update(shape=wkspace_info[0],
@@ -1960,20 +1971,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         q_aval, k_aval, v_aval, *_ = ctx.avals_in
-        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
-            *batch_shape, q_max_seqlen, num_qkv, num_heads, head_dim = q_aval.shape
-            assert num_qkv == 3
-            kv_max_seqlen = q_max_seqlen
-            num_gqa_groups = num_heads
-        else:
-            *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
-            if qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
-                *_, kv_max_seqlen, _, num_gqa_groups, _ = k_aval.shape
-            elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
-                *_, kv_max_seqlen, num_gqa_groups, _ = k_aval.shape
-                assert k_aval.shape == v_aval.shape
-            else:
-                raise ValueError(f"Unexpected {qkv_layout=}")
+
+        batch_shape, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim = \
+            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout)
 
         batch_size = reduce(operator.mul, batch_shape)
 
@@ -2037,25 +2037,26 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         del dropout_probability, is_training, result_infos
         q_spec = get_padded_spec(arg_infos[0])
         k_spec = get_padded_spec(arg_infos[1])
-        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
-            # q_spec = (...batch, q_seqlen, head, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None))
-        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
-            # q_spec = (...batch, q_seqlen, head, hidden)
-            # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-4]))
-        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
-            # q_spec = (...batch, q_seqlen, head, hidden)
-            # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-3]))
-        else:
-            raise ValueError(f"Unsupported {qkv_layout=}")
+        match qkv_layout:
+            case NVTE_QKV_Layout.NVTE_BS3HD:
+                # q_spec = (...batch, q_seqlen, head, hidden)
+                out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None))
+            case NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+                # q_spec = (...batch, q_seqlen, head, hidden)
+                # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
+                out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-4]))
+            case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+                # q_spec = (...batch, q_seqlen, head, hidden)
+                # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
+                out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], k_spec[-3]))
+            case _:
+                raise ValueError(f"Unsupported {qkv_layout=}")
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
         return (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2108,30 +2109,13 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
         assert q_cu_seqlen_aval.dtype == kv_cu_seqlen_aval.dtype
 
-        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
-            *q_batch_shape, q_max_seqlen, num_qkv, num_heads, q_head_dim = q_aval.shape
-            assert num_qkv == 3
-            kv_batch_shape = q_batch_shape
-            kv_max_seqlen = q_max_seqlen
-            num_gqa_groups = num_heads
-            kv_head_dim = q_head_dim
-        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
-            *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
-            *kv_batch_shape, kv_max_seqlen, num_kv, num_gqa_groups, kv_head_dim = k_aval.shape
-            assert num_kv == 2
-        elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
-            *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
-            *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
-            assert k_aval.shape == v_aval.shape
-        else:
-            raise ValueError(f"Unsupported {qkv_layout=}")
-        assert q_batch_shape == kv_batch_shape
-        assert q_head_dim == kv_head_dim
+        batch_shape, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim = \
+            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout)
 
-        batch_size = reduce(operator.mul, q_batch_shape)
+        batch_size = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = \
             transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
-                batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+                batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
                 scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
                 qkv_layout,
                 jax_dtype_to_te_dtype(q_aval.dtype), is_training
@@ -2174,20 +2158,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         q_aval, k_aval, v_aval, *_ = ctx.avals_in
-        if qkv_layout == NVTE_QKV_Layout.NVTE_BS3HD:
-            *batch_shape, q_max_seqlen, num_qkv, num_heads, head_dim = q_aval.shape
-            assert num_qkv == 3
-            kv_max_seqlen = q_max_seqlen
-            num_gqa_groups = num_heads
-        else:
-            *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
-            if qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
-                *_, kv_max_seqlen, _, num_gqa_groups, _ = k_aval.shape
-            elif qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
-                *_, kv_max_seqlen, num_gqa_groups, _ = k_aval.shape
-                assert k_aval.shape == v_aval.shape
-            else:
-                raise ValueError(f"Unexpected {qkv_layout=}")
+
+        batch_shape, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim = \
+            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout)
 
         batch_size = reduce(operator.mul, batch_shape)
 
