@@ -36,10 +36,10 @@ void fused_amax_and_scale_update(const at::Tensor &amax_history,
 }
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
-                               std::vector<at::Tensor> &amax_histories,
-                                 std::vector<at::Tensor> &scales,
-                                 std::vector<at::Tensor> &scale_invs,
-                                 std::vector<at::Tensor> &scale_inv_masks,
+                                 std::vector<at::Tensor> amax_histories,
+                                 std::vector<at::Tensor> scales,
+                                 std::vector<at::Tensor> scale_invs,
+                                 std::vector<at::Tensor> scale_inv_masks,
                                  const std::string &amax_compute_algo,
                                  transformer_engine::DType fp8_dtype,
                                  float margin) {
@@ -53,7 +53,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
   std::vector<NVTETensor> te_scales(num_tensors);
   std::vector<NVTETensor> te_scale_invs(num_tensors);
   std::vector<NVTETensor> te_scale_inv_masks(num_tensors);
-  for (size_t i=0; i<num_tensors; i++) {
+  for (size_t i = 0; i < num_tensors; i++) {
     t_amax_histories[i].data.dptr = amax_histories[i].data_ptr();
     auto amax_sizes = amax_histories[i].sizes().vec();
     std::vector<size_t> amax_shape{amax_sizes.begin(), amax_sizes.end()};

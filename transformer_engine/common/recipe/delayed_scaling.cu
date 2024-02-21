@@ -170,7 +170,7 @@ kernel_bulk(
   const size_t tid = threadIdx.x;
   const size_t num_scale = p.param[bid].num_scale;
 
-  for (size_t count=0; count<num_scale; count++) {
+  for (size_t count = 0; count < num_scale; count++) {
     // Update amax
     float amax = 0;
     {
@@ -346,10 +346,10 @@ void amax_and_scale_update(const Tensor &amax_history,
 }
 
 void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
-                           std::vector<Tensor*> &amax_histories,
-                           std::vector<Tensor*> &scales,
-                           std::vector<Tensor*> &scale_invs,
-                           std::vector<Tensor*> &scale_inv_masks,
+                           std::vector<Tensor*> amax_histories,
+                           std::vector<Tensor*> scales,
+                           std::vector<Tensor*> scale_invs,
+                           std::vector<Tensor*> scale_inv_masks,
                            const std::string &amax_compute_algo,
                            DType fp8_dtype,
                            float margin,
@@ -412,11 +412,11 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
   // amax parameters
   float* amax_buffer = static_cast<float*>(amax_reduction_buffer.data.dptr);
   AmaxParams p;
-  for (size_t iter=0; iter<num_kernels; iter++) {
+  for (size_t iter = 0; iter < num_kernels; iter++) {
     size_t kernel_num_scales = 0;
     size_t kernel_num_tensors = (iter == (num_kernels -1))
           ? num_tensors % kernel_param_limit: kernel_param_limit;
-    for (size_t pi=0; pi<kernel_num_tensors; pi++) {
+    for (size_t pi = 0; pi < kernel_num_tensors; pi++) {
       size_t i = iter * kernel_param_limit + pi;
 
       // Check tensors
@@ -523,7 +523,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
   using namespace transformer_engine;
   size_t num_tensors = amax_histories.size();
   std::vector<Tensor*> t_amax_histories, t_scales, t_scale_invs, t_scale_inv_masks;
-  for (size_t i=0; i<num_tensors; i++) {
+  for (size_t i = 0; i < num_tensors; i++) {
     t_amax_histories.push_back(reinterpret_cast<Tensor*>(amax_histories[i]));
     t_scales.push_back(reinterpret_cast<Tensor*>(scales[i]));
     t_scale_invs.push_back(reinterpret_cast<Tensor*>(scale_invs[i]));
