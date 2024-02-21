@@ -8,11 +8,7 @@ COPY examples/ examples/
 COPY qa/ qa/
 COPY tests/ tests/
 COPY transformer_engine/ transformer_engine/
-COPY CONTRIBUTING.rst .
-COPY LICENSE .
-COPY README.rst .
-COPY setup.py .
-COPY VERSION .
+COPY CONTRIBUTING.rst LICENSE README.rst setup.py te_version.p[y] VERSION .
 
 FROM ${FROM_IMAGE_NAME}
 ARG FRAMEWORK
