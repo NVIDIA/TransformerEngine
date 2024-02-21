@@ -355,7 +355,7 @@ class _CheckpointFrame:
 
 
 
-class _RecomputationHook(torch.autograd.graph.saved_tensors_hooks):
+class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):
 
     def __init__(self, frame):
 
@@ -377,7 +377,7 @@ class _RecomputationHook(torch.autograd.graph.saved_tensors_hooks):
         super().__init__(pack_hook, unpack_hook)
 
 
-class _CheckpointHook(torch.autograd.graph.saved_tensors_hooks):
+class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):
 
     def __init__(self, frame, args, kwargs):
 
@@ -395,7 +395,7 @@ class _CheckpointHook(torch.autograd.graph.saved_tensors_hooks):
         def unpack_hook(idx):
             """
             Unpacking hook for each tensor that comes out of the `ctx.saved_tensors` call in the
-            backward pass. The first time this is called, the _RecomputationHook will save all the
+            backward pass. The first time this is called, the _recomputation_hook will save all the
             activation tensors from `ctx.save_for_backward()` in the forward recomputation into the
             _CheckpointFrame. Subsequent calls will simply return the already recomputed activation
             tensor at the given index of the _CheckpointFrame storage.
@@ -409,7 +409,7 @@ class _CheckpointHook(torch.autograd.graph.saved_tensors_hooks):
                 frame.restore_rng_states(forward=True)
 
                 # Recompute the forward pass
-                with _RecomputationHook(frame):
+                with _recomputation_hook(frame):
                     frame.recompute_fn(*args, **kwargs)
 
                 # Restore RNG states back to the backward pass
@@ -425,6 +425,17 @@ class _CheckpointHook(torch.autograd.graph.saved_tensors_hooks):
 
 def use_reentrant_activation_recompute():
     return _USE_REENTRANT_ACTIVATION_RECOMPUTE
+
+def get_activation_recompute_contexts():
+    forward_ctx = activation_recompute_forward(
+        activation_recompute=True,
+        recompute_phase=False,
+    )
+    recompute_ctx = activation_recompute_forward(
+        activation_recompute=True,
+        recompute_phase=True,
+    )
+    return forward_ctx, recompute_ctx
 
 def checkpoint(
     function: Callable,
@@ -533,14 +544,7 @@ def checkpoint(
                 "the autograd engine's pack/unpack hooks."
             )
 
-        forward_ctx = activation_recompute_forward(
-            activation_recompute=True,
-            recompute_phase=False,
-        )
-        recompute_ctx = activation_recompute_forward(
-            activation_recompute=True,
-            recompute_phase=True,
-        )
+        forward_ctx, recompute_ctx = get_activation_recompute_contexts()
 
         def recompute_fn(*args, **kwargs):
             with torch.autograd.enable_grad(), recompute_ctx:
@@ -553,7 +557,7 @@ def checkpoint(
         )
         new_frame.cache_rng_states(forward=True)
 
-        with _CheckpointHook(new_frame, args, kwargs), forward_ctx:
+        with _checkpoint_hook(new_frame, args, kwargs), forward_ctx:
             out = function(*args, **kwargs)
 
         return out
