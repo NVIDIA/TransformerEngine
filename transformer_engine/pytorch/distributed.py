@@ -489,27 +489,23 @@ def checkpoint(
     tp_group = kwargs.pop("tp_group", None)
     get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
 
-    # Pop out te.utils.checkpoint.checkpoint() arguments for wrapper compatibility
-    context_fn = kwargs.pop("context_fn", noop_context_fn)
-    determinism_check = kwargs.pop("determinism_check", "default")
-    debug = kwargs.pop("debug", False)
+    # Pass everything to the PyTorch native checkpoint for non-TE modules
     if 'transformer_engine' not in function.__class__.__module__:
-        # This is not a TE module so just pass everything to the PyTorch native checkpoint
         return torch.utils.checkpoint.checkpoint(
             function,
             *args,
-            use_reentrant=use_reentrant,
-            context_fn=context_fn,
-            determinism_check=determinism_check,
-            debug=debug,
             **kwargs
         )
+
+    # Discard unused te.utils.checkpoint.checkpoint() arguments
+    context_fn = kwargs.pop("context_fn", noop_context_fn)
+    determinism_check = kwargs.pop("determinism_check", "default")
+    debug = kwargs.pop("debug", False)
     del context_fn, determinism_check, debug
 
-    use_reentrant = kwargs.pop("use_reentrant", True)
     global _USE_REENTRANT_ACTIVATION_RECOMPUTE
-    _USE_REENTRANT_ACTIVATION_RECOMPUTE = use_reentrant
-    if use_reentrant:
+    _USE_REENTRANT_ACTIVATION_RECOMPUTE = kwargs.pop("use_reentrant", True)
+    if _USE_REENTRANT_ACTIVATION_RECOMPUTE:
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.
         if distribute_saved_activations:
