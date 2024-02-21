@@ -2787,14 +2787,14 @@ class DotProductAttention(torch.nn.Module):
         if (use_fused_attention
             and fu_core_attention_bias_type == "post_scale_bias"
             and (fu_core_attention_bias.shape[0] != 1
-                or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
-                if fu_core_attention_bias.requires_grad:
-                    # remove this line when cuDNN adds bwd support for
-                    # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
-                    use_fused_attention = False
-                else:
-                    # max512 backend will only support [1, h, s, s]
-                    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+            or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
+            if fu_core_attention_bias.requires_grad:
+                # remove this line when cuDNN adds bwd support for
+                # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
+                use_fused_attention = False
+            else:
+                # max512 backend will only support [1, h, s, s]
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
