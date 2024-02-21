@@ -1141,7 +1141,7 @@ pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t max_seqlen,
     size_t attn_heads, size_t bias_heads, size_t head_dim,
     float scaling_factor, float dropout_probability,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,DType dtype, bool is_training) {
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
     constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BS3HD;
 
     auto qkv_shape = std::vector<size_t>{input_batch * max_seqlen, 3, attn_heads, head_dim};
