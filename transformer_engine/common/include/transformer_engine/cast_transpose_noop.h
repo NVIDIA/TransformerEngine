@@ -8,8 +8,8 @@
  *  \brief Functions handling transposes with no-op.
  */
 
-#ifndef TRANSFORMER_ENGINE_TRANSPOSE_WITH_NOOP_H_
-#define TRANSFORMER_ENGINE_TRANSPOSE_WITH_NOOP_H_
+#ifndef TRANSFORMER_ENGINE_CAST_TRANSPOSE_WITH_NOOP_H_
+#define TRANSFORMER_ENGINE_CAST_TRANSPOSE_WITH_NOOP_H_
 
 #include "transformer_engine.h"
 
@@ -27,4 +27,4 @@ void nvte_cast_transpose_with_noop(const NVTETensor input,
 }  // extern "C"
 #endif
 
-#endif  // TRANSFORMER_ENGINE_TRANSPOSE_WITH_NOOP_H_
+#endif  // TRANSFORMER_ENGINE_CAST_TRANSPOSE_WITH_NOOP_H_
