@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+"""Installation script."""
+
 import ctypes
 from functools import lru_cache
 import os
@@ -18,34 +20,10 @@ from typing import List, Optional, Tuple, Union
 import setuptools
 from setuptools.command.build_ext import build_ext
 
+from te_version import te_version
+
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
-
-@lru_cache(maxsize=1)
-def te_version() -> str:
-    """Transformer Engine version string
-
-    Includes Git commit as local version, unless suppressed with
-    NVTE_NO_LOCAL_VERSION environment variable.
-
-    """
-    with open(root_path / "VERSION", "r") as f:
-        version = f.readline().strip()
-    if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")):
-        try:
-            output = subprocess.run(
-                ["git", "rev-parse" , "--short", "HEAD"],
-                capture_output=True,
-                cwd=root_path,
-                check=True,
-                universal_newlines=True,
-            )
-        except (CalledProcessError, OSError):
-            pass
-        else:
-            commit = output.stdout.strip()
-            version += f"+{commit}"
-    return version
 
 @lru_cache(maxsize=1)
 def with_debug_build() -> bool:
@@ -266,7 +244,10 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Common requirements
     setup_reqs: List[str] = []
-    install_reqs: List[str] = ["pydantic"]
+    install_reqs: List[str] = [
+        "pydantic",
+        "importlib-metadata>=1.0; python_version<'3.8'",
+    ]
     test_reqs: List[str] = ["pytest"]
 
     def add_unique(l: List[str], vals: Union[str, List[str]]) -> None:

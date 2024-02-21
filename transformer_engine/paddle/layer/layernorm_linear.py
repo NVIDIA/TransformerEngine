@@ -17,6 +17,9 @@ from ..cpp_extensions import (
     layernorm_fwd,
     layernorm_fwd_fp8,
     layernorm_bwd,
+    rmsnorm_fwd_fp8,
+    rmsnorm_fwd,
+    rmsnorm_bwd,
 )
 
 from .base import TransformerEngineBaseLayer
@@ -44,82 +47,129 @@ from ..utils import (
 __all__ = ["LayerNormLinear"]
 
 
-def _layernorm_fwd_fp8_cast(
+def _apply_normalization_fwd(
+    normalization: str,
     inputmat: paddle.Tensor,
-    ln_weight: paddle.Tensor,
-    ln_bias: paddle.Tensor,
+    norm_weight: paddle.Tensor,
+    norm_bias: Union[paddle.Tensor, None],
     out_fp8_index: FP8FwdTensors,
     eps: float,
     fp8_enabled: bool,
     fp8_meta: Dict[str, Any],
     activation_dtype: paddle.dtype,
-    return_layernorm_output: bool,
-    fwd_ln_sm_margin: int,
+    return_norm_output: bool,
+    fwd_norm_sm_margin: int,
     zero_centered_gamma: bool,
 ):
     """Performs LayerNorm + FP8_Cast for FP8 path. LayerNorm only for BF16 path"""
+    assert normalization in ["LayerNorm", "RMSNorm"], "Unsupported normalization type!"
+    if normalization == "RMSNorm":
+        assert norm_bias is None, "RMSNorm does not support bias!"
+    norm_weight = cast_if_needed_inplace(norm_weight, activation_dtype)
+    if norm_bias is not None:
+        norm_bias = cast_if_needed_inplace(norm_bias, activation_dtype)
 
-    ln_weight = cast_if_needed_inplace(ln_weight, activation_dtype)
-    ln_bias = cast_if_needed_inplace(ln_bias, activation_dtype)
+    norm_kwargs = {
+        "inp": inputmat,
+        "weight": norm_weight,
+        "eps": eps,
+        "otype": TE_DType[activation_dtype],
+        "sm_margin": fwd_norm_sm_margin,
+        "zero_centered_gamma": zero_centered_gamma,
+    }
+
+    fwd_normalization_funcs = {
+        ('LayerNorm', True, True): layernorm_fwd,
+        ('LayerNorm', True, False): layernorm_fwd_fp8,
+        ('LayerNorm', False, True): layernorm_fwd,
+        ('LayerNorm', False, False): layernorm_fwd,
+        ('RMSNorm', True, True): rmsnorm_fwd,
+        ('RMSNorm', True, False): rmsnorm_fwd_fp8,
+        ('RMSNorm', False, True): rmsnorm_fwd,
+        ('RMSNorm', False, False): rmsnorm_fwd,
+    }
+
+    if normalization == "LayerNorm":
+        norm_kwargs["bias"] = norm_bias
+    norm_fwd_func = fwd_normalization_funcs[(normalization, fp8_enabled, return_norm_output)]
 
     if fp8_enabled:
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-        if not return_layernorm_output:
-            ln_out, mu, rsigma = layernorm_fwd_fp8(
-                inputmat,
-                ln_weight,
-                ln_bias,
-                eps,
-                fp8_meta["scaling_fwd"],
-                out_fp8_index,
-                fp8_dtype_forward,
-                fwd_ln_sm_margin,
-                zero_centered_gamma,
-            )
-            ln_out_return = ln_out
-        else:
-            ln_out_return, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
-                                                      TE_DType[activation_dtype], fwd_ln_sm_margin,
-                                                      zero_centered_gamma)
-            ln_out = cast_to_fp8(
-                ln_out_return,
-                fp8_meta["scaling_fwd"],
-                out_fp8_index,
-                fp8_dtype_forward,
-            )
+        if not return_norm_output:
+            fp8_kwargs = {
+                "fp8_meta_tensor": fp8_meta["scaling_fwd"],
+                "fp8_tensor": out_fp8_index,
+                "otype": fp8_dtype_forward,
+            }
+            norm_kwargs.update(fp8_kwargs)
+
+    out_tuple = norm_fwd_func(**norm_kwargs)
+
+    if normalization == "LayerNorm":
+        norm_out_return, mu, rsigma = out_tuple
+    else:    # RMSNorm
+        norm_out_return, rsigma = out_tuple
+        mu = None
+
+    if fp8_enabled and return_norm_output:
+        norm_out = cast_to_fp8(
+            norm_out_return,
+            fp8_meta["scaling_fwd"],
+            out_fp8_index,
+            fp8_dtype_forward,
+        )
     else:
-        ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
-                                           TE_DType[activation_dtype], fwd_ln_sm_margin,
-                                           zero_centered_gamma)
-        ln_out_return = ln_out
+        norm_out = norm_out_return
 
     return (
-        ln_out_return,
-        ln_out,
+        norm_out_return,
+        norm_out,
         mu,
         rsigma,
     )
 
 
-def _layernorm_bwd(
+def _apply_normalization_bwd(
+    normalization: str,
     inputmat: paddle.Tensor,
     dgrad: paddle.Tensor,
-    ln_weight: paddle.Tensor,
-    mu: paddle.Tensor,
+    norm_weight: paddle.Tensor,
+    mu: Union[paddle.Tensor, None],
     rsigma: paddle.Tensor,
-    grad_ln_out_return: paddle.Tensor,
-    return_layernorm_output: bool,
-    bwd_ln_sm_margin: int,
+    grad_norm_out_return: paddle.Tensor,
+    return_norm_output: bool,
+    bwd_norm_sm_margin: int,
     zero_centered_gamma: bool,
 ):
+    assert normalization in ["LayerNorm", "RMSNorm"], "Unsupported normalization type!"
+    if normalization == "RMSNorm":
+        assert mu is None, "RMSNorm does not support bias!"
     # LayerNorm gradient
-    d_ln_out = dgrad.reshape(inputmat.shape)
+    d_norm_out = dgrad.reshape(inputmat.shape)
     # Residual gradient
-    if return_layernorm_output:
-        d_ln_out = d_ln_out + grad_ln_out_return.reshape(d_ln_out.shape)
+    if return_norm_output:
+        d_norm_out = d_norm_out + grad_norm_out_return.reshape(d_norm_out.shape)
 
-    return layernorm_bwd(d_ln_out, inputmat, mu, rsigma, ln_weight, bwd_ln_sm_margin,
-                         zero_centered_gamma)
+    norm_bwd_func = layernorm_bwd if normalization == "LayerNorm" else rmsnorm_bwd
+    norm_bwd_kwargs = {
+        "dz": d_norm_out,
+        "x": inputmat,
+        "rsigma": rsigma,
+        "gamma": norm_weight,
+        "sm_margin": bwd_norm_sm_margin,
+        "zero_centered_gamma": zero_centered_gamma,
+    }
+    if normalization == "LayerNorm":
+        norm_bwd_kwargs["mu"] = mu
+
+    out_tuple = norm_bwd_func(**norm_bwd_kwargs)
+    if normalization == "LayerNorm":
+        dxmat, dgamma, dbeta = out_tuple
+    else:    # RMSNorm
+        dxmat, dgamma = out_tuple
+        dbeta = None
+
+    return dxmat, dgamma, dbeta
 
 
 class _LayerNormLinear(paddle.autograd.PyLayer):
@@ -130,7 +180,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         ctx,
         inp: paddle.Tensor,
         ln_weight: paddle.Tensor,
-        ln_bias: paddle.Tensor,
+        ln_bias: Union[paddle.Tensor, None],
         weight: paddle.Tensor,
         weight_fp8: Optional[paddle.Tensor],
         weight_t_fp8: Optional[paddle.Tensor],
@@ -146,6 +196,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        normalization: str,
         parallel_mode: Union[str, None],
         tensor_parallel: bool,
         sequence_parallel: bool,
@@ -153,6 +204,10 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         tp_size: int,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
+        if normalization == "RMSNorm":
+            assert ln_bias is None, "RMSNorm does not support bias!"
+        else:    # LayerNorm
+            assert ln_bias is not None, "LayerNorm requires bias!"
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -167,7 +222,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ln_out,
             mu,
             rsigma,
-        ) = _layernorm_fwd_fp8_cast(
+        ) = _apply_normalization_fwd(
+            normalization,
             inputmat,
             ln_weight,
             ln_bias,
@@ -232,9 +288,11 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
-            ctx.requires_ln_bgrad = not ln_bias.stop_gradient
+            ctx.requires_ln_bgrad = ln_bias is not None and not ln_bias.stop_gradient
             ctx.requires_ln_wgrad = not ln_weight.stop_gradient
             ctx.is_first_microbatch = is_first_microbatch
+            ctx.has_ln_bias = ln_bias is not None
+            ctx.normalization = normalization
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
@@ -314,7 +372,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 bgrad = bgrad_
 
             # LayerNorm Bwd
-            dxmat, dgamma, dbeta = _layernorm_bwd(
+            dxmat, dgamma, dbeta = _apply_normalization_bwd(
+                ctx.normalization,
                 inputmat,
                 dgrad,
                 ln_weight,
@@ -328,6 +387,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
 
             bgrad = bgrad if ctx.requires_bgrad else None
             bgrad_out = (bgrad,) if ctx.use_bias else ()
+            dbeta = dbeta if ctx.requires_ln_bgrad else None
+            dbeta_out = (dbeta,) if ctx.has_ln_bias else ()
 
             if not ctx.fp8_enabled or ctx.is_first_microbatch is None:
                 weight_cache_grad = ()
@@ -338,7 +399,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 dgamma if ctx.requires_ln_wgrad else None,
-                dbeta if ctx.requires_ln_bgrad else None,
+                *dbeta_out,
                 wgrad if ctx.requires_wgrad else None,
                 *weight_cache_grad,
                 *bgrad_out,
@@ -361,6 +422,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 optional `paddle.ParamAttr` for weight.
     bias_attr: Union[paddle.ParamAttr, None, bool], default = None
               optional `paddle.ParamAttr` for bias.
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
     return_layernorm_output : bool, default = `False`
                              if set to `True`, output of layernorm is returned from the forward
                              together with the output of the linear transformation.
@@ -395,6 +458,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         eps: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        normalization: str = 'LayerNorm',
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
         parallel_mode: Optional[str] = None,
@@ -407,6 +471,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self.in_features = in_features
         self.out_features = out_features
         self.eps = eps
+        self.normalization = normalization
+        assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
         self.backend = backend
@@ -439,17 +505,20 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             dtype=self._dtype,
             is_bias=False,
         )
-
-        self.ln_bias = self.create_parameter(
-            shape=[self.in_features],
-            attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
-            dtype=self._dtype,
-            is_bias=True,
-        )
+        if self.normalization != "RMSNorm":
+            self.ln_bias = self.create_parameter(
+                shape=[self.in_features],
+                attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
+                dtype=self._dtype,
+                is_bias=True,
+            )
+        else:
+            self.ln_bias = None
 
         if self.sequence_parallel:
             mark_as_sequence_parallel_parameter(self.ln_weight)
-            mark_as_sequence_parallel_parameter(self.ln_bias)
+            if self.ln_bias is not None:
+                mark_as_sequence_parallel_parameter(self.ln_bias)
 
         # Initialize Linear weight parameter
         with track_rng_state(enable=self.tensor_parallel):
@@ -534,6 +603,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.normalization,
                 self.parallel_mode,
                 self.tensor_parallel,
                 self.sequence_parallel,
@@ -566,19 +636,24 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             warnings.warn(
                 "`is_first_microbatch` is not supported for paddle backend and is ignored.")
 
-        ln_out = F.layer_norm(x=inp,
-                              normalized_shape=inp.shape[-1],
-                              weight=self.ln_weight,
-                              bias=self.ln_bias,
-                              epsilon=self.eps)
+        if self.normalization == "RMSNorm":
+            norm = paddle.rsqrt(paddle.mean(inp**2, axis=-1, keepdim=True) + self.eps)
+            norm_out = inp * norm * self.ln_weight
+        else:    # LayerNorm
+            norm_out = F.layer_norm(x=inp,
+                                    normalized_shape=inp.shape[-1],
+                                    weight=self.ln_weight,
+                                    bias=self.ln_bias,
+                                    epsilon=self.eps)
+
         if self.parallel_mode == 'column' and self.tensor_parallel:
-            ln_out = identity(ln_out, self.tp_group)
-        out = F.linear(ln_out, self.weight, self.bias if self.gemm_bias_fused_add else None)
+            norm_out = identity(norm_out, self.tp_group)
+        out = F.linear(norm_out, self.weight, self.bias if self.gemm_bias_fused_add else None)
         if self.parallel_mode == 'row' and self.tensor_parallel:
             out, _ = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out
         if self.return_layernorm_output:
-            return out, ln_out
+            return out, norm_out
         return out
 
     def forward(self, *args, **kwargs):
