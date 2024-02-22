@@ -13,12 +13,6 @@
 #include "../util/logging.h"
 #include "../util/cuda_runtime.h"
 
-#if CUDART_VERSION >= 12010
-#define AMAX_UPDATE_PARAM_LIMIT 818
-#else
-#define AMAX_UPDATE_PARAM_LIMIT 101
-#endif
-
 namespace transformer_engine {
 namespace delayed_scaling_recipe {
 
@@ -45,17 +39,35 @@ inline float fp8_dtype_max(DType dtype) {
   return 0;
 }
 
-// structs for amax parameters
+// struct for amax parameters
 struct AmaxParam {
-  size_t num_scale = 0;
+  int num_scale = 0;
   float* amax_history = nullptr;
   float* scale = nullptr;
   float* scale_inv = nullptr;
   unsigned char* scale_inv_mask = nullptr;
 };
 
+// dummy struct for kernel_bulk's other params
+struct OtherParams {
+  float* a;
+  size_t b;
+  AmaxComputeAlgo c;
+  float d;
+};
+
+#if CUDART_VERSION >= 12010
+constexpr size_t max_constant_memory_per_kernel = 32768;
+constexpr size_t AMAX_PARAMS_LIMIT = (
+  max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
+#else
+constexpr size_t max_constant_memory_per_kernel = 4096;
+constexpr size_t AMAX_PARAMS_LIMIT = (
+  max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
+#endif
+
 struct AmaxParams {
-  AmaxParam param[AMAX_UPDATE_PARAM_LIMIT];
+  AmaxParam param[AMAX_PARAMS_LIMIT];
 };
 
 namespace amax_and_scale_update_impl {
@@ -168,9 +180,9 @@ kernel_bulk(
        float scaled_max) {
   const size_t bid = blockIdx.x;
   const size_t tid = threadIdx.x;
-  const size_t num_scale = p.param[bid].num_scale;
+  const int num_scale = p.param[bid].num_scale;
 
-  for (size_t count = 0; count < num_scale; count++) {
+  for (int count = 0; count < num_scale; count++) {
     // Update amax
     float amax = 0;
     {
@@ -361,24 +373,6 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
   int cuda_runtime_version = 0;
   cudaRuntimeGetVersion(&cuda_runtime_version);
 
-  // calculate a more accurate limit of params
-  // Volta+ and CUDA 12.1+: 32KB; otherwise, 4KB
-  struct OtherParams {
-    float* a;
-    size_t b;
-    AmaxComputeAlgo c;
-    float d;
-  };
-  size_t kernel_param_limit = 0;
-  if ((sm_arch_ >= 70) && (cuda_runtime_version >=12010)) {
-    kernel_param_limit = (32768 - sizeof(OtherParams)) / sizeof(AmaxParam);
-  } else {
-    kernel_param_limit = (4096 - sizeof(OtherParams)) / sizeof(AmaxParam);
-  }
-  if (kernel_param_limit > AMAX_UPDATE_PARAM_LIMIT) {
-    kernel_param_limit = AMAX_UPDATE_PARAM_LIMIT;
-  }
-
   // amax value to use for updating scaling factor
   AmaxComputeAlgo amax_compute_algo_ = AmaxComputeAlgo::INVALID;
   if (amax_compute_algo == "max") {
@@ -403,7 +397,7 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
 
   // Number of tensors in the bulk
   const size_t num_tensors = amax_histories.size();
-  const size_t num_kernels = (num_tensors+kernel_param_limit-1)/kernel_param_limit;
+  const int num_kernels = (num_tensors+AMAX_PARAMS_LIMIT-1)/AMAX_PARAMS_LIMIT;
   size_t amax_history_length = 0;
   if (num_tensors > 0) {
     amax_history_length = amax_histories[0]->data.shape[0];
@@ -412,15 +406,15 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
   // amax parameters
   float* amax_buffer = static_cast<float*>(amax_reduction_buffer.data.dptr);
   AmaxParams p;
-  for (size_t iter = 0; iter < num_kernels; iter++) {
+  for (int iter = 0; iter < num_kernels; iter++) {
     size_t kernel_num_scales = 0;
     size_t kernel_num_tensors = (iter == (num_kernels -1))
-          ? num_tensors % kernel_param_limit: kernel_param_limit;
+          ? num_tensors % AMAX_PARAMS_LIMIT: AMAX_PARAMS_LIMIT;
     for (size_t pi = 0; pi < kernel_num_tensors; pi++) {
-      size_t i = iter * kernel_param_limit + pi;
+      size_t i = iter * AMAX_PARAMS_LIMIT + pi;
 
       // Check tensors
-      size_t num_scale = amax_histories[i]->data.shape[1];
+      int num_scale = amax_histories[i]->data.shape[1];
       NVTE_CHECK(amax_histories[i]->data.dtype == DType::kFloat32,
                  "Found ", dtype_name(amax_histories[i]->data.dtype), ".");
       NVTE_CHECK(amax_histories[i]->data.shape.size() == 2,
