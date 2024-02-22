@@ -821,6 +821,10 @@ std::vector<at::Tensor> fused_attn_fwd(
   std::vector<size_t> k_shape{k_sizes.begin(), k_sizes.end()};
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
+  
+  //std::vector<size_t> s_shape{q_sizes.begin(), q_sizes.end()};
+  //if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD) {
+  //  s_shape[0] = q_shape[0];
 
   // create output tensor O
   auto O = torch::empty_like(Q);

@@ -994,6 +994,7 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             bool is_training, float scaling_factor,
             float dropout_probability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
+            //void* devPtrStats, //void* devPtrM, void* devPtrZInv,
             void* devPtrM, void* devPtrZInv,
             void* devPtrO,
             void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
@@ -1017,7 +1018,7 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
     std::cout << " tensor type " << (int)tensorType << " " << layout << " " << b << h << s_q << s_kv << d << " " << dropout_probability << " " << scaling_factor << std::endl;
 
     //void* devPtrStats, devPtrSoftmaxStats
-    is_training = false; // this can be true / false
+    is_training = true; //false; // this can be true / false
 //    tensorType = fe::DataType_t::FP8_E4M3;
     layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
     auto bias_type = NVTE_Bias_Type::NVTE_NO_BIAS;
@@ -1122,7 +1123,7 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
             fe::graph::SDPA_fp8_attributes sdpa_options;
             sdpa_options = fe::graph::SDPA_fp8_attributes()
-                            .set_name("flash_attention_fp8")
+                            .set_name("sdpa_fp8")
                             .set_is_inference(!is_training)
                             .set_causal_mask(is_causal)
                             .set_attn_scale(attn_scale);
@@ -1179,9 +1180,9 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             amax_s->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
 
             if (is_training) {
-                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT);
-                        //.set_dim({b, h, s_q, 1})
-                        //.set_stride({h * s_q, s_q, 1, 1});
+                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)//;
+                        .set_dim({b, h, s_q, 1})
+                        .set_stride({h * s_q, s_q, 1, 1});
             }
 
             std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
@@ -1246,6 +1247,12 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         // null streams for sizing the cuDNN workspace.
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
+	std::cout << " devPtrQ K V :    " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
+	std::cout << " descale Q K V S :    " << devPtrDescaleQ << " " << devPtrDescaleK << " " << devPtrDescaleV << " " << devPtrDescaleS << std::endl;
+	std::cout << " scale s o :   " << devPtrScaleS << " " << devPtrScaleO << std::endl;
+	std::cout << " attn scale, O, amax S, amax O :  " << &scaling_factor << " " << devPtrO << " " << devPtrAmaxS << " " << devPtrAmaxO << std::endl;
+	//std::cout << " stats " <<  devPtrStats << std::endl;
+	std::cout << " stats " <<  devPtrM << " " << devPtrZInv << std::endl;
         // Build variant pack
         std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
             {Q, devPtrQ},
@@ -1262,10 +1269,10 @@ void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             {amax_s, devPtrAmaxS},
             {amax_o, devPtrAmaxO}};
 
-        //if (is_training) {
-        //    variant_pack[Stats] = nullptr; //devPtrSoftmaxStats;
-        //}
-            variant_pack[Stats] = nullptr; //devPtrSoftmaxStats;
+        if (is_training) {
+            variant_pack[Stats] = devPtrM; //nullptr; //devPtrSoftmaxStats;
+        }
+        //    variant_pack[Stats] = devPtrM; //devPtrStats; //nullptr; //devPtrSoftmaxStats;
 
         //if (is_bias) {
         //    variant_pack[bias] = devPtrBias;
@@ -2421,6 +2428,7 @@ void fused_attn_fp8_fwd(
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
 
+  void* devPtrStats = input_output_S->data.dptr;
   void* devPtrAmaxS = input_output_S->amax.dptr;
   void* devPtrScaleS = input_output_S->scale.dptr;
   void* devPtrDescaleS = input_output_S->scale_inv.dptr;
@@ -2454,6 +2462,7 @@ void fused_attn_fp8_fwd(
                   b, h, max_seqlen_q, max_seqlen_kv, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
+                  //devPtrStats, //devPtrM, devPtrZInv,
                   devPtrM, devPtrZInv,
                   devPtrO,
                   devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
