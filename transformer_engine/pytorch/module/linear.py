@@ -781,8 +781,6 @@ class Linear(TransformerEngineBaseModule):
                                     init_fn=init_method,
                                     get_rng_state_tracker=get_rng_state_tracker,
                                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
-            setattr(getattr(self, self.weight_names[i]), 'allreduce',
-                    not (self.is_expert and self.expert_parallel))
 
             # Construct bias parameter if needed
             if self.use_bias:
@@ -792,8 +790,6 @@ class Linear(TransformerEngineBaseModule):
                 bias = torch.nn.Parameter(bias)
                 self.register_parameter(self.bias_names[i], bias,
                                         init_fn=init_method_constant(0.0))
-                setattr(getattr(self, self.bias_names[i]), 'allreduce',
-                        not (self.is_expert and self.expert_parallel))
             else:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
                 setattr(self, self.bias_names[i], bias)
@@ -831,6 +827,8 @@ class Linear(TransformerEngineBaseModule):
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
+                setattr(getattr(self, weight), 'allreduce',
+                        not (self.is_expert and self.expert_parallel))
 
             # Set parallelism attributes for linear biases
             if self.use_bias:
@@ -839,6 +837,8 @@ class Linear(TransformerEngineBaseModule):
                         setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
+                    setattr(getattr(self, bias), 'allreduce',
+                            not (self.is_expert and self.expert_parallel))
 
     def get_fp8_weights_scratchpad(
         self,
