@@ -20,7 +20,7 @@ from jax import value_and_grad, jit
 from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
+from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 
 
@@ -144,6 +144,9 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
             kv = jnp.concatenate((key, value), axis=-3)
             return cross_fused_attn(query, kv, bias, mask, dropout_rng,
                                     **kwargs).astype(query.dtype)
+        case QKVLayout.BSHD_BSHD_BSHD:
+            return fused_attn(query, key, value, bias, mask, dropout_rng,
+                              **kwargs).astype(query.dtype)
 
 
 @dataclass
@@ -337,6 +340,7 @@ class FusedAttnRunner:
 @pytest.mark.parametrize('qkv_layout', [
     pytest.param(QKVLayout.BS3HD, id='qkvpacked'),
     pytest.param(QKVLayout.BSHD_BS2HD, id='kvpacked'),
+    pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
 ])
 @pytest.mark.parametrize('dropout_prob', [0., 0.1])
 @pytest.mark.parametrize('is_training',
