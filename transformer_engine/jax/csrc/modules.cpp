@@ -1264,7 +1264,6 @@ pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
     auto kv_tensor = TensorWrapper(nullptr, kv_shape, dtype);
 
-    // TODO(rewang): add bias for cross attn?
     auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
 
     // FP16/BF16 doesn't use this tensor
@@ -1500,6 +1499,266 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_input_tensors);
+}
+
+pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
+
+    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
+    auto v_shape = k_shape;
+    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
+
+    auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
+    auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
+    auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
+
+    auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+
+    // F16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+    auto o_tensor = TensorWrapper(nullptr, q_shape, dtype);
+
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+
+    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
+
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    TensorWrapper query_workspace_tensor;
+    nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
+                        s_tensor.data(), o_tensor.data(), &aux_output_tensors,
+                        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training,
+                        scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+                        query_workspace_tensor.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
+    return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
+}
+
+void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input buffers from XLA
+    void *q = buffers[0];
+    void *k = buffers[1];
+    void *v = buffers[2];
+    void *bias = buffers[3];
+    void *q_cu_seqlens = buffers[4];
+    void *kv_cu_seqlens = buffers[5];
+    void *seed = buffers[6];
+
+    // output buffers from XLA
+    void *output = buffers[7];
+    void *softmax_aux = buffers[8];
+    void *rng_state = buffers[9];
+    void *workspace = buffers[10];
+
+    // tensor sizes
+    auto batch_size = descriptor.batch_size;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto num_heads = descriptor.num_heads;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
+    auto head_dim = descriptor.head_dim;
+    auto scaling_factor = descriptor.scaling_factor;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+
+    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
+    auto v_shape = k_shape;
+    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
+
+    // input tensors
+    auto dtype = descriptor.dtype;
+    auto q_tensor = TensorWrapper(q, q_shape, dtype);
+    auto k_tensor = TensorWrapper(k, k_shape, dtype);
+    auto v_tensor = TensorWrapper(v, v_shape, dtype);
+    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
+
+    // output tensors
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
+    auto o_tensor = TensorWrapper(output, q_shape, dtype);
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+
+    // prep RNG state
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+    auto backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+        mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+        head_dim);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+
+    // auxiliary tensors (to be propagated to the backward pass later)
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+    PrepareFusedAttnForwardAuxTensors(&aux_output_tensors, &descriptor, bias_type, backend,
+                                      softmax_aux);
+
+    // cuDNN workspace
+    auto workspace_tensor = TensorWrapper(workspace, std::vector<size_t>{descriptor.wkspace_size},
+                                          descriptor.wkspace_dtype);
+
+    nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
+                        s_tensor.data(), o_tensor.data(), &aux_output_tensors,
+                        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
+                        descriptor.is_training, scaling_factor, dropout_probability, qkv_layout,
+                        bias_type, mask_type, workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
+pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
+
+    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
+    auto v_shape = k_shape;
+    auto output_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
+
+    auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
+    auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
+    auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
+    auto doutput_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    // F16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+
+    auto dq_tensor = TensorWrapper(nullptr, q_shape, dtype);
+    auto dk_tensor = TensorWrapper(nullptr, k_shape, dtype);
+    auto dv_tensor = TensorWrapper(nullptr, v_shape, dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+
+    NVTETensorPack aux_input_tensors;
+    nvte_tensor_pack_create(&aux_input_tensors);
+
+    TensorWrapper query_workspace_tensor;
+    nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+                        doutput_tensor.data(),
+                        s_tensor.data(),  // not used for F16
+                        s_tensor.data(),  // not used for F16
+                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
+                        kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
+                        dropout_probability, qkv_layout, bias_type, mask_type,
+                        query_workspace_tensor.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
+    return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
+}
+
+void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input buffers from XLA
+    void *q = buffers[0];
+    void *k = buffers[1];
+    void *v = buffers[2];
+    void *bias = buffers[3];
+    void *softmax_aux = buffers[4];
+    void *rng_state = buffers[5];
+    void *output = buffers[6];
+    void *doutput = buffers[7];
+    void *q_cu_seqlens = buffers[8];
+    void *kv_cu_seqlens = buffers[9];
+
+    // output buffers from XLA
+    void *dq = buffers[10];
+    void *dk = buffers[11];
+    void *dv = buffers[12];
+    void *dbias = buffers[13];
+    void *workspace = buffers[14];
+
+    // tensor sizes
+    auto batch_size = descriptor.batch_size;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto num_heads = descriptor.num_heads;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
+    auto head_dim = descriptor.head_dim;
+    auto scaling_factor = descriptor.scaling_factor;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+
+    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
+    auto v_shape = k_shape;
+    auto output_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
+
+    // input tensors
+    auto dtype = descriptor.dtype;
+    auto q_tensor = TensorWrapper(q, q_shape, dtype);
+    auto k_tensor = TensorWrapper(k, k_shape, dtype);
+    auto v_tensor = TensorWrapper(v, v_shape, dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, dtype);
+    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
+
+    // output tensors
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
+    auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
+    auto dk_tensor = TensorWrapper(dk, k_shape, dtype);
+    auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
+    auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+
+    // auxiliary tensors (propagated from the forward pass)
+    NVTETensorPack aux_input_tensors;
+    nvte_tensor_pack_create(&aux_input_tensors);
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
+    auto backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+        mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+        head_dim);
+    PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, &descriptor, backend, softmax_aux,
+                                       rng_state, bias);
+
+    // cuDNN workspace
+    auto wkspace_size = std::vector<size_t>{descriptor.wkspace_size};
+    auto wkspace_dtype = descriptor.wkspace_dtype;
+    auto workspace_tensor = TensorWrapper(workspace, wkspace_size, wkspace_dtype);
+
+    nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+                        doutput_tensor.data(),
+                        s_tensor.data(),  // not used for F16
+                        s_tensor.data(),  // not used for F16
+                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
+                        kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
+                        dropout_probability, qkv_layout, bias_type, mask_type,
+                        workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
