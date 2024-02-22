@@ -2617,7 +2617,15 @@ class DotProductAttention(torch.nn.Module):
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         inference_params: Optional[InferenceParams], default = `None`
-                    Inference context.
+            Optimizes execution performance during inference by caching Keys and Values of the
+            current decoding iteration. These cached values are appended to the K and V values
+            computed in previous iterations, eliminating the need to recalculate them for the
+            entire sequence.
+            Initialization of `inference_params` is required prior to use to ensure sufficient
+            memory allocation.
+            Adjustments of the sequence_len_offset should be done after a complete forward pass.
+            If rotary positional embeddings (RoPE) are utilized, they must be prepared beforehand.
+            Supports "sbhd" and "bshd" layouts, with the "sbhd" layout being more efficient.
         """
 
         assert (
@@ -2646,7 +2654,7 @@ class DotProductAttention(torch.nn.Module):
             qkv_format = self.qkv_format
 
         if inference_params is not None:
-            assert self.layer_number is not None
+            assert self.layer_number is not None, "Layer number must be set!"
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
@@ -2674,6 +2682,9 @@ class DotProductAttention(torch.nn.Module):
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
                 value_layer = value_layer.transpose(0, 1)
+            
+            key_layer = key_layer.contiguous()
+            value_layer = value_layer.contiguous()
 
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
