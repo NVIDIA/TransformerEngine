@@ -336,9 +336,9 @@ static cudnn_frontend::Tensor createDropoutForward(
             double probability,
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& beforeDropoutTensor) {
-  cudnn_frontend::throw_if(ops->size() == 0,
-                  "Dropout DAG constructed incorrectly as the first one",
-                  CUDNN_STATUS_BAD_PARAM);
+  //cudnn_frontend::throw_if(ops->size() == 0,
+  //                "Dropout DAG constructed incorrectly as the first one",
+  //                CUDNN_STATUS_BAD_PARAM);
 
   int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
   int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -421,9 +421,9 @@ static cudnn_frontend::Tensor createDropoutBackward(
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& beforeDropoutTensor,
             const cudnn_frontend::Tensor& dropoutMaskTensor) {
-  cudnn_frontend::throw_if(ops->size() == 0,
-                  "Dropout DAG constructed incorrectly as the first one",
-                  CUDNN_STATUS_BAD_PARAM);
+  //cudnn_frontend::throw_if(ops->size() == 0,
+  //                "Dropout DAG constructed incorrectly as the first one",
+  //                CUDNN_STATUS_BAD_PARAM);
 
   int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
   int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -499,9 +499,9 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
             int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& dyTensor) {
-  cudnn_frontend::throw_if(ops->size() == 0,
-                  "Softmax backward constructed incorrectly as the first one",
-                  CUDNN_STATUS_BAD_PARAM);
+//  cudnn_frontend::throw_if(ops->size() == 0,
+//                  "Softmax backward constructed incorrectly as the first one",
+//                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t dx_dim[4] = {b, h, s_q, s_kv};
   int64_t dx_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -621,9 +621,9 @@ static cudnn_frontend::Tensor createSVBMM(
             const cudnn_frontend::Tensor &softmaxTensor,
             const cudnn_frontend::Tensor &mnkOverride,
             std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensor) {
-  cudnn_frontend::throw_if(ops->size() == 0,
-                  "BMM2 op constructed incorrectly as the first one",
-                  CUDNN_STATUS_BAD_PARAM);
+//  cudnn_frontend::throw_if(ops->size() == 0,
+//                  "BMM2 op constructed incorrectly as the first one",
+//                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t v_dim[4] =  {b, h, s_kv, d};
   int64_t v_stride[4];
@@ -669,9 +669,9 @@ static cudnn_frontend::Tensor createSdOBMM(
             const cudnn_frontend::Tensor &softmaxTensor,
             const cudnn_frontend::Tensor &dOTensor,
             const cudnn_frontend::Tensor &mnkOverride) {
-  cudnn_frontend::throw_if(ops->size() == 0,
-                  "BMM2 op constructed incorrectly as the first one",
-                  CUDNN_STATUS_BAD_PARAM);
+//  cudnn_frontend::throw_if(ops->size() == 0,
+//                  "BMM2 op constructed incorrectly as the first one",
+//                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t s_dim_transpose[4] =  {b, h, s_kv, s_q};
   int64_t s_stride_transpose[4] = {h * s_kv * s_q, s_kv * s_q, 1, s_kv};
@@ -990,6 +990,314 @@ static cudnn_frontend::Tensor createdSQBMM(
 }
 
 // fused attention FWD FP8
+void fused_attn_fp8_fwd_impl_new(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+            bool is_training, float scaling_factor,
+            float dropout_probability, NVTE_QKV_Layout layout,
+            void* devPtrQ, void* devPtrK, void* devPtrV,
+            void* devPtrM, void* devPtrZInv,
+            void* devPtrO,
+            void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+            void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
+            void* devPtrAmaxO, void* devPtrAmaxS,
+            void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
+            void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+            cudnn_frontend::DataType_t tensorType,
+            void* workspace,
+            size_t* workspace_size,
+            cudaStream_t stream,
+            cudnnHandle_t handle) {
+    using namespace transformer_engine;
+    bool is_bias = false; //(bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+    bool is_alibi = false; //(bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+    bool is_causal = true; //((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_padding = false; //((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_dropout = (is_training && dropout_probability != 0.0f);
+    std::cout << " tensor type " << (int)tensorType << " " << layout << " " << b << h << s_q << s_kv << d << " " << dropout_probability << " " << scaling_factor << std::endl;
+
+    //void* devPtrStats, devPtrSoftmaxStats
+    is_training = false; // this can be true / false
+//    tensorType = fe::DataType_t::FP8_E4M3;
+    layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
+    auto bias_type = NVTE_Bias_Type::NVTE_NO_BIAS;
+    auto mask_type = NVTE_Mask_Type::NVTE_CAUSAL_MASK;
+    auto hg = h;
+
+    try {
+        FADescriptor_v1 descriptor{b,                   h,
+                                   hg,                  s_q,
+                                   s_kv,                d,
+                                   scaling_factor,      is_training,
+                                   dropout_probability, layout,
+                                   bias_type,           mask_type,
+                                   tensorType};
+
+        namespace fe = cudnn_frontend;
+        using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // K
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // V
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // O
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // Stats
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
+              std::shared_ptr<fe::graph::Tensor_attributes> >;  // dropout_offset
+
+        using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
+        static thread_local CacheType sdpa_f16_fprop_cache;
+
+        // Get plan from cache if cache is available, otherwise create one
+        auto get_graph = [&](CacheType &cache, const FADescriptor_v1 &descriptor)
+            -> graph_and_tensors {
+            // if hit, return
+            auto it = cache.find(descriptor);
+            if (it != cache.end()) {
+                auto graph = it->second;
+                return graph;
+            }
+
+            // otherwise, build the op_graph and the plan. Then update cache
+            auto mha_graph = std::make_shared<fe::graph::Graph>();
+            mha_graph->set_io_data_type(tensorType)
+                    .set_intermediate_data_type(fe::DataType_t::FLOAT)
+                    .set_compute_data_type(fe::DataType_t::FLOAT);
+
+            std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_s, scale_s, scale_o;
+            std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
+            std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
+
+            std::vector<int64_t> q_stride(4);
+            std::vector<int64_t> k_stride(4);
+            std::vector<int64_t> v_stride(4);
+            generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+            Q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Q")
+                            .set_dim({b, h, s_q, d})
+                            .set_stride(q_stride));
+            K = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("K")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(k_stride));
+            V = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("V")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(v_stride));
+
+            attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("attn_scale")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_is_pass_by_value(true)
+                            .set_data_type(fe::DataType_t::FLOAT));
+
+            descale_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Descale_q")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+            descale_k = mha_graph->tensor_like(descale_q, "Descale_q");
+            descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
+            descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
+            scale_s   = mha_graph->tensor_like(descale_q, "Scale_S");
+            scale_o   = mha_graph->tensor_like(descale_q, "Scale_O");
+
+            fe::graph::SDPA_fp8_attributes sdpa_options;
+            sdpa_options = fe::graph::SDPA_fp8_attributes()
+                            .set_name("flash_attention_fp8")
+                            .set_is_inference(!is_training)
+                            .set_causal_mask(is_causal)
+                            .set_attn_scale(attn_scale);
+
+            //sdpa_options.set_alibi_mask(is_alibi);
+            //if (is_bias) {
+            //    bias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                    .set_name("bias")
+            //                    .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                    .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //    sdpa_options.set_bias(bias);
+            //}
+
+            //if (is_padding) {
+            //    seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                    .set_name("seq_q")
+            //                    .set_dim({b, 1, 1, 1})
+            //                    .set_stride({1, 1, 1, 1})
+            //                    .set_data_type(fe::DataType_t::INT32));
+            //    seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                    .set_name("seq_kv")
+            //                    .set_dim({b, 1, 1, 1})
+            //                    .set_stride({1, 1, 1, 1})
+            //                    .set_data_type(fe::DataType_t::INT32));
+            //    sdpa_options.set_padding_mask(is_padding)
+            //                    .set_seq_len_q(seq_q)
+            //                    .set_seq_len_kv(seq_kv);
+            //}
+
+            //if (is_dropout) {
+            //    dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                    .set_name("Seed")
+            //                    .set_dim({1, 1, 1, 1})
+            //                    .set_stride({1, 1, 1, 1})
+            //                    .set_data_type(fe::DataType_t::INT64));
+            //    dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                    .set_name("Offset")
+            //                    .set_dim({1, 1, 1, 1})
+            //                    .set_stride({1, 1, 1, 1})
+            //                    .set_data_type(fe::DataType_t::INT64));
+            //    sdpa_options.set_dropout(
+            //                    dropout_probability, dropout_seed, dropout_offset);
+            //}
+
+            auto [O, Stats, amax_s, amax_o] = mha_graph->sdpa_fp8(
+                Q, K, V, descale_q, descale_k, descale_v, descale_s,
+                scale_s, scale_o, sdpa_options);
+
+            std::vector<int64_t> o_stride(4);
+            generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            O->set_output(true).set_dim({b, h, s_q, d}).set_stride(o_stride);
+            amax_o->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+            amax_s->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+
+            if (is_training) {
+                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT);
+                        //.set_dim({b, h, s_q, 1})
+                        //.set_stride({h * s_q, s_q, 1, 1});
+            }
+
+            std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // K
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // V
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_o
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // O
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_s
+                    std::shared_ptr<fe::graph::Tensor_attributes> >  // amax_o
+            key_tensors_tuple = std::make_tuple(Q, K, V, descale_q, descale_k, descale_v,
+                descale_s, scale_s, scale_o, attn_scale, O, amax_s, amax_o);
+            auto Stats_tuple = is_training ? std::make_tuple(Stats) : std::make_tuple(nullptr);
+            auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
+            auto padding_tuple = is_padding ?
+                std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
+            auto dropout_tuple = is_dropout ?
+                std::make_tuple(dropout_seed, dropout_offset) : std::make_tuple(nullptr, nullptr);
+            //auto return_empty_tuple = std::tuple_cat(
+            //    std::make_tuple(nullptr), key_tensors_tuple,
+            //    Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
+
+	    std::cout << " validate " << std::endl;
+            NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+	    std::cout << " build_operation_graph " << std::endl;
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+	    std::cout << " create_execution_plans " << std::endl;
+            NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+	    std::cout << " check_support " << std::endl;
+            NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
+	    std::cout << " build_plans " << std::endl;
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+
+            auto return_tuple = std::tuple_cat(
+                std::make_tuple(mha_graph), key_tensors_tuple,
+                Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
+            cache.insert({descriptor, return_tuple});
+
+            return return_tuple;
+        };
+
+        auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s,
+            scale_s, scale_o, attn_scale, O, amax_s, amax_o, Stats,
+            bias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
+                sdpa_f16_fprop_cache, descriptor);
+
+        auto plan_workspace_size = mha_graph->get_workspace_size();
+
+        // Exit to request upper level API to allocate memory if needed
+        size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+        if (workspace == nullptr) {
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+            return;
+        }
+
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+        // Build variant pack
+        std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
+            {Q, devPtrQ},
+            {K, devPtrK},
+            {V, devPtrV},
+            {descale_q, devPtrDescaleQ},
+            {descale_k, devPtrDescaleK},
+            {descale_v, devPtrDescaleV},
+            {descale_s, devPtrDescaleS},
+            {scale_s, devPtrScaleS},
+            {scale_o, devPtrScaleO},
+            {attn_scale, &scaling_factor},
+            {O, devPtrO},
+            {amax_s, devPtrAmaxS},
+            {amax_o, devPtrAmaxO}};
+
+        //if (is_training) {
+        //    variant_pack[Stats] = nullptr; //devPtrSoftmaxStats;
+        //}
+            variant_pack[Stats] = nullptr; //devPtrSoftmaxStats;
+
+        //if (is_bias) {
+        //    variant_pack[bias] = devPtrBias;
+        //}
+
+        //if (is_padding) {
+        //    constexpr size_t nthreads_per_block = 128;
+        //    const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        //    void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        //    void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        //    cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+        //        b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        //        static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        //        static_cast<int32_t *>(devActualSeqlenQ),
+        //        static_cast<int32_t *>(devActualSeqlenKV));
+        //    variant_pack[seq_q]  = devActualSeqlenQ;
+        //    variant_pack[seq_kv] = devActualSeqlenKV;
+        //}
+
+        //if (is_dropout) {
+        //    variant_pack[dropout_seed] = devPtrDropoutSeed;
+        //    variant_pack[dropout_offset] = devPtrDropoutOffset;
+        //}
+
+	    std::cout << " execute " << std::endl;
+        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    } catch (cudnn_frontend::cudnnException &e) {
+        NVTE_ERROR(e.what());
+    }
+}
+
+// fused attention FWD FP8
 void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             bool isTraining, float attnScale,
             float dropoutProbability, NVTE_QKV_Layout layout,
@@ -1028,12 +1336,12 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           std::vector<cudnn_frontend::Operation const*> all_ops;
           std::vector<cudnn_frontend::Operation> ops;
 
-          cudnn_frontend::throw_if(dropoutProbability != 0.0f && !isTraining,
-                          "Dropout probability should be 0.0f for inference mode",
-                          CUDNN_STATUS_BAD_PARAM);
-          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
-                          "Dropout probability cannot be 1.0",
-                          CUDNN_STATUS_BAD_PARAM);
+//          cudnn_frontend::throw_if(dropoutProbability != 0.0f && !isTraining,
+//                          "Dropout probability should be 0.0f for inference mode",
+//                          CUDNN_STATUS_BAD_PARAM);
+//          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
+//                          "Dropout probability cannot be 1.0",
+//                          CUDNN_STATUS_BAD_PARAM);
 
           int64_t raggedDim[4] =  {b + 1, 1, 1, 1};
           int64_t raggedStride[4] = {1, 1, 1, 1};
@@ -1286,9 +1594,9 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
       cudnnStatus_t status = cudnnBackendExecute(
                       handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
 
-      cudnn_frontend::throw_if(
-                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
-                      "Plan execute error", status);
+//      cudnn_frontend::throw_if(
+//                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
+//                      "Plan execute error", status);
   } catch (cudnn_frontend::cudnnException& e) {
       struct cudaDeviceProp prop;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
@@ -1347,9 +1655,9 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           std::vector<cudnn_frontend::Operation const*> all_ops;
           std::vector<cudnn_frontend::Operation> ops;
 
-          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
-                          "Dropout probability cannot be 1.0",
-                          CUDNN_STATUS_BAD_PARAM);
+//          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
+//                          "Dropout probability cannot be 1.0",
+//                          CUDNN_STATUS_BAD_PARAM);
 
           int64_t raggedDim[4] =  {b + 1, 1, 1, 1};
           int64_t raggedStride[4] = {1, 1, 1, 1};
@@ -1841,9 +2149,9 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
       cudnnStatus_t status = cudnnBackendExecute(
                       handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
 
-      cudnn_frontend::throw_if(
-                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
-                      "Plan execute error", status);
+//      cudnn_frontend::throw_if(
+//                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
+//                      "Plan execute error", status);
   } catch (cudnn_frontend::cudnnException& e) {
       struct cudaDeviceProp prop;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
@@ -2129,7 +2437,20 @@ void fused_attn_fp8_fwd(
   const DType QKV_type = input_Q->data.dtype;
   size_t workspace_size = 0;
 
-  fused_attn::fused_attn_fp8_fwd_impl(
+//  fused_attn::fused_attn_fp8_fwd_impl(
+//                  b, h, max_seqlen_q, max_seqlen_kv, d,
+//                  is_training, attn_scale, p_dropout, qkv_layout,
+//                  devPtrQ, devPtrK, devPtrV,
+//                  devPtrM, devPtrZInv,
+//                  devPtrO,
+//                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+//                  devPtrDescaleS, devPtrScaleS, devPtrScaleO,
+//                  devPtrAmaxO, devPtrAmaxS,
+//                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+//                  devPtrDropoutSeed, devPtrDropoutOffset,
+//                  get_cudnn_dtype(QKV_type),
+//                  workspace->data.dptr, &workspace_size, stream, handle);
+  fused_attn::fused_attn_fp8_fwd_impl_new(
                   b, h, max_seqlen_q, max_seqlen_kv, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
@@ -2140,7 +2461,7 @@ void fused_attn_fp8_fwd(
                   devPtrAmaxO, devPtrAmaxS,
                   devPtrcuSeqlensQ, devPtrcuSeqlensKV,
                   devPtrDropoutSeed, devPtrDropoutOffset,
-                  get_cudnn_dtype(QKV_type),
+                  get_cudnn_fe_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {

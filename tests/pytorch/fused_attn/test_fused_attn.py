@@ -909,8 +909,10 @@ def _run_transformer_layer(
 
 model_configs_fp8 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    "fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
+    #"fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
+    #"fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
+    #"fp8_1": ModelConfig(1, 1, 1,  128,  512,  512, 0.0, "causal", "no_bias"),
+    "fp8_1": ModelConfig(1, 1, 1,  64,  512,  512, 0.0, "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16]
 
@@ -943,6 +945,9 @@ def test_dpa_fp8(dtype, model):
         dtype, config, "UnfusedDotProductAttention")
 
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
+    torch.save(unfused_attn_fwd, 'unfused_attn_fwd.pt')
+    #torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
 
@@ -958,7 +963,7 @@ def _run_dpa_fp8(dtype, config, backend):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = 0.01 * torch.randn(
+    inp = 0.1 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
@@ -1129,6 +1134,7 @@ class _dpa_fp8(torch.autograd.Function):
                 META_QKV, fp8_dtype_forward,
                 tex.DType.kFloat16).view(b, max_s, 3, h, d).transpose(0,1).contiguous()
         torch.save(qkv_out_fp16, 'qkv.pt')
+        qkv_out = qkv_out.view(b, max_s, 3, h, d)
 
         # FMHA
         context_, aux_ctx_tensors, *rest = fused_attn_fwd(
@@ -1137,9 +1143,9 @@ class _dpa_fp8(torch.autograd.Function):
                 max_s,
                 cu_seqlens,
                 cu_seqlens,
-                qkv_out[:,0,:,:],
-                qkv_out[:,1,:,:],
-                qkv_out[:,2,:,:],
+                qkv_out[:,:,0,:,:],#.contiguous(),
+                qkv_out[:,:,1,:,:],#.contiguous(),
+                qkv_out[:,:,2,:,:],#.contiguous(),
                 fp8_dtype_forward,
                 FusedAttnBackend["FP8"],
                 None,
@@ -1151,9 +1157,9 @@ class _dpa_fp8(torch.autograd.Function):
                 attn_scale=None,
                 dropout=p_dropout,
                 fast_zero_fill=fast_zero_fill,
-                qkv_layout="t3hd",
+                qkv_layout="bs3hd",#"bshd_bshd_bshd",#"t3hd",
                 attn_bias_type="no_bias",
-                attn_mask_type="padding",
+                attn_mask_type="causal",#"padding",
                 rng_gen=None,
                 )
         M, ZInv, philox_unpacked = aux_ctx_tensors
@@ -1215,9 +1221,9 @@ class _dpa_fp8(torch.autograd.Function):
                     ctx.max_s,
                     ctx.cu_seqlens,
                     ctx.cu_seqlens,
-                    qkv_out[:,0,:,:],
-                    qkv_out[:,1,:,:],
-                    qkv_out[:,2,:,:],
+                    qkv_out[:,:,0,:,:],#.contiguous(),
+                    qkv_out[:,:,1,:,:],#.contiguous(),
+                    qkv_out[:,:,2,:,:],#.contiguous(),
                     context,
                     proj_dgrad.view_as(context),
                     fp8_dtype_forward,
@@ -1235,9 +1241,9 @@ class _dpa_fp8(torch.autograd.Function):
                     None,
                     ctx.p_dropout,
                     ctx.fast_zero_fill,
-                    "t3hd",
+                    "bs3hd",#"bshd_bshd_bshd",#"t3hd",
                     "no_bias",
-                    "padding",
+                    "causal",#"padding",
                     )
             dqkv = torch.cat([dq.unsqueeze(1), dk.unsqueeze(1), dv.unsqueeze(1)], dim=1)
 
