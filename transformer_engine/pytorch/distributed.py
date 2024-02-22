@@ -335,6 +335,7 @@ class _CheckpointFrame:
 
 
     def cache_rng_states(self, forward=True):
+        """Cache fwd/bwd RNG states in the frame to restore later."""
         rng_states = (
             torch.get_rng_state(),
             torch.cuda.get_rng_state(),
@@ -348,6 +349,7 @@ class _CheckpointFrame:
             self.bwd_rng_states = rng_states
 
     def restore_rng_states(self, forward=True):
+        """Restore fwd/bwd RNG states that were previously cached into the frame."""
         if forward:
             rng_states = self.fwd_rng_states
         else:
@@ -359,8 +361,8 @@ class _CheckpointFrame:
             self.get_rng_state_tracker().set_states(rng_states[2])
 
 
-
-class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):
+class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: disable=too-few-public-methods
+    """torch.autograd hook for packing/unpacking tensors during the activation recompute phase."""
 
     def __init__(self, frame):
 
@@ -382,7 +384,8 @@ class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):
         super().__init__(pack_hook, unpack_hook)
 
 
-class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):
+class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: disable=too-few-public-methods
+    """torch.autograd hook for packing/unpacking tensors during the checkpointed forward pass."""
 
     def __init__(self, frame, args, kwargs):
 
@@ -429,10 +432,12 @@ class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):
 
 
 def use_reentrant_activation_recompute():
+    """Returns `True` if activation recompute is using the 'reentrant' method."""
     return _USE_REENTRANT_ACTIVATION_RECOMPUTE
 
 
 def get_activation_recompute_contexts():
+    """Returns context objects for the checkpointed forward pass and the forward recompute phase."""
     forward_ctx = activation_recompute_forward(
         activation_recompute=True,
         recompute_phase=False,
@@ -445,6 +450,10 @@ def get_activation_recompute_contexts():
 
 
 def _is_te_module(module):
+    """
+    Check if given module is a Transformer Engine module that requires the TE checkpoint
+    implementation for activation recompute.
+    """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
     from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
