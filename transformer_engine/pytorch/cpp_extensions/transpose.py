@@ -33,15 +33,16 @@ def fp8_cast_transpose_fused(
         )
         return_outputs = True
 
-    tex.fused_cast_transpose(
-        inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
-        cast_out,
-        transpose_out,
-        otype,
-    )
+    if inp.nelement() > 0:
+        tex.fused_cast_transpose(
+            inp,
+            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            cast_out,
+            transpose_out,
+            otype,
+        )
 
     if return_outputs:
         return cast_out, transpose_out

@@ -916,16 +916,6 @@ class Linear(TransformerEngineBaseModule):
                 weight_tensor = self.weight_tensor
                 bias_tensor = self.bias_tensor
 
-            # When tokens are not passed to the expert
-            if inp.nelement() == 0:
-                # Manually call prepare_backward for amax global buffer key deletion
-                def no_tokens_backward(grad):
-                    with _prepare_backward(self.fp8, self.fp8_meta,
-                                           self.tp_group, self.tp_size, name="_Linear"):
-                        pass
-                    return grad
-                inp.register_hook(no_tokens_backward)
-                return torch.matmul(inp, weight_tensor.t())
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(

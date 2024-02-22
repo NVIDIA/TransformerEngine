@@ -62,6 +62,8 @@ def fp8_gemm(
     bias_dtype = TE_DType[bias_dtype]
 
     out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
+    if A.nelement() == 0 or B.nelement() == 0:
+        return out, gelu_input
 
     args = (
         A,
