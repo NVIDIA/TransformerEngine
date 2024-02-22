@@ -1904,8 +1904,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2053,6 +2055,13 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == qkv.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
+
     return SelfFusedAttnFwdPrimitive.outer_primitive.bind(qkv,
                                                           bias,
                                                           seqlen,
@@ -2253,6 +2262,13 @@ def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.nd
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == qkv.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
+
     return SelfFusedAttnBwdPrimitive.outer_primitive.bind(qkv,
                                                           bias,
                                                           softmax_aux,
@@ -2321,8 +2337,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2479,6 +2497,12 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_s
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
 
     return CrossFusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                            kv,
@@ -2705,6 +2729,13 @@ def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
+
     return CrossFusedAttnBwdPrimitive.outer_primitive.bind(q,
                                                            kv,
                                                            bias,
@@ -2776,8 +2807,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2825,8 +2858,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert k_aval.shape == v_aval.shape
         input_batch = reduce(operator.mul, batch_shape)
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2936,6 +2971,12 @@ def fused_attn_fwd(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.nda
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
 
     return FusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                       k,
@@ -2984,8 +3025,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_head_dim == kv_head_dim
         assert k_aval.shape == v_aval.shape
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -3042,8 +3085,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert k_aval.shape == v_aval.shape
         input_batch = reduce(operator.mul, batch_shape)
 
-        # get bias shape if bias is enabled
-        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
+        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
+        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
+        if len(bias_aval.shape) == 1:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -3175,6 +3220,13 @@ def fused_attn_bwd(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.nda
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
+    elif attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS:
+        if not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
+            # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
+            # forward pass as an arbitrary mask workaround. dBias for these shapes will be returned
+            # as zeros.
+            assert attn_mask_type == NVTE_Mask_Type.NVTE_NO_MASK
+
     return FusedAttnBwdPrimitive.outer_primitive.bind(q,
                                                       k,
                                                       v,
