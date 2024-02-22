@@ -244,15 +244,17 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
                             size_t opaque_len);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
+    float scaling_factor, float dropout_probability,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
+    float scaling_factor, float dropout_probability,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);

@@ -1905,11 +1905,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
         # get bias shape if bias is enabled
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
@@ -1951,11 +1950,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         *input_batch_shape, max_seqlen, _, attn_heads, head_dim = qkv_aval.shape
         input_batch = reduce(operator.mul, input_batch_shape)
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
@@ -2091,11 +2089,10 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         input_batch = reduce(operator.mul, input_batch_shape)
@@ -2139,11 +2136,10 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         *input_batch_shape, max_seqlen, _, attn_heads, head_dim = qkv_aval.shape
         input_batch = reduce(operator.mul, input_batch_shape)
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
@@ -2326,11 +2322,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
         # get bias shape if bias is enabled
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
@@ -2374,11 +2369,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         *_, kv_max_seqlen, _, num_gqa_groups, _ = kv_aval.shape
         input_batch = reduce(operator.mul, input_batch_shape)
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
@@ -2531,11 +2525,10 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         assert q_head_dim == kv_head_dim
         assert nkv == 2
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         input_batch = reduce(operator.mul, q_batch_shape)
@@ -2585,11 +2578,10 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         *_, kv_max_seqlen, _, num_gqa_groups, _ = kv_aval.shape
         input_batch = reduce(operator.mul, input_batch_shape)
 
-        bias_shape = bias_aval.shape
-        if len(bias_shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
-            *bias_batch_shape, bias_heads, _, _ = bias_shape
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
@@ -2754,7 +2746,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+        *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
         *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
         assert q_batch_shape == kv_batch_shape
         assert q_head_dim == kv_head_dim
@@ -2763,14 +2755,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(q_dtype, k_dtype, NVTE_QKV_Layout.NVTE_BSHD_BS2HD, attn_bias_type,
-                                  attn_mask_type, dropout_probability, num_heads, num_gqa_groups,
+                                  attn_mask_type, dropout_probability, attn_heads, num_gqa_groups,
                                   q_max_seqlen, kv_max_seqlen, q_head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, kv_max_seqlen)
+            softmax_shape = (*q_batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
             softmax_dtype = q_dtype
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, 1)
+            softmax_shape = (*q_batch_shape, attn_heads, q_max_seqlen, 1)
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f'Unsupported {backend=}')
@@ -2784,11 +2776,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
+        # get bias shape if bias is enabled
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+            bias_batch = bias_heads = 0
+        else:
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
+
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
-        batch_size = reduce(operator.mul, q_batch_shape)
+        input_batch = reduce(operator.mul, q_batch_shape)
         wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
-            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+            input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+            attn_heads, num_gqa_groups, bias_heads, q_head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
         wkspace_aval = q_aval.update(shape=wkspace_info[0],
@@ -2819,16 +2819,24 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        q_aval, k_aval, v_aval, *_ = ctx.avals_in
-        *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
+        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        *batch_shape, q_max_seqlen, attn_heads, head_dim = q_aval.shape
         *_, kv_max_seqlen, num_gqa_groups, _ = k_aval.shape
         assert k_aval.shape == v_aval.shape
-        batch_size = reduce(operator.mul, batch_shape)
+        input_batch = reduce(operator.mul, batch_shape)
+
+        # get bias shape if bias is enabled
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+            bias_batch = bias_heads = 0
+        else:
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
+            input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+            attn_heads, num_gqa_groups, bias_heads, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
@@ -2970,16 +2978,24 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
         assert q_cu_seqlen_aval.dtype == kv_cu_seqlen_aval.dtype
 
-        *q_batch_shape, q_max_seqlen, num_heads, q_head_dim = q_aval.shape
+        *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
         *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
         assert q_batch_shape == kv_batch_shape
         assert q_head_dim == kv_head_dim
         assert k_aval.shape == v_aval.shape
 
-        batch_size = reduce(operator.mul, q_batch_shape)
+        # get bias shape if bias is enabled
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+            bias_batch = bias_heads = 0
+        else:
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
+
+        input_batch = reduce(operator.mul, q_batch_shape)
         wkspace_shape, wkspace_dtype = \
             transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
-                batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, q_head_dim,
+                input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+                attn_heads, num_gqa_groups, bias_heads, q_head_dim,
                 scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
                 jax_dtype_to_te_dtype(q_aval.dtype), is_training
             )
@@ -3020,16 +3036,24 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        q_aval, k_aval, v_aval, *_ = ctx.avals_in
-        *batch_shape, q_max_seqlen, num_heads, head_dim = q_aval.shape
+        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        *batch_shape, q_max_seqlen, attn_heads, head_dim = q_aval.shape
         *_, kv_max_seqlen, num_gqa_groups, _ = k_aval.shape
         assert k_aval.shape == v_aval.shape
-        batch_size = reduce(operator.mul, batch_shape)
+        input_batch = reduce(operator.mul, batch_shape)
+
+        # get bias shape if bias is enabled
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+            bias_batch = bias_heads = 0
+        else:
+            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
 
         wkspace_aval = ctx.avals_out[-1]
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
+            input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+            attn_heads, num_gqa_groups, bias_heads, head_dim,
             wkspace_aval.size, scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training)
