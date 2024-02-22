@@ -10,7 +10,6 @@ from typing import Any, Dict, Union, Optional, Callable, Tuple
 import torch
 from torch.cuda import _lazy_call
 from torch.utils.checkpoint import detach_variable, noop_context_fn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
@@ -196,6 +195,7 @@ class _CheckpointFunction(torch.autograd.Function):
         distribute_saved_activations: bool,
         get_rng_state_tracker: Union[Callable, None],
         tp_group: Union[dist_group_type, None],
+        context_fn: Union[Callable, None],
         kwargs: Dict[str, Any],
         *args: Tuple[torch.Tensor, ...],
     ) -> Tuple[torch.Tensor, ...]:
@@ -210,7 +210,11 @@ class _CheckpointFunction(torch.autograd.Function):
         if get_rng_state_tracker is not None:
             ctx.fwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
-        with torch.no_grad():
+        if context_fn is not None:
+            forward_ctx, recompute_ctx = context_fn()
+        else:
+            forward_ctx, recompute_ctx = noop_context_fn()
+        with torch.no_grad(), forward_ctx:
             with activation_recompute_forward(
                 activation_recompute=True, recompute_phase=False
             ):
@@ -234,6 +238,7 @@ class _CheckpointFunction(torch.autograd.Function):
 
         ctx.get_rng_state_tracker = get_rng_state_tracker
         ctx.tp_group = tp_group
+        ctx.recompute_ctx = recompute_ctx
         ctx.kwargs = kwargs
 
         return outputs
@@ -278,7 +283,7 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
-        with torch.enable_grad():
+        with torch.enable_grad(), ctx.recompute_ctx:
             with activation_recompute_forward(
                 activation_recompute=True, recompute_phase=True
             ):
@@ -310,7 +315,7 @@ class _CheckpointFunction(torch.autograd.Function):
             inp.grad if isinstance(inp, torch.Tensor) else None
             for inp in detached_inputs
         )
-        return (None, None, None, None, None) + grads
+        return (None, None, None, None, None, None) + grads
 
 class _CheckpointFrame:
     """
@@ -426,6 +431,7 @@ class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):
 def use_reentrant_activation_recompute():
     return _USE_REENTRANT_ACTIVATION_RECOMPUTE
 
+
 def get_activation_recompute_contexts():
     forward_ctx = activation_recompute_forward(
         activation_recompute=True,
@@ -436,6 +442,29 @@ def get_activation_recompute_contexts():
         recompute_phase=True,
     )
     return forward_ctx, recompute_ctx
+
+
+def _is_te_module(module):
+    from .module import LayerNorm, RMSNorm
+    from .module.base import TransformerEngineBaseModule
+    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .transformer import TransformerLayer
+    te_classes_list = [
+        LayerNorm,
+        RMSNorm,
+        TransformerEngineBaseModule,
+        UnfusedDotProductAttention,
+        DotProductAttention,
+        MultiheadAttention,
+        TransformerLayer,
+    ]
+    is_te_module = False
+    for te_class in te_classes_list:
+        if isinstance(module, te_class):
+            is_te_module = True
+            break
+    return is_te_module
+
 
 def checkpoint(
     function: Callable,
@@ -485,26 +514,37 @@ def checkpoint(
             dictionary of string keys for keyword arguments to :attr:`function`.
     """
     # Pop out te.distributed.checkpoint() arguments
+    global _USE_REENTRANT_ACTIVATION_RECOMPUTE
+    _USE_REENTRANT_ACTIVATION_RECOMPUTE = kwargs.pop("use_reentrant", True)
     distribute_saved_activations = kwargs.pop("distribute_saved_activations", False)
     tp_group = kwargs.pop("tp_group", None)
     get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
 
-    # Pass everything to the PyTorch native checkpoint for non-TE modules
-    if 'transformer_engine' not in function.__class__.__module__:
-        return torch.utils.checkpoint.checkpoint(
-            function,
-            *args,
-            **kwargs
-        )
-
-    # Discard unused te.utils.checkpoint.checkpoint() arguments
+    # Trigger the native PyTorch checkpoint if:
+    # 1. `function` is a `torch.nn.Module`
+    #    AND
+    # 2. `function` is NOT a TE module
     context_fn = kwargs.pop("context_fn", noop_context_fn)
     determinism_check = kwargs.pop("determinism_check", "default")
     debug = kwargs.pop("debug", False)
-    del context_fn, determinism_check, debug
+    if isinstance(function, torch.nn.Module) and not _is_te_module(function):
+        return torch.utils.checkpoint.checkpoint(
+            function,
+            *args,
+            use_reentrant=_USE_REENTRANT_ACTIVATION_RECOMPUTE,
+            context_fn=context_fn,
+            determinism_check=determinism_check,
+            debug=debug,
+            **kwargs
+        )
 
-    global _USE_REENTRANT_ACTIVATION_RECOMPUTE
-    _USE_REENTRANT_ACTIVATION_RECOMPUTE = kwargs.pop("use_reentrant", True)
+    # Otherwise discard unused te.utils.checkpoint.checkpoint() arguments
+    # and execute TE's own checkpointing
+    # NOTE: This logic uses the TE checkpoint on all custom callable `function` handles because we
+    #       cannot be sure there are no TE modules inside the function. It also means we might run
+    #       the TE checkpoint for non-TE modules, so the TE checkpoint has to support a potential
+    #       user context function.
+    del determinism_check, debug
     if _USE_REENTRANT_ACTIVATION_RECOMPUTE:
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.
@@ -527,6 +567,7 @@ def checkpoint(
             distribute_saved_activations,
             get_rng_state_tracker,
             tp_group,
+            context_fn,
             kwargs,
             *args,
         )
@@ -540,10 +581,11 @@ def checkpoint(
                 "the autograd engine's pack/unpack hooks."
             )
 
-        forward_ctx, recompute_ctx = get_activation_recompute_contexts()
+        user_forward_ctx, user_recompute_ctx = context_fn()
+        te_forward_ctx, te_recompute_ctx = get_activation_recompute_contexts()
 
         def recompute_fn(*args, **kwargs):
-            with torch.autograd.enable_grad(), recompute_ctx:
+            with torch.autograd.enable_grad(), te_recompute_ctx, user_recompute_ctx:
                 function(*args, **kwargs)
 
         # Initialize a new checkpoint frame for each new forward pass.
@@ -553,7 +595,7 @@ def checkpoint(
         )
         new_frame.cache_rng_states(forward=True)
 
-        with _checkpoint_hook(new_frame, args, kwargs), forward_ctx:
+        with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
             out = function(*args, **kwargs)
 
         return out
