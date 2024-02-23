@@ -581,33 +581,32 @@ def checkpoint(
             *args,
         )
 
-    else:
-        if distribute_saved_activations:
-            warnings.warn(
-                "`distribute_saved_activations=True` has no effect when `use_reentrant=False`. "
-                "The non-reentrant checkpoint implementation does not manually store forward "
-                "inputs for the activation recompute in the backward pass, and instead leverages "
-                "the autograd engine's pack/unpack hooks."
-            )
-
-        user_forward_ctx, user_recompute_ctx = context_fn()
-        te_forward_ctx, te_recompute_ctx = get_activation_recompute_contexts()
-
-        def recompute_fn(*args, **kwargs):
-            with torch.autograd.enable_grad(), te_recompute_ctx, user_recompute_ctx:
-                function(*args, **kwargs)
-
-        # Initialize a new checkpoint frame for each new forward pass.
-        new_frame = _CheckpointFrame(
-            recompute_fn,
-            get_rng_state_tracker,
+    if distribute_saved_activations:
+        warnings.warn(
+            "`distribute_saved_activations=True` has no effect when `use_reentrant=False`. "
+            "The non-reentrant checkpoint implementation does not manually store forward "
+            "inputs for the activation recompute in the backward pass, and instead leverages "
+            "the autograd engine's pack/unpack hooks."
         )
-        new_frame.cache_rng_states(forward=True)
 
-        with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
-            out = function(*args, **kwargs)
+    user_forward_ctx, user_recompute_ctx = context_fn()
+    te_forward_ctx, te_recompute_ctx = get_activation_recompute_contexts()
 
-        return out
+    def recompute_fn(*args, **kwargs):
+        with torch.autograd.enable_grad(), te_recompute_ctx, user_recompute_ctx:
+            function(*args, **kwargs)
+
+    # Initialize a new checkpoint frame for each new forward pass.
+    new_frame = _CheckpointFrame(
+        recompute_fn,
+        get_rng_state_tracker,
+    )
+    new_frame.cache_rng_states(forward=True)
+
+    with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
+        out = function(*args, **kwargs)
+
+    return out
 
 class CudaRNGStatesTracker:
     """
