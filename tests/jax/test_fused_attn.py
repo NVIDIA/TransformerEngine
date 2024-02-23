@@ -185,9 +185,8 @@ class FusedAttnRunner:
         if (self.bias_layout != '1hss'
             and self.attn_bias_type != AttnBiasType.POST_SCALE_BIAS
             and self.attn_mask_type not in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]):
-            pytest.skip("[b, 1, s, s], [b, h, s, s] and [1, 1, s, s] bias layouts are only "
-                        "supported for AttnBiasType.POST_SCALE_BIAS with "
-                        "AttnMaskType.NO_MASK or AttnMaskType.CAUSAL_MASK.")
+            pytest.skip("Arbitrary mask workaround requires [AttnBiasType.POST_SCALE_BIAS] "
+                        "with [AttnMaskType.NO_MASK or AttnMaskType.CAUSAL_MASK].")
 
     def _setup_inputs(self):
         self._check_configs()
@@ -275,7 +274,7 @@ class FusedAttnRunner:
         Test value_and_grad with JIT, which includes both forward and backward
         """
         if not self.is_training:
-            pytest.skip("Backward doesn't support inference")
+            pytest.skip("Backward doesn't support inference.")
 
         self._setup_inputs()
 
@@ -324,10 +323,16 @@ class FusedAttnRunner:
                                    rtol=1e-3)
 
         # Convert the outputs to float32 for the elementwise comparison
-        primitive_dq, primitive_dk, primitive_dv, primitive_dbias = map(
-            jnp.float32, primitive_dgrad)
-        reference_dq, reference_dk, reference_dv, reference_dbias = map(
-            jnp.float32, reference_dgrad)
+        if self.bias_layout == '1hss':
+            primitive_dq, primitive_dk, primitive_dv, primitive_dbias = map(
+                jnp.float32, primitive_dgrad)
+            reference_dq, reference_dk, reference_dv, reference_dbias = map(
+                jnp.float32, reference_dgrad)
+        else:
+            primitive_dq, primitive_dk, primitive_dv = map(
+                jnp.float32, primitive_dgrad)
+            reference_dq, reference_dk, reference_dv = map(
+                jnp.float32, reference_dgrad)
 
         def check_dqkv(primitive, reference, valid_len):
             primitive_valid, primitive_invalid = jnp.split(primitive, (valid_len,), axis=1)
@@ -341,7 +346,7 @@ class FusedAttnRunner:
         check_dqkv(primitive_dk, reference_dk, self.valid_len_kv)
         check_dqkv(primitive_dv, reference_dv, self.valid_len_kv)
 
-        if self.attn_bias_type != AttnBiasType.NO_BIAS:
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_layout == '1hss':
             # dbias valid part
             np.testing.assert_allclose(primitive_dbias[..., :self.valid_len_q, :self.valid_len_kv],
                                        reference_dbias[..., :self.valid_len_q, :self.valid_len_kv],
@@ -368,9 +373,9 @@ class FusedAttnRunner:
     pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id='PADDING_CAUSAL'),
 ])
 @pytest.mark.parametrize('qkv_layout', [
-    pytest.param(QKVLayout.BS3HD, id='qkvpacked'),
-    pytest.param(QKVLayout.BSHD_BS2HD, id='kvpacked'),
-    pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
+    pytest.param(QKVLayout.BS3HD, id='QKV_PACKED'),
+    pytest.param(QKVLayout.BSHD_BS2HD, id='KV_PACKED'),
+    pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='SEPARATE'),
 ])
 @pytest.mark.parametrize('bias_layout', [
     pytest.param('1hss', id='BIAS_1HSS'),
@@ -383,8 +388,8 @@ class FusedAttnRunner:
     0.1,
 ])
 @pytest.mark.parametrize('is_training', [
-    pytest.param(True, id='training'),
-    pytest.param(False, id='inference'),
+    pytest.param(True, id='TRAINING'),
+    pytest.param(False, id='INFERENCE'),
 ])
 @pytest.mark.parametrize('dtype', [
     pytest.param(jnp.bfloat16, id="BF16"),
@@ -392,7 +397,7 @@ class FusedAttnRunner:
 ])
 @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',
                          [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),
-                          pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-cross'),
+                          pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-CROSS'),
                           pytest.param(4, 2048, 2048, 12, 6, 64, id='4-2048-2048-12-6-64-GQA')])
 class TestFusedAttn:
     """
