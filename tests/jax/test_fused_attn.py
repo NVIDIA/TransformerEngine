@@ -183,8 +183,8 @@ class FusedAttnRunner:
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
         if (self.bias_layout != '1hss'
-            and self.attn_bias_type != AttnBiasType.POST_SCALE_BIAS
-            and self.attn_mask_type not in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]):
+            and not (self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
+                     and self.attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK])):
             pytest.skip("Arbitrary mask workaround requires [AttnBiasType.POST_SCALE_BIAS] "
                         "with [AttnMaskType.NO_MASK or AttnMaskType.CAUSAL_MASK].")
 
