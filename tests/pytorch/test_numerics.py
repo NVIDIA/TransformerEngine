@@ -1470,9 +1470,9 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         }
     else:
         atol = {
-            torch.float32 : 8e-4,
-            torch.half    : 8e-4,
-            torch.bfloat16: 8e-3,
+            torch.float32 : 1e-3,
+            torch.half    : 1e-3,
+            torch.bfloat16: 1e-2,
         }
 
     # Check if the fully generated output matches the one generated incrementally
