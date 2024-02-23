@@ -2817,6 +2817,11 @@ class DotProductAttention(torch.nn.Module):
                 use_fused_attention and is_backend_avail and \
                 (not context_parallel or \
                  fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
+            if (fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
+                and fu_core_attention_bias_type == "post_scale_bias"
+                and (fu_core_attention_bias.shape[0] != 1
+                or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
+                use_fused_attention = False
 
         # Filter: determinism.
         # backend                                  | deterministic
