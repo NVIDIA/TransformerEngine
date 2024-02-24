@@ -150,6 +150,13 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
                               **kwargs).astype(query.dtype)
 
 
+class BiasShape(Enum):
+    BIAS_1HSS = '1HSS'
+    BIAS_B1SS = 'B1SS'
+    BIAS_BHSS = 'BHSS'
+    BIAS_11SS = '11SS'
+
+
 @dataclass
 class FusedAttnRunner:
     """
@@ -167,7 +174,7 @@ class FusedAttnRunner:
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
-    bias_layout: str
+    bias_shape: BiasShape
 
     def _check_configs(self):
         if self.qkv_layout == QKVLayout.BS3HD and self.num_heads_q != self.num_heads_kv:
@@ -176,17 +183,19 @@ class FusedAttnRunner:
         if self.qkv_layout == QKVLayout.BS3HD and self.max_seqlen_q != self.max_seqlen_kv:
             pytest.skip("BS3HD layout requires max_seqlen_q and max_seqlen_kv to be equal.")
 
+        if (self.bias_shape != BiasShape.BIAS_1HSS
+            and (self.attn_bias_type != AttnBiasType.POST_SCALE_BIAS
+                 or (self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
+                     and self.attn_mask_type != AttnMaskType.NO_MASK
+                     and self.attn_mask_type != AttnMaskType.CAUSAL_MASK))):
+            pytest.skip("B1SS, BHSS and 11SS bias shapes require POST_SCALE_BIAS "
+                        "with NO_MASK or CAUSAL_MASK.")
+
         if not is_fused_attn_kernel_available(
                 self.dtype, self.dtype, self.qkv_layout, self.attn_bias_type, self.attn_mask_type,
                 self.dropout_prob, self.num_heads_q, self.num_heads_kv, self.max_seqlen_q,
                 self.max_seqlen_kv, self.head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
-
-        if (self.bias_layout != '1hss'
-            and not (self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
-                     and self.attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK])):
-            pytest.skip("Arbitrary mask workaround requires [AttnBiasType.POST_SCALE_BIAS] "
-                        "with [AttnMaskType.NO_MASK or AttnMaskType.CAUSAL_MASK].")
 
     def _setup_inputs(self):
         self._check_configs()
@@ -196,13 +205,13 @@ class FusedAttnRunner:
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
         k_shape = v_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim)
 
-        if self.bias_layout == '1hss':
+        if self.bias_shape == BiasShape.BIAS_1HSS:
             bias_shape = (1, self.num_heads_q, self.max_seqlen_q, self.max_seqlen_kv)
-        elif self.bias_layout == 'b1ss':
+        elif self.bias_shape == BiasShape.BIAS_B1SS:
             bias_shape = (self.batch_size, 1, self.max_seqlen_q, self.max_seqlen_kv)
-        elif self.bias_layout == 'bhss':
+        elif self.bias_shape == BiasShape.BIAS_BHSS:
             bias_shape = (self.batch_size, self.num_heads_q, self.max_seqlen_q, self.max_seqlen_kv)
-        elif self.bias_layout == '11ss':
+        elif self.bias_shape == BiasShape.BIAS_11SS:
             bias_shape = (1, 1, self.max_seqlen_q, self.max_seqlen_kv)
         else:
             pytest.xfail("PyTest attempted to use an unrecognized bias layout!")
@@ -213,7 +222,7 @@ class FusedAttnRunner:
 
         with_bias = self.attn_bias_type != AttnBiasType.NO_BIAS
         if with_bias:
-            if self.bias_layout == '1hss':
+            if self.bias_shape == BiasShape.BIAS_1HSS:
                 self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1)
             else:
                 # [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] bias shapes are workarounds for
@@ -298,7 +307,7 @@ class FusedAttnRunner:
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
-        arg_nums = (0, 1, 2, 3) if self.bias_layout == '1hss' else (0, 1, 2)
+        arg_nums = (0, 1, 2, 3) if self.bias_shape == BiasShape.BIAS_1HSS else (0, 1, 2)
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
@@ -323,16 +332,14 @@ class FusedAttnRunner:
                                    rtol=1e-3)
 
         # Convert the outputs to float32 for the elementwise comparison
-        if self.bias_layout == '1hss':
+        if self.bias_shape == BiasShape.BIAS_1HSS:
             primitive_dq, primitive_dk, primitive_dv, primitive_dbias = map(
                 jnp.float32, primitive_dgrad)
             reference_dq, reference_dk, reference_dv, reference_dbias = map(
                 jnp.float32, reference_dgrad)
         else:
-            primitive_dq, primitive_dk, primitive_dv = map(
-                jnp.float32, primitive_dgrad)
-            reference_dq, reference_dk, reference_dv = map(
-                jnp.float32, reference_dgrad)
+            primitive_dq, primitive_dk, primitive_dv = map(jnp.float32, primitive_dgrad)
+            reference_dq, reference_dk, reference_dv = map(jnp.float32, reference_dgrad)
 
         def check_dqkv(primitive, reference, valid_len):
             primitive_valid, primitive_invalid = jnp.split(primitive, (valid_len,), axis=1)
@@ -346,7 +353,7 @@ class FusedAttnRunner:
         check_dqkv(primitive_dk, reference_dk, self.valid_len_kv)
         check_dqkv(primitive_dv, reference_dv, self.valid_len_kv)
 
-        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_layout == '1hss':
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape.BIAS_1HSS:
             # dbias valid part
             np.testing.assert_allclose(primitive_dbias[..., :self.valid_len_q, :self.valid_len_kv],
                                        reference_dbias[..., :self.valid_len_q, :self.valid_len_kv],
@@ -377,11 +384,11 @@ class FusedAttnRunner:
     pytest.param(QKVLayout.BSHD_BS2HD, id='KV_PACKED'),
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='SEPARATE'),
 ])
-@pytest.mark.parametrize('bias_layout', [
-    pytest.param('1hss', id='BIAS_1HSS'),
-    pytest.param('b1ss', id='BIAS_B1SS'),
-    pytest.param('bhss', id='BIAS_BHSS'),
-    pytest.param('11ss', id='BIAS_11SS'),
+@pytest.mark.parametrize('bias_shape', [
+    pytest.param(BiasShape.BIAS_1HSS, id='BIAS_1HSS'),
+    pytest.param(BiasShape.BIAS_B1SS, id='BIAS_B1SS'),
+    pytest.param(BiasShape.BIAS_BHSS, id='BIAS_BHSS'),
+    pytest.param(BiasShape.BIAS_11SS, id='BIAS_11SS'),
 ])
 @pytest.mark.parametrize('dropout_prob', [
     0.,
@@ -406,21 +413,21 @@ class TestFusedAttn:
 
     @staticmethod
     def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
-                     dtype, is_training, qkv_layout, bias_layout):
+                     dtype, is_training, qkv_layout, bias_shape):
         """
         Test forward with parameterized configs
         """
 
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                                 dropout_prob, dtype, is_training, qkv_layout, bias_layout)
+                                 dropout_prob, dtype, is_training, qkv_layout, bias_shape)
         runner.test_forward()
 
     @staticmethod
     def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
-                      dtype, is_training, qkv_layout, bias_layout):
+                      dtype, is_training, qkv_layout, bias_shape):
         """
         Test backward with parameterized configs
         """
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                                 dropout_prob, dtype, is_training, qkv_layout, bias_layout)
+                                 dropout_prob, dtype, is_training, qkv_layout, bias_shape)
         runner.test_backward()
