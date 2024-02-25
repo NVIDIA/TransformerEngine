@@ -270,7 +270,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, ["jax", "flax>=0.7.1"])
+        add_unique(install_reqs, ["jax>=0.4.16", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
