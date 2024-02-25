@@ -3463,7 +3463,7 @@ class DGeluPrimitive(BasePrimitive):
         dgelu partition
         """
         del result_infos
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        dx_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
         impl = DGeluPrimitive.impl
@@ -3695,7 +3695,7 @@ class DgatedGeluPrimitive(BasePrimitive):
         dgated_gelu partition
         """
         del result_infos
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        dx_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
         impl = DgatedGeluPrimitive.impl
@@ -3873,7 +3873,7 @@ class CastTransposePrimitive(BasePrimitive):
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         return (casted_x_sharding, casted_transposed_x_sharding, amax_sharding)
 
     @staticmethod
@@ -3884,7 +3884,7 @@ class CastTransposePrimitive(BasePrimitive):
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, amax_sharding)
 
@@ -4014,7 +4014,7 @@ class CastFP8Primitive(BasePrimitive):
         del out_dtype, result_infos
         x_spec = get_spec(arg_infos[0])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         return (casted_x_sharding, amax_sharding)
 
     @staticmethod
@@ -4022,7 +4022,7 @@ class CastFP8Primitive(BasePrimitive):
         del result_infos
         x_spec = get_spec(arg_infos[0])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, amax_sharding)
 
@@ -4367,7 +4367,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
 
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[3])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[3]))
         return (out_sharding, mu_sharding, rsigma_sharding, amax_sharding)
 
     @staticmethod
@@ -4397,8 +4397,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_spec(arg_infos[0])[:-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[3])))
+            mesh, get_spec(arg_infos[0])[:-1])
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[3]))
         fp8_meta_sharding = amax_sharding
         arg_shardings = (x_sharding, g_sharding, b_sharding) + (fp8_meta_sharding,) * 3
         out_shardings = (out_sharding, mu_sharding, rsigma_sharding, amax_sharding)
@@ -4611,7 +4611,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         return (out_sharding, rsigma_sharding, amax_sharding)
 
     @staticmethod
@@ -4633,8 +4633,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
-        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[0])[:-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        rsigma_sharding = NamedSharding(mesh, get_spec(arg_infos[0])[:-1])
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         fp8_meta_sharding = amax_sharding
         arg_shardings = (x_sharding, g_sharding) + (fp8_meta_sharding,) * 3
         out_shardings = (out_sharding, rsigma_sharding, amax_sharding)
@@ -4769,7 +4769,7 @@ class GeluFp8Primitive(BasePrimitive):
         del out_dtype, result_infos
         x_spec = get_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         return (out_sharding, amax_sharding)
 
     @staticmethod
@@ -4777,7 +4777,7 @@ class GeluFp8Primitive(BasePrimitive):
         del result_infos
         x_spec = get_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (out_sharding, amax_sharding)
 
@@ -4973,7 +4973,7 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
 
     @staticmethod
@@ -4988,7 +4988,7 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
 
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, dbias_shaprding,
                          amax_sharding)
@@ -5150,7 +5150,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         del out_dtype, result_infos
         x_spec = get_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         return (out_sharding, amax_sharding)
 
     @staticmethod
@@ -5158,7 +5158,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         del result_infos
         x_spec = get_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[1])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[1]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (out_sharding, amax_sharding)
 
@@ -5313,7 +5313,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, -2)
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         return (out_sharding, tranposed_out_sharding, amax_sharding)
 
     @staticmethod
@@ -5324,7 +5324,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, -2)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
 
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, get_spec(arg_infos[2]))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, amax_sharding)
 
