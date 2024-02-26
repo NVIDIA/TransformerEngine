@@ -1416,11 +1416,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         is_first_microbatch
                 )
 
-            # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
-            if (self.bias_gelu_nvfusion
-                and not use_reentrant_activation_recompute()):
-                self.bias_gelu_nvfusion = False
-
             from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():

@@ -558,18 +558,10 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
 
     config = model_configs[model]
 
-    if not use_reentrant:
-        # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
-        os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
-
     outputs, names = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
                                               recompute=False, use_reentrant=use_reentrant)
     outputs_recompute, _ = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
                                                     recompute=True, use_reentrant=use_reentrant)
-
-    if not use_reentrant:
-        # Reset bias+GELU fusion flag to avoid contaminating other tests
-        del os.environ["NVTE_BIAS_GELU_NVFUSION"]
 
     assert_all_equal(outputs, outputs_recompute, names=names)
 
