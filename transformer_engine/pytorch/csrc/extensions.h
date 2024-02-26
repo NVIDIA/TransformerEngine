@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "common/common.h"
+#include "multi_tensor.h"
 
 /***************************************************************************************************
  * Attention

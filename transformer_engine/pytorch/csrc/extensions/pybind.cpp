@@ -119,6 +119,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format");
 
+  // multi-tensor functions
+  m.def("multi_tensor_scale", &multi_tensor_scale_cuda, "Multi-tensor scale");
+  m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda, "Multi-tensor L2Norm");
+  m.def("multi_tensor_unscale_l2norm", &multi_tensor_unscale_l2norm_cuda,
+        "Multi-tensor Unscale L2Norm");
+  m.def("multi_tensor_adam", &multi_tensor_adam_cuda, "Multi-tensor Adam");
+  m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
+        "Multi-tensor Adam Capturable");
+  m.def("multi_tensor_adam_capturable_master", &multi_tensor_adam_capturable_master_cuda,
+        "Multi-tensor Adam Capturable Master");
+
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
     .def(py::init<>())
