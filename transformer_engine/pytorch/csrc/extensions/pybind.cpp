@@ -23,6 +23,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_upper_triang_masked_softmax_backward",
             &scaled_upper_triang_masked_softmax_backward,
             "Scaled Upper-Triangular Masked Softmax BWD");
+  m.def("scaled_aligned_causal_masked_softmax_forward",
+            &scaled_aligned_causal_masked_softmax_forward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax FWD");
+  m.def("scaled_aligned_causal_masked_softmax_backward",
+            &scaled_aligned_causal_masked_softmax_backward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax BWD");
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
@@ -66,14 +72,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("geglu", &geglu, "GeGLU with FP8 output");
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
+  m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
+  m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
+  m.def("fused_amax_and_scale_update",
+        &fused_amax_and_scale_update,
+        "Update amax history and FP8 scale");
+
+  // fused apply rope
+  m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD");
+  m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD");
+  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format");
+  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format");
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");

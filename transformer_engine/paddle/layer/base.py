@@ -12,8 +12,12 @@ from typing import Generator, Dict, Tuple, Union, Any, List, Optional
 import numpy as np
 
 import paddle
-from paddle.fluid import core
-from paddle.fluid.framework import _dygraph_tracer
+try:
+    from paddle.base import core
+    from paddle.base.framework import _dygraph_tracer
+except ImportError:
+    from paddle.fluid import core
+    from paddle.fluid.framework import _dygraph_tracer
 
 from ..constants import FP8BwdTensors, dist_group_type
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8, transpose

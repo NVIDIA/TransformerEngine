@@ -138,8 +138,7 @@ class LayerNorm(torch.nn.Module):
                 dtype=params_dtype,
             )
         )
-        setattr(self.weight, "sequence_parallel", sequence_parallel)
-        setattr(self.bias, "sequence_parallel", sequence_parallel)
+        self.sequence_parallel = sequence_parallel
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
@@ -168,7 +167,15 @@ class LayerNorm(torch.nn.Module):
         """Init LayerNorm parameters"""
         if defer_init:
             return
+
+        if self.weight.device == torch.device('meta'):
+            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device='cuda'))
+        setattr(self.weight, "sequence_parallel", self.sequence_parallel)
         init.constant_(self.weight, float(not self.zero_centered_gamma))
+
+        if self.bias.device == torch.device('meta'):
+            self.bias = torch.nn.Parameter(torch.empty_like(self.bias, device='cuda'))
+        setattr(self.bias, "sequence_parallel", self.sequence_parallel)
         init.zeros_(self.bias)
 
     @no_torch_dynamo()

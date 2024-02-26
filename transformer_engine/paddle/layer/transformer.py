@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """Transformer"""
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 import warnings
 
 import paddle
@@ -27,6 +27,14 @@ class TransformerLayer(paddle.nn.Layer):
                      intermediate size to which input samples are projected.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
+    num_gqa_groups : Optional[int], default = `None`
+                    number of GQA groups in the transformer layer.
+                    Grouped Query Attention is described in
+                    `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                    This only affects the keys and values, not the queries.
+                    GQA-1 is equivalent to Multi-Query Attention
+                    (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
                        for numerical stability.
@@ -52,6 +60,7 @@ class TransformerLayer(paddle.nn.Layer):
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
                `encoder` option.
+    normalization: {'LayerNorm', 'RMSNorm'}, default = `LayerNorm`
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -97,16 +106,19 @@ class TransformerLayer(paddle.nn.Layer):
                  hidden_size: int,
                  ffn_hidden_size: int,
                  num_attention_heads: int,
+                 num_gqa_groups: Optional[int] = None,
                  layernorm_epsilon: float = 1e-5,
                  hidden_dropout: float = 0.1,
                  attention_dropout: float = 0.1,
                  weight_attr: Union[paddle.ParamAttr, None] = None,
                  bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+                 max_sequence_length: Optional[int] = None,
                  self_attn_mask_type: str = "causal",
                  params_dtype: Optional[paddle.dtype] = None,
                  apply_residual_connection_post_layernorm: bool = False,
                  output_layernorm: bool = False,
                  layer_type: str = "encoder",
+                 normalization: str = "LayerNorm",
                  zero_centered_gamma: bool = False,
                  activation: str = 'gelu',
                  set_parallel_mode: bool = False,
@@ -149,10 +161,13 @@ class TransformerLayer(paddle.nn.Layer):
         common_attention_kwargs = {
             "params_dtype": params_dtype,
             "return_layernorm_output": apply_residual_connection_post_layernorm,
+            "normalization": normalization,
             "zero_centered_gamma": zero_centered_gamma,
             "set_parallel_mode": set_parallel_mode,
             "sequence_parallel": self.sequence_parallel,
+            'max_sequence_length': max_sequence_length,
             "tp_group": tp_group,
+            "num_gqa_groups": num_gqa_groups,
             "rng_state_name": attention_dropout_rng_state_name,
             "backend": backend,
         }
@@ -180,6 +195,7 @@ class TransformerLayer(paddle.nn.Layer):
             eps=layernorm_epsilon,
             weight_attr=weight_attr,
             bias_attr=bias_attr,
+            normalization=normalization,
             activation=activation,
             return_layernorm_output=apply_residual_connection_post_layernorm,
             zero_centered_gamma=zero_centered_gamma,
@@ -213,6 +229,7 @@ class TransformerLayer(paddle.nn.Layer):
         attention_mask: Optional[paddle.Tensor] = None,
         encoder_output: Optional[paddle.Tensor] = None,
         enc_dec_attn_mask: Optional[paddle.Tensor] = None,
+        rotary_pos_emb: Optional[Tuple[paddle.Tensor, paddle.Tensor]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
@@ -239,6 +256,9 @@ class TransformerLayer(paddle.nn.Layer):
         enc_dec_attn_mask : Optional[paddle.Tensor], default = `None`
              Boolean tensor used to mask out inter-attention softmax input if using
              `layer_type="decoder"`.
+        rotary_pos_emb : Optional[Tuple[paddle.Tensor, paddle.Tensor]], default = `None`
+             Embeddings for query and key tensors for applying rotary position
+             embedding. By default no input embedding is applied
         core_attention_bias_type: str, default = `no_bias`
         core_attention_bias: Optional[paddle.Tensor], default = `None`
                     Bias tensor for Q * K.T
@@ -274,6 +294,7 @@ class TransformerLayer(paddle.nn.Layer):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             set_zero=set_zero,
+            rotary_pos_emb=rotary_pos_emb,
             recompute_core_attention=recompute_core_attention,
             is_first_microbatch=is_first_microbatch,
         )

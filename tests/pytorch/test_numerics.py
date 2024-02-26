@@ -4,6 +4,7 @@
 
 import math
 import os
+import sys
 from typing import List, Optional
 import pytest
 import copy
@@ -17,10 +18,11 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
+    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
-    MultiheadAttention, RMSNorm, TransformerLayer
+    MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
@@ -53,14 +55,14 @@ model_configs = {
 }
 
 param_types = [torch.float32, torch.float16]
-if torch.cuda.is_bf16_supported():
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -71,22 +73,27 @@ def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
 
-def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
+def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
-        assert torch.equal(t1, t2), "Output mismatch."
+    failed = False
+    failed_tensors = ""
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
+        if not torch.equal(t1, t2):
+            failed = True
+            failed_tensors += f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
+    assert not failed, "Output mismatches in:\n" + failed_tensors
 
 
 def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
         result = torch.allclose(t1, t2, atol=atol)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
-            msg = (f"Outputs not close enough."
+            msg = (f"Outputs not close enough in tensor at idx={i}. "
                    f"Location of the maximum difference: {m.item()} "
                    f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
                    f"(diff {diff[m].item()})."
@@ -214,15 +221,41 @@ class TorchDotProductAttention(torch.nn.Module):
         return context_layer
 
 
+class TorchLayerNorm(nn.Module):
+    def __init__(self, in_features: int,
+                 eps: float,
+                 zero_centered_gamma: bool):
+        super().__init__()
+        self.eps = eps
+        self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
+
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
+        self.bias = nn.Parameter(torch.zeros(in_features))
+        self.register_parameter("weight", self.weight)
+        self.register_parameter("bias", self.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.weight if not self.zero_centered_gamma else 1 + self.weight
+        w = w.to(torch.float32)
+        b = self.bias.to(torch.float32)
+        inp = x.to(torch.float32)
+        out = torch.nn.functional.layer_norm(inp, (self.in_features,), weight=w,
+                                             bias=b, eps=self.eps)
+        return out.to(x.dtype)
+
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
-    def __init__(self, in_features, eps=1e-5):
+    def __init__(self, in_features, zero_centered_gamma, eps=1e-5):
         super().__init__()
 
         self.eps = eps
         self.in_features = in_features
+        self.zero_centered_gamma = zero_centered_gamma
 
-        self.weight = nn.Parameter(torch.ones(in_features))
+        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        self.weight = nn.Parameter(initial_value)
         self.register_parameter("weight", self.weight)
 
     def forward(self, x):
@@ -233,18 +266,24 @@ class TorchRMSNorm(nn.Module):
         r_rms_x = rms_x2 ** (-1. / 2)
         x_normed = x * r_rms_x
 
-        return (self.weight.float() * x_normed).to(x.dtype)
+        w = self.weight.float()
+        if self.zero_centered_gamma:
+            w = 1 + w
+        return (w * x_normed).to(x.dtype)
 
 
 class TorchLayerNormLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int,
                  eps: float, bias: bool = True,
-                 normalization: str = "LayerNorm"):
+                 normalization: str = "LayerNorm",
+                 zero_centered_gamma: bool = False):
         super().__init__()
         if normalization == "LayerNorm":
-            self.layernorm = nn.LayerNorm(in_features, eps=eps)
+            self.layernorm = TorchLayerNorm(in_features, eps=eps,
+                                            zero_centered_gamma=zero_centered_gamma)
         elif normalization == "RMSNorm":
-            self.layernorm = TorchRMSNorm(in_features, eps=eps)
+            self.layernorm = TorchRMSNorm(in_features, eps=eps,
+                                          zero_centered_gamma=zero_centered_gamma)
         else:
             raise RuntimeError("Unsupported normalization")
 
@@ -271,12 +310,16 @@ class TorchMHA(nn.Module):
             output = output[0]
         return output
 
+class TorchQuickGELU(nn.Module):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input * torch.sigmoid(1.702 * input)
 
 _supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
                   'gelu'  : nn.GELU(approximate="tanh"),
                   'reglu'  : nn.ReLU(),
                   'relu'  : nn.ReLU(),
-                  'swiglu' : nn.SiLU()}
+                  'swiglu' : nn.SiLU(),
+                  'qgelu'  : TorchQuickGELU()}
 
 
 class TorchGLU(nn.Module):
@@ -298,9 +341,11 @@ class TorchLayerNormMLP(nn.Module):
                  normalization: str = "LayerNorm"):
         super().__init__()
         if normalization == "LayerNorm":
-            self.ln = nn.LayerNorm(hidden_size, eps=eps)
+            self.ln = TorchLayerNorm(hidden_size, eps=eps,
+                                     zero_centered_gamma=False)
         elif normalization == "RMSNorm":
-            self.ln = TorchRMSNorm(hidden_size, eps=eps)
+            self.ln = TorchRMSNorm(hidden_size, eps=eps,
+                                   zero_centered_gamma=False)
         else:
             raise RuntimeError("Unsupported normalization")
         if 'glu' in activation:
@@ -418,7 +463,12 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
     assert_all_equal(outputs, outputs_recompute)
 
 
-def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
+def _test_e2e_full_recompute(
+    bs, dtype, config, fp8,
+    fp8_model_params=False,
+    recompute=False,
+    use_reentrant=True
+):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -455,21 +505,23 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
         )
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=use_reentrant
     ).cuda()
-    te_inp_hidden_states.retain_grad()
+    if use_reentrant:
+        te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     with fp8_autocast(enabled=fp8):
         if recompute:
             te_out = te_checkpoint(
                 block,
-                False,  # distribute_saved_activations
-                get_dummy_cuda_rng_tracker,
-                None,  # tp_group
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
+                distribute_saved_activations=False,
+                tp_group=None,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                use_reentrant=use_reentrant,
             )
         else:
             te_out = block(
@@ -481,11 +533,17 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
     loss.backward()
     torch.cuda.synchronize()
 
-    outputs = [te_out, te_inp_hidden_states.grad]
-    for p in block.parameters():
+    outputs = [te_out]
+    names = ["output"]
+    if use_reentrant:
+        outputs.append(te_inp_hidden_states.grad)
+        names.append("input")
+    for name, p in block.named_parameters():
         if p.requires_grad:
             outputs.append(p.grad)
-    return outputs
+            names.append(name)
+
+    return outputs, names
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -493,15 +551,27 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, use_reentrant):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
-    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+    if not use_reentrant:
+        # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
+        os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
+
+    outputs, names = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                              recompute=False, use_reentrant=use_reentrant)
+    outputs_recompute, _ = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                                    recompute=True, use_reentrant=use_reentrant)
+
+    if not use_reentrant:
+        # Reset bias+GELU fusion flag to avoid contaminating other tests
+        del os.environ["NVTE_BIAS_GELU_NVFUSION"]
+
+    assert_all_equal(outputs, outputs_recompute, names=names)
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
@@ -892,13 +962,15 @@ def test_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
-def test_rmsnorm_accuracy(dtype, bs, model, eps):
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     config = model_configs[model]
 
     te_rmsnorm = (
         RMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
@@ -909,6 +981,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         TorchRMSNorm(
             config.hidden_size,
             eps=eps,
+            zero_centered_gamma=zero_centered_gamma
         )
         .to(dtype=dtype)
         .cuda()
@@ -923,17 +996,64 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
     torch_outputs = _test_granular_accuracy(torch_rmsnorm, bs, dtype, config)
 
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+    atol = {torch.float32 : 1e-7,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
+    config = model_configs[model]
+
+    te_layernorm = (
+        LayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_layernorm = (
+        TorchLayerNorm(
+            config.hidden_size,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_layernorm.weight = Parameter(te_layernorm.weight.clone())
+        torch_layernorm.bias = Parameter(te_layernorm.bias.clone())
+
+    te_outputs = _test_granular_accuracy(te_layernorm, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
+
+    # Check output.
+    atol = {torch.float32 : 1e-7,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
     config = model_configs[model]
 
     te_ln_linear = (
@@ -943,6 +1063,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
             config.eps,
             bias=True,
             normalization=normalization,
+            zero_centered_gamma=zero_centered_gamma,
         )
         .to(dtype=dtype)
         .cuda()
@@ -956,6 +1077,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
             config.eps,
             bias=True,
             normalization=normalization,
+            zero_centered_gamma=zero_centered_gamma,
         )
         .to(dtype=dtype)
         .cuda()
@@ -974,10 +1096,11 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    atol = {torch.float32 : 2e-4,
+            torch.half    : 2e-3,
+            torch.bfloat16: 2e-2,
+    }
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1225,7 +1348,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            hidden_states_format="sbhd"
+            attn_input_format="sbhd"
         )
         .to(dtype=dtype)
         .cuda()
@@ -1248,7 +1371,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            hidden_states_format="bshd"
+            attn_input_format="bshd"
         )
         .to(dtype=dtype)
         .cuda()

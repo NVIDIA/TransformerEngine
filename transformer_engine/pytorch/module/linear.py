@@ -26,6 +26,7 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
+    init_method_constant,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -33,6 +34,8 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -44,7 +47,6 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 
 from ..float8_tensor import Float8Tensor
-
 
 __all__ = ["Linear"]
 
@@ -68,6 +70,7 @@ class _Linear(torch.autograd.Function):
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -154,7 +157,9 @@ class _Linear(torch.autograd.Function):
                     fp8_meta=fp8_meta,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                 )
-                if is_grad_enabled:
+                if (is_grad_enabled
+                    or (is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase())):
                     fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -164,11 +169,12 @@ class _Linear(torch.autograd.Function):
                         transpose_out=weight_t_fp8._data,
                     )
                 else:
-                    weight_fp8._data = cast_to_fp8(
+                    cast_to_fp8(
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
+                        out=weight_fp8._data,
                     )
                     weight_t_fp8 = None
 
@@ -266,12 +272,26 @@ class _Linear(torch.autograd.Function):
                         saved_inputmat = inputmat
                     else:
                         saved_inputmat_t = inputmat_t
+                        if cpu_offloading:
+                            saved_inputmat_t.activation_offloading = True
                 else:
                     saved_inputmat = inputmat_no_fp8
+
+                if cpu_offloading:
+                    if fuse_wgrad_accumulation:
+                        weight.main_grad.weight_offloading = True
+                    if fp8 and weight_t_fp8 is not None:
+                        weight_t_fp8.weight_offloading = True
+                    weight.weight_offloading = True
+
+                    if saved_inputmat is not None:
+                        saved_inputmat.activation_offloading = True
+
             ctx.save_for_backward(
                 saved_inputmat,
                 saved_inputmat_t,
                 weight,
+                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
@@ -279,6 +299,7 @@ class _Linear(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
@@ -315,13 +336,20 @@ class _Linear(torch.autograd.Function):
                 inputmat,
                 inputmat_t,
                 weight,
+                main_grad,
                 weight_t_fp8,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                weight = torch.nn.Parameter(weight, False)
+                weight.main_grad = main_grad
+
             # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
+                weight_t_fp8 = weight.transpose(
+                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
+                )
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -496,6 +524,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -743,22 +772,11 @@ class Linear(TransformerEngineBaseModule):
                 if is_subview:
                     bias = bias[split_start:split_end]
                 bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias)
-                if parallel_mode == "row":
-                    bias.sequence_parallel = sequence_parallel
+                self.register_parameter(self.bias_names[i], bias,
+                                        init_fn=init_method_constant(0.0))
             else:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
                 setattr(self, self.bias_names[i], bias)
-
-            # Configure tensor parallelism
-            set_tensor_model_parallel_attributes(
-                tensor=weight,
-                is_parallel=True,
-                dim=1 if parallel_mode == "row" else 0,
-                stride=1,
-            )
-            if parallel_mode == "column":
-                set_tensor_model_parallel_attributes(bias, True, 0, 1)
 
             # Concatenated tensors are not needed if not splitting
             # into multiple parameters
@@ -780,6 +798,27 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+
+        if not defer_init:
+            # Set parallelism attributes for linear weights
+            for weight in self.weight_names:
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, weight),
+                    is_parallel=True,
+                    dim=1 if self.parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+            # Set parallelism attributes for linear biases
+            if self.use_bias:
+                for bias in self.bias_names:
+                    if self.parallel_mode == "row":
+                        setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
+                    elif self.parallel_mode == "column":
+                        set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
     def get_fp8_weights_scratchpad(
         self,
@@ -862,6 +901,8 @@ class Linear(TransformerEngineBaseModule):
                 is_first_microbatch
             )
 
+            from ..cpu_offload import CPUOffloadEnabled
+
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
                 args = []
@@ -880,6 +921,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
+                CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

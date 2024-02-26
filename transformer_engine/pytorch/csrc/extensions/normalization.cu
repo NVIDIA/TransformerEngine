@@ -218,8 +218,6 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
                                     const int sm_margin,
                                     const bool zero_centered_gamma
 ) {
-    NVTE_CHECK(zero_centered_gamma == false,
-               "Zero-centered gamma is not supported yet for RMSNorm.");
     auto dx = at::empty_like(x);
     auto dgamma = at::empty_like(gamma);
     transformer_engine::TensorWrapper workspace, barrier, dgamma_part;
@@ -232,7 +230,7 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
     auto dgamma_cu  = makeTransformerEngineTensor(dgamma);
 
     // This call populates tensors with the required config.
-    const auto bwd_fun = nvte_rmsnorm_bwd;
+    const auto bwd_fun = zero_centered_gamma ? nvte_rmsnorm1p_bwd : nvte_rmsnorm_bwd;
     bwd_fun(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(),
             dx_cu.data(), dgamma_cu.data(), dgamma_part.data(),
             at::cuda::getCurrentCUDAStream(),
@@ -295,8 +293,6 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 const bool zero_centered_gamma
 ) {
     using namespace transformer_engine;
-    NVTE_CHECK(zero_centered_gamma == false,
-               "Zero-centered gamma is not supported yet for RMSNorm.");
 
     size_t N = static_cast<size_t>(input.size(0));
     size_t H = static_cast<size_t>(input.size(1));
@@ -313,7 +309,7 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
     transformer_engine::TensorWrapper workspace, barrier;
 
     // This call populates workspace and barrier tensors with the required config
-    const auto func = nvte_rmsnorm_fwd;
+    const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
     func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(),
          rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,

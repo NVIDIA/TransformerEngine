@@ -222,3 +222,9 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         "Tensor dimensions are not compatible for FP8 execution: "
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
     )
+
+def is_bf16_compatible() -> None:
+    """Replaces torch.cuda.is_bf16_compatible() with an explicit
+       check on device compute capability to enforce sm_80 or higher.
+    """
+    return torch.cuda.get_device_capability()[0] >= 8

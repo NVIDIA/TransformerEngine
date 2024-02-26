@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from typing import Optional
+from contextlib import nullcontext
 
 import torch
 import pytest
@@ -12,6 +13,7 @@ from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
+    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     LayerNormLinear,
@@ -20,6 +22,7 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     RMSNorm,
     LayerNorm,
+    get_cpu_offload_context,
 )
 from transformer_engine.common import recipe
 
@@ -99,7 +102,7 @@ fp8_recipes = [
 ]
 
 param_types = [torch.float32, torch.float16]
-if torch.cuda.is_bf16_supported():
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
@@ -215,7 +218,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             assert torch.count_nonzero(p.main_grad) > 0, "Gradient not accumulated."
 
 
-def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
+def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
     te_inp_hidden_states = torch.randn(
         config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
@@ -223,9 +226,16 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
     if skip_wgrad:
         _disable_wgrads(block)
 
+    if cpu_offload:
+        offload_context, sync_function = get_cpu_offload_context(enabled=True)
+    else:
+        offload_context = nullcontext()
+        sync_function = lambda x: x
+
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe), offload_context:
         te_out = block(te_inp_hidden_states)
+    te_out = sync_function(te_out)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
@@ -351,9 +361,6 @@ def test_sanity_layernorm_linear(dtype, fp8_recipe, model, skip_wgrad,
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     sigma = 0.023
     init_method = init_method_normal(sigma)
 
@@ -417,9 +424,6 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -449,9 +453,11 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
+@pytest.mark.parametrize("cpu_offload", all_boolean)
 def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
                     zero_centered_gamma, bias, activation,
-                    normalization, parallel_attention_mlp):
+                    normalization, parallel_attention_mlp,
+                    cpu_offload):
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -459,9 +465,6 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -489,7 +492,7 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
         .cuda()
     )
 
-    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload)
 
 
 def test_sanity_gpt_126m():
@@ -512,6 +515,7 @@ def test_sanity_gpt_126m():
         activation="gelu",
         normalization="LayerNorm",
         parallel_attention_mlp=False,
+        cpu_offload=False,
     )
 
 
@@ -530,9 +534,6 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -594,9 +595,6 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -713,7 +711,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
         .cuda()
     )
 
-    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, False)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -751,7 +749,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
         .cuda()
     )
 
-    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, False)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -810,9 +808,6 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
             pytest.skip(reason_for_no_fp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)

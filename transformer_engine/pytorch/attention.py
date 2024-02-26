@@ -4,14 +4,16 @@
 
 """Attention."""
 import collections
-import os
-import warnings
-import math
-from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union, Dict
-from pkg_resources import packaging
+import functools
+from importlib.metadata import version
+import math
+import os
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import warnings
+
 import numpy as np
+from pkg_resources import packaging
 
 import torch
 import torch.nn.functional as F
@@ -68,8 +70,16 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
 
 
-_cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+_alibi_cache = {
+    "_num_heads": None,
+    "_alibi_slopes": None,
+    "_max_seqlen_q": None,
+    "_max_seqlen_kv": None,
+    "_alibi_bias": None,
+    "_alibi_slopes_require_update": False,
+    "_alibi_bias_require_update": False,
+    }
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -125,32 +135,70 @@ def get_alibi(
     num_heads: int,
     max_seqlen_q: int,
     max_seqlen_kv: int,
-) -> torch.Tensor:
+    alibi_slopes: Optional[torch.Tensor] = None,
+    bias_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Generate ALiBi bias in the shape of [1, num_heads, max_seqlen_q, max_seqlen_kv].
+    Parameters
+    ----------
+    num_heads: int
+        Number of heads.
+    max_seqlen_q: int
+        Maximum sequence length for queries.
+    max_seqlen_kv: int
+        Maximum sequence length for keys and values.
+    alibi_slopes: Optional[torch.Tensor], default = `None`
+        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
+    bias_dtype: Optional[torch.dtype], default = `None`
+        Dtype of the generated ALiBi bias. If None, use torch.float32.
+
+    Returns
+    ----------
+    alibi_slopes: torch.Tensor
+        ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
+    alibi_bias: torch.Tensor
+        ALiBi bias in FP32 or `bias_dtype`. If `alibi_slopes` is in [num_heads] shape,
+        then `alibi_bias` is in [1, num_heads, max_seqlen_q, max_seqlen_kv], and if
+        `alibi_slopes` is in [batch_size, num_heads], then the bias is in
+        [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     """
-    n = 2 ** math.floor(math.log2(num_heads))
-    m_0 = 2.0 ** (-8.0 / n)
-    m = torch.pow(m_0, torch.arange(1, 1 + n))
+    global _alibi_cache
+    if _alibi_cache["_alibi_slopes_require_update"]:
+        if alibi_slopes is not None:
+            _alibi_cache["_alibi_slopes"] = alibi_slopes
+        else:
+            n = 2 ** math.floor(math.log2(num_heads))
+            m_0 = 2.0 ** (-8.0 / n)
+            m = torch.pow(m_0, torch.arange(1, 1 + n))
 
-    if n < num_heads:
-        m_hat_0 = 2.0 ** (-4.0 / n)
-        m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
-        m = torch.cat([m, m_hat])
+            if n < num_heads:
+                m_hat_0 = 2.0 ** (-4.0 / n)
+                m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
+                m = torch.cat([m, m_hat])
 
-    a = torch.ones(max_seqlen_q, max_seqlen_kv)
-    b = torch.triu(a,diagonal=1)
-    c = b.cumsum(dim=-1)
-    bb = torch.tril(a,diagonal=-1)
-    cc = bb.cumsum(dim=0)
-    d = c - cc
-    bias = d.repeat(1, num_heads, 1, 1)
+            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
+        _alibi_cache["_num_heads"] = num_heads
+        _alibi_cache["_alibi_slopes_require_update"] = False
 
-    for i in range(num_heads):
-        bias[0,i,:,:] = m[i] * bias[0,i,:,:]
+    if _alibi_cache["_alibi_bias_require_update"]:
+        assert _alibi_cache["_alibi_slopes"] is not None, "ALiBi slopes can not be None!"
+        if _alibi_cache["_alibi_slopes"].dim() == 1:
+            slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
+        if _alibi_cache["_alibi_slopes"].dim() == 2:
+            slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
+        bias = torch.arange(
+            1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+        bias = bias - torch.arange(
+            1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1)
+        bias = bias.abs().mul(-1)
+        bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
+        _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
+        bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_cache["_alibi_bias_require_update"] = False
 
-    bias = bias.to(dtype=torch.float32, device="cuda")
-    return bias
+    return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
+
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
@@ -212,6 +260,26 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
                     mode="constant", value=float(bs * max_seqlen))
 
     return indices
+
+
+@functools.lru_cache
+def _get_full_cu_seqlens(
+    batch_size: int,
+    max_seqlen: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Cumulative sequence lengths in full data batch
+
+    All sequences in batch have the maximum sequence length.
+
+    """
+    return torch.arange(
+        0,
+        (batch_size + 1) * max_seqlen,
+        step=max_seqlen,
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 @jit_fuser
@@ -974,6 +1042,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def __init__(
         self,
         dim: int,
+        rotary_percent: float = 1.0,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
     ):
@@ -982,6 +1051,8 @@ class RotaryPositionEmbedding(torch.nn.Module):
         ----------
         dim: int
             rotary embedding dimension
+        rotary_percent: float
+            Percent of rotary dimension to use for rotary position embeddings.
         seq_len_interpolation_factor: int
             if not None, discrete positions will be interpolated by this factor via the trick in
             https://arxiv.org/abs/2306.15595
@@ -989,8 +1060,16 @@ class RotaryPositionEmbedding(torch.nn.Module):
             pre-trained max_position_embeddings before position interpolation
         """
         super().__init__()
+        if rotary_percent < 1.0:
+            dim = int(dim * rotary_percent)
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (
+            10000
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
+                / dim
+            )
+        )
         self.register_buffer('inv_freq', inv_freq)
         self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
 
@@ -1005,8 +1084,10 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             fixed offset for freqencies
         """
-        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
-        seq = seq.type_as(self.inv_freq)
+        seq = (
+            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+            + offset
+        )
 
         if (self.pretrained_max_position_embeddings is not None
             and self.seq_len_interpolation_factor is not None):
@@ -1025,6 +1106,58 @@ class RotaryPositionEmbedding(torch.nn.Module):
         # emb [seq_length, .., dim]
         return emb.reshape(emb.size(0), 1, 1, emb.size(1))
 
+
+class FusedRoPEFunc(torch.autograd.Function):
+    """
+    Function for FusedRoPE
+
+    This implementation assumes the input tensor to be in `sbhd`, `bshd` or `thd` format and
+    the RoPE tensor to be of shape (s, 1, 1, d). It accepts arbitrary memory layouts to avoid
+    the expensive `.contiguous()` calls, thus it may not achieve the best memory access pattern.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        t: torch.Tensor,
+        freqs: torch.Tensor,
+        tensor_format: str = "sbhd",
+        cu_seqlens: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        if tensor_format == "sbhd":
+            output = tex.fused_rope_forward(t, freqs, False)
+        elif tensor_format == "bshd":
+            output = tex.fused_rope_forward(
+                t.transpose(0, 1), freqs, True
+            ).transpose(0, 1)
+        elif tensor_format == "thd":
+            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
+        else:
+            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+        ctx.save_for_backward(freqs, cu_seqlens)
+        ctx.tensor_format = tensor_format
+
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        freqs, cu_seqlens = ctx.saved_tensors
+        if ctx.tensor_format == "sbhd":
+            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
+        elif ctx.tensor_format == "bshd":
+            grad_input = tex.fused_rope_backward(
+                grad_output.transpose(0, 1), freqs, True
+            ).transpose(0, 1)
+        elif ctx.tensor_format == "thd":
+            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
+        else:
+            raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
+
+        return grad_input, None, None, None, None
+
+
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
     change sign so the last dimension becomes [-odd, +even]
@@ -1034,33 +1167,58 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: str = "sbhd") -> torch.Tensor:
+def apply_rotary_pos_emb(
+    t: torch.Tensor,
+    freqs: torch.Tensor,
+    tensor_format: str = "sbhd",
+    fused: bool = False,
+    cu_seqlens: Union[torch.Tensor, None] = None,
+) -> torch.Tensor:
     """
-        Parameters
-        ----------
-        t: torch.Tensor
-            input tensor on which rotary positional embedding will be applied
-        freqs: torch.Tensor
-            rotary positional embeding tensor `freqs` is of shape
-            `[seq_length, ..., dim]`
-        tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
-            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
-            of shape `[seq, bs, ...]`.
+    Apply rotary positional embedding tensor to the input tensor.
 
+    Parameters
+    ----------
+    t: torch.Tensor
+        Input tensor of shape `[s, b, h, d]`, `[s, b, h, d]` or `[t, h, d]`, on which
+        rotary positional embedding will be applied.
+    freqs: torch.Tensor
+        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
+    fused: bool, default = False
+        Whether to use a fused applying RoPE implementation.
+    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+        is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+        of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
+    cu_seqlens: torch.Tensor, default = None.
+        Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
+        dtype torch.int32. Only valid when `tensor_format` is 'thd'.
     """
-    assert tensor_format in ("sbhd", "bshd"),("Only formats `sbhd` or `bshd` "
-                                              "are supported for input tensor "
-                                              "`t`.")
+    if fused:
+        assert (
+            tensor_format != "thd" or cu_seqlens is not None
+        ), "cu_seqlens must not be None when tensor_format is 'thd'."
+        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens)
+
+    assert tensor_format in ("sbhd", "bshd"), (
+        "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
+        f"when fused is False, got {tensor_format}."
+    )
+
     max_seq_len = freqs.shape[0]
     cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
 
     # Only apply the rotary embeddings up to the sequence length of the running
     # input.
-    assert cur_seq_len <= max_seq_len, (f"Rotary Embeddings only supported "
-                                        "upto {max_seq_len} sequence length!")
-    freqs = freqs[:cur_seq_len].to(t.dtype)
+    assert cur_seq_len <= max_seq_len, (
+        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    )
+    freqs = freqs[:cur_seq_len]
     if tensor_format == "bshd":
-        freqs = freqs.transpose(0,1) # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    # cos/sin first then dtype conversion for better precision
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
 
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
@@ -1068,7 +1226,7 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: st
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    t = (t * cos_) + (_rotate_half(t) * sin_)
     return torch.cat((t, t_pass), dim=-1)
 
 
@@ -1170,6 +1328,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
 
@@ -1239,8 +1398,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
-            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
-                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             matmul_result = torch.bmm(
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
@@ -1253,10 +1410,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
-                assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
-                        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                core_attention_bias = get_alibi(output_size[1], output_size[2], output_size[3])
+                _, core_attention_bias = get_alibi(
+                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes)
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
@@ -1562,7 +1718,6 @@ class FlashAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [x.contiguous()
                 for x in (query_layer, key_layer, value_layer)]
 
-        global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
         batch_size = query_layer.shape[0]
 
         if qkv_format in ['sbhd', 'bshd']:
@@ -1581,58 +1736,45 @@ class FlashAttention(torch.nn.Module):
                     assert (
                         max_seqlen_q == max_seqlen_kv
                     ), "Maximum sequence length for Q and KV should be the same."
-                    if self.layer_number == 1:
-                        if cu_seqlens_q is None:
-                            assert (attention_mask is not None
-                                ), "Please provide attention_mask for padding!"
-                            _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
-                        else:
-                            _cu_seqlens_q = cu_seqlens_q
-                            _indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                    _cu_seqlens_kv = _cu_seqlens_q
-                    query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
-                        _indices_q, query_layer, key_layer, value_layer
-                    )
-                else:
-                    if self.layer_number == 1:
-                        if cu_seqlens_q is None or cu_seqlens_kv is None:
-                            assert (attention_mask is not None
-                                ), "Please provide attention_mask for padding!"
-                            _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(
-                                attention_mask[0])
-                            _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(
-                                attention_mask[1])
-                        else:
-                            _cu_seqlens_q = cu_seqlens_q
-                            _cu_seqlens_kv = cu_seqlens_kv
-                            _indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                            _indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer_packed = PackTensors.apply(_indices_q, query_layer)
-                    key_layer_packed, value_layer_packed = PackTensors.apply(
-                        _indices_kv, key_layer, value_layer
-                    )
-                query_layer, key_layer, value_layer = (
-                    query_layer_packed, key_layer_packed, value_layer_packed)
-                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
-            else:
-                if self.layer_number == 1:
                     if cu_seqlens_q is None:
-                        cu_seqlens_q = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_q,
-                                step=max_seqlen_q,
-                                dtype=torch.int32,
-                                device=query_layer.device)
-                    if cu_seqlens_kv is None:
-                        cu_seqlens_kv = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_kv,
-                                step=max_seqlen_kv,
-                                dtype=torch.int32,
-                                device=key_layer.device)
-                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
+                        assert (attention_mask is not None
+                                ), "Please provide attention_mask for padding!"
+                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                    else:
+                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                    cu_seqlens_kv = cu_seqlens_q
+                    query_layer, key_layer, value_layer = PackTensors.apply(
+                        indices_q, query_layer, key_layer, value_layer
+                    )
                 else:
-                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                    if cu_seqlens_q is None or cu_seqlens_kv is None:
+                        assert (attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
+                            attention_mask[0])
+                        cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(
+                            attention_mask[1])
+                    else:
+                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                        indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
+                    query_layer = PackTensors.apply(indices_q, query_layer)
+                    key_layer, value_layer = PackTensors.apply(
+                        indices_kv, key_layer, value_layer
+                    )
+            else:
+                # Cumulative sequence lengths for unpadded data
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_q,
+                        query_layer.device,
+                    )
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_kv,
+                        key_layer.device,
+                    )
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format not supported with context parallelism!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
@@ -1662,6 +1804,14 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic
                 )
         else:
+
+            from .cpu_offload import CPUOffloadEnabled
+            if CPUOffloadEnabled:
+                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
+                for tensor in tensor_list:
+                    if tensor is not None:
+                        tensor.activation_offloading = True
+
             with self.attention_dropout_ctx():
                 fa_optional_forward_kwargs = {}
                 if _flash_attn_2_3_plus:
@@ -1679,7 +1829,7 @@ class FlashAttention(torch.nn.Module):
                 )
 
         if 'padding' in attn_mask_type:
-            output = UnpackTensor.apply(_indices_q, batch_size * max_seqlen_q, output)
+            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
 
         if qkv_format == 'sbhd':
             # (bs)hd -> bs(hd) -> sb(hd)
@@ -1725,6 +1875,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         qkv, out, cu_seqlens = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1794,6 +1945,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -1848,6 +2000,15 @@ class FusedAttnFunc(torch.autograd.Function):
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            tensor_list = [q, k, v, out, cu_seqlens_q, cu_seqlens_kv]
+            qkv_layout = 'sbhd_sbhd_sbhd'
+            for tensor in tensor_list:
+                if tensor is not None:
+                    tensor.activation_offloading = True
+
+
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
@@ -1866,6 +2027,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2025,42 +2187,30 @@ class FusedAttention(torch.nn.Module):
             if 'padding' in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
 
-                global _cu_seqlens_q, _cu_seqlens_kv
-                if (cu_seqlens_q is not None and cu_seqlens_kv is not None):
-                    # use cu_seqlens when both cu_seqlens and attention_mask are present
-                    if self.layer_number == 1:
-                        _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
-                elif attention_mask is not None:
+                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                    if attention_mask is None:
+                        raise RuntimeError(
+                            "Please provide attention_mask or cu_seqlens for padding!"
+                        )
                     if self.attention_type == "self":
-                        if self.layer_number == 1:
-                            _cu_seqlens_q = get_cu_seqlens(attention_mask)
-                            _cu_seqlens_kv = _cu_seqlens_q
+                        cu_seqlens_q = get_cu_seqlens(attention_mask)
+                        cu_seqlens_kv = cu_seqlens_q
                     else:
-                        if self.layer_number == 1:
-                            _cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            _cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
-                else:
-                    raise Exception("Please provide attention_mask or cu_seqlens for padding!")
-                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                        cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                        cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
             else:
-                if self.layer_number == 1:
-                    if cu_seqlens_q is None:
-                        cu_seqlens_q = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_q,
-                                step=max_seqlen_q,
-                                dtype=torch.int32,
-                                device=query_layer.device)
-                    if cu_seqlens_kv is None:
-                        cu_seqlens_kv = torch.arange(
-                                0,
-                                (batch_size + 1) * max_seqlen_kv,
-                                step=max_seqlen_kv,
-                                dtype=torch.int32,
-                                device=key_layer.device)
-                    _cu_seqlens_q, _cu_seqlens_kv = cu_seqlens_q, cu_seqlens_kv
-                else:
-                    cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_q,
+                        query_layer.device,
+                    )
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = _get_full_cu_seqlens(
+                        batch_size,
+                        max_seqlen_kv,
+                        key_layer.device,
+                    )
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
@@ -2237,6 +2387,7 @@ class DotProductAttention(torch.nn.Module):
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
+        self.layer_number = 1 if layer_number is None else layer_number
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
@@ -2321,9 +2472,9 @@ class DotProductAttention(torch.nn.Module):
 
         hidden_states = checkpoint(
             custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
+            distribute_saved_activations=False,
+            get_rng_state_tracker=self.get_rng_state_tracker,
+            tp_group=self.tp_group,
             *forward_args,
             **forward_kwargs,
         )
@@ -2367,10 +2518,10 @@ class DotProductAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
-        alibi_slopes: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
@@ -2448,11 +2599,7 @@ class DotProductAttention(torch.nn.Module):
                        `arbitrary`}, default = `None`. Type of attention mask passed into
                        softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
         window_size: Optional[Tuple[int, int]], default = `None`
-                    sliding window size for local attention.
-        alibi_slopes: Optional[torch.Tensor], default = `None`
-                     An fp32 bias of shape (nheads,) or (batch_size, nheads)
-                     (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-                     is added to the attention score of query i and key j.
+                    Sliding window size for local attention.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -2463,6 +2610,10 @@ class DotProductAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
+                     to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         """
@@ -2547,6 +2698,11 @@ class DotProductAttention(torch.nn.Module):
         # The following section filters out some backends based on
         # certain asserts before executing the forward pass.
 
+        # Filter: ONNX export.
+        if is_in_onnx_export_mode():
+            use_flash_attention = False
+            use_fused_attention = False
+
         # Filter: Input type.
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
@@ -2575,10 +2731,6 @@ class DotProductAttention(torch.nn.Module):
             )
             use_flash_attention = False
 
-        # Filter: bias.
-        if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
-            use_flash_attention = False
-
         context_parallel = (self.cp_group is not None and \
             get_distributed_world_size(self.cp_group) != 1)
 
@@ -2588,11 +2740,6 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
             if (not _flash_attn_2_3_plus) or context_parallel:
                 use_flash_attention = False
-
-        # Filter: ONNX export.
-        if is_in_onnx_export_mode():
-            use_flash_attention = False
-            use_fused_attention = False
 
         # Filter: Attention mask type.
         #   attn_mask_type(s)    |     supported backends
@@ -2609,12 +2756,47 @@ class DotProductAttention(torch.nn.Module):
         if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             use_unfused_attention = False
 
+        # Filter: bias.
+        global _alibi_cache
+        if alibi_slopes is not None:
+            assert (core_attention_bias_type == "alibi"
+                ), "core_attention_bias_type must be alibi in order to use alibi_slopes!"
+            if self.layer_number == 1:
+                _alibi_cache["_alibi_slopes_require_update"] = True
+                _alibi_cache["_alibi_bias_require_update"] = True
+        if core_attention_bias_type == "alibi":
+            assert (core_attention_bias is None
+                ), "core_attention_bias must be None when core_attention_bias_type is alibi!"
+            if (_alibi_cache["_num_heads"] != query_layer.shape[-2]
+                or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
+                or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
+                or _alibi_cache["_alibi_slopes"] is None):
+                _alibi_cache["_alibi_slopes_require_update"] = True
+                _alibi_cache["_alibi_bias_require_update"] = True
+
+        if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
+            use_flash_attention = False
+
+        fu_core_attention_bias_type = core_attention_bias_type
+        fu_core_attention_bias = core_attention_bias
+        if core_attention_bias_type == "alibi" and use_fused_attention and alibi_slopes is not None:
+            fu_core_attention_bias_type = "post_scale_bias"
+            _, fu_core_attention_bias = get_alibi(
+                query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes,
+                bias_dtype=query_layer.dtype)
+            if (fu_core_attention_bias.shape[0] != 1
+                or fu_core_attention_bias.shape[1] != query_layer.shape[-2]):
+                # remove this line when cuDNN adds bwd support for [b, 1, s, s] and [b, h, s, s]
+                use_fused_attention = False
+                # max512 backend will only support [1, h, s, s]
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
                 QKVLayout[qkv_layout],
-                AttnBiasType[core_attention_bias_type],
+                AttnBiasType[fu_core_attention_bias_type],
                 AttnMaskType[attn_mask_type],
                 self.attention_dropout,
                 query_layer.shape[-2], # num_attn_heads
@@ -2630,13 +2812,6 @@ class DotProductAttention(torch.nn.Module):
                 use_fused_attention and is_backend_avail and \
                 (not context_parallel or \
                  fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
-
-        # Filter: Alibi slopes
-        if alibi_slopes is not None:
-            use_fused_attention = False
-            assert (
-                use_flash_attention
-            ), "Alibi slopes bias is only supported in the FlashAttention backend."
 
         # Filter: determinism.
         # backend                                  | deterministic
@@ -2666,6 +2841,9 @@ class DotProductAttention(torch.nn.Module):
         if use_flash_attention:
             if _NVTE_DEBUG:
                 print("[DotProductAttention]: using flash-attn",_flash_attn_version)
+            if core_attention_bias_type == "alibi":
+                alibi_slopes, _ = get_alibi(
+                    query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
@@ -2698,8 +2876,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     fused_attention_backend=fused_attention_backend,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
+                    core_attention_bias_type=fu_core_attention_bias_type,
+                    core_attention_bias=fu_core_attention_bias,
                     fast_zero_fill=fast_zero_fill,
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
@@ -2716,8 +2894,8 @@ class DotProductAttention(torch.nn.Module):
                 attn_mask_type=attn_mask_type,
                 attention_mask=attention_mask,
                 fused_attention_backend=fused_attention_backend,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias=core_attention_bias,
+                core_attention_bias_type=fu_core_attention_bias_type,
+                core_attention_bias=fu_core_attention_bias,
                 fast_zero_fill=fast_zero_fill,
                 cp_group=self.cp_group,
                 cp_global_ranks=self.cp_global_ranks,
@@ -2727,6 +2905,13 @@ class DotProductAttention(torch.nn.Module):
 
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
+
+        from .cpu_offload import CPUOffloadEnabled
+        if CPUOffloadEnabled:
+            warnings.warn(
+                           "Attention activation Offloading is only implemented"
+                           "with Flash Attention and Fused Attention!"
+                         )
 
         if _NVTE_DEBUG:
             print("[DotProductAttention]: using unfused DPA")
@@ -2743,7 +2928,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type = attn_mask_type,
                     attention_mask = attention_mask,
                     core_attention_bias_type = core_attention_bias_type,
-                    core_attention_bias = core_attention_bias)
+                    core_attention_bias = core_attention_bias,
+                    alibi_slopes = alibi_slopes)
             return self.unfused_attention(query_layer,
                     key_layer,
                     value_layer,
@@ -2753,7 +2939,8 @@ class DotProductAttention(torch.nn.Module):
                     attn_mask_type = attn_mask_type,
                     attention_mask = attention_mask,
                     core_attention_bias_type = core_attention_bias_type,
-                    core_attention_bias = core_attention_bias)
+                    core_attention_bias = core_attention_bias,
+                    alibi_slopes = alibi_slopes)
 
         raise Exception("No dot product attention support for the provided inputs!")
 
@@ -2819,8 +3006,8 @@ class MultiheadAttention(torch.nn.Module):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = `True`
-                     if set to `False`, layer normalization to the input is not applied.
+    input_layernorm: bool, default = `False`
+                     if set to `True`, layer normalization to the input is applied.
     attention_type: { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
@@ -3084,6 +3271,7 @@ class MultiheadAttention(torch.nn.Module):
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
             layer_number=self.layer_number,
+            attention_type=self.attention_type,
         )
 
         # Linear
@@ -3166,6 +3354,7 @@ class MultiheadAttention(torch.nn.Module):
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
@@ -3221,6 +3410,10 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
                     It should be 'None' for 'no_bias' and 'alibi' bias types.
+        alibi_slopes: Optional[torch.Tensor], default = `None`
+                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
+                     to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         """
@@ -3432,8 +3625,8 @@ class MultiheadAttention(torch.nn.Module):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
 
         context_layer = self.core_attention(
             query_layer,
@@ -3448,6 +3641,7 @@ class MultiheadAttention(torch.nn.Module):
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
+            alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
         )
 
