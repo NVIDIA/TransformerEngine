@@ -6,7 +6,7 @@ import torch
 
 import transformer_engine.pytorch as te
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.optimizers.multi_tensor_apply import MultiTensorApply
+from transformer_engine.pytorch.optimizers import MultiTensorApply
 
 input_size_pairs = [
     (7777 * 77, 555 * 555),
