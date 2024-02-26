@@ -2055,11 +2055,6 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == qkv.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return SelfFusedAttnFwdPrimitive.outer_primitive.bind(qkv,
                                                           bias,
@@ -2261,11 +2256,6 @@ def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.nd
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == qkv.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return SelfFusedAttnBwdPrimitive.outer_primitive.bind(qkv,
                                                           bias,
@@ -2495,11 +2485,6 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_s
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return CrossFusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                            kv,
@@ -2726,11 +2711,6 @@ def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return CrossFusedAttnBwdPrimitive.outer_primitive.bind(q,
                                                            kv,
@@ -2967,11 +2947,6 @@ def fused_attn_fwd(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.nda
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return FusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                       k,
@@ -3215,11 +3190,6 @@ def fused_attn_bwd(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.nda
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=q.dtype)
-    elif not (bias.shape[0] == 1 and bias.shape[1] == q.shape[1]):
-        # Bias shapes of [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] are only supported in the
-        # forward pass as an arbitrary mask workaround.
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
-        assert attn_mask_type in [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
 
     return FusedAttnBwdPrimitive.outer_primitive.bind(q,
                                                       k,

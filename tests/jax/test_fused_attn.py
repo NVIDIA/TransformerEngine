@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+import sys
 
 from enum import Enum
 from dataclasses import dataclass
@@ -22,7 +23,9 @@ from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
-from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+from transformer_engine.jax.cpp_extensions import FusedAttnHelper
+
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 
 @pytest.fixture(autouse=True, scope='function')
@@ -60,7 +63,20 @@ def general_dot_product_attention(query: ArrayLike, key: ArrayLike, value: Array
 
     if bias is not None:
         if bias.ndim != logits.ndim:
-            bias = bias.reshape((1, *logits.shape[1:]))
+            if bias.shape[0] == 1:
+                if bias.shape[1] == 1:
+                    # (1, 1, s_q, s_kv) -> (1, 1, 1, s_q, s_kv)
+                    bias = bias.reshape((1, 1, 1, *logits.shape[3:]))
+                else:
+                    # (1, h_q, s_q, s_kv) -> (1, h_kv, num_groups, s_q, s_kv)
+                    bias = bias.reshape((1, *logits.shape[1:]))
+            else:
+                if bias.shape[1] == 1:
+                    # (b, 1, s_q, s_kv) -> (b, 1, 1, s_q, s_kv)
+                    bias = bias.reshape((b, 1, 1, *logits.shape[3:]))
+                else:
+                    # (b, h_q, s_q, s_kv) -> (b, h_kv, num_groups, s_q, s_kv)
+                    bias = bias.reshape(logits.shape)
         logits = logits + bias
 
     if mask is not None:
@@ -183,19 +199,24 @@ class FusedAttnRunner:
         if self.qkv_layout == QKVLayout.BS3HD and self.max_seqlen_q != self.max_seqlen_kv:
             pytest.skip("BS3HD layout requires max_seqlen_q and max_seqlen_kv to be equal.")
 
-        if (self.bias_shape != BiasShape.BIAS_1HSS
-            and (self.attn_bias_type != AttnBiasType.POST_SCALE_BIAS
-                 or (self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
-                     and self.attn_mask_type != AttnMaskType.NO_MASK
-                     and self.attn_mask_type != AttnMaskType.CAUSAL_MASK))):
-            pytest.skip("B1SS, BHSS and 11SS bias shapes require POST_SCALE_BIAS "
-                        "with NO_MASK or CAUSAL_MASK.")
-
-        if not is_fused_attn_kernel_available(
-                self.dtype, self.dtype, self.qkv_layout, self.attn_bias_type, self.attn_mask_type,
-                self.dropout_prob, self.num_heads_q, self.num_heads_kv, self.max_seqlen_q,
-                self.max_seqlen_kv, self.head_dim):
+        backend = FusedAttnHelper(
+            self.dtype, self.dtype, self.qkv_layout.value, self.attn_bias_type.value,
+            self.attn_mask_type.value, self.dropout_prob, self.num_heads_q, self.num_heads_kv,
+            self.max_seqlen_q, self.max_seqlen_kv, self.head_dim).get_fused_attn_backend()
+        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("Unsupported inputs combination or device compute capability.")
+
+        if self.bias_shape != BiasShape.BIAS_1HSS:
+            if self.attn_bias_type != AttnBiasType.POST_SCALE_BIAS:
+                pytest.skip("B1SS, BHSS and 11SS bias shapes require POST_SCALE_BIAS.")
+            elif self.attn_mask_type not in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+                pytest.skip("B1SS, BHSS and 11SS bias shapes are only supported for "
+                            "AttnMaskType.NO_MASK and AttnMaskType.CAUSAL_MASK.")
+            elif backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                pytest.skip("B1SS, BHSS and 11SS bias shapes are only supported for "
+                            "the F16_arbitrary_seqlen backend.")
+            elif self.dtype == jnp.float16:
+                pytest.xfail("B1SS, BHSS and 11SS bias shapes fail with jax.numpy.float16 dtype.")
 
     def _setup_inputs(self):
         self._check_configs()
@@ -227,7 +248,20 @@ class FusedAttnRunner:
             else:
                 # [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] bias shapes are workarounds for
                 # an arbitrary mask where (True/False -> 0/-Inf)
-                self.bias = jax.random.choice(bias_key, self.dtype([0, -jnp.inf]), bias_shape)
+                neg_inf = -1024. * 1024. * 1024. if self.dtype == jnp.bfloat16 else -2.**10.
+                self.bias = jnp.zeros(bias_shape, dtype=self.dtype)
+                self.bias = self.bias.at[:, :, :, :].set(neg_inf)
+                seq_id = [0, 14, 55, 60, 128,
+                          144, 190, 222, 256,
+                          300, 356, 450, 512,
+                          680, 720, 884, 1024,
+                          1128, 1480, 2812, 2048]
+                for i in range(1, len(seq_id)):
+                    if seq_id[i] < self.max_seqlen_q and seq_id[i] < self.max_seqlen_kv:
+                        self.bias = \
+                            self.bias.at[:, :, seq_id[i-1]:seq_id[i], seq_id[i-1]:seq_id[i]].set(0.)
+                    else:
+                        break
         else:
             self.bias = None
 
@@ -329,7 +363,8 @@ class FusedAttnRunner:
         np.testing.assert_allclose(primitive_out.astype(jnp.float32),
                                    reference_out.astype(jnp.float32),
                                    atol=1e-5,
-                                   rtol=1e-3)
+                                   rtol=1e-3,
+                                   verbose=True)
 
         # Convert the outputs to float32 for the elementwise comparison
         if self.bias_shape == BiasShape.BIAS_1HSS:
@@ -345,7 +380,8 @@ class FusedAttnRunner:
             primitive_valid, primitive_invalid = jnp.split(primitive, (valid_len,), axis=1)
             reference_valid, reference_invalid = jnp.split(reference, (valid_len,), axis=1)
 
-            np.testing.assert_allclose(primitive_valid, reference_valid, atol=1e-4, rtol=1e-3)
+            np.testing.assert_allclose(primitive_valid, reference_valid,
+                                       atol=1e-4, rtol=1e-3, verbose=True)
             assert jnp.allclose(primitive_invalid, reference_invalid)
             assert jnp.allclose(primitive_invalid, jnp.zeros_like(primitive_invalid))
 
@@ -358,11 +394,13 @@ class FusedAttnRunner:
             np.testing.assert_allclose(primitive_dbias[..., :self.valid_len_q, :self.valid_len_kv],
                                        reference_dbias[..., :self.valid_len_q, :self.valid_len_kv],
                                        atol=3e-5,
-                                       rtol=1e-4)
+                                       rtol=1e-4,
+                                       verbose=True)
 
             # dbias padded part
             np.testing.assert_allclose(primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:],
-                                       reference_dbias[..., self.valid_len_q:, self.valid_len_kv:])
+                                       reference_dbias[..., self.valid_len_q:, self.valid_len_kv:],
+                                       verbose=True)
 
             assert jnp.allclose(
                 primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:],
