@@ -29,7 +29,7 @@ def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     if matrix_shape not in _default_causal_mask:
         diagonal_offset = sk - sq + 1
         _default_causal_mask[matrix_shape] = torch.triu(
-            torch.ones(sq, sk, dtype=torch.bool, device="cuda"), 
+            torch.ones(sq, sk, dtype=torch.bool, device="cuda"),
             diagonal=diagonal_offset)
     return _default_causal_mask[matrix_shape]
 

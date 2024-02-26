@@ -2678,11 +2678,11 @@ class DotProductAttention(torch.nn.Module):
                 sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
             key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-            
+
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
                 value_layer = value_layer.transpose(0, 1)
-            
+
             key_layer = key_layer.contiguous()
             value_layer = value_layer.contiguous()
 
