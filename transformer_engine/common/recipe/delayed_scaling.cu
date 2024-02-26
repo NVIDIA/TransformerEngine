@@ -190,7 +190,8 @@ kernel_bulk(
       const auto& length = amax_history_length;
       const auto& stride = p.param[bid].num_scale;
       auto* amax_history = p.param[bid].amax_history+count;
-      const auto last_amax = (amax_reduction_buffer[bid*stride+count] != 0) ?
+      const auto last_amax = ((amax_reduction_buffer != nullptr)
+            && (amax_reduction_buffer[bid*stride+count] != 0)) ?
             amax_reduction_buffer[bid*stride+count] : amax_history[0];
       for (size_t off = 0; off < length; off += bsize) {
         const size_t i = off + tid;
@@ -468,7 +469,9 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
     NVTE_CHECK_CUDA(cudaGetLastError());
 
     // shift amax buffer pointer
-    amax_buffer += kernel_num_scales;
+    if (amax_buffer != nullptr) {
+      amax_buffer += kernel_num_scales;
+    }
   }
 }
 
