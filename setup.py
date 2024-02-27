@@ -14,7 +14,6 @@ import subprocess
 from subprocess import CalledProcessError
 import sys
 import sysconfig
-import tempfile
 from typing import List, Optional, Tuple, Union
 
 import setuptools
