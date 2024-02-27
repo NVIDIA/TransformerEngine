@@ -14,6 +14,7 @@ from torch.utils.checkpoint import detach_variable, noop_context_fn
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
+from .jit import no_torch_dynamo
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -24,8 +25,6 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "partition_dim": -1,
     "partition_stride": 1,
 }
-
-_USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
 _FP8_ACTIVATION_RECOMPUTE_ENABLED = False
 _FP8_ACTIVATION_RECOMPUTE_PHASE = False
@@ -431,11 +430,6 @@ class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: dis
         super().__init__(pack_hook, unpack_hook)
 
 
-def use_reentrant_activation_recompute():
-    """Returns `True` if activation recompute is using the 'reentrant' method."""
-    return _USE_REENTRANT_ACTIVATION_RECOMPUTE
-
-
 def get_activation_recompute_contexts():
     """Returns context objects for the checkpointed forward pass and the forward recompute phase."""
     forward_ctx = activation_recompute_forward(
@@ -474,7 +468,7 @@ def _is_te_module(module):
             break
     return is_te_module
 
-
+@no_torch_dynamo()
 def checkpoint(
     function: Callable,
     *args: Tuple[torch.Tensor, ...],
@@ -523,8 +517,7 @@ def checkpoint(
             dictionary of string keys for keyword arguments to :attr:`function`.
     """
     # Pop out te.distributed.checkpoint() arguments
-    global _USE_REENTRANT_ACTIVATION_RECOMPUTE
-    _USE_REENTRANT_ACTIVATION_RECOMPUTE = kwargs.pop("use_reentrant", True)
+    use_reentrant = kwargs.pop("use_reentrant", True)
     distribute_saved_activations = kwargs.pop("distribute_saved_activations", False)
     tp_group = kwargs.pop("tp_group", None)
     get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
@@ -540,7 +533,7 @@ def checkpoint(
         return torch.utils.checkpoint.checkpoint(
             function,
             *args,
-            use_reentrant=_USE_REENTRANT_ACTIVATION_RECOMPUTE,
+            use_reentrant=use_reentrant,
             context_fn=context_fn,
             determinism_check=determinism_check,
             debug=debug,
@@ -554,7 +547,7 @@ def checkpoint(
     #       the TE checkpoint for non-TE modules, so the TE checkpoint has to support a potential
     #       user context function.
     del determinism_check, debug
-    if _USE_REENTRANT_ACTIVATION_RECOMPUTE:
+    if use_reentrant:
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.
         if distribute_saved_activations:
@@ -607,6 +600,7 @@ def checkpoint(
         out = function(*args, **kwargs)
 
     return out
+
 
 class CudaRNGStatesTracker:
     """

@@ -43,7 +43,6 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    use_reentrant_activation_recompute,
 )
 
 from .. import cpp_extensions as tex
@@ -1415,11 +1414,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.get_fp8_weights_scratchpad(
                         is_first_microbatch
                 )
-
-            # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
-            if (self.bias_gelu_nvfusion
-                and not use_reentrant_activation_recompute()):
-                self.bias_gelu_nvfusion = False
 
             from ..cpu_offload import CPUOffloadEnabled
 
