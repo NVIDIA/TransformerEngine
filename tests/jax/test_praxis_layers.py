@@ -776,40 +776,74 @@ class MultiHeadAttnAttr:
     ZERO_CEN = 'zero_centered_gamma'
     NUM_ATTN_HEADS = 'num_attention_heads'
     NUM_GQA_GROUPS = 'num_gqa_groups'
+    ENABLE_ROPE = 'enable_rotary_pos_emb'
+    ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
+        ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
+        ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
         ATTN_MASK_TYPE: 'causal'
@@ -839,6 +873,8 @@ class TestMultiHeadAttn(TestLayer):
         input_layernorm = False
         return_layernorm_output = False
         attn_mask_type = attrs[MultiHeadAttnAttr.ATTN_MASK_TYPE]
+        enable_rotary_pos_emb = attrs[MultiHeadAttnAttr.ENABLE_ROPE]
+        rotary_pos_emb_group_method = attrs[MultiHeadAttnAttr.ROPE_GROUP_METHOD]
         fuse_qkv_params = True
         transpose_batch_sequence = True
         scale_attn_logits = False
@@ -859,6 +895,8 @@ class TestMultiHeadAttn(TestLayer):
                                      return_layernorm_output=return_layernorm_output,
                                      input_layernorm=input_layernorm,
                                      attn_mask_type=attn_mask_type,
+                                     enable_rotary_pos_emb=enable_rotary_pos_emb,
+                                     rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                                      fuse_qkv_params=fuse_qkv_params,
                                      transpose_batch_sequence=transpose_batch_sequence,
                                      scale_attn_logits=scale_attn_logits,
@@ -878,6 +916,8 @@ class TestMultiHeadAttn(TestLayer):
             return_layernorm_output=return_layernorm_output,
             input_layernorm=input_layernorm,
             attn_mask_type=attn_mask_type,
+            enable_rotary_pos_emb=enable_rotary_pos_emb,
+            rotary_pos_emb_group_method=rotary_pos_emb_group_method,
             fuse_qkv_params=fuse_qkv_params,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
@@ -920,6 +960,7 @@ class TransformerLayerAttr:
     ZERO_CEN = 'zero_centered_gamma'
     TRANSPOSE_BS = 'transpose_batch_sequence'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
+    ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -927,6 +968,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -935,6 +977,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -943,6 +986,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -951,6 +995,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -959,6 +1004,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -967,6 +1013,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -975,6 +1022,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -983,6 +1031,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -991,6 +1040,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -999,6 +1049,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1007,6 +1058,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1015,6 +1067,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1023,6 +1076,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1031,6 +1085,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1039,6 +1094,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1047,6 +1103,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1055,6 +1112,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1063,6 +1121,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1071,6 +1130,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1079,6 +1139,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1087,6 +1148,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1095,6 +1157,25 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
+        TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: True,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: True,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }]
 
@@ -1123,6 +1204,7 @@ class TestTransformer(TestLayer):
         bias_init = WeightInit.Constant(0.0)
         layer_type = attrs[TransformerLayerAttr.LYR_TYPE]
         enable_rotary_pos_emb = attrs[TransformerLayerAttr.ENABLE_ROPE]
+        rotary_pos_emb_group_method = attrs[TransformerLayerAttr.ROPE_GROUP_METHOD]
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
                                                dtype=dtype,
@@ -1160,6 +1242,7 @@ class TestTransformer(TestLayer):
                                      layer_type=layer_type,
                                      enable_relative_embedding=enable_relative_embedding,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
+                                     rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                                      relative_embedding=relative_embedding,
                                      drop_path=drop_path,
                                      transpose_batch_sequence=transpose_batch_sequence)
@@ -1182,6 +1265,7 @@ class TestTransformer(TestLayer):
                                "bias", bias_init),
                            layer_type=layer_type,
                            enable_rotary_pos_emb=enable_rotary_pos_emb,
+                           rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                            enable_relative_embedding=enable_relative_embedding,
                            relative_embedding=relative_embedding_flax_module,
                            drop_path=drop_path,
