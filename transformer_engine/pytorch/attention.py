@@ -2472,9 +2472,9 @@ class DotProductAttention(torch.nn.Module):
 
         hidden_states = checkpoint(
             custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
+            distribute_saved_activations=False,
+            get_rng_state_tracker=self.get_rng_state_tracker,
+            tp_group=self.tp_group,
             *forward_args,
             **forward_kwargs,
         )
