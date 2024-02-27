@@ -350,6 +350,22 @@ at::Tensor fp8_transpose(at::Tensor input,
 }
 
 
+void fp8_transpose_noalloc(at::Tensor input,
+                           at::Tensor output,
+                           transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t M = static_cast<size_t>(input.size(0));
+  size_t N = static_cast<size_t>(input.size(1));
+
+  auto input_cu  = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {N, M}, otype);
+
+  nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+}
+
+
 at::Tensor fp8_transpose_noop(at::Tensor input,
                               at::Tensor noop,
                               transformer_engine::DType otype

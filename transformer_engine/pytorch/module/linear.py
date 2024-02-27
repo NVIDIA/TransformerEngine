@@ -154,7 +154,6 @@ class _Linear(torch.autograd.Function):
                 # Weight is already in FP8
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
-                weight_t_fp8 = None
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -318,6 +317,7 @@ class _Linear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
+            ctx.primary_weights_in_fp8 = primary_weights_in_fp8
 
         # Row Parallel Linear
         if ub_split_rs or ub_atomic_gemm_rs:
@@ -352,10 +352,8 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             # Primary weights are in FP8.
-            if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(
-                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
-                )
+            if ctx.primary_weights_in_fp8:
+                tex.fp8_transpose_noalloc(weight._data, weight_t_fp8._data, weight._fp8_dtype)
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -836,7 +834,7 @@ class Linear(TransformerEngineBaseModule):
         `is_first_microbatch` is not `None`) or return empty fp8 weight
         tensors (if `is_first_microbatch is None`)
         """
-        if not self.fp8 or self.primary_weights_in_fp8:
+        if not self.fp8:
             return [None, None]
 
         if is_first_microbatch is None:

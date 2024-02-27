@@ -213,8 +213,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.reset_fp8_meta_scale_inv()
                 fc1_weight_fp8 = fc1_weight
                 fc2_weight_fp8 = fc2_weight
-                fc1_weight_t_fp8 = None
-                fc2_weight_t_fp8 = None
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 fc1_weight_fp8 = Float8Tensor(
@@ -517,6 +515,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.primary_weights_in_fp8 = primary_weights_in_fp8
 
         # Row Parallel Linear
         if ub_split_rs or ub_atomic_gemm_rs:
@@ -567,11 +566,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
-            update_transpose_cache = "reuse_only" if ctx.is_first_microbatch is None else "lazy"
-            if ctx.fp8 and fc1_weight_t_fp8 is None:
-                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=update_transpose_cache)
-            if ctx.fp8 and fc2_weight_t_fp8 is None:
-                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=update_transpose_cache)
+            if ctx.primary_weights_in_fp8:
+                tex.fp8_transpose_noalloc(fc1_weight._data, fc1_weight_t_fp8._data, fc1_weight._fp8_dtype)
+                tex.fp8_transpose_noalloc(fc2_weight._data, fc2_weight_t_fp8._data, fc2_weight._fp8_dtype)
 
             activation_func = _act_func(ctx.activation)[1]
 
@@ -1371,7 +1368,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         `is_first_microbatch` is not `None`) or return empty fp8 weight
         tensors (if `is_first_microbatch is None`)
         """
-        if not self.fp8 or self.primary_weights_in_fp8:
+        if not self.fp8:
             return [None, None, None, None]
 
         if is_first_microbatch is None:

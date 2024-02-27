@@ -27,11 +27,13 @@ def fp8_cast_transpose_fused(
     """Cast + Transpose with FP8 output"""
 
     return_outputs = False
-    if cast_out is None or transpose_out is None:
-        cast_out = torch.empty_like(inp, dtype=torch.uint8)
+    if transpose_out is None:
         transpose_out = torch.empty(
             inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8
         )
+        return_outputs = True
+    if cast_out is None:
+        cast_out = torch.empty_like(inp, dtype=torch.uint8)
         return_outputs = True
 
     if noop_tensor is None:

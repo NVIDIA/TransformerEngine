@@ -274,6 +274,11 @@ at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 );
 
+void fp8_transpose_noalloc(at::Tensor input,
+                           at::Tensor output,
+                           transformer_engine::DType otype
+);
+
 at::Tensor fp8_transpose_noop(at::Tensor input,
                               at::Tensor noop,
                               transformer_engine::DType otype
