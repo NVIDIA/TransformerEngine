@@ -967,7 +967,7 @@ def _run_dpa_fp8(dtype, config, backend):
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
     #inp = 0.01 * torch.randn(
-    inp = 0.1 * torch.randn(
+    inp = 0.3 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
@@ -1139,6 +1139,8 @@ class _dpa_fp8(torch.autograd.Function):
                 tex.DType.kFloat16).view(b, max_s, 3, h, d).transpose(0,1).contiguous()
         torch.save(qkv_out_fp16, 'qkv.pt')
         qkv_out = qkv_out.view(b, max_s, 3, h, d)
+        print('--- qkv_out min ', qkv_out.min().item(), ' max ', qkv_out.max().item())
+        print('--- qkv_out_fp16 min ', qkv_out_fp16.min().item(), ' max ', qkv_out_fp16.max().item())
 
         # FMHA
         context_, aux_ctx_tensors, *rest = fused_attn_fwd(
