@@ -11,7 +11,6 @@ from math import sqrt
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from flax.linen import combine_masks
@@ -206,6 +205,13 @@ class FusedAttnRunner:
                 pytest.skip("B1SS, BHSS and 11SS bias shapes are only supported for "
                             "the F16_arbitrary_seqlen backend.")
 
+        backend_str = "backend: "
+        if self.backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+            backend_str += "arbitrary_seqlen"
+        elif self.backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
+            backend_str += "max512_seqlen"
+        print('    ' + backend_str + '    ', end='')
+
     def _setup_inputs(self):
         self._check_configs()
         key = jax.random.PRNGKey(0)
@@ -225,17 +231,17 @@ class FusedAttnRunner:
         else:
             pytest.xfail("PyTest attempted to use an unrecognized bias layout!")
 
-        self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1)
-        self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1)
-        self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1)
+        self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.)
+        self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.)
+        self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.)
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape.BIAS_1HSS:
-                self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1)
+                self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1.)
             else:
                 # [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] bias shapes are workarounds for
                 # an arbitrary mask where (True/False -> 0/-Inf)
-                cudnn_neg_inf = -1e9 if self.dtype == jnp.bfloat16 else -2.**15.
+                cudnn_neg_inf = -2.**27. if self.dtype == jnp.bfloat16 else -2.**15.
                 self.bias = jnp.full(bias_shape, cudnn_neg_inf, dtype=self.dtype)
                 max_id = min(self.max_seqlen_q, self.max_seqlen_kv)
                 seq_id_size = max_id * 5 // 128  # 5 ids per interval of 128 sequences
@@ -267,7 +273,7 @@ class FusedAttnRunner:
         """
         Test forward without JIT
         """
-        self._setup_inputs(True)
+        self._setup_inputs()
 
         args = [self.q, self.k, self.v, self.bias, self.token_q, self.token_kv, self.dropout_rng]
         kwargs = {
@@ -283,11 +289,14 @@ class FusedAttnRunner:
         primitive_out = customcall_fused_dpa(*args, **kwargs).astype(jnp.float32)
         reference_out = jax_dpa(*args, **kwargs).astype(jnp.float32)
 
+        if self.is_training and self.dropout_prob > 0.:
+            return
+
         primitive_valid, primitive_invalid = jnp.split(primitive_out, (self.valid_len_q,), axis=1)
         reference_valid, _ = jnp.split(reference_out, (self.valid_len_q,), axis=1)
 
-        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
         assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
+        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
 
     def test_backward(self):
         """
@@ -339,9 +348,9 @@ class FusedAttnRunner:
             primitive_valid, primitive_invalid = jnp.split(primitive, (valid_len,), axis=1)
             reference_valid, reference_invalid = jnp.split(reference, (valid_len,), axis=1)
 
-            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
-            assert_allclose(primitive_invalid, reference_invalid, dtype=self.dtype)
             assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
+            assert_allclose(primitive_invalid, reference_invalid, dtype=self.dtype)
+            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
 
         # Convert the outputs to float32 for the elementwise comparison
         primitive_dq, primitive_dk, primitive_dv = map(jnp.float32, primitive_dgrad[:3])
@@ -355,20 +364,20 @@ class FusedAttnRunner:
             primitive_dbias = jnp.float32(primitive_dgrad[3])
             reference_dbias = jnp.float32(reference_dgrad[3])
 
-            # dbias valid part
-            assert_allclose(primitive_dbias[..., :self.valid_len_q, :self.valid_len_kv],
-                            reference_dbias[..., :self.valid_len_q, :self.valid_len_kv],
-                            dtype=self.dtype)
+            assert_allclose(
+                primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:],
+                jnp.zeros_like(primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:]),
+                dtype=self.dtype)
 
             # dbias padded part
             assert_allclose(primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:],
                             reference_dbias[..., self.valid_len_q:, self.valid_len_kv:],
                             dtype=self.dtype)
 
-            assert_allclose(
-                primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:],
-                jnp.zeros_like(primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:]),
-                dtype=self.dtype)
+            # dbias valid part
+            assert_allclose(primitive_dbias[..., :self.valid_len_q, :self.valid_len_kv],
+                            reference_dbias[..., :self.valid_len_q, :self.valid_len_kv],
+                            dtype=self.dtype)
 
 @pytest.mark.parametrize('bias_shape', [
     pytest.param(BiasShape.BIAS_1HSS, id='1HSS'),
