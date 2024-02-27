@@ -116,13 +116,24 @@ class Pipeline:
         fuse_ops: bool = True,
     ):
 
-        # Unfused ops for forward and backward pass
-        self._num_unfused_ops: int = len(ops)
-        self._unfused_ops: list[FusableOperation] = ops
+        # Get list of unfused operations
+        unfused_ops = []
+        for op in ops:
+            if op.is_fused_op:
+                unfused_ops.extend(op._unfused_ops)  ### TODO Recursive
+            else:
+                unfused_ops.append(op)
+        self._num_unfused_ops: int = len(unfused_ops)
+        self._unfused_ops: list[FusableOperation] = unfused_ops
+
+        # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusableOperation, list[int]]]
         self._backward_ops: list[tuple[FusableOperation, list[int]]]
-        self._forward_ops = [(op, [idx]) for idx, op in enumerate(ops)]
-        self._backward_ops = [op for op in reversed(self._forward_ops)]
+        self._forward_ops = [
+            (op, (idx,))
+            for idx, op in enumerate(self._unfused_ops)
+        ]
+        self._backward_ops = list(reversed(self._forward_ops))
 
         # Fuse ops if needed
         if fuse_ops:
@@ -143,6 +154,10 @@ class Pipeline:
         input: torch.Tensor,
         unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
+
+        # Make sure ops are initialized
+        for op in self._unfused_ops:
+            op._pre_forward()
 
         # Construct autograd contexts
         num_unfused_ops = len(self._unfused_ops)

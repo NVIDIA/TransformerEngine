@@ -16,9 +16,11 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     Must be used carefully.
     """
     for t in tensors:
-        if t is not None:
+        if getattr(t, "_is_float8_tensor", False):
+            t._data = torch.Tensor()
+        elif isinstance(t, torch.Tensor):
             t.data = torch.Tensor()
-            del t
+        del t
 
 
 def get_device_compute_capability() -> Tuple[int, int]:

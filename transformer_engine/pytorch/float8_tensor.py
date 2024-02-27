@@ -102,6 +102,7 @@ class _ToFloat8Func(torch.autograd.Function):
             if scale is None:
                 scale = fp8_meta[fp8_meta_key].scale[fp8_meta_index]
             if amax is None:
+
                 amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
             if scale_inv is None:
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
@@ -755,3 +756,6 @@ class Float8Tensor(torch.Tensor):
 
     # Do not force the Float8Tensor type on the returned tensor
     __torch_function__ = torch._C._disabled_torch_function_impl
+
+    # Class attribute to check for Float8Tensor
+    _is_float8_tensor: bool = True

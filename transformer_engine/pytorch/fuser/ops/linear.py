@@ -11,16 +11,56 @@ from typing import Optional
 
 import torch
 
-from ...cpp_extensions import gemm
+from ...cpp_extensions import fp8_gemm, gemm
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
+from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager
 from ...module.base import get_workspace
-from ._common import canonicalize_device, canonicalize_dtype
+from ._common import (
+    canonicalize_device,
+    canonicalize_dtype,
+    is_float8_tensor,
+)
 from .op import FusableOperation
+
+def _reshape(
+    tensor: torch.Tensor | Float8Tensor,
+    shape: Optional[Iterable[int]] = None,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+    memory_format: torch.memory_format = torch.preserve_format,
+):
+    """Reshape tensor, keeping same data if possible
+
+    Supports Float8Tensor.
+
+    """
+
+    # Default kwargs
+    if shape is None:
+        shape = tensor.size()
+    if device is None:
+        device = tensor.device
+    if dtype is None:
+        dtype = tensor.dtype
+
+    # Reshape FP8 tensor
+    if is_float8_tensor(tensor):
+        data = tensor._data.to(
+            device=device,
+            memory_format=memory_format,
+        )
+        data = data.reshape(*shape)
+        return Float8Tensor.make_like(tensor, data=data, dtype=dtype)
+
+    # Reshape standard PyTorch tensor
+    tensor = tensor.reshape(*shape)
+    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+
 
 class Linear(FusableOperation):
 
@@ -42,7 +82,7 @@ class Linear(FusableOperation):
         self.in_features: int = in_features
         self.out_features: int = out_features
 
-        # Check device
+        # Weight tensor device
         defer_param_init = False
         device = canonicalize_device(device)
         if device.type == "meta":
@@ -52,7 +92,7 @@ class Linear(FusableOperation):
             raise ValueError(f"Only CUDA devices are supported (got {device})")
         self.device: torch.device = device
 
-        # Check dtype
+        # Weight tensor datatype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(
@@ -60,7 +100,7 @@ class Linear(FusableOperation):
             )
         self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
-        # Configure tensor parallelism
+        # Tensor parallel configuration
         tensor_parallel_size: int = 1
         local_in_features: int = in_features
         local_out_features: int = out_features
@@ -99,7 +139,7 @@ class Linear(FusableOperation):
         self.local_in_features: int = local_in_features
         self.local_out_features: int = local_out_features
 
-        # Native FP8 parameters
+        # Whether weight tensor is natively in FP8
         self._with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         if self._with_fp8_parameters:
             defer_param_init = True
@@ -108,7 +148,7 @@ class Linear(FusableOperation):
         weight = torch.empty(
             local_out_features,
             local_in_features,
-            device="meta" if defer_param_init else device,
+            device="meta",
             dtype=dtype,
         )
         weight = torch.nn.Parameter(weight)
@@ -118,13 +158,23 @@ class Linear(FusableOperation):
         if not defer_param_init:
             self.reset_parameters()
 
+    def num_fp8_scales(self, mode: str) -> int:
+        if mode == "input":
+            return 1
+        if mode == "param":
+            return 1
+        if mode == "grad_output":
+            return 1
+        return 0
+
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 
-        # Make sure parameter is on a CUDA device
+        # Make sure parameter is initialized
         weight = self.weight
-        if weight.device.type != "cuda":
+        if weight.device.type != "cuda" or is_float8_tensor(weight):
             weight = torch.empty_like(weight, device=self.device)
+        weight = weight.to(device=self.device, dtype=self.dtype)
 
         # Initialize values
         init_context = contextlib.nullcontext
@@ -134,36 +184,33 @@ class Linear(FusableOperation):
             torch.nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
 
         # Cast to FP8 if needed
-        ### TODO Fix
-        # fp8_meta_index = ### TODO ?
-        # if self._with_fp8_parameters:
-        #     weight = Float8Tensor.to_float8(
-        #         weight,
-        #         fp8_meta=self.fp8_meta,
-        #         fp8_meta_index=fp8_meta_index
-        #     )
+        if self._with_fp8_parameters:
+            weight = Float8Tensor.to_float8(
+                weight,
+                fp8_meta=self._get_fp8_meta("param"),
+                fp8_meta_index=0,
+            )
 
         # Save updated parameter
         if not isinstance(weight, torch.nn.Parameter):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def _lazy_reset_parameters(self) -> None:
-        """Initialize parameters if not already initialized"""
-        if self.weight.device.type != "cuda":
-            self.reset_parameters
+    def _pre_forward(self) -> None:
+        super()._pre_forward()
+        if self.weight.device.type == "meta":
+            self.reset_parameters()
 
-    def unfused_op_forward(
+    def _unfused_op_forward(
         self,
         ctx: OperationContext,
         input: torch.Tensor,
     ) -> torch.Tensor:
-        ### TODO FP8
 
-        # Make sure parameters are ready
-        self._lazy_reset_parameters()
+        # Check if FP8 is enabled
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
 
-        # Check tensors
+        # Check input tensor
         input_dims = input.size()
         if self.weight.size(1) != input_dims[-1]:
             raise ValueError(
@@ -171,34 +218,81 @@ class Linear(FusableOperation):
                 f"and weight tensor (shape={tuple(self.weight.size())}) "
                 "are not compatible"
             )
-        x = input.reshape(-1, input_dims[-1])
-        x = x.to(
+        x = _reshape(
+            input,
+            shape=(-1, input_dims[-1]),
             device=self.device,
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
-        w = self.weight.contiguous()
+        if fp8_enabled and not is_float8_tensor(x):
+            x = Float8Tensor.to_float8(
+                x,
+                fp8_meta=self._get_fp8_meta("input"),
+                fp8_meta_index=0,
+            )
+        elif not fp8_enabled and is_float8_tensor(x):
+            x = x.from_float8()
 
         # Gather sequence-parallel input if needed
         local_x = x
+        async_handle = None
         if self.tensor_parallel_mode == "column" and self.sequence_parallel:
-            x, _ = gather_along_first_dim(local_x, self.tensor_parallel_group)
+            x, async_handle = gather_along_first_dim(
+                local_x,
+                self.tensor_parallel_group,
+                async_op=True,
+            )
 
-        # Apply GEMM
+        # Check weight tensor
+        ### TODO: Weight caching without FP8 params
+        w = _reshape(
+            self.weight,
+            device=self.device,
+            dtype=self.dtype,
+            memory_format=torch.contiguous_format,
+        )
+        if fp8_enabled and not is_float8_tensor(w):
+            w = Float8Tensor.to_float8(
+                w,
+                fp8_meta=self._get_fp8_meta("param"),
+                fp8_meta_index=0,
+            )
+        elif not fp8_enabled and is_float8_tensor(w):
+            w = w.from_float8()
+
+        # Synchronize async communication
+        if async_handle is not None:
+            async_handle.wait()
+
+        # Perform GEMM
         y = torch.empty(
             (x.size(0), w.size(0)),
             dtype=self.dtype,
             device=self.device,
         )
-        gemm(
-            w,
-            x,
-            self.dtype,
-            get_workspace(),
-            bias=None,
-            use_bias=False,
-            out=y,
-        )
+        if fp8_enabled:
+            fp8_gemm(
+                w._data,
+                w._scale_inv,
+                0,
+                w._fp8_dtype,
+                x._data,
+                x._scale_inv,
+                0,
+                x._fp8_dtype,
+                y.dtype,
+                get_workspace(),
+                out=y,
+            )
+        else:
+            gemm(
+                w,
+                x,
+                y.dtype,
+                get_workspace(),
+                out=y,
+            )
 
         # Reduce tensor-parallel output if needed
         if self.tensor_parallel_mode == "row":
@@ -207,31 +301,27 @@ class Linear(FusableOperation):
             else:
                 torch.distributed.all_reduce(y, group=self.tensor_parallel_group)
 
+        # Save state for backward pass
         ctx.save_for_backward(
             local_x,
         )
+        ctx.fp8_enabled = fp8_enabled
         ctx.input_dims = input_dims
         ctx.requires_dgrad = True  ### TODO input.requires_grad
 
         return y.reshape(-1, *input_dims[1:-1], y.size(-1))
 
-    def unfused_op_backward(
+    def _unfused_op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
+        # Load state from forward pass
         (
             local_x,
         ) = ctx.saved_tensors
-
-        # Check tensors
-        dy = grad_output.reshape(-1, grad_output.size(-1))
-        dy = dy.to(
-            device=self.weight.device,
-            dtype=self.weight.dtype,
-            memory_format=torch.contiguous_format,
-        )
+        fp8_enabled = ctx.fp8_enabled
 
         # Helper function for async communication
         async_handle = None
@@ -242,7 +332,6 @@ class Linear(FusableOperation):
                 async_handle = None
 
         # Gather sequence-parallel input if needed
-        # Note: Try overlapping with dgrad
         wait_async_handle()
         x = local_x
         if (
@@ -256,18 +345,86 @@ class Linear(FusableOperation):
                 async_op=ctx.requires_dgrad,
             )
 
-        # Apply dgrad GEMM
+        # Check grad output tensor
+        ### TODO: fused cast-transpose
+        dy = _reshape(
+            grad_output,
+            shape=(-1, grad_output.size(-1)),
+            device=self.device,
+            dtype=self.dtype,
+            memory_format=torch.contiguous_format,
+        )
+        if fp8_enabled and not is_float8_tensor(dy):
+            dy = Float8Tensor.to_float8(
+                dy,
+                fp8_meta=self._get_fp8_meta("grad_output"),
+                fp8_meta_forward=False,
+                fp8_meta_index=0,
+            )
+        elif not fp8_enabled and is_float8_tensor(dy):
+            dy = dy.from_float8()
+
+        # Compute grad input
         dx = None
         if ctx.requires_dgrad:
-            w = self.weight.contiguous()
-            dx, _, _ = gemm(
-                w,
-                dy,
-                self.dtype,
-                get_workspace(),
-                layout="NN",
-                grad=True,
+
+            # Check weight tensor
+            ### TODO: Weight caching without FP8 params
+            ### TODO: FP8 transpose caching
+            ### TODO: fused cast-transpose
+            w, w_t = None, None
+            if fp8_enabled:
+                w_t = _reshape(
+                    self.weight.transpose(),
+                    device=self.device,
+                    dtype=self.dtype,
+                    memory_format=torch.contiguous_format,
+                )
+                if not is_float8_tensor(w_t):
+                    w_t = Float8Tensor.to_float8(
+                        w_t,
+                        fp8_meta=self._get_fp8_meta("param"),
+                        fp8_meta_index=0,
+                    )
+            else:
+                w = _reshape(
+                    self.weight,
+                    device=self.device,
+                    dtype=self.dtype,
+                    memory_format=torch.contiguous_format,
+                )
+                if is_float8_tensor(w):
+                    w = w.from_float8()
+
+            # Perform dgrad GEMM
+            dx = torch.empty(
+                (dy.size(0), self.weight.size(1)),
+                dtype=self.dtype,
+                device=self.device,
             )
+            if fp8_enabled:
+                fp8_gemm(
+                    w_t._data,
+                    w_t._scale_inv,
+                    0,
+                    w_t._fp8_dtype,
+                    dy._data,
+                    dy._scale_inv,
+                    0,
+                    dy._fp8_dtype,
+                    dx.dtype,
+                    get_workspace(),
+                    out=dx,
+                )
+            else:
+                gemm(
+                    w,
+                    dy,
+                    dx.dtype,
+                    get_workspace(),
+                    layout="NN",
+                    out=dx,
+                )
 
         # Reduce tensor-parallel grad input if needed
         # Note: Try overlapping with wgrad
@@ -286,19 +443,42 @@ class Linear(FusableOperation):
                     async_op=self.weight.requires_grad,
                 )
 
-        # Apply wgrad GEMM
+        # Perform wgrad GEMM
+        ### TODO: grad accumulation
+        ### TODO: smarter handling of transpose
+        dw = None
         if self.weight.requires_grad:
-            dw, _, _ = gemm(
-                x,
-                dy,
-                self.dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                # accumulate=accumulate_wgrad_into_param_main_grad
-                # out=weight.main_grad if ctx.fuse_wgrad_accumulation else
+            dw = torch.empty_like(
+                self.weight,
+                dtype=self.dtype,
+                device=self.device,
+                memory_format=torch.contiguous_format,
+            )
+            if fp8_enabled:
+                fp8_gemm(
+                    x.transpose()._data,
+                    x._scale_inv,
+                    0,
+                    x._fp8_dtype,
+                    dy.transpose()._data,
+                    dy._scale_inv,
+                    0,
+                    dy._fp8_dtype,
+                    dw.dtype,
+                    get_workspace(),
+                    out=dw,
+                )
+            else:
+                gemm(
+                    x,
+                    dy,
+                    dw.dtype,
+                    get_workspace(),
+                    out=dw,
+                    layout="NT",
             )
 
+        # Clean up and return grads
         wait_async_handle()
         if dx is not None:
             dx = dx.reshape(ctx.input_dims)

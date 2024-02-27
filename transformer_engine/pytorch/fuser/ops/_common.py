@@ -19,3 +19,7 @@ def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
         # Use default dtype
         dtype = torch.get_default_dtype()
     return dtype
+
+def is_float8_tensor(tensor: Any) -> bool:
+    """Check if tensor is a Float8Tensor"""
+    return getattr(tensor, "_is_float8_tensor", False)
