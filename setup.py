@@ -361,7 +361,7 @@ class CMakeBuildExtension(BuildExtension):
             if isinstance(ext, CMakeExtension):
                 print(f"Building CMake extension {ext.name}")
                 # Set up incremental builds for CMake extensions
-                setup_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+                setup_dir = Path(__file__).resolve().parent
                 build_dir = setup_dir / "build" / "cmake"
                 build_dir.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
                 package_path = Path(self.get_ext_fullpath(ext.name))
