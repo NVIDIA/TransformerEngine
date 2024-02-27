@@ -205,13 +205,6 @@ class FusedAttnRunner:
                 pytest.skip("B1SS, BHSS and 11SS bias shapes are only supported for "
                             "the F16_arbitrary_seqlen backend.")
 
-        backend_str = "backend: "
-        if self.backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            backend_str += "arbitrary_seqlen"
-        elif self.backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            backend_str += "max512_seqlen"
-        print('    ' + backend_str + '    ', end='')
-
     def _setup_inputs(self):
         self._check_configs()
         key = jax.random.PRNGKey(0)
@@ -340,6 +333,10 @@ class FusedAttnRunner:
         primitive_out, primitive_dgrad = jitted_primitive(*args)
         reference_out, reference_dgrad = jitted_reference(*args)
 
+        # Skip elementwise comparison when dropout enabled
+        if self.dropout_prob > 0.0:
+            return
+
         assert_allclose(primitive_out.astype(jnp.float32),
                         reference_out.astype(jnp.float32),
                         dtype=self.dtype)
@@ -380,14 +377,14 @@ class FusedAttnRunner:
                             dtype=self.dtype)
 
 @pytest.mark.parametrize('bias_shape', [
-    pytest.param(BiasShape.BIAS_1HSS, id='1HSS'),
-    pytest.param(BiasShape.BIAS_B1SS, id='B1SS'),
-    pytest.param(BiasShape.BIAS_BHSS, id='BHSS'),
-    pytest.param(BiasShape.BIAS_11SS, id='11SS'),
+    pytest.param(BiasShape.BIAS_1HSS, id='1-H-S-S'),
+    pytest.param(BiasShape.BIAS_B1SS, id='B-1-S-S'),
+    pytest.param(BiasShape.BIAS_BHSS, id='B-H-S-S'),
+    pytest.param(BiasShape.BIAS_11SS, id='1-1-S-S'),
 ])
 @pytest.mark.parametrize('attn_bias_type', [
     pytest.param(AttnBiasType.NO_BIAS, id='NO_BIAS'),
-    pytest.param(AttnBiasType.POST_SCALE_BIAS, id='POST_SCALE'),
+    pytest.param(AttnBiasType.POST_SCALE_BIAS, id='POST_SCALE_BIAS'),
 ])
 @pytest.mark.parametrize('attn_mask_type', [
     pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
@@ -405,44 +402,42 @@ class FusedAttnRunner:
     pytest.param(jnp.float16, id="FP16")
 ])
 @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',[
-    pytest.param(32,  128,  128, 16, 16, 64, id='SELF_512'),
-    pytest.param( 4, 2048, 2048, 12, 12, 64, id='SELF_ARB'),
-    pytest.param(32,  512,  128, 16, 16, 64, id='CROSS_512'),
-    pytest.param( 4, 2048, 1024, 12, 12, 64, id='CROSS_ARB'),
-    pytest.param(32,  128,  128, 12,  6, 64, id='GQA_512'),
-    pytest.param( 4, 2048, 2048, 12,  6, 64, id='GQA_ARB')
+    pytest.param(32,  128,  128, 16, 16, 64, id='32-128-128-16-16-64-SELF'),
+    pytest.param( 4, 2048, 2048, 12, 12, 64, id='4-2048-2048-12-12-64-SELF'),
+    pytest.param(32,  512,  128, 16, 16, 64, id='32-512-128-16-16-64-CROSS'),
+    pytest.param( 4, 2048, 1024, 12, 12, 64, id='4-2048-1048-12-12-64-CROSS'),
+    pytest.param(32,  128,  128, 16,  8, 64, id='32-128-128-16-8-64-GQA'),
+    pytest.param( 4, 2048, 2048, 12,  6, 64, id='4-2048-2048-12-6-64-GQA')
+])
+@pytest.mark.parametrize('dropout_prob', [
+    pytest.param(0.0, id="DROP_0.0"),
+    pytest.param(0.1, id="DROP_0.1")
+])
+@pytest.mark.parametrize('is_training', [
+    pytest.param(True, id='TRAINING'),
+    pytest.param(False, id='INFERENCE'),
 ])
 class TestFusedAttn:
     """
     Fused attention tester
     """
-
-    @pytest.mark.parametrize('dropout_prob', [
-        pytest.param(0.0, id="DROP_0.0"),
-        pytest.param(0.1, id="DROP_0.1")
-    ])
-    @pytest.mark.parametrize('is_training', [
-        pytest.param(True, id='TRAINING'),
-        pytest.param(False, id='INFERENCE'),
-    ])
     @staticmethod
     def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                      dropout_prob, dtype, is_training, qkv_layout, bias_shape):
         """
         Test forward with parameterized configs
         """
-        pytest.skipif(is_training and dropout_prob > 0.,
-                      "Cannot test non-zero dropout in training mode.")
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                                  dropout_prob, dtype, is_training, qkv_layout, bias_shape)
         runner.test_forward()
 
     @staticmethod
     def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                      dtype, qkv_layout, bias_shape):
+                      dropout_prob, dtype, is_training, qkv_layout, bias_shape):
         """
         Test backward with parameterized configs
         """
+        pytest.skipif(is_training, "Backward pass does not support inference.")
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                                 0.0, dtype, True, qkv_layout, bias_shape)
+                                 dropout_prob, dtype, True, qkv_layout, bias_shape)
         runner.test_backward()

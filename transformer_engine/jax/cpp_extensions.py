@@ -1904,10 +1904,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2325,10 +2322,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2783,10 +2777,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2834,10 +2825,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert k_aval.shape == v_aval.shape
         input_batch = reduce(operator.mul, batch_shape)
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -2995,10 +2983,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_head_dim == kv_head_dim
         assert k_aval.shape == v_aval.shape
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
@@ -3055,10 +3040,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert k_aval.shape == v_aval.shape
         input_batch = reduce(operator.mul, batch_shape)
 
-        # NOTE: We can't rely on checking bias type here because we want to support arbitrary bias
-        #       shapes the bias tensor is being used as a workaround for an arbitrary mask
-        #       (True/False -> 0/-Inf) with bias type set to NO_BIAS.
-        if len(bias_aval.shape) == 1:
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
