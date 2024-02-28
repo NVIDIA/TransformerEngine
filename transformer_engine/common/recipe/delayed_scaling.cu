@@ -401,8 +401,8 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
 
   // amax parameters
   float* amax_buffer = static_cast<float*>(amax_reduction_buffer.data.dptr);
+  AmaxParams p;
   for (int iter = 0; iter < num_kernels; iter++) {
-    AmaxParams p;
     size_t kernel_num_scales = 0;
     size_t kernel_num_tensors = (iter == (num_kernels -1))
           ? num_tensors % AMAX_PARAMS_LIMIT: AMAX_PARAMS_LIMIT;
