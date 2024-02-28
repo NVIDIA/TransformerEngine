@@ -135,6 +135,7 @@ def initialize_ub(
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
+    use_reduce_scatter = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
 
     def get_method(name):
         for method, names in methods.items():
@@ -163,6 +164,7 @@ def initialize_ub(
                     set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    1 if name in use_reduce_scatter else 0,
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:

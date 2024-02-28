@@ -84,6 +84,7 @@ class _Linear(torch.autograd.Function):
         ub_split_ag_p2p: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag_p2p: bool,
+        ub_atomic_gemm_rs_p2p: bool,
         ub_name: str
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
@@ -95,7 +96,8 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(weight)
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
-        ub_rs = any([ub_split_rs, ub_split_rs_p2p, ub_atomic_gemm_rs])
+        ub_rs = any([
+            ub_split_rs, ub_split_rs_p2p, ub_atomic_gemm_rs, ub_atomic_gemm_rs_p2p])
 
         if ub_rs:
             tp_world_size = get_distributed_world_size(tp_group)
@@ -103,7 +105,9 @@ class _Linear(torch.autograd.Function):
                 ub_split_rs = False
                 ub_split_rs_p2p = False
                 ub_atomic_gemm_rs = False
-        if ub_atomic_gemm_rs or ub_atomic_gemm_ag_p2p:
+                ub_atomic_gemm_rs_p2p = False
+                ub_atomic_gemm_ag_p2p = False
+        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag_p2p, ub_atomic_gemm_rs_p2p]):
             assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
 
         # Cast input to expected dtype
@@ -205,6 +209,7 @@ class _Linear(torch.autograd.Function):
             ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
             ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
             ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P if ub_split_rs_p2p else ub_algo
+            ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P if ub_atomic_gemm_rs_p2p else ub_algo
             _ = fp8_gemm(
                 weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -553,6 +558,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -643,6 +649,7 @@ class Linear(TransformerEngineBaseModule):
         ub_split_ag_p2p: bool = False,
         ub_atomic_gemm_rs: bool = False,
         ub_atomic_gemm_ag_p2p: bool = False,
+        ub_atomic_gemm_rs_p2p: bool = False,
         ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -659,21 +666,21 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_rs_p2p = ub_split_rs_p2p
         self.ub_split_ag_p2p = ub_split_ag_p2p
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
+        self.ub_atomic_gemm_rs_p2p = ub_atomic_gemm_rs_p2p
         self.ub_atomic_gemm_ag_p2p = ub_atomic_gemm_ag_p2p
-        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag_p2p]):
+        if any([ub_split_rs, ub_split_rs_p2p, ub_split_ag_p2p, ub_atomic_gemm_rs,
+                ub_atomic_gemm_rs_p2p, ub_atomic_gemm_ag_p2p]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
         self.ub_name = ub_name
         self.get_rng_state_tracker = get_rng_state_tracker
         if device == 'meta':
             assert parameters_split is None, ("Cannot split module parameters "
                                               "on 'meta' device.")
 
-        if any([ub_split_rs, ub_split_rs_p2p, ub_split_ag_p2p, ub_atomic_gemm_rs]):
-            assert (
-                tex.userbuf_comm_available()
-            ), "Userbuffer communication backend not available."
-
-        if ub_atomic_gemm_rs or ub_atomic_gemm_ag_p2p:
+        if any([ub_atomic_gemm_rs, ub_atomic_gemm_rs_p2p, ub_atomic_gemm_ag_p2p]):
             warnings.warn(
                 "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
@@ -946,6 +953,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_split_ag_p2p,
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag_p2p,
+                self.ub_atomic_gemm_rs_p2p,
                 self.ub_name,
             )
             out = linear_fn(*args)
