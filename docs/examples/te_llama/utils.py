@@ -1,6 +1,7 @@
 
 import time
 import sys
+import IPython
 
 import torch
 from torch.optim import AdamW
@@ -71,7 +72,6 @@ def init_baseline_model(hyperparams):
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     # make sure to use flash_attention to do iso comparison with TELlamaModel
     config._attn_implementation = "flash_attention_2"
-#     config.num_hidden_layers = 4
     model = AutoModelForCausalLM.from_pretrained(
         hyperparams.model_name,
         config=config,
@@ -128,7 +128,7 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     total_loss = 0
     optimizer.zero_grad()
     train_dataloader = enumerate(train_dataloader)
-    
+
     time_vals = []
 
     for _ in range(hyperparams.num_training_steps):
@@ -146,51 +146,32 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
         end_time = time.time()
         total_time = end_time - start_time
         time_vals.append(total_time)
-        #print(f"Step {step}: loss: {loss.item():.3f} time: {total_time * 1000:.0f} ms")
 
     accelerator.end_training()
-    
+
     # ignore the first couple of time vals
     time_vals = time_vals[2:]
     print(f"{hyperparams.num_training_steps} finetuning steps complete!\nAverage time taken per step: {(sum(time_vals)/len(time_vals)) * 1000:.0f} milliseconds")
-    
+
 def restart_jupyter_notebook():
     # Try restarting the Jupyter kernel
-    import IPython
     IPython.Application.instance().kernel.do_shutdown(True)
-    
+
     # Check whether the device memory has been flushed
-    import torch
     if torch.cuda.memory_allocated() != 0:
         import warnings
         warnings.warn("The device memory hasn't been flushed, trying with a second method!")
-        
+
         # Try restarting the Jupyter kernel another way
         # Restart the kernel
         from IPython.core.display import HTML
         HTML("<script>Jupyter.notebook.kernel.restart()</script>")
-        
+
         if torch.cuda.memory_allocated() != 0:
             print("The device memory hasn't been flushed, try manually restarting the Jupyter kernel!")
-            
+
     # Suppress the warnings
-    import sys
     if not sys.warnoptions:
         import warnings
         warnings.simplefilter("ignore")
         torch.set_warn_always(False)
-    
-    
-## Default hyperparams, also defined in `utils.py` in class `Hyperparameters`
-## !!! `model_name` attr must point to the location of the model weights !!!
-hyperparams.model_name = "/ckpt/llama-7bf-hf" # <== Add model weight location here
-hyperparams.mixed_precision = "fp8"
-# hyperparams.batch_size = 128
-
-## Init the model and accelerator wrapper
-model = init_baseline_model(hyperparams)
-accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
-print(model)
-
-## Finetune the model
-finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
