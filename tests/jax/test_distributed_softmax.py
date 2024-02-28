@@ -70,8 +70,9 @@ class TestDistributedSoftmax:
         [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED, SoftmaxType.SCALED_UPPER_TRIANG_MASKED])
     @pytest.mark.parametrize('scale_factor', [1.0, 3.0])
     @pytest.mark.parametrize('dtype', DTYPES)
+    @pytest.mark.parametrize('bad_sharding', [False, True])
     def test_softmax(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
-                     softmax_type, scale_factor, dtype):
+                     softmax_type, scale_factor, dtype, bad_sharding):
 
         target_func = partial(self.target_func,
                               scale_factor=scale_factor,
@@ -79,7 +80,7 @@ class TestDistributedSoftmax:
         ref_func = partial(self.ref_func, scale_factor=scale_factor, dtype=dtype)
 
         (x, mask), (x_pspec, mask_pspec) = \
-                self.generate_inputs(data_shape, mesh_resource, softmax_type, dtype, False)
+                self.generate_inputs(data_shape, mesh_resource, softmax_type, dtype, bad_sharding)
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
@@ -87,59 +88,26 @@ class TestDistributedSoftmax:
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             mask_ = jax.device_put(mask, NamedSharding(mesh, mask_pspec))
 
-            compare_ops(target_func,
-                        ref_func, [x_, mask_],
-                        collective_count_ref,
-                        grad_args=(0,),
-                        metric_fwd_dtype=dtype,
-                        metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, mask_pspec),
-                        out_shardings=(None, (x_pspec,)))
-
-    @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
-    @pytest.mark.parametrize('data_shape', [[32, 12, 128, 128]])
-    @pytest.mark.parametrize(
-        'softmax_type',
-        [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED, SoftmaxType.SCALED_UPPER_TRIANG_MASKED])
-    def test_softmax_bad_sharding(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
-                                  softmax_type):
-
-        target_func = partial(self.target_func, scale_factor=1.0, softmax_type=softmax_type)
-        ref_func = partial(self.ref_func, scale_factor=1.0, dtype=jnp.float16)
-
-        (x, mask), (x_pspec, mask_pspec) = \
-                self.generate_inputs(data_shape, mesh_resource, softmax_type, jnp.float16, True)
-        collective_count_ref = self.generate_collectives_count_ref()
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(mesh_resource=mesh_resource):
-            x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            mask_ = jax.device_put(mask, NamedSharding(mesh, mask_pspec))
-
-            with warnings.catch_warnings(record=True) as w:
+            with warnings.catch_warnings(record=True) as warns:
                 try:
                     compare_ops(target_func,
                                 ref_func, [x_, mask_],
                                 collective_count_ref,
                                 grad_args=(0,),
-                                metric_fwd_dtype=jnp.float16,
-                                metric_bwd_dtype=jnp.float16,
+                                metric_fwd_dtype=dtype,
+                                metric_bwd_dtype=dtype,
                                 in_shardings=(x_pspec, mask_pspec),
                                 out_shardings=(None, (x_pspec,)))
-                except AssertionError as e:
+                except AssertionError as err:
                     # Softmax should still produce the correct numerical result with
                     # bad sharding. However, the collective count may not be the same
                     # when XLA is forced to unshard the hidden dimension. We can catch
                     # and ignore that specific error here.
-                    if "Expected collective count" not in str(e):
-                        raise e
-                    else:
-                        for warn in w:
-                            assert "Sharding the hidden dimension is not supported" in str(warn), (
-                                "Softmax primitive did not raise the correct warning for "
-                                "unsupported sharding in the hidden dimension."
-                            )
-
-
-
-
+                    if not bad_sharding or "Expected collective count" not in str(err):
+                        raise err
+                finally:
+                    for w in warns:
+                        assert "Sharding the hidden dimension is not supported" in str(w), (
+                            "Softmax primitive did not raise the correct warning for "
+                            "unsupported sharding in the hidden dimension."
+                        )

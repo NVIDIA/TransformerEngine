@@ -1326,7 +1326,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
         return ScaledSoftmaxFwdPrimitive.forward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos,result_infos
+            scale_factor, mesh, arg_infos, result_infos
         )
 
     @staticmethod
