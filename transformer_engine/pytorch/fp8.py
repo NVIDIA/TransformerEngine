@@ -64,6 +64,9 @@ class FP8GlobalStateManager:
     IS_FIRST_FP8_MODULE = False
     FP8_AUTOCAST_DEPTH = 0
     global_fp8_buffer = {}
+    global_amax_history_buffer = {}
+    global_scale_buffer = {}
+    global_scale_inv_buffer = {}
     fp8_tensors_recompute_buffer = []
     amax_forward_global_reduce_func = None
     amax_backward_global_reduce_func = None
@@ -85,6 +88,9 @@ class FP8GlobalStateManager:
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_AUTOCAST_DEPTH = 0
         cls.global_fp8_buffer = {}
+        cls.global_amax_history_buffer = {}
+        cls.global_scale_buffer = {}
+        cls.global_scale_inv_buffer = {}
         cls.fp8_tensors_recompute_buffer = []
         cls.amax_forward_global_reduce_func = None
         cls.amax_backward_global_reduce_func = None
@@ -186,8 +192,14 @@ class FP8GlobalStateManager:
 
         if key not in cls.global_fp8_buffer:
             cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+            cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
+            cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+            cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
         else:
             cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
+            cls.global_amax_history_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history)
+            cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+            cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -314,7 +326,19 @@ class FP8GlobalStateManager:
             fp8_meta["async_amax_reduction"],
         )
 
-        split_and_copy(contiguous_amax, cls.global_fp8_buffer[amax_buffer_key], chunk_sizes)
+        fp8_meta_tensor_key = "scaling_fwd" if forward else "scaling_bwd"
+        _fused_amax_and_scale_update_after_reduction(
+            contiguous_amax,
+            cls.global_amax_history_buffer[amax_buffer_key],
+            cls.global_scale_buffer[amax_buffer_key],
+            cls.global_scale_inv_buffer[amax_buffer_key],
+            get_fp8_te_dtype(fp8_meta["recipe"], forward),
+            fp8_meta["recipe"].margin,
+            fp8_meta["recipe"].amax_compute_algo,
+            fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] * len(cls.global_fp8_buffer),
+            True,
+        )
+        # split_and_copy(contiguous_amax, cls.global_fp8_buffer[amax_buffer_key], chunk_sizes)
 
         return wait_handle
 
