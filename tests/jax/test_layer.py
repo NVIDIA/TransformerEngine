@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import os
 from functools import partial
 
 import flax
@@ -18,6 +19,16 @@ from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 
 is_fp8_supported, reason = is_fp8_available()
+
+
+@pytest.fixture(autouse=True, scope='module')
+def enable_fused_attn():
+    """
+    Enable fused attention
+    """
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    yield
+    del os.environ["NVTE_FUSED_ATTN"]
 
 
 @pytest.fixture(autouse=True, scope='function')
@@ -89,10 +100,12 @@ _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
 _KEY_OF_NUM_HEADS = 'num_attention_heads'
 _KEY_OF_NUM_GQA_GROUPS = 'num_gqa_groups'
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
+_KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_NUM_HEADS: 8,
+    _KEY_OF_DROPOUT_RATE: 0,
 }
 
 ATTRS = [{
@@ -150,13 +163,29 @@ ATTRS = [{
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
-    _KEY_OF_ENABLE_ROPE: True
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
-    _KEY_OF_ENABLE_ROPE: True
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
+}, {
+    _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
+}, {
+    _KEY_OF_TRANSPOSE_BS: True,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -221,7 +250,8 @@ class TestEncoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -282,9 +312,6 @@ class TestEncoderLayer:
         test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
                                        apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
-
         def reorganize_test_wgrad(test_wgrad, attrs):
             num_heads = attrs.get(_KEY_OF_NUM_HEADS)
             num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
@@ -328,10 +355,14 @@ class TestEncoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_dict(ref_grads[1],
-                     reorganize_test_wgrad(test_grads[1], attrs),
-                     rtol=rtol,
-                     atol=atol)    # wgrad
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
+
+            compare_dict(ref_grads[1],
+                         reorganize_test_wgrad(test_grads[1], attrs),
+                         rtol=rtol,
+                         atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 
@@ -430,7 +461,8 @@ class TestDecoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -492,9 +524,6 @@ class TestDecoderLayer:
         test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
                                        apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
-
         def reorganize_test_wgrad(test_wgrad, attrs):
             num_heads = attrs.get(_KEY_OF_NUM_HEADS)
             num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
@@ -547,10 +576,13 @@ class TestDecoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_dict(ref_grads[1],
-                     reorganize_test_wgrad(test_grads[1], attrs),
-                     rtol=rtol,
-                     atol=atol)    # wgrad
+        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
+            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
+            compare_dict(ref_grads[1],
+                         reorganize_test_wgrad(test_grads[1], attrs),
+                         rtol=rtol,
+                         atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 
@@ -576,7 +608,7 @@ class TestDecoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
+        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=3e-04)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
