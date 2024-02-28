@@ -437,7 +437,8 @@ class TestFusedAttn:
         """
         Test backward with parameterized configs
         """
-        pytest.skipif(is_training, "Backward pass does not support inference.")
+        if not is_training:
+            pytest.skip("Backward pass does not support inference.")
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                                  dropout_prob, dtype, True, qkv_layout, bias_shape)
         runner.test_backward()
