@@ -71,6 +71,7 @@ def init_baseline_model(hyperparams):
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     # make sure to use flash_attention to do iso comparison with TELlamaModel
     config._attn_implementation = "flash_attention_2"
+#     config.num_hidden_layers = 4
     model = AutoModelForCausalLM.from_pretrained(
         hyperparams.model_name,
         config=config,
@@ -180,3 +181,16 @@ def restart_jupyter_notebook():
         torch.set_warn_always(False)
     
     
+## Default hyperparams, also defined in `utils.py` in class `Hyperparameters`
+## !!! `model_name` attr must point to the location of the model weights !!!
+hyperparams.model_name = "/ckpt/llama-7bf-hf" # <== Add model weight location here
+hyperparams.mixed_precision = "fp8"
+# hyperparams.batch_size = 128
+
+## Init the model and accelerator wrapper
+model = init_baseline_model(hyperparams)
+accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
+print(model)
+
+## Finetune the model
+finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
