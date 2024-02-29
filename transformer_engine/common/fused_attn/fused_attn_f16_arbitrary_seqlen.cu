@@ -72,6 +72,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         FADescriptor_v1 descriptor{b,                   h,
                                    hg,                  s_q,
                                    s_kv,                d,
+                                   bias_b,              bias_h,
                                    scaling_factor,      is_training,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
@@ -316,6 +317,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         FADescriptor_v1 descriptor{b,                   h,
                                    hg,                  s_q,
                                    s_kv,                d,
+                                   bias_b,              bias_h,
                                    scaling_factor,      true,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
@@ -426,7 +428,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_dim({bias_b, bias_h, s_q, s_kv})
                                 .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
                 sdpa_backward_options.set_bias(bias);
-                sdpa_backward_options.set_dbias(dBias);
+                // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
+                // are not supported for dbias calculation but they are
+                // supported for forward bias calculation
+                if ((bias_b == 1) && (bias_h == h)) {
+                  sdpa_backward_options.set_dbias(dBias);
+                }
             }
 
             if (is_padding) {
@@ -541,7 +548,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
         if (is_bias) {
             variant_pack[bias] = devPtrBias;
-            variant_pack[dBias] = devPtrdBias;
+            if ((bias_b == 1) && (bias_h == h)) {
+              variant_pack[dBias] = devPtrdBias;
+            } else {
+              variant_pack[dBias] = nullptr;
+            }
         }
 
         if (is_padding) {
