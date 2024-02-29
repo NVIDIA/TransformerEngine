@@ -85,6 +85,7 @@ class ModelConfig:
         attn_bias_type: str,
         alibi_type: str = "none",
         num_layers: int = 1,
+        bias_shape: str = "1hss",
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -100,6 +101,7 @@ class ModelConfig:
         self.alibi_type  = alibi_type
         self.attn_type  = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
+        self.bias_shape = bias_shape
 
 def _is_fused_attention_supported(
     config: ModelConfig,
@@ -379,6 +381,31 @@ def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
 
+model_configs_bias_shapes = {
+    #     test:             b,  h, hg,   d,   sq,  skv,   p,
+    "bias_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,
+    #        mask,                     bias,       bias_shape,
+        "no_mask",        "post_scale_bias", bias_shape='11ss'),
+    "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,
+        "no_mask",        "post_scale_bias", bias_shape='1hss'),
+    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,
+        "no_mask",         "post_scale_bias", bias_shape='b1ss'),
+    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,
+        "no_mask",         "post_scale_bias", bias_shape='bhss'),
+    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,
+        "causal",                   "alibi", bias_shape='1hss', alibi_type='custom'),
+    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,
+        "causal",                   "alibi", bias_shape='bhss', alibi_type='custom'),
+}
+
+@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
+@pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
+def test_dpa_bias_shapes(dtype, model_configs, model):
+    """Test DotProductAttention module with different bias types and shapes"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+
 model_configs_swa = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
     "swa_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "no_mask",          "no_bias"),
@@ -510,10 +537,13 @@ def _run_dot_product_attention(
         window_size, attention_mask = None, None
 
     alibi_slopes = None
-    if config.attn_bias_type == "alibi":
-        if config.alibi_type == "custom":
+    if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
+        if config.bias_shape == "1hss":
             alibi_slopes = torch.randn(
                 config.num_heads).abs().to(dtype=torch.float32, device="cuda")
+        if config.bias_shape == "bhss":
+            alibi_slopes = torch.randn(
+                config.batch_size, config.num_heads).abs().to(dtype=torch.float32, device="cuda")
 
     # Create input tensors
     dim_to_num = {
@@ -527,6 +557,7 @@ def _run_dot_product_attention(
         'tg' : cu_seqlens_kv[-1],
         '3'  : 3,
         '2'  : 2,
+        '1'  : 1,
         }
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
@@ -566,8 +597,12 @@ def _run_dot_product_attention(
     if config.attn_bias_type in ['no_bias', 'alibi']:
         bias = None
     if config.attn_bias_type == 'post_scale_bias':
-        bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
-                dtype=dtype, device="cuda")
+        shape = '_'.join(config.bias_shape)
+        shape = shape.replace('_s_s', '_sq_skv')
+        tensor_shape = [dim_to_num[j] for j in shape.split('_')]
+        bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        if config.bias_shape != '1hss':
+            bias.requires_grad = False
 
     # Create RNG
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()

@@ -340,7 +340,7 @@ class MlpBlock(nn.Module):
         return output
 
 
-def apply_rotary_pos_emb(
+def apply_rotary_pos_emb_alternate(
     inputs: jnp.ndarray,
     position: jnp.ndarray,
     min_timescale: int = 1,
@@ -361,6 +361,41 @@ def apply_rotary_pos_emb(
     first_part = first_part.astype(inputs.dtype)
     second_part = second_part.astype(inputs.dtype)
     return jnp.concatenate([first_part, second_part], axis=-1)
+
+
+def apply_rotary_pos_emb_consecutive(
+    inputs: jnp.ndarray,
+    position: jnp.ndarray,
+    min_timescale: int = 1,
+    max_timescale: int = 10000,
+):
+
+    embedding_dim = inputs.shape[-1]
+    half_embedding_dim = embedding_dim // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / embedding_dim
+
+    inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
+    inputs_shifted_right = jnp.concatenate([inputs[..., -1:], inputs[..., :-1]], axis=-1)
+    inputs_shifted = jax.lax.select(
+        jnp.tile(
+            jnp.mod(jnp.arange(embedding_dim, dtype=jnp.int32), 2),
+            inputs.shape[:-1] + (1,),
+        ),
+        inputs_shifted_right,
+        inputs_shifted_left,
+    )
+    fraction = jnp.repeat(fraction, 2)
+    timescale = min_timescale * (max_timescale / min_timescale)**fraction
+
+    position = jnp.expand_dims(position, axis=tuple(range(2, inputs.ndim)))
+
+    sinusoid_inp = position / timescale
+    sin = jnp.sin(sinusoid_inp)
+    cos = jnp.cos(sinusoid_inp)
+    sign = jnp.sign(jnp.mod(jnp.arange(embedding_dim, dtype=jnp.int32), 2) - 0.5)
+    outputs = inputs * cos + inputs_shifted * sin * sign
+
+    return outputs
 
 
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
@@ -392,6 +427,7 @@ class MultiHeadAttention(nn.Module):
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv: bool = True
 
     def __post_init__(self):
@@ -511,6 +547,11 @@ class MultiHeadAttention(nn.Module):
             seq_dim = 1 - batch_dim
 
             position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+
+            if self.rotary_pos_emb_group_method == 'alternate':
+                apply_rotary_pos_emb = apply_rotary_pos_emb_alternate
+            else:
+                apply_rotary_pos_emb = apply_rotary_pos_emb_consecutive
 
             query = apply_rotary_pos_emb(query, position)
             key = apply_rotary_pos_emb(key, position)
@@ -836,6 +877,7 @@ class EncoderLayer(nn.Module):
     output_layernorm: bool = False
     drop_path: float = 0.0
     enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -889,6 +931,7 @@ class EncoderLayer(nn.Module):
                                scaled_query_init=self.scaled_query_init,
                                fuse_qkv=self.fuse_qkv_params,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+                               rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                name='attention')(x,
                                                  x,
                                                  encoder_mask,
@@ -958,6 +1001,7 @@ class DecoderLayer(nn.Module):
     zero_centered_gamma: bool = False
     drop_path: float = 0.0
     enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
@@ -1018,6 +1062,7 @@ class DecoderLayer(nn.Module):
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+                               rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
                                name='self_attention')(x,
                                                       x,
@@ -1052,6 +1097,7 @@ class DecoderLayer(nn.Module):
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+                               rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
                                name='encoder_decoder_attention')(y,
                                                                  encoded,
