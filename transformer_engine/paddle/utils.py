@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
+from .cpp_extensions import swiglu_pd
 
 
 def cast_if_needed(tensor: Union[paddle.Tensor, None],
@@ -48,6 +49,8 @@ def get_paddle_act_func(activation):
     funcs = {
         'gelu': F.gelu,
         'relu': F.relu,
+        'silu': F.silu,
+        'swiglu': swiglu_pd,
     }
     if activation not in funcs:
         raise "Activation type " + activation + " is not supported."

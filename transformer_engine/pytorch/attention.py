@@ -2471,9 +2471,9 @@ class DotProductAttention(torch.nn.Module):
 
         hidden_states = checkpoint(
             custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
+            distribute_saved_activations=False,
+            get_rng_state_tracker=self.get_rng_state_tracker,
+            tp_group=self.tp_group,
             *forward_args,
             **forward_kwargs,
         )
@@ -2834,10 +2834,15 @@ class DotProductAttention(torch.nn.Module):
             _, fu_core_attention_bias = get_alibi(
                 query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes,
                 bias_dtype=query_layer.dtype)
-            if (fu_core_attention_bias.shape[0] != 1
-                or fu_core_attention_bias.shape[1] != query_layer.shape[-2]):
-                # remove this line when cuDNN adds bwd support for [b, 1, s, s] and [b, h, s, s]
+        if (use_fused_attention
+            and fu_core_attention_bias_type == "post_scale_bias"
+            and (fu_core_attention_bias.shape[0] != 1
+            or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
+            if fu_core_attention_bias.requires_grad:
+                # remove this line when cuDNN adds bwd support for
+                # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
                 use_fused_attention = False
+            else:
                 # max512 backend will only support [1, h, s, s]
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
@@ -2862,6 +2867,11 @@ class DotProductAttention(torch.nn.Module):
                 use_fused_attention and is_backend_avail and \
                 (not context_parallel or \
                  fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]))
+            if (fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
+                and fu_core_attention_bias_type == "post_scale_bias"
+                and (fu_core_attention_bias.shape[0] != 1
+                or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
+                use_fused_attention = False
 
         # Filter: determinism.
         # backend                                  | deterministic

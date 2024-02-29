@@ -4,5 +4,6 @@
 """Praxis related Modules"""
 from .module import FusedSoftmax, LayerNorm
 from .module import LayerNormLinear, LayerNormMLP, Linear, TransformerEngineBaseLayer
-from .transformer import MultiHeadAttention, RelativePositionBiases, TransformerLayer
+from .transformer import DotProductAttention, MultiHeadAttention
+from .transformer import RelativePositionBiases, TransformerLayer
 from ..flax.transformer import TransformerLayerType

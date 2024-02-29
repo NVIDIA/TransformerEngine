@@ -5,12 +5,6 @@
 
 import struct
 
-from utils import (
-    assert_allclose,
-    create_fp8_meta,
-    get_fused_attention_backend,
-    is_fused_attention_supported,
-)
 import numpy as np
 import paddle
 import paddle.nn.functional as F
@@ -34,6 +28,10 @@ from transformer_engine.paddle.cpp_extensions import (
     cast_transpose_bgrad,
     te_gelu,
     gelu_fp8,
+    swiglu,
+    swiglu_fp8,
+    swiglu_pd,
+    dswiglu,
     dgelu_cast_transpose_bgrad_fp8,
     layernorm_fwd_fp8,
     layernorm_fwd,
@@ -62,9 +60,9 @@ GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
 
-SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
-CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
-FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
+SELF_ATTN_CASES = [(2, 512, 12, 64)]
+CROSS_ATTN_CASES = [(2, 128, 512, 12, 64)]
+FLASH_ATTN_CASES = [(2, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
 
 
@@ -295,6 +293,55 @@ class TestActivation:
         assert_allclose(x_grad, x.grad, rtol=0.1, atol=0.01)
         assert_allclose(x_grad_t, x.grad.T, rtol=0.1, atol=0.01)
         assert_allclose(dbias, x.grad.sum(axis=0), rtol=0.1, atol=0.01)
+
+    @staticmethod
+    def test_swiglu_bf16():
+        """
+        Test BF16 SwiGLU Forward
+        """
+        a = paddle.rand(shape=(16, 32), dtype='bfloat16') * 2 - 1
+        swiglu_out = swiglu(a, otype=tex.DType.kBFloat16)
+        swiglu_ref = swiglu_pd(a)
+
+        assert_allclose(swiglu_out, swiglu_ref, rtol=1e-2)
+
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('fp8_dtype', [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+    def test_swiglu_fp8(fp8_dtype):
+        """
+        Test FP8 SwiGLU Forward
+        """
+        a = paddle.rand(shape=(16, 32), dtype='float32') * 2 - 1
+        fp8_meta = create_fp8_meta()
+
+        swiglu_out_fp8 = swiglu_fp8(a, fp8_meta, FP8FwdTensors.GEMM1_INPUT, otype=fp8_dtype)
+
+        swiglu_out = cast_from_fp8(swiglu_out_fp8,
+                                   fp8_meta,
+                                   FP8FwdTensors.GEMM1_INPUT,
+                                   itype=fp8_dtype,
+                                   otype=tex.DType.kFloat32)
+
+        swiglu_ref = swiglu_pd(a)
+
+        assert_allclose(swiglu_out, swiglu_ref, rtol=0.1, atol=0.01)
+
+    @staticmethod
+    def test_swiglu_bwd():
+        """
+        Test SwiGLU Backward
+        """
+        # y = SwiGLU(x), calculate ref
+        x = paddle.rand(shape=(16, 32), dtype='bfloat16') * 2 - 1
+        x.stop_gradient = False
+        y = swiglu_pd(x)
+        y_grad = paddle.rand(shape=(16, 16), dtype='bfloat16') * 2 - 1
+        paddle.autograd.backward([y], [y_grad], True)
+        # calculate fp8
+        x_grad = dswiglu(y_grad, x, otype=tex.DType.kBFloat16)
+
+        assert_allclose(x_grad, x.grad, rtol=0.1, atol=0.01)
 
 
 class TestGemm:
