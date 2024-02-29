@@ -197,13 +197,15 @@ class FP8GlobalStateManager:
             cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
             cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
             cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
-            cls.global_non_weight_mask_buffer[key] = [fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
+            cls.global_non_weight_mask_buffer[key] = [
+                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
         else:
             cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
             cls.global_amax_history_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history)
             cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
             cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
-            cls.global_non_weight_mask_buffer[key].append(fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
+            cls.global_non_weight_mask_buffer[key].append(
+                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:

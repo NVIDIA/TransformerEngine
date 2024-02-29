@@ -182,6 +182,11 @@ kernel_bulk(
   const size_t tid = threadIdx.x;
   const int num_scale = p.param[bid].num_scale;
 
+  int offset_in_buffer = 0;
+  for (int j = 0; j < bid; j++) {
+    offset_in_buffer += p.param[j].num_scale;
+  }
+
   for (int count = 0; count < num_scale; count++) {
     // Update amax
     float amax = 0;
@@ -191,8 +196,8 @@ kernel_bulk(
       const auto& stride = p.param[bid].num_scale;
       auto* amax_history = p.param[bid].amax_history+count;
       const auto last_amax = ((amax_reduction_buffer != nullptr)
-            && (amax_reduction_buffer[bid*stride+count] != 0)) ?
-            amax_reduction_buffer[bid*stride+count] : amax_history[0];
+            && (amax_reduction_buffer[offset_in_buffer+count] != 0.0f)) ?
+            amax_reduction_buffer[offset_in_buffer+count] : amax_history[0];
       for (size_t off = 0; off < length; off += bsize) {
         const size_t i = off + tid;
         float a = 0;
@@ -200,7 +205,7 @@ kernel_bulk(
           a = (i < length - 1) ? amax_history[(i+1)*stride] : last_amax;
           amax = fmaxf(amax, a);
         }
-        __syncthreads();  // In case roll is in-place
+        __syncthreads();  // Inplace roll
         if (i < length) {
           amax_history[i*stride] = (i > 0) ? a : 0;
         }
