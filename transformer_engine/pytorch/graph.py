@@ -304,17 +304,28 @@ def make_graphed_callables(
     for extensive documentation.
     """
 
+    # Set capture.
     if enabled:
         set_fp8_graph_capture_start()
         assert num_warmup_iters > 0, "Warmup is required for FP8 graph capture."
 
     fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
 
+    # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
         just_one_callable = True
         modules = (modules,)
 
+    # Store FP8 tensors to reset later.
+    saved_fp8_meta_tensors = []
+    for module in modules:
+        # Recursively handle cases, including sequential.
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
+
+    # FP8 wrapper.
     def wrap_autocast(block):
         old_forward = block.forward
         def forward_func(*args, **kwargs):
@@ -356,14 +367,15 @@ def make_graphed_callables(
     # Ensures warmup does not affect numerics for ops such as dropout.
     _set_cuda_rng_state(cuda_rng_state)
 
-    # Remove FP8 state from warmup.
+    # Reset FP8 state.
     for module in modules:
-        # Recursively handle cases, including sequential.
         for m in module.modules():
             if isinstance(m, TransformerEngineBaseModule):
-                m.reset_fp8_meta_tensors()
+                m.reset_fp8_meta_tensors(saved_fp8_meta_tensors.pop(0))
         for p in module.parameters():
             p.grad = None
+
+    assert len(saved_fp8_meta_tensors) == 0, "TE internal error."
 
     set_fp8_graph_capture_end()
     return graphed_callables
