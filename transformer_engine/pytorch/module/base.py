@@ -78,10 +78,11 @@ def _prepare_backward(
         if amax_reduce_handle_bwd is not None:
             amax_reduce_handle_bwd.wait()
 
-        # Update amax and scale; Skip all setup for global amax reduction
-        amax_and_scale_update(fp8_meta, False)
+        # Amax and scale update fused with post reduction split and copy.
         if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
             FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+        else:
+            amax_and_scale_update(fp8_meta, False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
@@ -544,9 +545,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
-                    amax_and_scale_update(
-                        self.fp8_meta, True, skip_scale_inv_update=skip_fp8_weight_update
-                    )
+                    # TODO(ksivaman): Cleanup
+                    pass
                 else:
                     amax_and_scale_update(
                         self.fp8_meta, True, skip_scale_inv_update=skip_fp8_weight_update

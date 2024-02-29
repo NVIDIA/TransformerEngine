@@ -64,6 +64,10 @@ class FP8GlobalStateManager:
     IS_FIRST_FP8_MODULE = False
     FP8_AUTOCAST_DEPTH = 0
     global_fp8_buffer = {}
+    global_amax_history_buffer = {}
+    global_scale_buffer = {}
+    global_scale_inv_buffer = {}
+    global_non_weight_mask_buffer = {}
     fp8_tensors_recompute_buffer = []
     amax_forward_global_reduce_func = None
     amax_backward_global_reduce_func = None
@@ -85,6 +89,10 @@ class FP8GlobalStateManager:
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_AUTOCAST_DEPTH = 0
         cls.global_fp8_buffer = {}
+        cls.global_amax_history_buffer = {}
+        cls.global_scale_buffer = {}
+        cls.global_scale_inv_buffer = {}
+        cls.global_non_weight_mask_buffer = {}
         cls.fp8_tensors_recompute_buffer = []
         cls.amax_forward_global_reduce_func = None
         cls.amax_backward_global_reduce_func = None
@@ -186,8 +194,18 @@ class FP8GlobalStateManager:
 
         if key not in cls.global_fp8_buffer:
             cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+            cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
+            cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+            cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
+            cls.global_non_weight_mask_buffer[key] = [
+                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
         else:
             cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
+            cls.global_amax_history_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history)
+            cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+            cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
+            cls.global_non_weight_mask_buffer[key].append(
+                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -305,7 +323,6 @@ class FP8GlobalStateManager:
             else:
                 return None
 
-        chunk_sizes = [x.numel() for x in cls.global_fp8_buffer[amax_buffer_key]]
         contiguous_amax = torch.cat(cls.global_fp8_buffer[amax_buffer_key])
 
         wait_handle = cls.reduce_tensor_across_group_op_max(
@@ -314,7 +331,31 @@ class FP8GlobalStateManager:
             fp8_meta["async_amax_reduction"],
         )
 
-        split_and_copy(contiguous_amax, cls.global_fp8_buffer[amax_buffer_key], chunk_sizes)
+        if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
+            _fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                cls.global_amax_history_buffer[amax_buffer_key],
+                cls.global_scale_buffer[amax_buffer_key],
+                cls.global_scale_inv_buffer[amax_buffer_key],
+                get_fp8_te_dtype(fp8_meta["recipe"], forward),
+                fp8_meta["recipe"].margin,
+                fp8_meta["recipe"].amax_compute_algo,
+                cls.global_non_weight_mask_buffer[amax_buffer_key],
+                True,
+            )
+        else:
+            _non_fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                cls.global_amax_history_buffer[amax_buffer_key],
+                cls.global_fp8_buffer[amax_buffer_key],
+                cls.global_scale_buffer[amax_buffer_key],
+                cls.global_scale_inv_buffer[amax_buffer_key],
+                cls.global_non_weight_mask_buffer[amax_buffer_key],
+                get_fp8_te_dtype(fp8_meta["recipe"], forward),
+                fp8_meta["recipe"].margin,
+                fp8_meta["recipe"].amax_compute_algo,
+                True,
+            )
 
         return wait_handle
 
@@ -578,6 +619,77 @@ def _fused_amax_and_scale_update(
         margin,
     )
     return amax_history, scale, scale_inv
+
+
+def _non_fused_amax_and_scale_update_after_reduction(
+    amax_reduction_buffer: torch.Tensor,
+    amax_history_buffer: List[torch.Tensor],
+    amax_buffer: List[torch.Tensor],
+    scale_buffer: List[torch.Tensor],
+    scale_inv_buffer: List[torch.Tensor],
+    non_weight_mask_buffer: List[torch.Tensor],
+    fp8_dtype: tex.DType,
+    margin: int,
+    amax_compute_algo: str,
+    update_weight_scale_inv: bool,
+) -> None:
+    """
+    After forward or backward reduction of DP/TP groups,
+    split the global buffer into chunks and use them to
+    update the local amax_history, scale, scale_inv in
+    each FP8 module.
+    """
+    split_and_copy(amax_reduction_buffer, amax_buffer, [x.numel() for x in amax_buffer])
+
+    for amax_history, scale, scale_inv, non_weight_mask in zip(
+        amax_history_buffer, scale_buffer, scale_inv_buffer, non_weight_mask_buffer
+    ):
+        if update_weight_scale_inv:
+            non_weight_mask = torch.Tensor()
+        tex.fused_amax_and_scale_update(
+            amax_history,
+            scale,
+            scale_inv,
+            non_weight_mask,
+            amax_history,
+            scale,
+            scale_inv,
+            amax_compute_algo,
+            fp8_dtype,
+            margin,
+        )
+
+
+def _fused_amax_and_scale_update_after_reduction(
+    amax_reduction_buffer: torch.Tensor,
+    amax_histories: List[torch.Tensor],
+    scales: List[torch.Tensor],
+    scale_invs: List[torch.Tensor],
+    fp8_dtype: tex.DType,
+    margin: int,
+    amax_compute_algo: str,
+    non_weight_masks: List[torch.Tensor],
+    update_weight_scale_inv: bool,
+) -> None:
+    """
+    After forward or backward reduction of DP/TP groups,
+    split the global buffer into chunks and use them to
+    update the local amax_history, scale, scale_inv in
+    each FP8 module.
+    """
+
+    if update_weight_scale_inv:
+        non_weight_masks = [torch.Tensor()] * len(amax_histories)
+    tex.fused_amax_and_scale_update_after_reduction(
+        amax_reduction_buffer,
+        amax_histories,
+        scales,
+        scale_invs,
+        non_weight_masks,
+        amax_compute_algo,
+        fp8_dtype,
+        margin,
+    )
 
 
 def _compute_amax_and_update_history(

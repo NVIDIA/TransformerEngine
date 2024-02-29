@@ -68,13 +68,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Args for testing CUDA graphs with TE layers.")
     parser.add_argument('--seed', type=int, default=1234)
     parser.add_argument('--dtype', type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
-    parser.add_argument('--optimizer', type=str, default="fused_adamw",
+    parser.add_argument('--optimizer', type=str, default="adamw",
                         choices=["fused_adamw", "fused_sgd", "sgd", "adamw"])
     parser.add_argument('--num-layers', type=int, default=1)
     parser.add_argument('--module', default="linear",
                         choices=['linear', 'layernorm_linear', 'layernorm_mlp',
                                  'transformer', 'dpa', 'mha'])
     parser.add_argument('--fp8', action='store_true')
+    parser.add_argument('--fp8-params', action='store_true')
     parser.add_argument('--graph', action='store_true')
     parser.add_argument('--graph-mode', default="full", choices=['full', 'individual'])
     parser.add_argument('--num-warmup-iters', type=int, default=3)
@@ -91,58 +92,64 @@ def train(args):
     """Train."""
 
     dtype = str_to_torch_dtype(args.dtype)
+    if args.fp8_params:
+        assert args.fp8, "FP8 execution needed for FP8 parameters."
+        assert (args.optimizer in ("sgd", "adamw")
+        ), f"Unsupported optimizer {args.optimizer} for FP8 parameters."
 
-    # Create modules.
-    if args.module == "transformer":
-        modules = [te.TransformerLayer(
-                        args.hdim, args.hdim, args.nheads,
-                        hidden_dropout=args.dropout,
-                        attention_dropout=args.dropout,
-                        params_dtype=dtype,
-                    ) for _ in range(args.num_layers)]
-    elif args.module == "layernorm_mlp":
-        modules = [te.LayerNormMLP(
-            args.hdim, args.hdim, params_dtype=dtype
-        ) for _ in range(args.num_layers)]
-    elif args.module == "layernorm_linear":
-        modules = [te.LayerNormLinear(
-            args.hdim, args.hdim, params_dtype=dtype
-        ) for _ in range(args.num_layers)]
-    elif args.module == "mha":
-        modules = [te.MultiheadAttention(
-            args.hdim, args.nheads, attention_dropout=args.dropout, params_dtype=dtype
-        ) for _ in range(args.num_layers)]
-    elif args.module == "dpa":
-        assert args.hdim % args.nheads == 0, "Err."
-        assert args.num_layers == 1, "Err."
-        args.embed = args.hdim // args.nheads
-        modules = [te.DotProductAttention(
-                    args.nheads, args.embed, attention_dropout=args.dropout
-                    ) for _ in range(args.num_layers)]
-    else:
-        modules = [te.Linear(
-            args.hdim, args.hdim, device="cuda", params_dtype=dtype
-        ) for _ in range(args.num_layers)]
+    with te.fp8_model_init(enabled=args.fp8_params):
+        # Create modules.
+        if args.module == "transformer":
+            modules = [te.TransformerLayer(
+                            args.hdim, args.hdim, args.nheads,
+                            hidden_dropout=args.dropout,
+                            attention_dropout=args.dropout,
+                            fuse_qkv_params=True,
+                            params_dtype=dtype,
+                        ) for _ in range(args.num_layers)]
+        elif args.module == "layernorm_mlp":
+            modules = [te.LayerNormMLP(
+                args.hdim, args.hdim, params_dtype=dtype
+            ) for _ in range(args.num_layers)]
+        elif args.module == "layernorm_linear":
+            modules = [te.LayerNormLinear(
+                args.hdim, args.hdim, params_dtype=dtype
+            ) for _ in range(args.num_layers)]
+        elif args.module == "mha":
+            modules = [te.MultiheadAttention(
+                args.hdim, args.nheads, attention_dropout=args.dropout, params_dtype=dtype
+            ) for _ in range(args.num_layers)]
+        elif args.module == "dpa":
+            assert args.hdim % args.nheads == 0, "Err."
+            assert args.num_layers == 1, "Err."
+            args.embed = args.hdim // args.nheads
+            modules = [te.DotProductAttention(
+                        args.nheads, args.embed, attention_dropout=args.dropout
+                        ) for _ in range(args.num_layers)]
+        else:
+            modules = [te.Linear(
+                args.hdim, args.hdim, device="cuda", params_dtype=dtype
+            ) for _ in range(args.num_layers)]
 
-    # Generate model and wrap API to return graphed version.
-    if args.graph:
-        # Graph entire module at once.
-        if args.graph_mode == "full":
-            model = modules[0] if args.module == "dpa" else torch.nn.Sequential(*modules)
-            model = te.make_graphed_callables(
-                    model,
+        # Generate model and wrap API to return graphed version.
+        if args.graph:
+            # Graph entire module at once.
+            if args.graph_mode == "full":
+                model = modules[0] if args.module == "dpa" else torch.nn.Sequential(*modules)
+                model = te.make_graphed_callables(
+                        model,
+                        generate_data(args, warmup=True),
+                        num_warmup_iters=args.num_warmup_iters,
+                        enabled=args.fp8)
+            else:
+                modules = [te.make_graphed_callables(
+                    module,
                     generate_data(args, warmup=True),
                     num_warmup_iters=args.num_warmup_iters,
-                    enabled=args.fp8)
+                    enabled=args.fp8) for module in modules]
+                model = modules[0] if args.module == "dpa" else torch.nn.Sequential(*modules)
         else:
-            modules = [te.make_graphed_callables(
-                module,
-                generate_data(args, warmup=True),
-                num_warmup_iters=args.num_warmup_iters,
-                enabled=args.fp8) for module in modules]
             model = modules[0] if args.module == "dpa" else torch.nn.Sequential(*modules)
-    else:
-        model = modules[0] if args.module == "dpa" else torch.nn.Sequential(*modules)
 
     # Loss function and optimizer.
     loss_fn = torch.nn.MSELoss()

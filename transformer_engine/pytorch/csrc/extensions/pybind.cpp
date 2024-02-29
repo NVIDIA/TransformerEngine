@@ -88,7 +88,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
   m.def("fused_amax_and_scale_update",
         &fused_amax_and_scale_update,
-        "Update amax history and FP8 scale");
+        "Update amax history and FP8 scale/scale_inv");
+  m.def("fused_amax_and_scale_update_after_reduction",
+        &fused_amax_and_scale_update_after_reduction,
+        "Update amax history and FP8 scale/scale_inv after reduction");
 
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD");
