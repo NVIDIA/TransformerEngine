@@ -321,7 +321,6 @@ class FP8GlobalStateManager:
             else:
                 return None
 
-        chunk_sizes = [x.numel() for x in cls.global_fp8_buffer[amax_buffer_key]]
         contiguous_amax = torch.cat(cls.global_fp8_buffer[amax_buffer_key])
 
         wait_handle = cls.reduce_tensor_across_group_op_max(
@@ -330,18 +329,31 @@ class FP8GlobalStateManager:
             fp8_meta["async_amax_reduction"],
         )
 
-        _fused_amax_and_scale_update_after_reduction(
-            contiguous_amax,
-            cls.global_amax_history_buffer[amax_buffer_key],
-            cls.global_scale_buffer[amax_buffer_key],
-            cls.global_scale_inv_buffer[amax_buffer_key],
-            get_fp8_te_dtype(fp8_meta["recipe"], forward),
-            fp8_meta["recipe"].margin,
-            fp8_meta["recipe"].amax_compute_algo,
-            cls.global_non_weight_mask_buffer[amax_buffer_key],
-            True,
-        )
-        # split_and_copy(contiguous_amax, cls.global_fp8_buffer[amax_buffer_key], chunk_sizes)
+        if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
+            _fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                cls.global_amax_history_buffer[amax_buffer_key],
+                cls.global_scale_buffer[amax_buffer_key],
+                cls.global_scale_inv_buffer[amax_buffer_key],
+                get_fp8_te_dtype(fp8_meta["recipe"], forward),
+                fp8_meta["recipe"].margin,
+                fp8_meta["recipe"].amax_compute_algo,
+                cls.global_non_weight_mask_buffer[amax_buffer_key],
+                True,
+            )
+        else:
+            _non_fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                cls.global_amax_history_buffer[amax_buffer_key],
+                cls.global_fp8_buffer[amax_buffer_key],
+                cls.global_scale_buffer[amax_buffer_key],
+                cls.global_scale_inv_buffer[amax_buffer_key],
+                cls.global_non_weight_mask_buffer[amax_buffer_key],
+                get_fp8_te_dtype(fp8_meta["recipe"], forward),
+                fp8_meta["recipe"].margin,
+                fp8_meta["recipe"].amax_compute_algo,
+                True,
+            )
 
         return wait_handle
 
@@ -603,6 +615,45 @@ def _fused_amax_and_scale_update(
     return amax_history, scale, scale_inv
 
 
+def _non_fused_amax_and_scale_update_after_reduction(
+    amax_reduction_buffer: torch.Tensor,
+    amax_history_buffer: List[torch.Tensor],
+    amax_buffer: List[torch.Tensor],
+    scale_buffer: List[torch.Tensor],
+    scale_inv_buffer: List[torch.Tensor],
+    non_weight_mask_buffer: List[torch.Tensor],
+    fp8_dtype: tex.DType,
+    margin: int,
+    amax_compute_algo: str,
+    update_weight_scale_inv: bool,
+) -> None:
+    """
+    After forward or backward reduction of DP/TP groups,
+    split the global buffer into chunks and use them to
+    update the local amax_history, scale, scale_inv in
+    each FP8 module.
+    """
+    split_and_copy(amax_reduction_buffer, amax_buffer, [x.numel() for x in amax_buffer])
+
+    for amax_history, scale, scale_inv, non_weight_mask in zip(
+        amax_history_buffer, scale_buffer, scale_inv_buffer, non_weight_mask_buffer
+    ):
+        if update_weight_scale_inv:
+            non_weight_mask = torch.Tensor()
+        tex.fused_amax_and_scale_update(
+            amax_history,
+            scale,
+            scale_inv,
+            non_weight_mask,
+            amax_history,
+            scale,
+            scale_inv,
+            amax_compute_algo,
+            fp8_dtype,
+            margin,
+        )
+
+
 def _fused_amax_and_scale_update_after_reduction(
     amax_reduction_buffer: torch.Tensor,
     amax_histories: List[torch.Tensor],
@@ -613,52 +664,12 @@ def _fused_amax_and_scale_update_after_reduction(
     amax_compute_algo: str,
     non_weight_masks: List[torch.Tensor],
     update_weight_scale_inv: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> None:
     """
     After forward or backward reduction of DP/TP groups,
     split the global buffer into chunks and use them to
     update the local amax_history, scale, scale_inv in
     each FP8 module.
-
-    Parameters
-    ----------
-    amax_reduction_buffer: torch.Tensor
-        The amax buffer used during reduction. Should be contiguous
-        and have the length of `sum(local_amax_histories[i].shape[1])`.
-    amax_histories: List[torch.Tensor]
-        A list of amax histories from different FP8 modules. Typically,
-        this should be `FP8GlobalStateManager.global_fp8_buffer["forward"]`
-        or `FP8GlobalStateManager.global_fp8_buffer["backward"]`, which is
-        a collection of `module.fp8_meta["amax_histories"]` for FP8 modules.
-    scales: List[torch.Tensor]
-        Similiar to `amax_histories`, this is a list of scales for FP8 modules,
-        i.e. `[m.fp8_meta["scaling_fwd"].scale for m in modules]` or
-        `[m.fp8_meta["scaling_bwd"].scale for m in modules]`.
-    scale_invs: List[torch.Tensor]
-        Similiar to `scales`, this is a list of scale_invs for FP8 modules,
-        i.e. `[m.fp8_meta["scaling_fwd"].scale_inv for m in modules]` or
-        `[m.fp8_meta["scaling_bwd"].scale_inv for m in modules]`.
-    fp8_dtype: tex.DType
-        FP8 format in tex.DType.
-    margin: int
-        Margin used to calculate FP8 scale and scale_inv.
-    amax_compute_algo: str
-        The algorithm for calculating amax, {'max', 'most_recent'}.
-    non_weight_masks: List[torch.Tensor]
-        Similiar to `scale_invs`, this is a list of non-weight masks for FP8 modules,
-        i.e. `[m.fp8_meta["scaling_fwd_non_weight_mask"] for m in modules]` or
-        `[m.fp8_meta["scaling_bwd_non_weight_mask"] for m in modules]`.
-    update_weight_scale_inv: bool
-        Whether to update the weight tensor's scale_inv.
-
-    Return
-    ----------
-    amax_histories: List[torch.Tensor]
-        The updated `amax histories`.
-    scales: List[torch.Tensor]
-        The updated `scales`.
-    scale_invs: List[torch.Tensor]
-        The updated `scale_invs`.
     """
 
     if update_weight_scale_inv:
@@ -673,7 +684,6 @@ def _fused_amax_and_scale_update_after_reduction(
         fp8_dtype,
         margin,
     )
-    return amax_histories, scales, scale_invs
 
 
 def _compute_amax_and_update_history(
