@@ -292,14 +292,35 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(False)
         self.fp8_meta_tensors_initialized = True
 
-    def reset_fp8_meta_tensors(self) -> None:
-        """Init scales and amaxes."""
+    def get_fp8_meta_tensors(self) -> None:
+        """Get scales and amaxes."""
+        fwd_key, bwd_key = "scaling_fwd", "scaling_bwd"
+        if fwd_key not in self.fp8_meta or bwd_key not in self.fp8_meta:
+            return None
+
+        fp8_meta_tensors = {fwd_key: [], bwd_key: []}
+        with torch.no_grad():
+            for key in (fwd_key, bwd_key):
+                fp8_meta_tensors[key].append(self.fp8_meta[key].scale.clone())
+                fp8_meta_tensors[key].append(self.fp8_meta[key].scale_inv.clone())
+                fp8_meta_tensors[key].append(self.fp8_meta[key].amax_history.clone())
+        return fp8_meta_tensors
+
+    def reset_fp8_meta_tensors(self, fp8_meta_tensors=None) -> None:
+        """Reset scales and amaxes."""
         def reset(key):
             if key in self.fp8_meta:
-                self.fp8_meta[key].scale.copy_(torch.ones_like(self.fp8_meta[key].scale))
-                self.fp8_meta[key].scale_inv.copy_(torch.ones_like(self.fp8_meta[key].scale_inv))
-                self.fp8_meta[key].amax_history.copy_(
-                    torch.zeros_like(self.fp8_meta[key].amax_history))
+                if fp8_meta_tensors is None:
+                    self.fp8_meta[key].scale.copy_(torch.ones_like(self.fp8_meta[key].scale))
+                    self.fp8_meta[key].scale_inv.copy_(
+                        torch.ones_like(self.fp8_meta[key].scale_inv))
+                    self.fp8_meta[key].amax_history.copy_(
+                        torch.zeros_like(self.fp8_meta[key].amax_history))
+                else:
+                    assert key in fp8_meta_tensors, "Cannot reset fp8 tensors."
+                    self.fp8_meta[key].scale.copy_(fp8_meta_tensors[key][0])
+                    self.fp8_meta[key].scale_inv.copy_(fp8_meta_tensors[key][1])
+                    self.fp8_meta[key].amax_history.copy_(fp8_meta_tensors[key][2])
         with torch.no_grad():
             reset("scaling_fwd")
             reset("scaling_bwd")
