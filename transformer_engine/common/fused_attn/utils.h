@@ -103,6 +103,8 @@ struct FADescriptor_v1 {
   std::int64_t s_q;
   std::int64_t s_kv;
   std::int64_t d;
+  std::int64_t bias_b;
+  std::int64_t bias_h;
   float attnScale;
   bool isTraining;
   float dropoutProbability;
@@ -112,11 +114,12 @@ struct FADescriptor_v1 {
   cudnn_frontend::DataType_t tensor_type;
 
   bool operator<(const FADescriptor_v1 &rhs) const {
-    return std::tie(b, h, hg, s_q, s_kv, d,
+    return std::tie(b, h, hg, s_q, s_kv, d, bias_b, bias_h,
                     attnScale, isTraining, dropoutProbability,
                     layout, mask_type, bias_type, tensor_type)
                     < std::tie(
                       rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d,
+                      rhs.bias_b, rhs.bias_h,
                       rhs.attnScale, rhs.isTraining,
                       rhs.dropoutProbability, rhs.layout,
                       rhs.mask_type, rhs.bias_type,
