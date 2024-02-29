@@ -111,6 +111,7 @@ def initialize_ub(
     shape: list,
     tp_size: int,
     use_fp8: bool = False,
+    dtype: torch.dtype = torch.bfloat16
     ub_cfgs: Optional[dict] = None
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
@@ -151,7 +152,7 @@ def initialize_ub(
         num_splits: int = 4,
         aggregate: int = 0,
     ) -> None:
-        dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
+        dtype = torch.uint8 if (use_fp8 and name in fp8_buf)
         sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
