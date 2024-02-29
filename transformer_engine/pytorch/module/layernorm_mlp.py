@@ -43,6 +43,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    use_reentrant_activation_recompute,
 )
 
 from .. import cpp_extensions as tex
@@ -63,6 +64,7 @@ def _act_func(activation: str):
             'geglu': (tex.geglu, tex.dgeglu),
             'reglu': (tex.reglu, tex.dreglu),
             'swiglu': (tex.swiglu, tex.dswiglu),
+            'qgelu': (tex.qgelu, tex.dqgelu)
     }
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
@@ -1083,7 +1085,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu'.
+          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -1432,6 +1434,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.get_fp8_weights_scratchpad(
                         is_first_microbatch
                 )
+
+            # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
+            if (self.bias_gelu_nvfusion
+                and not use_reentrant_activation_recompute()):
+                self.bias_gelu_nvfusion = False
 
             from ..cpu_offload import CPUOffloadEnabled
 

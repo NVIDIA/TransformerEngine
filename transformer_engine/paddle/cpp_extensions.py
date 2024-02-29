@@ -6,6 +6,7 @@
 import math
 from typing import Optional, Tuple, Union
 import paddle
+import paddle.nn.functional as F
 import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
 from .fp8 import FP8TensorMeta
@@ -328,6 +329,56 @@ def gelu_fp8(
     return out
 
 
+def swiglu(
+    inp: paddle.Tensor,
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """Non FP8 SWIGLU"""
+    return tex.te_swiglu(
+        inp,
+        int(otype),
+    )
+
+
+def swiglu_pd(inp: paddle.Tensor,) -> paddle.Tensor:
+    """Native SWIGLU"""
+    gate_out, up_out = paddle.chunk(inp, chunks=2, axis=-1)
+    out = F.silu(gate_out) * up_out
+    return out
+
+
+def swiglu_fp8(
+    inp: paddle.Tensor,
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """SWIGLU + FP8 cast"""
+    out, _, _ = tex.te_swiglu_fp8(
+        inp,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        fp8_tensor.value,
+        int(otype),
+    )
+
+    return out
+
+
+def dswiglu(
+    grad_output: paddle.Tensor,
+    swiglu_input: paddle.Tensor,
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """dSWIGLU"""
+    return tex.te_dswiglu(
+        grad_output,
+        swiglu_input,
+        int(otype),
+    )
+
+
 def dgelu_cast_transpose_bgrad_fp8(
     grad_output: paddle.Tensor,
     gelu_input: paddle.Tensor,
@@ -404,9 +455,10 @@ def rmsnorm_fwd(
     eps: float,
     otype: tex.DType,
     sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Non-FP8 RMSNorm forward"""
-    return tex.te_rmsnorm_fwd(inp, weight, eps, int(otype), sm_margin)
+    return tex.te_rmsnorm_fwd(inp, weight, eps, int(otype), sm_margin, zero_centered_gamma)
 
 
 def rmsnorm_fwd_fp8(
@@ -417,12 +469,13 @@ def rmsnorm_fwd_fp8(
     fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
     sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """RMSNorm with FP8 output"""
     out, rsigma, _, _ = tex.te_rmsnorm_fwd_fp8(inp, weight, fp8_meta_tensor.scale,
                                                fp8_meta_tensor.amax_history,
                                                fp8_meta_tensor.scale_inv, eps, fp8_tensor.value,
-                                               int(otype), sm_margin)
+                                               int(otype), sm_margin, zero_centered_gamma)
     return out, rsigma
 
 
@@ -432,9 +485,10 @@ def rmsnorm_bwd(
     rsigma: paddle.Tensor,
     gamma: paddle.Tensor,
     sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Non-FP8 RMSNorm backward"""
-    return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin)
+    return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma)
 
 
 def mask_to_cu_seqlens(

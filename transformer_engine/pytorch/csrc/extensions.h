@@ -323,6 +323,13 @@ at::Tensor swiglu(at::Tensor input,
                   transformer_engine::DType otype
 );
 
+at::Tensor qgelu(at::Tensor input,
+                  at::Tensor scale,
+                  at::Tensor amax,
+                  at::Tensor scale_inv,
+                  transformer_engine::DType otype
+);
+
 at::Tensor dgelu(at::Tensor grad,
                  at::Tensor input,
                  transformer_engine::DType otype
@@ -344,6 +351,11 @@ at::Tensor dreglu(at::Tensor grad,
 );
 
 at::Tensor dswiglu(at::Tensor grad,
+                   at::Tensor input,
+                   transformer_engine::DType otype
+);
+
+at::Tensor dqgelu(at::Tensor grad,
                    at::Tensor input,
                    transformer_engine::DType otype
 );
