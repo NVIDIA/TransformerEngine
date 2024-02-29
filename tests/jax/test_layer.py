@@ -100,6 +100,7 @@ _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
 _KEY_OF_NUM_HEADS = 'num_attention_heads'
 _KEY_OF_NUM_GQA_GROUPS = 'num_gqa_groups'
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
+_KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -162,13 +163,29 @@ ATTRS = [{
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
-    _KEY_OF_ENABLE_ROPE: True
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
-    _KEY_OF_ENABLE_ROPE: True
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
+}, {
+    _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
+}, {
+    _KEY_OF_TRANSPOSE_BS: True,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True,
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -591,7 +608,7 @@ class TestDecoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
+        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=3e-04)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)

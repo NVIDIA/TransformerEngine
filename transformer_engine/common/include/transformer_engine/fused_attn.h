@@ -44,7 +44,7 @@ enum NVTE_QKV_Layout {
 };
 
 /*! \enum NVTE_QKV_Layout_Group
- *  \brief QKV layout groups 
+ *  \brief QKV layout groups
  */
 enum NVTE_QKV_Layout_Group {
     /*! 3HD QKV layouts, i.e. BS3HD, SB3HD, T3HD */
