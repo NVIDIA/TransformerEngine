@@ -806,7 +806,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param = Float8Tensor.to_float8(
                     param,
                     fp8_meta=self.fp8_meta,
-                    fp8_meta_index=fp8_meta_index
+                    fp8_meta_index=fp8_meta_index,
+                    amax=torch.empty(1, device="cuda"),  # Dummy amax to avoid overwriting history.
                 )
 
             # Redo parameter wrap in case we broke it above
