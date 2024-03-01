@@ -89,10 +89,6 @@ class _ToFloat8Func(torch.autograd.Function):
             else:
                 scale_inv = 1 / scale
 
-        # Check amax
-        if amax is None:
-            amax = torch.empty(1, device="cuda")
-
         # Extract data from FP8 meta tensors if provided
         if fp8_meta is not None:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
@@ -137,6 +133,9 @@ class _ToFloat8Func(torch.autograd.Function):
             scale_inv = scale.reciprocal()
         scale_inv = scale_inv.to(device=tensor.device, dtype=torch.float32)
 
+        # Check amax
+        if amax is None:
+            amax = torch.empty_like(scale)
         if not (amax.numel() == 1 and amax.is_cuda and amax.dtype == torch.float32):
             raise ValueError(
                 "Attempted to initialize Float8Tensor with invalid amax tensor"
