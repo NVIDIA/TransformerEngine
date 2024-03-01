@@ -97,6 +97,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 const at::Tensor QKV,
                 const transformer_engine::DType qkv_type,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -131,17 +132,17 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     } else {
       O.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+                    || (!scale_S.has_value()) || (!scale_O.has_value())
                     || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_QKV = makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape,
                     qkv_type, nullptr, nullptr, descale_QKV.value().data_ptr());
-    at::Tensor descale_S = torch::empty_like(scale_S.value());
     te_S = makeTransformerEngineTensor(nullptr, {0},
                     DType::kFloat32, amax_S.value().data_ptr(),
-                    scale_S.value().data_ptr(), descale_S.data_ptr());
+                    scale_S.value().data_ptr(), descale_S.value().data_ptr());
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape,
                     qkv_type, amax_O.value().data_ptr(), scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
@@ -433,6 +434,7 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 const at::Tensor KV,
                 const transformer_engine::DType qkv_type,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -463,7 +465,8 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     } else {
       O.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+                    || (!scale_S.has_value()) || (!scale_O.has_value())
                     || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
@@ -472,10 +475,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                     qkv_type, nullptr, nullptr, descale_QKV.value().data_ptr());
     te_KV = makeTransformerEngineTensor(KV.data_ptr(), kv_shape,
                     qkv_type, nullptr, nullptr, descale_QKV.value().data_ptr());
-    at::Tensor descale_S = torch::empty_like(scale_S.value());
     te_S = makeTransformerEngineTensor(nullptr, {0},
                     DType::kFloat32, amax_S.value().data_ptr(),
-                    scale_S.value().data_ptr(), descale_S.data_ptr());
+                    scale_S.value().data_ptr(), descale_S.value().data_ptr());
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape,
                     qkv_type, amax_O.value().data_ptr(), scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
@@ -806,6 +808,7 @@ std::vector<at::Tensor> fused_attn_fwd(
                 const at::Tensor V,
                 const transformer_engine::DType qkv_type,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -822,10 +825,6 @@ std::vector<at::Tensor> fused_attn_fwd(
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
   
-  //std::vector<size_t> s_shape{q_sizes.begin(), q_sizes.end()};
-  //if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD) {
-  //  s_shape[0] = q_shape[0];
-
   // create output tensor O
   auto O = torch::empty_like(Q);
 
@@ -841,7 +840,8 @@ std::vector<at::Tensor> fused_attn_fwd(
     } else {
       O.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+                    || (!scale_S.has_value()) || (!scale_O.has_value())
                     || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
@@ -852,25 +852,28 @@ std::vector<at::Tensor> fused_attn_fwd(
                     qkv_type, nullptr, nullptr, descale_QKV.value().data_ptr());
     te_V = makeTransformerEngineTensor(V.data_ptr(), v_shape,
                     qkv_type, nullptr, nullptr, descale_QKV.value().data_ptr());
-    at::Tensor descale_S = torch::empty_like(scale_S.value());
     te_S = makeTransformerEngineTensor(nullptr, {0},
                     DType::kFloat32, amax_S.value().data_ptr(),
-                    scale_S.value().data_ptr(), descale_S.data_ptr());
+                    scale_S.value().data_ptr(), descale_S.value().data_ptr());
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape,
                     qkv_type, amax_O.value().data_ptr(), scale_O.value().data_ptr(), nullptr);
 
-std::cout << " devPtrQ        : " << Q.data_ptr()         << " " << q_shape << std::endl;
-std::cout << " devPtrK        : " << K.data_ptr()         << " " << k_shape << std::endl;
-std::cout << " devPtrV        : " << V.data_ptr()        << " " << v_shape << std::endl;
-std::cout << " devPtrDescaleQ : " << descale_QKV.value().data_ptr() << std::endl;
-std::cout << " devPtrDescaleK : " << descale_QKV.value().data_ptr() << std::endl;
-std::cout << " devPtrDescaleV : " << descale_QKV.value().data_ptr() << std::endl;
-std::cout << " devPtrDescaleS : " << descale_S.data_ptr() << std::endl;
-std::cout << " devPtrScaleS   : " << scale_S.value().data_ptr()  << std::endl;
-std::cout << " devPtrScaleO   : " << scale_O.value().data_ptr()  << std::endl;
-std::cout << " devPtrO        : " << O.data_ptr()     << " " << q_shape << std::endl;
-std::cout << " devPtrAmaxS    : " << amax_S.value().data_ptr()   << std::endl;
-std::cout << " devPtrAmaxO    : " << amax_O.value().data_ptr()    << std::endl;
+//std::cout << " devPtrQ        : " << Q.data_ptr()         << " " << q_shape << std::endl;
+//std::cout << " devPtrK        : " << K.data_ptr()         << " " << k_shape << std::endl;
+//std::cout << " devPtrV        : " << V.data_ptr()        << " " << v_shape << std::endl;
+//std::cout << " devPtrDescaleQ : " << descale_QKV.value().data_ptr() << " " << descale_QKV.value() << std::endl;
+//std::cout << " devPtrDescaleK : " << descale_QKV.value().data_ptr() << std::endl;
+//std::cout << " devPtrDescaleV : " << descale_QKV.value().data_ptr() << std::endl;
+//std::cout << " devPtrDescaleS : " << descale_S.value().data_ptr() << " " << descale_S.value() << std::endl;
+//std::cout << " devPtrScaleS   : " << scale_S.value().data_ptr()  << " " << scale_S.value() << std::endl;
+//std::cout << " devPtrScaleO   : " << scale_O.value().data_ptr()  << " " << scale_O.value() << std::endl;
+//std::cout << " devPtrO        : " << O.data_ptr()     << " " << q_shape << std::endl;
+//std::cout << " devPtrAmaxS    : " << amax_S.value().data_ptr()   << " " << amax_S.value() << std::endl;
+//std::cout << " devPtrAmaxO    : " << amax_O.value().data_ptr()    << " " << amax_O.value() << std::endl;
+//    float descale_s_host = 100.0f;
+//    cudaMemcpy(&descale_s_host, descale_S.value().data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
+//    cudaDeviceSynchronize();
+//    std::cout << " 1 host devPtrDescaleS : " << descale_s_host << std::endl;
 
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
     // BF16 or FP16
@@ -918,6 +921,11 @@ std::cout << " devPtrAmaxO    : " << amax_O.value().data_ptr()    << std::endl;
 
   // create workspace
   TensorWrapper workspace;
+
+//    float descale_s_host = 100.0f;
+//    cudaMemcpy(&descale_s_host, descale_S.value().data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
+//    cudaDeviceSynchronize();
+//    std::cout << " 11 host devPtrDescaleS : " << descale_s_host << std::endl;
 
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd(

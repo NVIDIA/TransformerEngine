@@ -85,15 +85,24 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
-  if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
-          && (sm_arch_ >= 90)
-          && (max_seqlen_q == max_seqlen_kv)
-          && (num_attn_heads == num_gqa_groups)
-          && (max_seqlen_q <= 512)
-          && (head_dim == 64)
-          && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
-          && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-          && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)) {
+  if (
+      ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
+      && (sm_arch_ >= 90)
+      && (max_seqlen_q == max_seqlen_kv)
+      && (num_attn_heads == num_gqa_groups)
+      && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
+      && (
+          ((cudnn_runtime_version >= 8900)
+              && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)
+              && (max_seqlen_q <= 512)
+              && (head_dim == 64)
+              && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK))
+          || ((cudnn_runtime_version >= 9100)
+              && ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+                  || (qkv_format == NVTE_QKV_Format::NVTE_SBHD))
+              //&& (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+              )
+         )) {
     if (cudnn_runtime_version >= 8900) {
       backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
     } else {
@@ -615,6 +624,11 @@ void nvte_fused_attn_fwd(
   Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+
+//    float descale_s_host = 100.0f;
+//    cudaMemcpy(&descale_s_host, input_output_S->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
+//    cudaDeviceSynchronize();
+//    std::cout << " 2 host devPtrDescaleS : " << descale_s_host << std::endl;
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;

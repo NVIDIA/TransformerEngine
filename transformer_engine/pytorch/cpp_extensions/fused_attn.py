@@ -84,6 +84,7 @@ def fused_attn_fwd_qkvpacked(
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_o: torch.Tensor = None,
     amax_s: torch.Tensor = None,
@@ -119,6 +120,8 @@ def fused_attn_fwd_qkvpacked(
                 shape [1, num_heads, max_seqlen, max_seqlen], same data type as qkv
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_s: torch.Tensor, default = None
+                input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_o: torch.Tensor, default = None
@@ -206,6 +209,8 @@ def fused_attn_fwd_qkvpacked(
 
         assert (d_scale_qkv is not None
                 ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert (d_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
         assert (q_scale_s is not None
                 ), "q_scale_s is required as an input for FP8 fused attention."
         assert (q_scale_o is not None
@@ -220,7 +225,7 @@ def fused_attn_fwd_qkvpacked(
             max_seqlen, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, qkv_dtype,
-            d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o, attn_bias,
+            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o, attn_bias,
             rng_gen, rng_elts_per_thread,
     )
 
@@ -368,6 +373,7 @@ def fused_attn_fwd_kvpacked(
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_o: torch.Tensor = None,
     amax_s: torch.Tensor = None,
@@ -410,6 +416,8 @@ def fused_attn_fwd_kvpacked(
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q and kv
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_s: torch.Tensor, default = None
+                input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_o: torch.Tensor, default = None
@@ -496,12 +504,25 @@ def fused_attn_fwd_kvpacked(
         rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
+        assert (d_scale_qkv is not None
+                ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert (d_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_o is not None
+                ), "q_scale_o is required as an input for FP8 fused attention."
+        assert (amax_s is not None
+                ), "amax_s is required as an input for FP8 fused attention."
+        assert (amax_o is not None
+                ), "amax_o is required as an input for FP8 fused attention."
+
     # execute kernel
     output_tensors = tex.fused_attn_fwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, qkv_dtype,
-            d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
+            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
 
@@ -664,6 +685,7 @@ def fused_attn_fwd(
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_o: torch.Tensor = None,
     amax_s: torch.Tensor = None,
@@ -710,6 +732,8 @@ def fused_attn_fwd(
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q, k and v
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of Q, K and V in FP8 computations
+    d_scale_s: torch.Tensor, default = None
+                input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
     q_scale_o: torch.Tensor, default = None
@@ -798,12 +822,25 @@ def fused_attn_fwd(
         rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
+        assert (d_scale_qkv is not None
+                ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert (d_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_o is not None
+                ), "q_scale_o is required as an input for FP8 fused attention."
+        assert (amax_s is not None
+                ), "amax_s is required as an input for FP8 fused attention."
+        assert (amax_o is not None
+                ), "amax_o is required as an input for FP8 fused attention."
+
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
-            d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
+            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
 
