@@ -246,7 +246,7 @@ def gemm(
             assert (
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS_P2P requires extra output tensor'
-            args = tuple(args + (False, extra_output_tensor,))
+            args = tuple(args + (extra_output_tensor,))
     _ = fn(*args)
 
     return out, grad_bias, gelu_input

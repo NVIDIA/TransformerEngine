@@ -71,9 +71,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   int comm_sms;
   int cga_size;
   int use_ce;
+  bool _atomic_gemm;
 
   UbufCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm, int comm_cga_size,
-                  int num_splits, bool set_sm_margin, int num_max_streams,
+                  int num_splits, bool set_sm_margin, int num_max_streams, bool atomic_gemm,
                   torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     if (!comm_created) {
@@ -116,9 +117,12 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
 
     output_tensor = torch::Tensor();
-    auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    counter = torch::zeros({num_splits * 2}, counter_options);
-    counter.index_put_({Slice(None, num_splits)}, 1);
+    _atomic_gemm = atomic_gemm;
+    if (_atomic_gemm) {
+      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+      counter = torch::zeros({num_splits * 2}, counter_options);
+      counter.index_put_({Slice(None, num_splits)}, 1);
+    }
     // CUDA event creation
     cudaEventCreateWithFlags(&_start_compute, 0);
     cudaEventCreateWithFlags(&_stop_compute, 0);
@@ -519,6 +523,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
     return output_tensor;
   }
+
+  bool is_atomic_gemm() { return _atomic_gemm; }
+  bool is_p2p_overlap() { return false; }
 };  // UbufCommOverlap
 
 struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
@@ -544,10 +551,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   int use_ce;
   int sms;
   int cga_size;
+  bool _atomic_gemm;
 
   UbufP2PCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm,
                      int comm_cga_size, bool set_sm_margin, bool aggregate2, int num_max_streams,
-                     bool overlap_reduce_scatter, torch::Tensor empty_tensor) {
+                     bool is_reduce_scatter, bool atomic_gemm, torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (rank == 0) {
@@ -565,7 +573,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     int ubuf_bytes = sample.numel() * sample.element_size();
     int ubuf_chunk_bytes = ubuf_bytes / tp_size;
     int num_ubuf_chunks = tp_size;
-    if (overlap_reduce_scatter) {
+    if (is_reduce_scatter) {
       // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
       // outputs for reduction at the end of the pipelining.
       ubuf_bytes = (int)(ubuf_bytes / tp_size * (tp_size * 2 - 1));
@@ -611,26 +619,29 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     _next_rank = (tp_size + rank + 1) % tp_size + _rank_round_tp;
     _prev_rank = (tp_size + rank + -1) % tp_size + _rank_round_tp;
 
-    auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    counter = torch::zeros({tp_size * 2}, counter_options);
-    counter.index_put_({Slice(None, tp_size)}, 1);
-    _self_chunk_id = _tp_id;
+    _atomic_gemm = atomic_gemm;
+    if (_atomic_gemm) {
+      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+      counter = torch::zeros({tp_size * 2}, counter_options);
+      counter.index_put_({Slice(None, tp_size)}, 1);
+      _self_chunk_id = _tp_id;
 
-    if (!overlap_reduce_scatter) {
-      const char *env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
-      if (rank == 0 && env_p != nullptr) {
-        if (env_p[0] == '1') {
-          printf("!!userbuffers_sendrecv_atomic\n");
-        } else if (env_p[0] == '2') {
-          printf("!!userbuffers_sendrecv_multiatomic\n");
-        } else if (env_p[0] == '3') {
-          printf("!!userbuffers_sendrecv_multiatomic_shuffle\n");
-          _self_chunk_id = 0;
-        } else {
-          printf("!!userbuffers_sendrecv\n");
+      if (!is_reduce_scatter) {
+        const char *env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
+        if (rank == 0 && env_p != nullptr) {
+          if (env_p[0] == '1') {
+            printf("!!userbuffers_sendrecv_atomic\n");
+          } else if (env_p[0] == '2') {
+            printf("!!userbuffers_sendrecv_multiatomic\n");
+          } else if (env_p[0] == '3') {
+            printf("!!userbuffers_sendrecv_multiatomic_shuffle\n");
+            _self_chunk_id = 0;
+          } else {
+            printf("!!userbuffers_sendrecv\n");
+          }
         }
+        counter.index_put_({_self_chunk_id}, 0);
       }
-      counter.index_put_({_self_chunk_id}, 0);
     }
 
     // CUDA event creation
@@ -1157,6 +1168,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   }
 
   bool is_fp8_ubuf() { return (_ubuf.element_size() == 1); }
+  bool is_atomic_gemm() { return _atomic_gemm; }
+  bool is_p2p_overlap() { return true; }
 };  // UbufP2PCommOverlap
 
 }  // namespace ubuf
