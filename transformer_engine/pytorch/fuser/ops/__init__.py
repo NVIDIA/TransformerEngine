@@ -3,10 +3,12 @@
 # See LICENSE for license information.
 
 from .linear import Linear
+from .reshape import Reshape
 from .op import FusableOperation, OperationContext
 
 __all__ = [
     "FusableOperation",
     "Linear,"
     "OperationContext",
+    "Reshape",
 ]

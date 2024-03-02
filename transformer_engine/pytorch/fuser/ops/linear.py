@@ -23,43 +23,10 @@ from ...module.base import get_workspace
 from ._common import (
     canonicalize_device,
     canonicalize_dtype,
+    convert_tensor,
     is_float8_tensor,
 )
 from .op import FusableOperation
-
-def _reshape(
-    tensor: torch.Tensor | Float8Tensor,
-    shape: Optional[Iterable[int]] = None,
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None,
-    memory_format: torch.memory_format = torch.preserve_format,
-):
-    """Reshape tensor, keeping same data if possible
-
-    Supports Float8Tensor.
-
-    """
-
-    # Default kwargs
-    if shape is None:
-        shape = tensor.size()
-    if device is None:
-        device = tensor.device
-    if dtype is None:
-        dtype = tensor.dtype
-
-    # Reshape FP8 tensor
-    if is_float8_tensor(tensor):
-        data = tensor._data.to(
-            device=device,
-            memory_format=memory_format,
-        )
-        data = data.reshape(*shape)
-        return Float8Tensor.make_like(tensor, data=data, dtype=dtype)
-
-    # Reshape standard PyTorch tensor
-    tensor = tensor.reshape(*shape)
-    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
 
 
 class Linear(FusableOperation):
@@ -218,13 +185,13 @@ class Linear(FusableOperation):
                 f"and weight tensor (shape={tuple(self.weight.size())}) "
                 "are not compatible"
             )
-        x = _reshape(
+        x = convert_tensor(
             input,
-            shape=(-1, input_dims[-1]),
             device=self.device,
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
+        x = x.view(-1, input_dims[-1])
         if fp8_enabled and not is_float8_tensor(x):
             x = Float8Tensor.to_float8(
                 x,
@@ -246,7 +213,7 @@ class Linear(FusableOperation):
 
         # Check weight tensor
         ### TODO: Weight caching without FP8 params
-        w = _reshape(
+        w = convert_tensor(
             self.weight,
             device=self.device,
             dtype=self.dtype,
@@ -347,13 +314,13 @@ class Linear(FusableOperation):
 
         # Check grad output tensor
         ### TODO: fused cast-transpose
-        dy = _reshape(
+        dy = convert_tensor(
             grad_output,
-            shape=(-1, grad_output.size(-1)),
             device=self.device,
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
+        dy = dy.view(-1, dy.size(-1))
         if fp8_enabled and not is_float8_tensor(dy):
             dy = Float8Tensor.to_float8(
                 dy,
@@ -374,7 +341,7 @@ class Linear(FusableOperation):
             ### TODO: fused cast-transpose
             w, w_t = None, None
             if fp8_enabled:
-                w_t = _reshape(
+                w_t = convert_tensor(
                     self.weight.transpose(),
                     device=self.device,
                     dtype=self.dtype,
@@ -387,7 +354,7 @@ class Linear(FusableOperation):
                         fp8_meta_index=0,
                     )
             else:
-                w = _reshape(
+                w = convert_tensor(
                     self.weight,
                     device=self.device,
                     dtype=self.dtype,
@@ -448,8 +415,8 @@ class Linear(FusableOperation):
         ### TODO: smarter handling of transpose
         dw = None
         if self.weight.requires_grad:
-            dw = torch.empty_like(
-                self.weight,
+            dw = torch.empty(
+                self.weight.size(),
                 dtype=self.dtype,
                 device=self.device,
                 memory_format=torch.contiguous_format,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+from ...float8_tensor import Float8Tensor
+
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     """Canonicalize PyTorch device"""
     if device is None:
@@ -23,3 +25,29 @@ def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
 def is_float8_tensor(tensor: Any) -> bool:
     """Check if tensor is a Float8Tensor"""
     return getattr(tensor, "_is_float8_tensor", False)
+
+def convert_tensor(
+    tensor: torch.Tensor | Float8Tensor,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+    memory_format: torch.memory_format = torch.preserve_format,
+):
+    """Convert tensor attributes, keeping same data if possible
+
+    Supports Float8Tensor.
+
+    """
+
+    # Default kwargs
+    if device is None:
+        device = tensor.device
+    if dtype is None:
+        dtype = tensor.dtype
+
+    # Convert FP8 tensor
+    if is_float8_tensor(tensor):
+        data = tensor._data.to(device=device, memory_format=memory_format)
+        return Float8Tensor.make_like(tensor, data=data, dtype=dtype)
+
+    # Convert standard PyTorch tensor
+    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)

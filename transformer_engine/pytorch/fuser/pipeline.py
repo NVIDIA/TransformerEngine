@@ -120,7 +120,7 @@ class Pipeline:
         unfused_ops = []
         for op in ops:
             if op.is_fused_op:
-                unfused_ops.extend(op._unfused_ops)  ### TODO Recursive
+                unfused_ops.extend(op._unfused_ops)
             else:
                 unfused_ops.append(op)
         self._num_unfused_ops: int = len(unfused_ops)
