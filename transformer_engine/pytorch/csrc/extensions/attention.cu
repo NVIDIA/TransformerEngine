@@ -267,6 +267,7 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
@@ -298,7 +299,7 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
     } else {
       dQKV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
                     || (!descale_O.has_value()) || (!descale_dO.has_value())
                     || (!scale_S.has_value()) || (!scale_dP.has_value())
                     || (!scale_dQKV.has_value())
@@ -315,10 +316,10 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     nullptr, scale_S.value().data_ptr(), descale_S.value().data_ptr());
-    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
+//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0},
                     DType::kFloat32, amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
-                    descale_dP.data_ptr());
+                    descale_dP.value().data_ptr());
     te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(), qkv_shape, qkv_type,
                     amax_dQKV.value().data_ptr(), scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
@@ -615,6 +616,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
@@ -652,7 +654,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
       dQ.fill_(0);
       dKV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
                     || (!descale_O.has_value()) || (!descale_dO.has_value())
                     || (!scale_S.has_value()) || (!scale_dP.has_value())
                     || (!scale_dQKV.has_value())
@@ -671,10 +673,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32, nullptr,
                     scale_S.value().data_ptr(), descale_S.value().data_ptr());
-    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
+//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
-                    descale_dP.data_ptr());
+                    descale_dP.value().data_ptr());
     te_dQ = makeTransformerEngineTensor(dQ.data_ptr(), q_shape, qkv_type,
                     amax_dQKV.value().data_ptr(), scale_dQKV.value().data_ptr(), nullptr);
     te_dKV = makeTransformerEngineTensor(dKV.data_ptr(), kv_shape, qkv_type,
@@ -1021,6 +1023,7 @@ std::vector<at::Tensor> fused_attn_bwd(
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
@@ -1120,7 +1123,7 @@ std::vector<at::Tensor> fused_attn_bwd(
       dK.fill_(0);
       dV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
                     || (!descale_O.has_value()) || (!descale_dO.has_value())
                     || (!scale_S.has_value()) || (!scale_dP.has_value())
                     || (!scale_dQKV.has_value())
@@ -1141,10 +1144,10 @@ std::vector<at::Tensor> fused_attn_bwd(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32, nullptr,
                     scale_S.value().data_ptr(), descale_S.value().data_ptr());
-    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
+//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
-                    descale_dP.data_ptr());
+                    descale_dP.value().data_ptr());
     te_dQ = makeTransformerEngineTensor(dQ.data_ptr(), q_shape, qkv_type,
                     amax_dQKV.value().data_ptr(), scale_dQKV.value().data_ptr(), nullptr);
     te_dK = makeTransformerEngineTensor(dK.data_ptr(), k_shape, qkv_type,

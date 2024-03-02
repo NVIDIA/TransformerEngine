@@ -246,6 +246,7 @@ def fused_attn_bwd_qkvpacked(
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
     d_scale_do: torch.Tensor = None,
+    d_scale_dp: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_dp: torch.Tensor = None,
     q_scale_dqkv: torch.Tensor = None,
@@ -290,6 +291,8 @@ def fused_attn_bwd_qkvpacked(
                 input tensor for the dequantization of O in FP8 computations
     d_scale_do: torch.Tensor, default = None
                 input tensor for the dequantization of dO in FP8 computations
+    d_scale_dp: torch.Tensor, default = None
+                input tensor for the dequantization of dP in FP8 computations
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations
     q_scale_dp: torch.Tensor, default = None
@@ -341,6 +344,7 @@ def fused_attn_bwd_qkvpacked(
         assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
         assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
         assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
+        assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
         assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
         assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
         assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
@@ -354,7 +358,7 @@ def fused_attn_bwd_qkvpacked(
             max_seqlen, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, o, d_o, qkv_dtype, aux_ctx_tensors,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
+            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
 
@@ -546,6 +550,7 @@ def fused_attn_bwd_kvpacked(
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
     d_scale_do: torch.Tensor = None,
+    d_scale_dp: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_dp: torch.Tensor = None,
     q_scale_dqkv: torch.Tensor = None,
@@ -597,6 +602,8 @@ def fused_attn_bwd_kvpacked(
                 input tensor for the dequantization of O in FP8 computations
     d_scale_do: torch.Tensor, default = None
                 input tensor for the dequantization of dO in FP8 computations
+    d_scale_dp: torch.Tensor, default = None
+                input tensor for the dequantization of dP in FP8 computations
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations
     q_scale_dp: torch.Tensor, default = None
@@ -652,6 +659,7 @@ def fused_attn_bwd_kvpacked(
         assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
         assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
         assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
+        assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
         assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
         assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
         assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
@@ -665,7 +673,7 @@ def fused_attn_bwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, aux_ctx_tensors,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
+            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
 
@@ -865,6 +873,7 @@ def fused_attn_bwd(
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
     d_scale_do: torch.Tensor = None,
+    d_scale_dp: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
     q_scale_dp: torch.Tensor = None,
     q_scale_dqkv: torch.Tensor = None,
@@ -919,6 +928,8 @@ def fused_attn_bwd(
                 input tensor for the dequantization of O in FP8 computations
     d_scale_do: torch.Tensor, default = None
                 input tensor for the dequantization of dO in FP8 computations
+    d_scale_dp: torch.Tensor, default = None
+                input tensor for the dequantization of dP in FP8 computations
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations
     q_scale_dp: torch.Tensor, default = None
@@ -978,6 +989,7 @@ def fused_attn_bwd(
         assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
         assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
         assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
+        assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
         assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
         assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
         assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
@@ -991,7 +1003,7 @@ def fused_attn_bwd(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, aux_ctx_tensors,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
+            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
 

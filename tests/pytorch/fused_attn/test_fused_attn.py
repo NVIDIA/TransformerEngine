@@ -911,8 +911,8 @@ model_configs_fp8 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
     #"fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
     #"fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    #"fp8_1": ModelConfig(1, 1, 1,  128,  512,  512, 0.0, "causal", "no_bias"),
-    "fp8_1": ModelConfig(1, 1, 1,  128,  2048,  2048, 0.0, "causal", "no_bias"),
+    "fp8_1": ModelConfig(1, 1, 1,  128,  512,  512, 0.0, "causal", "no_bias"),
+    #"fp8_1": ModelConfig(1, 1, 1,  128,  2048,  2048, 0.0, "causal", "no_bias"),
     #"fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16]
@@ -947,13 +947,15 @@ def test_dpa_fp8(dtype, model):
 
     print('fused_attn_fwd',fused_attn_fwd.min(),fused_attn_fwd.max())
     print('unfused_attn_fwd',unfused_attn_fwd.min(),unfused_attn_fwd.max())
+    print('fused_attn_bwd',fused_attn_bwd.min(),fused_attn_bwd.max())
+    print('unfused_attn_bwd',unfused_attn_bwd.min(),unfused_attn_bwd.max())
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
     torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
     torch.save(unfused_attn_fwd, 'unfused_attn_fwd.pt')
     #print('----- not testing assert ------')
     #torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-    #torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+    torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dpa_fp8(dtype, config, backend):
     """Run FusedAttention FP8 backend, i.e.
@@ -968,14 +970,17 @@ def _run_dpa_fp8(dtype, config, backend):
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
     #inp = 0.01 *  torch.randn(
-    inp = 0.01 *  torch.randn(
+    #inp = 0.5 *  torch.randn(
+    inp = 0.01 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
             dtype=torch.int32, device="cuda")
     cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-    out_grad = 0.01 * torch.randn(
+    #out_grad = 0.01 * torch.randn(
+    #out_grad = 0.5 * torch.randn(
+    out_grad = torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda")
     torch.save(out_grad, 'out_grad.pt')
@@ -983,7 +988,7 @@ def _run_dpa_fp8(dtype, config, backend):
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         interval=1,
-        fp8_format=recipe.Format.HYBRID,
+        fp8_format=recipe.Format.E4M3,#HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
     )
@@ -1143,19 +1148,6 @@ class _dpa_fp8(torch.autograd.Function):
         print('--- qkv_out min ', qkv_out.min().item(), ' max ', qkv_out.max().item())
         print('--- qkv_out_fp16 min ', qkv_out_fp16.min().item(), ' max ', qkv_out_fp16.max().item())
         #fp8_meta["scaling_fwd"].scale[META_S] = 40
-        print(""" fp8_meta[scaling_fwd].scale_inv[META_QKV],
-            fp8_meta[scaling_fwd].scale_inv[META_S],
-            fp8_meta[scaling_fwd].scale[META_S],
-            fp8_meta[scaling_fwd].scale[META_O],
-            fp8_meta[scaling_fwd].amax_history[0][META_S],
-            fp8_meta[scaling_fwd].amax_history[0][META_O]""",
-            fp8_meta["scaling_fwd"].scale_inv[META_QKV],
-            fp8_meta["scaling_fwd"].scale_inv[META_S],
-            fp8_meta["scaling_fwd"].scale[META_S],
-            fp8_meta["scaling_fwd"].scale[META_O],
-            fp8_meta["scaling_fwd"].amax_history[0][META_S],
-            fp8_meta["scaling_fwd"].amax_history[0][META_O],
-            )
 
         # FMHA
         context_, aux_ctx_tensors, *rest = fused_attn_fwd(
@@ -1185,6 +1177,19 @@ class _dpa_fp8(torch.autograd.Function):
                 attn_mask_type="causal",#"padding",
                 rng_gen=None,
                 )
+        print(""" fp8_meta[scaling_fwd].scale_inv[META_QKV],
+            fp8_meta[scaling_fwd].scale_inv[META_S],
+            fp8_meta[scaling_fwd].scale[META_S],
+            fp8_meta[scaling_fwd].scale[META_O],
+            fp8_meta[scaling_fwd].amax_history[0][META_S],
+            fp8_meta[scaling_fwd].amax_history[0][META_O]""",
+            fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+            fp8_meta["scaling_fwd"].scale_inv[META_S],
+            fp8_meta["scaling_fwd"].scale[META_S],
+            fp8_meta["scaling_fwd"].scale[META_O],
+            fp8_meta["scaling_fwd"].amax_history[0][META_S],
+            fp8_meta["scaling_fwd"].amax_history[0][META_O],
+            )
         M, ZInv, philox_unpacked = aux_ctx_tensors
         torch.save(context_, 'context_.pt')
         print(' context_ ', context_.min(), context_.max(), context_.shape, context_[0,511,0,:])
@@ -1260,6 +1265,7 @@ class _dpa_fp8(torch.autograd.Function):
                     fwd_scale_inverses[META_S], # d_scale_s,
                     fwd_scale_inverses[META_O], # d_scale_o,
                     ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    ctx.fp8_meta['scaling_bwd'].scale_inv[META_DS], # d_scale_ds
                     fwd_scales[META_S], # q_scale_s
                     ctx.fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
                     ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
@@ -1273,6 +1279,27 @@ class _dpa_fp8(torch.autograd.Function):
                     "no_bias",
                     "causal",#"padding",
                     )
+            print("""fwd_scale_inverses[META_QKV], # d_scale_qkv,
+                fwd_scale_inverses[META_S], # d_scale_s,
+                fwd_scale_inverses[META_O], # d_scale_o,
+                ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                ctx.fp8_meta['scaling_bwd'].scale_inv[META_DS], # d_scale_ds
+                fwd_scales[META_S], # q_scale_s
+                ctx.fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV]""", # amax_dqkv
+                fwd_scale_inverses[META_QKV], # d_scale_qkv,
+                fwd_scale_inverses[META_S], # d_scale_s,
+                fwd_scale_inverses[META_O], # d_scale_o,
+                ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                ctx.fp8_meta['scaling_bwd'].scale_inv[META_DS], # d_scale_ds
+                fwd_scales[META_S], # q_scale_s
+                ctx.fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                )
             dqkv = torch.cat([dq.unsqueeze(1), dk.unsqueeze(1), dv.unsqueeze(1)], dim=1)
 
             dqkv_grad_output_c = dqkv.view(-1, 3*ctx.hidden_size)
