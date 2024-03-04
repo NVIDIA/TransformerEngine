@@ -105,6 +105,7 @@ class _LayerNormMLP(torch.autograd.Function):
         tensor_parallel: bool,
         activation_dtype: torch.dtype,
         return_layernorm_output: bool,
+        return_layernorm_output_gathered: bool,
         bias_gelu_nvfusion: bool,
         set_parallel_mode: bool,
         is_grad_enabled: bool,
@@ -174,18 +175,7 @@ class _LayerNormMLP(torch.autograd.Function):
                                                   fwd_ln_sm_margin,
                                                   zero_centered_gamma,
                                                   is_grad_enabled)
-        # If residual connection is after LN, we need `ln_out`
-        # tensor in higher precision, this comes at the cost
-        # of an extra fp8 cast.
-        if return_layernorm_output:
-            ln_out_return = ln_out
-            if fp8:
-                ln_out = tex.cast_to_fp8(
-                    ln_out,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
+
         # Column Parallel Linear
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
@@ -194,6 +184,19 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
             ln_out_total = ln_out
+
+        # If residual connection is after LN, we need `ln_out`
+        # tensor in higher precision, this comes at the cost
+        # of an extra fp8 cast.
+        if return_layernorm_output:
+            ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
+            if fp8:
+                ln_out = tex.cast_to_fp8(
+                    ln_out,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                )
 
         if fp8:
             bias_dtype = (
@@ -503,6 +506,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
             ctx.return_layernorm_output = return_layernorm_output
+            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
@@ -525,7 +529,12 @@ class _LayerNormMLP(torch.autograd.Function):
         fc2_out = fc2_out.view(-1, *inp.shape[1:-1], fc2_out.shape[-1])
 
         if return_layernorm_output:
-            return fc2_out, ln_out_return.view_as(inp)
+            if return_layernorm_output_gathered:
+                shape = list(inp.shape)
+                shape[0] *= tp_size
+                return fc2_out, ln_out_return.view(shape)
+            else:
+                return fc2_out, ln_out_return.view_as(inp)
         return fc2_out
 
 
@@ -856,6 +865,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
                 if not ctx.ub_bulk_wgrad:
+                    if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
+                        fc1_dgrad = fc1_dgrad + grad_outputs[1].view_as(fc1_dgrad)
                     fc1_dgrad, handle = reduce_scatter_along_first_dim(
                         fc1_dgrad, ctx.tp_group, async_op=True
                     )
@@ -958,7 +969,7 @@ class _LayerNormMLP(torch.autograd.Function):
             dgrad = fc1_dgrad.view(inputmat.shape)
 
             # Residual gradient
-            if ctx.return_layernorm_output:
+            if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
@@ -1058,6 +1069,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1093,6 +1105,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module
                              is taken post layernorm.
+    return_layernorm_output_gathered : bool, default = `False`
+                             if set to `True`, output of layernorm is returned after the all
+                             gather operation. Ignored if return_layernorm_output is False.
+                             Example use case: with sequence parallel on, input to residual connection
+                             for transformer module (e.g. LoRA) will need to be gathered.
+                             Returning layernorm output gathered will prevent a redundant gather.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
