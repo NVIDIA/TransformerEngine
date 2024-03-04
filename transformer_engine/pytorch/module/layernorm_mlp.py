@@ -177,10 +177,12 @@ class _LayerNormMLP(torch.autograd.Function):
                                                   is_grad_enabled)
 
         # Column Parallel Linear
+        ln_out_gathered = False
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             ln_out = torch.empty_like(ln_out)
         elif set_parallel_mode and sequence_parallel:
+            ln_out_gathered = True
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
             ln_out_total = ln_out
@@ -506,7 +508,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
             ctx.return_layernorm_output = return_layernorm_output
-            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered
+            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered \
+                                                   and ln_out_gathered
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
