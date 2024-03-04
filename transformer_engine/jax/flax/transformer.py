@@ -541,19 +541,22 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         return x
 
 
-def rotary_pos_emb(x: Array, windows: Tuple[int, int], transpose_batch_sequence: bool):
+def rotary_pos_emb(x: Array,
+                   windows: Tuple[int, int],
+                   transpose_batch_sequence: bool,
+                   group_method: str = 'consecutive'):
     """
     Rotary Positional Embedding
     x should be in shape of
-    [Batch, Seqlen, ..., Hidden] if transpose_batch_sequence is False, or
-    [Seqlen, Batch, ..., Hidden] if transpose_batch_sequence is True.
+    [Batch, Seqlen, ..., Heads, Hidden] if transpose_batch_sequence is False, or
+    [Seqlen, Batch, ..., Heads, Hidden] if transpose_batch_sequence is True.
     """
-    embed_dim = x.shape[-1]
-    half_embed_dim = embed_dim // 2
+    hidden_dim = x.shape[-1]
+    half_hidden_dim = hidden_dim // 2
     min_window = windows[0]
     max_window = windows[1]
 
-    fraction = 2 * jnp.arange(0, half_embed_dim) / embed_dim
+    fraction = 2 * jnp.arange(0, half_hidden_dim) / hidden_dim
     time_scales = min_window * (max_window / min_window)**fraction
     time_scales = jnp.expand_dims(time_scales, axis=tuple(range(x.ndim - 1)))
 
@@ -563,15 +566,55 @@ def rotary_pos_emb(x: Array, windows: Tuple[int, int], transpose_batch_sequence:
     positions = jnp.expand_dims(jnp.arange(x.shape[seq_dim]), axis=batch_dim)
     positions = jnp.expand_dims(positions, axis=tuple(range(2, x.ndim)))
 
-    sinusoidal_positions = positions / time_scales
-    sin = jnp.sin(sinusoidal_positions)
-    cos = jnp.cos(sinusoidal_positions)
+    def generate_sin_cos(timescales):
+        sinusoidal_positions = positions / timescales
+        sin = jnp.sin(sinusoidal_positions)
+        cos = jnp.cos(sinusoidal_positions)
+        return sin, cos
 
-    x1, x2 = jnp.split(x, 2, axis=-1)
-    part_1 = (x1 * cos - x2 * sin).astype(x.dtype)
-    part_2 = (x2 * cos + x1 * sin).astype(x.dtype)
+    def alternate_impl():
+        sin, cos = generate_sin_cos(time_scales)
 
-    return jnp.concatenate([part_1, part_2], axis=-1)
+        x1, x2 = jnp.split(x, 2, axis=-1)
+        part_1 = (x1 * cos - x2 * sin).astype(x.dtype)
+        part_2 = (x2 * cos + x1 * sin).astype(x.dtype)
+
+        output = jnp.concatenate([part_1, part_2], axis=-1)
+        return output
+
+    def consecutive_impl():
+        sin, cos = generate_sin_cos(jnp.repeat(time_scales, 2, axis=-1))
+
+        x_shifted_left = jnp.roll(x, -1, axis=-1)
+        x_shifted_right = jnp.roll(x, 1, axis=-1)
+        x_shifted = jax.lax.select(
+            jnp.tile(
+                jnp.mod(jnp.arange(hidden_dim, dtype=jnp.int32), 2),
+                x.shape[:-1] + (1,),
+            ),
+            x_shifted_right,
+            x_shifted_left,
+        )
+
+        sign = jnp.sign(jnp.mod(jnp.arange(hidden_dim, dtype=jnp.int32), 2) - 0.5)
+
+        output = x * cos + x_shifted * sin * sign
+        output = output.astype(x.dtype)
+        return output
+
+    def canonicalize_group_method(gm):
+        canonicalized_gm = gm.lower().strip().replace('-', '').replace('_', '')
+        assert canonicalized_gm in ['consecutive', 'alternate'], \
+            f"Invalid relative positional embedding group method. " \
+            f"Expect to be in []'alternate' or 'consecutive'], but got {gm}."
+
+        return canonicalized_gm
+
+    group_method = canonicalize_group_method(group_method)
+
+    if group_method == 'alternate':
+        return alternate_impl()
+    return consecutive_impl()
 
 
 class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
@@ -640,6 +683,10 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
+    rotary_pos_emb_group_method: str, default = 'consecutive'
+        Indicate the method to coupled the coordinates. It should be one of
+        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
+        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
@@ -693,6 +740,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
+    rotary_pos_emb_group_method: str = 'consecutive'
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
@@ -942,9 +990,14 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
 
+            # No changes to memory layout, should trigger bicast only (Ideally no Perf impact)
+            query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+
             query = rotary_pos_emb(query, self.rotary_pos_emb_windows,
-                                   self.transpose_batch_sequence)
-            key = rotary_pos_emb(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence)
+                                   self.transpose_batch_sequence, self.rotary_pos_emb_group_method)
+            key = rotary_pos_emb(key, self.rotary_pos_emb_windows, self.transpose_batch_sequence,
+                                 self.rotary_pos_emb_group_method)
             qkv_layout = QKVLayout.BSHD_BSHD_BSHD
 
         if qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
@@ -1269,6 +1322,10 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
+    rotary_pos_emb_group_method: str, default = 'consecutive'
+        Indicate the method to coupled the coordinates. It should be one of
+        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
+        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
 
@@ -1323,6 +1380,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     relative_embedding: nn.Module = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
+    rotary_pos_emb_group_method: str = 'consecutive'
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -1464,6 +1522,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             attn_bias_type=self.self_attn_bias_type,
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
+            rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
             fuse_qkv_params=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
@@ -1530,6 +1589,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 attn_bias_type='no_bias',
                 enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                 rotary_pos_emb_windows=self.rotary_pos_emb_windows,
+                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,

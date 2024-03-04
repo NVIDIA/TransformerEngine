@@ -207,20 +207,25 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
-    """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
-    """
-    return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
+    """Check if tensor dimensions are supported for FP8 TN GEMM"""
+    return (
+        tensor.dim() == 2
+        and tensor.size(0) % 8 == 0
+        and tensor.size(1) % 16 == 0
+    )
 
 
 def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
-    """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
-    """
+    """Assert that tensor dimensions are supported for FP8 TN GEMM"""
     # single tensor check so it's clear which tensor is triggering the assertion
-    assert check_dim_for_fp8_exec(tensor), (
-        "Tensor dimensions are not compatible for FP8 execution: "
-        f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
+    assert (
+        tensor.dim() == 2
+        and tensor.size(0) % 8 == 0
+        and tensor.size(1) % 16 == 0
+    ), (
+        "FP8 execution requires 2D input matrices with "
+        "height divisible by 8 and width divisible by 16, "
+        f"but got tensor with dims={list(tensor.size())}"
     )
 
 def is_bf16_compatible() -> None:
