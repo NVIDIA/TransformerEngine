@@ -137,10 +137,12 @@ class _LayerNormLinear(torch.autograd.Function):
                                                   is_grad_enabled)
 
         # Column Parallel Linear
+        ln_out_gathered = False
         if ub_split_ag or ub_atomic_gemm_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             ln_out = torch.empty_like(ln_out)
         elif parallel_mode == "column" and sequence_parallel:
+            ln_out_gathered = True
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
             ln_out_total = ln_out
