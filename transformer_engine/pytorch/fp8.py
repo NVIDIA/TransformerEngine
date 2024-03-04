@@ -651,6 +651,7 @@ def _non_fused_amax_and_scale_update_after_reduction(
             scale,
             scale_inv,
             non_weight_mask,
+            torch.Tensor(), # TODO(ksivaman): Set skip tensor option.
             amax_history,
             scale,
             scale_inv,

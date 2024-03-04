@@ -520,13 +520,11 @@ class Float8Tensor(torch.Tensor):
         the tensor.
 
         """
-        if self._fp8_meta is None:
-            return
+        assert self._fp8_meta is not None, "FP8 meta tensors not found."
         fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
             forward=self._fp8_meta_forward,
         )
-        scale_inv = self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index]
-        scale_inv.view(1).copy_(self._scale_inv.view(1))
+        self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index].copy_(self._scale_inv[0])
 
     def to_dtype(self, dtype: torch.dtype) -> Float8Tensor:
         """Create `Float8Tensor` with given nominal dtype
