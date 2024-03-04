@@ -289,7 +289,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.return_layernorm_output = return_layernorm_output
-            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered
+            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered and ln_out_gathered
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
