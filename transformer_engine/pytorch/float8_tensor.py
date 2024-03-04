@@ -573,7 +573,7 @@ class Float8Tensor(torch.Tensor):
                 # Directly copy FP8 data if possible
                 if dst._fp8_dtype == src._fp8_dtype:
                     dst._data.copy_(src._data)
-                    dst._scale_inv = src._scale_inv.clone()
+                    dst._scale_inv.copy_(src._scale_inv.clone())
                     if dst._fp8_meta is not None:
                         if src._fp8_meta is None:
                             src_min, src_max = src.from_float8().aminmax()
@@ -618,7 +618,7 @@ class Float8Tensor(torch.Tensor):
                     fp8_meta_index = dst._fp8_meta_index
                     scale = dst._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
                     amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-                    dst._scale_inv = scale.detach().view(1).reciprocal()
+                    dst._scale_inv.copy_(scale.detach().reciprocal())
 
                 # Cast to FP8
                 if not dst._data.is_contiguous():
