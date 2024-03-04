@@ -1187,6 +1187,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fuse_wgrad_accumulation: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
+        return_layernorm_output_gathered: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
@@ -1210,6 +1211,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
+        self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.bias_gelu_nvfusion = (bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1"))) and
                                    self.activation == 'gelu')
         self.set_parallel_mode = set_parallel_mode
@@ -1477,6 +1479,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.tp_size > 1,
                 self.activation_dtype,
                 self.return_layernorm_output,
+                self.return_layernorm_output_gathered,
                 self.bias_gelu_nvfusion,
                 self.set_parallel_mode,
                 torch.is_grad_enabled(),
