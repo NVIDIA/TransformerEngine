@@ -652,7 +652,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              taken post layernorm.
     return_layernorm_output_gathered : bool, default = `False`
                              if set to `True`, output of layernorm is returned after the all
-                             gather operation. Ignored if return_layernorm_output is False
+                             gather operation. Ignored if return_layernorm_output is False.
+                             Example use case: with sequence parallel on, input to residual connection
+                             for transformer module (e.g. LoRA) will need to be gathered.
+                             Returning layernorm output gathered will prevent a redundant gather.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
                       Configuration for splitting the weight and bias tensors along dim 0 into
                       multiple PyTorch parameters. If a list or tuple of strings is provided,
