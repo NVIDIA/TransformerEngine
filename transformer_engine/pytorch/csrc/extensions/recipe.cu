@@ -38,13 +38,14 @@ void fused_amax_and_scale_update(const at::Tensor &amax_history,
 }
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
-                                 std::vector<at::Tensor> amax_histories,
-                                 std::vector<at::Tensor> scales,
-                                 std::vector<at::Tensor> scale_invs,
-                                 std::vector<at::Tensor> scale_inv_masks,
-                                 const std::string &amax_compute_algo,
-                                 transformer_engine::DType fp8_dtype,
-                                 float margin) {
+                                                 std::vector<at::Tensor> amax_histories,
+                                                 std::vector<at::Tensor> scales,
+                                                 std::vector<at::Tensor> scale_invs,
+                                                 std::vector<at::Tensor> scale_inv_masks,
+                                                 const at::Tensor &skip_scale_inv_update,
+                                                 const std::string &amax_compute_algo,
+                                                 transformer_engine::DType fp8_dtype,
+                                                 float margin) {
   using namespace transformer_engine;
   size_t num_tensors = amax_histories.size();
   std::vector<Tensor> t_amax_histories(num_tensors);
@@ -91,6 +92,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
     te_scales,
     te_scale_invs,
     te_scale_inv_masks,
+    makeTransformerEngineTensor(skip_scale_inv_update).data(),
     amax_compute_algo.c_str(),
     static_cast<NVTEDType>(fp8_dtype),
     margin,

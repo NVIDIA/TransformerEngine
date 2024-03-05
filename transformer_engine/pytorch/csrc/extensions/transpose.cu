@@ -366,19 +366,15 @@ void fp8_transpose_noalloc(at::Tensor input,
 }
 
 
-at::Tensor fp8_transpose_noop(at::Tensor input,
-                              at::Tensor noop,
-                              transformer_engine::DType otype
+void fp8_transpose_noalloc_noop(at::Tensor input,
+                                at::Tensor output,
+                                at::Tensor noop,
+                                transformer_engine::DType otype
 ) {
   using namespace transformer_engine;
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
-
-  auto output =
-            allocateTorchTensor(input.size(1),
-                                input.size(0),
-                                DType::kByte);
 
   auto input_cu  = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
   auto noop_cu   = makeTransformerEngineTensor(noop);
@@ -387,6 +383,4 @@ at::Tensor fp8_transpose_noop(at::Tensor input,
   nvte_transpose_with_noop(
     input_cu.data(), noop_cu.data(), output_cu.data(),
     at::cuda::getCurrentCUDAStream());
-
-  return output;
 }

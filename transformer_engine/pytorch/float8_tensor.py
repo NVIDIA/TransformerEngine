@@ -483,14 +483,18 @@ class Float8Tensor(torch.Tensor):
         if not cache:
             return tex.fp8_transpose(self._data, self._fp8_dtype)
 
-        if not update_cache:
+        if not update_cache and noop is None:
             assert self._data_transpose is not None, "Tranpose cache is empty."
             return self._data_transpose
 
         if self._data_transpose is None:
+            # This branch is only run once since we never reset the cache.
+            # For graphed case this will be initialized during 1st warmup.
             self._data_transpose = tex.fp8_transpose(self._data, self._fp8_dtype)
-        else:
+        elif noop is None:
             tex.fp8_transpose_noalloc(self._data, self._data_transpose, self._fp8_dtype)
+        else:
+            tex.fp8_transpose_noalloc_noop(self._data, self._data_transpose, noop, self._fp8_dtype)
 
         return self._data_transpose
 

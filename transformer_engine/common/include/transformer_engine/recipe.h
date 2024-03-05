@@ -93,6 +93,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
                            std::vector<NVTETensor> scales,
                            std::vector<NVTETensor> scale_invs,
                            std::vector<NVTETensor> scale_inv_masks,
+                           const NVTETensor skip_scale_inv_update,
                            const char *amax_compute_algo,
                            NVTEDType fp8_dtype,
                            float margin,

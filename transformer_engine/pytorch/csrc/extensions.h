@@ -279,9 +279,10 @@ void fp8_transpose_noalloc(at::Tensor input,
                            transformer_engine::DType otype
 );
 
-at::Tensor fp8_transpose_noop(at::Tensor input,
-                              at::Tensor noop,
-                              transformer_engine::DType otype
+void fp8_transpose_noalloc_noop(at::Tensor input,
+                                at::Tensor output,
+                                at::Tensor noop,
+                                transformer_engine::DType otype
 );
 
 /***************************************************************************************************
@@ -593,13 +594,14 @@ void fused_amax_and_scale_update(const at::Tensor &amax_history,
                                  float margin);
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
-                                 std::vector<at::Tensor> amax_histories,
-                                 std::vector<at::Tensor> scales,
-                                 std::vector<at::Tensor> scale_invs,
-                                 std::vector<at::Tensor> scale_inv_masks,
-                                 const std::string &amax_compute_algo,
-                                 transformer_engine::DType fp8_dtype,
-                                 float margin);
+                                                 std::vector<at::Tensor> amax_histories,
+                                                 std::vector<at::Tensor> scales,
+                                                 std::vector<at::Tensor> scale_invs,
+                                                 std::vector<at::Tensor> scale_inv_masks,
+                                                 const at::Tensor &skip_scale_inv_update,
+                                                 const std::string &amax_compute_algo,
+                                                 transformer_engine::DType fp8_dtype,
+                                                 float margin);
 
 /***************************************************************************************************
  * Rotary positional embedding

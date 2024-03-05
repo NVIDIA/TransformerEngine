@@ -51,9 +51,10 @@ struct AmaxParam {
 // dummy struct for kernel_bulk's other params
 struct OtherParams {
   float* a;
-  size_t b;
-  AmaxComputeAlgo c;
-  float d;
+  const float* b;
+  size_t c;
+  AmaxComputeAlgo d;
+  float e;
 };
 
 #if CUDART_VERSION >= 12010
@@ -71,6 +72,9 @@ struct AmaxParams {
 };
 
 namespace amax_and_scale_update_impl {
+
+
+
 
 // CUDA block size
 constexpr size_t bsize = 256;
@@ -155,6 +159,7 @@ kernel(const float* amax_history_ptr,
     }
     updated_scale_ptr[bid] = scale;
 
+    // Update scale inverse
     bool update_weight_scale_inv;
     if (skip_scale_inv_update_ptr == nullptr) {
       update_weight_scale_inv = scale_inv_mask_ptr == nullptr;
@@ -162,7 +167,6 @@ kernel(const float* amax_history_ptr,
       update_weight_scale_inv = skip_scale_inv_update_ptr[0] == 0.0f;
     }
 
-    // Update scale inverse
     float scale_inv;
     if (update_weight_scale_inv || scale_inv_mask_ptr[bid]) {
       scale_inv = 1 / scale;
@@ -182,6 +186,7 @@ kernel(const float* amax_history_ptr,
 __global__ void __launch_bounds__(bsize)
 kernel_bulk(
        float* amax_reduction_buffer,
+       const float* skip_scale_inv_update_ptr,
        AmaxParams p,
        size_t amax_history_length,
        AmaxComputeAlgo amax_compute_algo,
@@ -254,9 +259,17 @@ kernel_bulk(
         scale = p.param[bid].scale[count];
       }
       p.param[bid].scale[count] = scale;
+
       // Update scale inverse
+      bool update_weight_scale_inv;
+      if (skip_scale_inv_update_ptr == nullptr) {
+        update_weight_scale_inv = p.param[bid].scale_inv_mask == nullptr;
+      } else {
+        update_weight_scale_inv = skip_scale_inv_update_ptr[0] == 0.0f;
+      }
+
       float scale_inv;
-      if (p.param[bid].scale_inv_mask == nullptr || p.param[bid].scale_inv_mask[count]) {
+      if (update_weight_scale_inv || p.param[bid].scale_inv_mask[count]) {
         scale_inv = 1 / scale;
       } else {
         scale_inv = p.param[bid].scale_inv[count];
@@ -381,14 +394,15 @@ void amax_and_scale_update(const Tensor &amax_history,
 }
 
 void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
-                           std::vector<Tensor*> amax_histories,
-                           std::vector<Tensor*> scales,
-                           std::vector<Tensor*> scale_invs,
-                           std::vector<Tensor*> scale_inv_masks,
-                           const std::string &amax_compute_algo,
-                           DType fp8_dtype,
-                           float margin,
-                           cudaStream_t stream) {
+                                           std::vector<Tensor*> amax_histories,
+                                           std::vector<Tensor*> scales,
+                                           std::vector<Tensor*> scale_invs,
+                                           std::vector<Tensor*> scale_inv_masks,
+                                           const Tensor &skip_scale_inv_update,
+                                           const std::string &amax_compute_algo,
+                                           DType fp8_dtype,
+                                           float margin,
+                                           cudaStream_t stream) {
   using namespace transformer_engine;
 
   // amax value to use for updating scaling factor
@@ -447,6 +461,11 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
       NVTE_CHECK(numel(scales[i]) == num_scale,
                  "Expected ", num_scale, " elements, ",
                  "Found ", numel(scales[i]), ".");
+      if (skip_scale_inv_update.data.dptr != nullptr) {
+        NVTE_CHECK(skip_scale_inv_update.data.shape == std::vector<size_t>{1});
+        NVTE_CHECK(skip_scale_inv_update.data.dtype == DType::kFloat32);
+        NVTE_CHECK(scale_inv_masks[i]->data.dptr != nullptr);
+      }
       if (scale_inv_masks[i]->data.dptr != nullptr) {
         NVTE_CHECK(scale_invs[i]->data.dtype == DType::kFloat32,
                    "Found ", dtype_name(scale_invs[i]->data.dtype), ".");
@@ -479,6 +498,7 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
     amax_and_scale_update_impl::kernel_bulk
       <<<grid_size, block_size, 0, stream>>>(
         amax_buffer,
+        static_cast<const float*>(skip_scale_inv_update.data.dptr),
         p,
         amax_history_length,
         amax_compute_algo_,
@@ -531,6 +551,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
                            std::vector<NVTETensor> scales,
                            std::vector<NVTETensor> scale_invs,
                            std::vector<NVTETensor> scale_inv_masks,
+                           const NVTETensor skip_scale_inv_update,
                            const char *amax_compute_algo,
                            NVTEDType fp8_dtype,
                            float margin,
@@ -551,6 +572,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
     t_scales,
     t_scale_invs,
     t_scale_inv_masks,
+    *reinterpret_cast<const Tensor*>(skip_scale_inv_update),
     amax_compute_algo,
     static_cast<DType>(fp8_dtype),
     margin,
