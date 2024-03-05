@@ -112,10 +112,7 @@ class FusableOperation(torch.nn.Module):
 
         # Initialize FP8 metadata if needed
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        with_fp8_params = any(
-            is_float8_tensor(param) for param in self.parameters()
-        )
-        if self._fp8_metas is None and (fp8_enabled or with_fp8_params):
+        if self._fp8_metas is None and fp8_enabled:
             self._fp8_metas = self._make_fp8_metas()
 
         # Update FP8 metadata if needed

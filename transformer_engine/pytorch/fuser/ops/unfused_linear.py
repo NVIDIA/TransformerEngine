@@ -109,7 +109,7 @@ class UnfusedLinear(FusableOperation):
         # Whether weight tensor is natively in FP8
         self._with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         if self._with_fp8_parameters:
-            defer_param_init = True
+            self._fp8_metas = self._make_fp8_metas()
 
         # Initialize parameters if needed
         weight = torch.empty(
@@ -152,8 +152,6 @@ class UnfusedLinear(FusableOperation):
 
         # Cast to FP8 if needed
         if self._with_fp8_parameters:
-            if self._fp8_metas is None:
-                self._fp8_metas = self._make_fp8_metas()
             weight = Float8Tensor.to_float8(
                 weight,
                 fp8_meta=self._get_fp8_meta("param"),
@@ -349,7 +347,7 @@ class UnfusedLinear(FusableOperation):
             w, w_t = None, None
             if fp8_enabled:
                 w_t = convert_tensor(
-                    self.weight.transpose(),
+                    self.weight.transpose(0, 1),
                     device=self.device,
                     dtype=self.dtype,
                     memory_format=torch.contiguous_format,
@@ -430,7 +428,7 @@ class UnfusedLinear(FusableOperation):
             )
             if fp8_enabled:
                 fp8_gemm(
-                    x.transpose()._data,
+                    x.transpose(0, 1)._data,
                     x._scale_inv,
                     0,
                     x._fp8_dtype,

@@ -282,9 +282,6 @@ class TestFuserOps:
                 else tex.DType.kFloat8E4M3
             )
 
-        print(f'{y_ref=}, {y_test=}') ### TODO Remove
-        print(f'{w_ref=}, {op.weight=}') ### TODO Remove
-
         # Check results
         y_ref = y_ref.to(dtype=dtype, device="cpu")
         dx_ref = x_ref.grad.to(dtype=dtype, device="cpu")
