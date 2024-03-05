@@ -859,24 +859,6 @@ std::vector<at::Tensor> fused_attn_fwd(
                     scale_S.value().data_ptr(), descale_S.value().data_ptr());
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape,
                     qkv_type, amax_O.value().data_ptr(), scale_O.value().data_ptr(), nullptr);
-
-//std::cout << " devPtrQ        : " << Q.data_ptr()         << " " << q_shape << std::endl;
-//std::cout << " devPtrK        : " << K.data_ptr()         << " " << k_shape << std::endl;
-//std::cout << " devPtrV        : " << V.data_ptr()        << " " << v_shape << std::endl;
-//std::cout << " devPtrDescaleQ : " << descale_QKV.value().data_ptr() << " " << descale_QKV.value() << std::endl;
-//std::cout << " devPtrDescaleK : " << descale_QKV.value().data_ptr() << std::endl;
-//std::cout << " devPtrDescaleV : " << descale_QKV.value().data_ptr() << std::endl;
-//std::cout << " devPtrDescaleS : " << descale_S.value().data_ptr() << " " << descale_S.value() << std::endl;
-//std::cout << " devPtrScaleS   : " << scale_S.value().data_ptr()  << " " << scale_S.value() << std::endl;
-//std::cout << " devPtrScaleO   : " << scale_O.value().data_ptr()  << " " << scale_O.value() << std::endl;
-//std::cout << " devPtrO        : " << O.data_ptr()     << " " << q_shape << std::endl;
-//std::cout << " devPtrAmaxS    : " << amax_S.value().data_ptr()   << " " << amax_S.value() << std::endl;
-//std::cout << " devPtrAmaxO    : " << amax_O.value().data_ptr()    << " " << amax_O.value() << std::endl;
-//    float descale_s_host = 100.0f;
-//    cudaMemcpy(&descale_s_host, descale_S.value().data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
-//    cudaDeviceSynchronize();
-//    std::cout << " 1 host devPtrDescaleS : " << descale_s_host << std::endl;
-
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape,
@@ -923,11 +905,6 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // create workspace
   TensorWrapper workspace;
-
-//    float descale_s_host = 100.0f;
-//    cudaMemcpy(&descale_s_host, descale_S.value().data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
-//    cudaDeviceSynchronize();
-//    std::cout << " 11 host devPtrDescaleS : " << descale_s_host << std::endl;
 
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd(

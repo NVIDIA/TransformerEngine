@@ -37,18 +37,11 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             cudaStream_t stream,
             cudnnHandle_t handle) {
     using namespace transformer_engine;
-    bool is_bias = false; //(bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-    //bool is_alibi = false; //(bias_type == NVTE_Bias_Type::NVTE_ALIBI);
-    bool is_causal = true; //((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_padding = false; //((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_training = true; //false; // this can be true / false
+    bool is_bias = false;
+    bool is_causal = true;
+    bool is_padding = false;
+    bool is_training = true;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
-    std::cout << " tensor type " << (int)tensorType << " " << layout << " " << b << h << s_q << s_kv << d << " " << dropout_probability << " " << scaling_factor << std::endl;
-    //void* devPtrStats, devPtrSoftmaxStats
-//    tensorType = fe::DataType_t::FP8_E4M3;
-//    layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
     auto bias_type = NVTE_Bias_Type::NVTE_NO_BIAS;
     auto mask_type = NVTE_Mask_Type::NVTE_CAUSAL_MASK;
     auto hg = h;
@@ -112,8 +105,10 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 
             // otherwise, build the op_graph and the plan. Then update cache
             auto mha_graph = std::make_shared<fe::graph::Graph>();
-    auto data_type_forward_tensors = tensorType;//fe::DataType_t::FP8_E4M3; // according to the mix recipe
-    auto data_type_backward_tensors = tensorType;//fe::DataType_t::FP8_E4M3; // should be e5m2 in TE, but devtech kernel is hardcoded for e4m3
+
+            auto data_type_forward_tensors = fe::DataType_t::FP8_E4M3; // according to the mix recipe
+            auto data_type_backward_tensors = fe::DataType_t::FP8_E4M3; // should be e5m2 in TE, but devtech kernel is hardcoded for e4m3
+
             //mha_graph->set_io_data_type(tensorType)
             mha_graph->set_io_data_type(data_type_forward_tensors)
                     .set_intermediate_data_type(fe::DataType_t::FLOAT)
@@ -177,13 +172,13 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                             .set_dim({1, 1, 1, 1})
                             .set_stride({1, 1, 1, 1})
                             .set_data_type(fe::DataType_t::FLOAT));
-            descale_k = mha_graph->tensor_like(descale_q, "Descale_q");
-            descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
-            descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
-            descale_o = mha_graph->tensor_like(descale_q, "Descale_O");
+            descale_k  = mha_graph->tensor_like(descale_q, "Descale_q");
+            descale_v  = mha_graph->tensor_like(descale_q, "Descale_V");
+            descale_s  = mha_graph->tensor_like(descale_q, "Descale_S");
+            descale_o  = mha_graph->tensor_like(descale_q, "Descale_O");
             descale_dS = mha_graph->tensor_like(descale_q, "Descale_dS");
             descale_dO = mha_graph->tensor_like(descale_q, "Descale_dO");
-            scale_s   = mha_graph->tensor_like(descale_q, "Scale_S");
+            scale_s    = mha_graph->tensor_like(descale_q, "Scale_S");
             scale_dS   = mha_graph->tensor_like(descale_q, "Scale_dS");
             scale_dQ   = mha_graph->tensor_like(descale_q, "Scale_dQ");
             scale_dK   = mha_graph->tensor_like(descale_q, "Scale_dK");
@@ -262,10 +257,18 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             dV->set_output(true)
                     .set_dim({b, hg, s_kv, d})
                     .set_stride(v_stride);
-            amax_dQ->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-            amax_dK->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-            amax_dV->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-            amax_dS->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+            amax_dQ->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dK->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dV->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dS->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
 
             dO->set_data_type(data_type_backward_tensors);
             dQ->set_data_type(data_type_backward_tensors);
@@ -311,9 +314,6 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                 std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
             auto dropout_tuple = is_dropout ?
                 std::make_tuple(dropout_seed, dropout_offset) : std::make_tuple(nullptr, nullptr);
-            //auto return_empty_tuple = std::tuple_cat(
-            //    std::make_tuple(nullptr), key_tensors_tuple,
-            //    bias_tuple, padding_tuple, dropout_tuple);
 
             NVTE_CHECK_CUDNN_FE(mha_graph->validate());
             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
@@ -420,7 +420,6 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             bool is_training, float scaling_factor,
             float dropout_probability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
-            //void* devPtrStats, //void* devPtrM, void* devPtrZInv,
             void* devPtrM, void* devPtrZInv,
             void* devPtrO,
             void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
@@ -434,19 +433,12 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             cudaStream_t stream,
             cudnnHandle_t handle) {
     using namespace transformer_engine;
-    bool is_bias = false; //(bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-    //bool is_alibi = false; //(bias_type == NVTE_Bias_Type::NVTE_ALIBI);
-    bool is_causal = true; //((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_padding = false; //((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-        //|| (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_bias = false;
+    //bool is_alibi = false;
+    bool is_causal = true;
+    bool is_padding = false;
+    is_training = true; //false;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
-//    std::cout << " tensor type " << (int)tensorType << " " << layout << " " << b << h << s_q << s_kv << d << " " << dropout_probability << " " << scaling_factor << std::endl;
-
-    //void* devPtrStats, devPtrSoftmaxStats
-    is_training = true; //false; // this can be true / false
-//    tensorType = fe::DataType_t::FP8_E4M3;
-//    layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
     auto bias_type = NVTE_Bias_Type::NVTE_NO_BIAS;
     auto mask_type = NVTE_Mask_Type::NVTE_CAUSAL_MASK;
     auto hg = h;
@@ -682,7 +674,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             {amax_o, devPtrAmaxO}};
 
         if (is_training) {
-            variant_pack[Stats] = devPtrM; //nullptr; //devPtrSoftmaxStats;
+            variant_pack[Stats] = devPtrM; //nullptr; // temporary
         }
 
         //if (is_bias) {
@@ -1843,11 +1835,6 @@ void fused_attn_fp8_fwd(
   void* devPtrScaleS = input_output_S->scale.dptr;
   void* devPtrDescaleS = input_output_S->scale_inv.dptr;
 
-//    float descale_s_host = 100.0f;
-//    cudaMemcpy(&descale_s_host, input_output_S->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-//    cudaDeviceSynchronize();
-//    std::cout << " 3 host devPtrDescaleS : " << descale_s_host << std::endl;
-
   void* devPtrcuSeqlensQ = reinterpret_cast<void *>(
                   reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
   void* devPtrcuSeqlensKV = reinterpret_cast<void *>(
@@ -1877,7 +1864,6 @@ void fused_attn_fp8_fwd(
                   b, h, max_seqlen_q, max_seqlen_kv, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
-                  //devPtrStats, //devPtrM, devPtrZInv,
                   devPtrM, devPtrZInv,
                   devPtrO,
                   devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
