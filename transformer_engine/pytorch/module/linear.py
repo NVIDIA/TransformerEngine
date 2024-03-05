@@ -299,6 +299,7 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                skip_fp8_weight_update,
             )
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -345,6 +346,7 @@ class _Linear(torch.autograd.Function):
                 main_grad,
                 weight_t_fp8,
                 fwd_scale_inverses,
+                skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -353,7 +355,13 @@ class _Linear(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.primary_weights_in_fp8:
-                tex.fp8_transpose_noalloc(weight._data, weight_t_fp8._data, weight._fp8_dtype)
+                weight_t_fp8 = weight.transpose(
+                    cache=ctx.is_first_microbatch is not None,
+                    update_cache=ctx.is_first_microbatch,
+                    noop=skip_fp8_weight_update,
+                )
+            else:
+                weight_t_fp8 = weight_t_fp8._data
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -406,7 +414,7 @@ class _Linear(torch.autograd.Function):
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     dgrad, _ = fp8_gemm(
-                        weight_t_fp8._data,
+                        weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
@@ -834,7 +842,7 @@ class Linear(TransformerEngineBaseModule):
         `is_first_microbatch` is not `None`) or return empty fp8 weight
         tensors (if `is_first_microbatch is None`)
         """
-        if not self.fp8:
+        if not self.fp8 or self.primary_weights_in_fp8:
             return [None, None]
 
         if is_first_microbatch is None:

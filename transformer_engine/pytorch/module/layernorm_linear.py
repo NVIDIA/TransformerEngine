@@ -273,6 +273,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                skip_fp8_weight_update,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -329,6 +330,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fwd_scale_inverses,
+                skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -337,7 +339,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.primary_weights_in_fp8:
-                tex.fp8_transpose_noalloc(weight._data, weight_t_fp8._data, weight._fp8_dtype)
+                weight_t_fp8 = weight.transpose(
+                    cache=ctx.is_first_microbatch is not None,
+                    update_cache=ctx.is_first_microbatch,
+                    noop=skip_fp8_weight_update,
+                )
+            else:
+                weight_t_fp8 = weight_t_fp8._data
 
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -409,7 +417,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
-                    weight_t_fp8._data,
+                    weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
@@ -969,7 +977,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         `is_first_microbatch` is not `None`) or return empty fp8 weight
         tensors (if `is_first_microbatch is None`)
         """
-        if not self.fp8:
+        if not self.fp8 or self.primary_weights_in_fp8:
             return [None, None]
 
         if is_first_microbatch is None:

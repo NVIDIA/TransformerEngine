@@ -308,7 +308,7 @@ class Float8Tensor(torch.Tensor):
         self._fp8_dtype: tex.DType = fp8_dtype
 
         # Cached transpose
-        self._transpose: Optional[Float8Tensor] = None
+        self._data_transpose: Optional[Float8Tensor] = None
 
         # FP8 scale-inverse
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
@@ -440,7 +440,8 @@ class Float8Tensor(torch.Tensor):
         dim0: int = 0,
         dim1: int = 1,
         *,
-        update_cache: str | bool = "reuse_only",
+        cache: bool = False,
+        update_cache: bool = True,
         noop: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -455,28 +456,16 @@ class Float8Tensor(torch.Tensor):
               The first dimension to be transposed
         dim1: int, default = 1
               The second dimension to be transposed
-        update_cache: str or bool, default = "reuse_only"
-                      Memoization behavior. Options are
-                      "reuse_only"/`False` (reuse cached value if
-                      available, otherwise calculate transpose without
-                      caching), "force"/`True` (calculate transpose
-                      and cache), "lazy" (reuse cached value if
-                      available, otherwise calculate transpose and
-                      cache if possible). Caching is only supported
-                      for basic 2D transposes and the cache is reset
-                      after any in-place operations.
-
+        cache: bool, default = `False`
+               If `False`, transpose is calculated and returned.
+               If `True`, the transpose value is cached and can
+               be reused without recomputation by setting the
+               `update_cache` argument to `False`.
+        update_cache: bool, default = `True`
+                      Only used if argument `cache` is `True`, ignored otherwise.
+                      If `True`, the tranpose is recomputed and cached.
+                      If `False`, cached transpose is returned.
         """
-
-        # Check caching mode
-        if not isinstance(update_cache, str):
-            update_cache = "force" if update_cache else "reuse_only"
-        if update_cache not in ("force", "reuse_only", "lazy"):
-            raise ValueError(
-                "Supported values for update_cache are "
-                '"force" (True), "reuse_only" (False), "lazy" '
-                f"(got {update_cache})"
-            )
 
         # Handle non-2D transposes
         if -self.dim() <= dim0 < 0:
@@ -484,32 +473,26 @@ class Float8Tensor(torch.Tensor):
         if -self.dim() <= dim1 < 0:
             dim1 += self.dim()
         if self.dim() != 2 or dim0 == dim1:
-            if update_cache == "force":
+            if cache:
                 raise ValueError(
                     "Transpose caching is only supported for basic 2D transposes "
                     f"(ndims={self.dim()}, dim0={dim0}, dim1={dim1})"
                 )
             return super().transpose(dim0, dim1)
 
-        # Clear cache if needed
-        if update_cache == "force":
-            self._transpose = None
+        if not cache:
+            return tex.fp8_transpose(self._data, self._fp8_dtype)
 
-        # Compute transpose if needed
-        out = self._transpose
-        if out is None:
-            out = Float8Tensor.make_like(
-                self,
-                data=tex.fp8_transpose(
-                    self._data.contiguous(),
-                    self._fp8_dtype,
-                ),
-            )
+        if not update_cache:
+            assert self._data_transpose is not None, "Tranpose cache is empty."
+            return self._data_transpose
 
-        # Update cache if needed
-        if update_cache in ("force", "lazy"):
-            self._transpose = out
-        return out
+        if self._data_transpose is None:
+            self._data_transpose = tex.fp8_transpose(self._data, self._fp8_dtype)
+        else:
+            tex.fp8_transpose_noalloc(self._data, self._data_transpose, self._fp8_dtype)
+
+        return self._data_transpose
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
@@ -539,14 +522,6 @@ class Float8Tensor(torch.Tensor):
             dtype=dtype,
         )
 
-    def _reset_caches(self) -> None:
-        """Reset cached values
-
-        Should be called after any in-place operation.
-
-        """
-        self._transpose = None
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -573,7 +548,7 @@ class Float8Tensor(torch.Tensor):
                 # Directly copy FP8 data if possible
                 if dst._fp8_dtype == src._fp8_dtype:
                     dst._data.copy_(src._data)
-                    dst._scale_inv.copy_(src._scale_inv.clone())
+                    dst._scale_inv.copy_(src._scale_inv.detach().clone())
                     if dst._fp8_meta is not None:
                         if src._fp8_meta is None:
                             src_min, src_max = src.from_float8().aminmax()
@@ -637,9 +612,6 @@ class Float8Tensor(torch.Tensor):
                 # Invalid case
                 raise RuntimeError("Using Float8Tensor copy logic, but no Float8Tensor found")
 
-            # Nothing to return for in-place ops
-            if dst_is_fp8:
-                dst._reset_caches()
             return None
 
         # Slice op
@@ -684,7 +656,6 @@ class Float8Tensor(torch.Tensor):
                 schema_arg.alias_info.is_write
             ):
                 arg.copy_(new_arg)
-                arg._reset_caches()
 
         # In-place op
         if func._schema.is_mutable:
@@ -762,7 +733,7 @@ class Float8Tensor(torch.Tensor):
     _fp8_meta_forward = property(**_make_fp8_attr_property_funcs("fp8_meta_forward"))
     _fp8_meta_index = property(**_make_fp8_attr_property_funcs("fp8_meta_index"))
     _fp8_dtype = property(**_make_fp8_attr_property_funcs("dtype"))
-    _transpose = property(**_make_fp8_attr_property_funcs("transpose"))
+    _data_transpose = property(**_make_fp8_attr_property_funcs("transpose"))
     _scale_inv = property(**_make_fp8_attr_property_funcs("scale_inv"))
 
     # Do not force the Float8Tensor type on the returned tensor
