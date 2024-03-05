@@ -52,6 +52,8 @@ class Bias(FusableOperation):
                     f"({size=}, {tensor_parallel_size=})"
                 )
             local_size /= tensor_parallel_size
+        else:
+            tensor_parallel_group = None
         self.tensor_parallel: bool = tensor_parallel
         self.tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = tensor_parallel_group
         self.tensor_parallel_size: int = tensor_parallel_size

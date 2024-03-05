@@ -30,10 +30,17 @@ class OperationContext:
 
 class FusableOperation(torch.nn.Module):
 
-    def __init__(self, *unfused_ops: FusableOperation) -> None:
+    def __init__(
+        self,
+        unfused_ops: Optional[Iterable[FusableOperation]] = None,
+    ) -> None:
         super().__init__()
 
         # Unfused operations that comprise this operation
+        if unfused_ops is None:
+            unfused_ops = ()
+        else:
+            unfused_ops = tuple(unfused_ops)
         if any(op.is_fused_op for op in unfused_ops):
             raise ValueError("Attempted to fuse an already-fused operation")
         self._unfused_ops: tuple[FusableOperation] = unfused_ops
