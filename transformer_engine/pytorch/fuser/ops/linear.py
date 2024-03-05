@@ -68,9 +68,9 @@ class Linear(FusableOperation):
         self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
         # Tensor parallel configuration
-        tensor_parallel_size: int = 1
-        local_in_features: int = in_features
-        local_out_features: int = out_features
+        tensor_parallel_size = 1
+        local_in_features = in_features
+        local_out_features = out_features
         if tensor_parallel_mode is None:
             tensor_parallel_group = None
             sequence_parallel = False

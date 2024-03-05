@@ -13,9 +13,18 @@ import transformer_engine.pytorch as te
 import transformer_engine.pytorch.fuser as te_fuser
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+# Supported data types
+_dtypes: list[torch.dtype] = [torch.float32, torch.float16]
+if is_bf16_compatible():  # bf16 requires sm_80 or higher
+    _dtypes.append(torch.bfloat16)
+
+# Supported devices
+_devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 
 class TestFuserOps:
@@ -36,7 +45,7 @@ class TestFuserOps:
             ((6,7), (3, -1, 7)),
         ),
     )
-    @pytest.mark.parametrize("dtype", (torch.float32, torch.float16))
+    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize(
         "memory_format",
@@ -88,3 +97,43 @@ class TestFuserOps:
         tols = dict(rtol=0, atol=0)  # Reshape is exact
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(x_test.grad, x_ref.grad, **tols)
+
+    @pytest.mark.parametrize("size", (1, 7, 32))
+    @pytest.mark.parametrize("in_shape", ([], [1, 3], [2, 3, 4]))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("device", _devices)
+    def test_bias(
+        self,
+        size: int,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Bias operation"""
+
+        # Random data
+        in_shape = list(in_shape) + [size]
+        with torch.no_grad():
+            x_ref = torch.rand(in_shape, dtype=dtype, device=device)
+            b_ref = torch.rand(size, dtype=dtype, device=device)
+            x_test = x_ref.detach().clone()
+            dy = torch.rand_like(x_ref)
+        x_ref.requires_grad_()
+        b_ref.requires_grad_()
+        x_test.requires_grad_()
+
+        # Plain PyTorch implementation
+        y_ref = x_ref + b_ref.reshape([1] * (len(in_shape) - 1) + [size])
+        y_ref.backward(dy)
+
+        # Implementation with fusable operation
+        op = te_fuser.ops.Bias(size, device=device, dtype=dtype)
+        with torch.no_grad():
+            op.bias.copy_(b_ref)
+        y_test = op(x_test)
+        y_test.backward(dy)
+
+        # Check results
+        torch.testing.assert_close(y_test, y_ref)
+        torch.testing.assert_close(x_test.grad, x_ref.grad)
+        torch.testing.assert_close(op.bias.grad, b_ref.grad)
