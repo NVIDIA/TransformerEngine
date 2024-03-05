@@ -568,7 +568,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
                 if not amax_reduction:
                     amax_and_scale_update(
-                        self.fp8_meta, True, skip_scale_inv_update=skip_fp8_weight_update
+                        self.fp8_meta, True, skip_weight_scale_inv_update=skip_fp8_weight_update
                     )
 
             if self.fp8 and self.training:
@@ -609,7 +609,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.tp_group,
                 self.tp_size,
                 forward=True,
-                skip_scale_inv_update=skip_fp8_weight_update,
+                skip_weight_scale_inv_update=skip_fp8_weight_update,
             )
             FP8GlobalStateManager.setup_amax_forward_global_reduce_func(reduce_func)
 
