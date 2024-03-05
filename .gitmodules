@@ -3,4 +3,4 @@
 	url = https://github.com/google/googletest.git
 [submodule "3rdparty/cudnn-frontend"]
 	path = 3rdparty/cudnn-frontend
-	url = https://github.com/NVIDIA/cudnn-frontend.git
+	url = https://gitlab-master.nvidia.com/cudnn/cudnn_frontend.git
