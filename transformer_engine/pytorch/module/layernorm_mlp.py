@@ -536,8 +536,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 shape = list(inp.shape)
                 shape[0] *= tp_size
                 return fc2_out, ln_out_return.view(shape)
-            else:
-                return fc2_out, ln_out_return.view_as(inp)
+            return fc2_out, ln_out_return.view_as(inp)
         return fc2_out
 
 
@@ -1111,7 +1110,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     return_layernorm_output_gathered : bool, default = `False`
                              if set to `True`, output of layernorm is returned after the all
                              gather operation. Ignored if return_layernorm_output is False.
-                             Example use case: with sequence parallel on, input to residual connection
+                             Example use case: with sequence parallel, input to residual connection
                              for transformer module (e.g. LoRA) will need to be gathered.
                              Returning layernorm output gathered will prevent a redundant gather.
     zero_centered_gamma : bool, default = 'False'

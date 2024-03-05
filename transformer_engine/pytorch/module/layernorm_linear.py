@@ -313,8 +313,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 shape = list(inp.shape)
                 shape[0] *= tp_size
                 return out, ln_out_return.view(shape)
-            else:
-                return out, ln_out_return.view_as(inp)
+            return out, ln_out_return.view_as(inp)
         return out
 
 
@@ -656,7 +655,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     return_layernorm_output_gathered : bool, default = `False`
                              if set to `True`, output of layernorm is returned after the all
                              gather operation. Ignored if return_layernorm_output is False.
-                             Example use case: with sequence parallel on, input to residual connection
+                             Example use case: with sequence parallel, input to residual connection
                              for transformer module (e.g. LoRA) will need to be gathered.
                              Returning layernorm output gathered will prevent a redundant gather.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
