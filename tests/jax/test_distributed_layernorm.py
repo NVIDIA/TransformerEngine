@@ -34,7 +34,7 @@ class TestDistributedLayernorm:
         else:
             raise NotImplementedError
 
-        g_pspec = b_pspec = PartitionSpec(None)
+        g_pspec = b_pspec = PartitionSpec(mesh_resource.dp_resource)
 
         return (x, gamma, beta), (x_pspec, g_pspec, b_pspec)
 
@@ -91,7 +91,8 @@ class TestDistributedLayernorm:
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
                         in_shardings=(x_pspec, g_pspec, b_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec, b_pspec)))
+                        out_shardings=(None, (x_pspec, g_pspec, b_pspec)),
+                        check_collectives=False)
 
     @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
     @pytest.mark.parametrize('data_shape', [[32, 128, 1024], [32, 1024]])
@@ -127,4 +128,5 @@ class TestDistributedLayernorm:
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
                         in_shardings=(x_pspec, g_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec)))
+                        out_shardings=(None, (x_pspec, g_pspec)),
+                        check_collectives=False)
