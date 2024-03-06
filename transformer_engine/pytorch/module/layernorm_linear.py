@@ -77,6 +77,7 @@ class _LayerNormLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         return_layernorm_output: bool,
+        return_layernorm_output_gathered: bool,
         is_grad_enabled: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
@@ -134,11 +135,23 @@ class _LayerNormLinear(torch.autograd.Function):
                                                   fwd_ln_sm_margin,
                                                   zero_centered_gamma,
                                                   is_grad_enabled)
+
+        # Column Parallel Linear
+        ln_out_gathered = False
+        if ub_split_ag or ub_atomic_gemm_ag:
+            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out = torch.empty_like(ln_out)
+        elif parallel_mode == "column" and sequence_parallel:
+            ln_out_gathered = True
+            ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
+        else:
+            ln_out_total = ln_out
+
         # If residual connection is after LN, we need `ln_out_return`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
         if return_layernorm_output:
-            ln_out_return = ln_out
+            ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
                 ln_out = tex.cast_to_fp8(
                     ln_out,
@@ -146,14 +159,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     tex.FP8FwdTensors.GEMM1_INPUT,
                     fp8_dtype_forward,
                 )
-        # Column Parallel Linear
-        if ub_split_ag or ub_atomic_gemm_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
-            ln_out = torch.empty_like(ln_out)
-        elif parallel_mode == "column" and sequence_parallel:
-            ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
-        else:
-            ln_out_total = ln_out
 
         if fp8:
             bias_dtype = (
@@ -284,6 +289,8 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.return_layernorm_output = return_layernorm_output
+            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered \
+                                                   and ln_out_gathered
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
@@ -302,6 +309,10 @@ class _LayerNormLinear(torch.autograd.Function):
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
 
         if return_layernorm_output:
+            if return_layernorm_output_gathered:
+                shape = list(inp.shape)
+                shape[0] *= tp_size
+                return out, ln_out_return.view(shape)
             return out, ln_out_return.view_as(inp)
         return out
 
@@ -355,7 +366,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
+                if tp_world_size == 1 or not weight.requires_grad:
                     ctx.ub_bulk_wgrad = False
 
             # Column Parallel Linear
@@ -445,6 +456,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
                 if not ctx.ub_bulk_wgrad:
+                    if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
+                        dgrad = dgrad + grad_outputs[1].view_as(dgrad)
                     dgrad, handle = reduce_scatter_along_first_dim(
                         dgrad, ctx.tp_group, async_op=True
                     )
@@ -538,7 +551,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad = dgrad.view(inputmat.shape)
 
             # Residual gradient
-            if ctx.return_layernorm_output:
+            if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
@@ -611,6 +624,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -638,6 +652,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
+    return_layernorm_output_gathered : bool, default = `False`
+                             if set to `True`, output of layernorm is returned after the all
+                             gather operation. Ignored if return_layernorm_output is False.
+                             Example use case: with sequence parallel, input to residual connection
+                             for transformer module (e.g. LoRA) will need to be gathered.
+                             Returning layernorm output gathered will prevent a redundant gather.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
                       Configuration for splitting the weight and bias tensors along dim 0 into
                       multiple PyTorch parameters. If a list or tuple of strings is provided,
@@ -711,6 +731,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
+        return_layernorm_output_gathered: bool = False,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
         device: Union[torch.device, str] = "cuda",
@@ -732,6 +753,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
+        self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.ub_bulk_wgrad = ub_bulk_wgrad
@@ -1067,6 +1089,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 self.return_layernorm_output,
+                self.return_layernorm_output_gathered,
                 torch.is_grad_enabled(),
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
