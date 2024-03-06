@@ -9,7 +9,9 @@ from typing import Optional
 
 import torch
 
+from .bias import Bias
 from .op import FusableOperation
+from .unfused_linear import UnfusedLinear
 
 
 class Linear(FusableOperation):
@@ -30,36 +32,32 @@ class Linear(FusableOperation):
 
         # Initialize unfused ops
         ### TODO Tensor/sequence parallelism
-        linear_op = UnfusedLinear(
-            in_features,
-            out_features,
-            device=device,
-            dtype=dtype,
-            tensor_parallel_mode=tensor_parallel_mode,
-            tensor_parallel_group=tensor_parallel_group,
-            sequence_parallel=sequence_parallel,
-            rng_state_tracker_function=rng_state_tracker_function,
-        )
-        ops = [linear_op]
-        if bias:
-            bias_op = Bias(
+        ops = [
+            UnfusedLinear(
+                in_features,
                 out_features,
                 device=device,
                 dtype=dtype,
-                tensor_parallel=(tensor_parallel_mode is not None),
+                tensor_parallel_mode=tensor_parallel_mode,
                 tensor_parallel_group=tensor_parallel_group,
+                sequence_parallel=sequence_parallel,
+                rng_state_tracker_function=rng_state_tracker_function,
             )
-            ops.append(bias_op)
+        ]
+        if bias:
+            ops.append(
+                Bias(
+                    out_features,
+                    device=device,
+                    dtype=dtype,
+                    tensor_parallel=(tensor_parallel_mode is not None),
+                    tensor_parallel_group=tensor_parallel_group,
+                )
+            )
 
         # Initialize base class
         super().__init__(ops)
 
         # Register parameters
-        self.register_parameter("weight", linear_op.weight)
-        if bias:
-            self.register_parameter("bias", bias_op.bias)
-        else:
-            self.bias = torch.Tensor(
-                device=linear_op.device,
-                dtype=linear_op.dtype,
-            )
+        self.register_parameter("weight", self._unfused_ops[0].weight)
+        self.register_parameter("bias", self._unfused_ops[1].bias if bias else None)

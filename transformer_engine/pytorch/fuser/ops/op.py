@@ -191,6 +191,22 @@ class FusableOperation(torch.nn.Module):
             )
             return grad_input, [grad_params]
 
-    def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+
+        # Check op kwargs
+        if unfused_op_kwargs is not None and kwargs:
+            raise ValueError(
+                "Provided both unfused_op_kwargs and normal kwargs"
+            ) ### TODO Clean up
+        if unfused_op_kwargs is None:
+            num_unfused_ops = len(self._unfused_ops) if self.is_fused_op else 1
+            unfused_op_kwargs = [kwargs for _ in range(num_unfused_ops)]
+
+        # Launch pipeline
         from ..pipeline import Pipeline
-        return Pipeline([self], fuse_ops=False)(input, [kwargs])
+        return Pipeline([self], fuse_ops=False)(input, unfused_op_kwargs)
