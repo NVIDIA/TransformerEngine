@@ -95,17 +95,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     }
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
-    const char *env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
-    const char *env_q = std::getenv("NVTE_UB_ATOMIC_GEMM_RS");
-    if (rank == 0 && env_p != nullptr && env_q != nullptr && env_q[0] == '1') {
-      if (env_p[0] == '1')
-        printf("!! Using reducescatter2_userbuff_strided_atomic\n");
-      else if (env_p[0] == '2')
-        printf("!! Using reducescatter2_userbuff_strided_multiatomic\n");
-      else
-        printf("!! Using reducescatter2_userbuff_strided\n");
-    }
-
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
       cudaStream_t stream;
@@ -793,10 +782,15 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Get communication and GEMM output chunk sizes
     const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
-    const int output_chunk_bytes = (n_chunk * m) * HALF_BYTES;
+    const bool do_gelu = pre_gelu_out.numel() > 0;
+    const int output_chunk_bytes = (do_gelu
+                                    ? (n_chunk * m) * D.element_size()
+                                    : (n_chunk * m) * HALF_BYTES);
+    const int aux_chunk_bytes = do_gelu ? (n_chunk * m) * pre_gelu_out.element_size() : 0;
 
     // Get output and workspace data pointers
     char *output_ptr = reinterpret_cast<char *>(D.data_ptr());
+    char *pre_gelu_out_ptr = reinterpret_cast<char *>(pre_gelu_out.data_ptr());
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
     int workspace_size_chunk = workspaceSize / _stream_compute.size();
 
@@ -809,7 +803,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t)stream_main));
 
-    assert(pre_gelu_out.numel() == 0);
     if (_aggregate2) {
       // Catch up the default torch stream
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
@@ -848,6 +841,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
             torch::from_blob(input_b_ptr + send_offset, {n_chunk * 2, k}, _ubuf.options());
         torch::Tensor output_chunk = torch::from_blob(
             output_ptr + (send_chunk_id * output_chunk_bytes), {n_chunk * 2, m}, D.options());
+        if (do_gelu) {
+          pre_gelu_out = torch::from_blob(
+              pre_gelu_out_ptr + (send_chunk_id * aux_chunk_bytes),
+              {n_chunk * 2, m},
+              pre_gelu_out.options());
+        }
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());
@@ -901,6 +900,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
         // GEMM
         torch::Tensor output_chunk = torch::from_blob(
             output_ptr + (send_chunk_id * output_chunk_bytes), {n_chunk, m}, D.options());
+        if (do_gelu) {
+          pre_gelu_out = torch::from_blob(
+              pre_gelu_out_ptr + (send_chunk_id * aux_chunk_bytes),
+              {n_chunk, m},
+              pre_gelu_out.options());
+        }
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());

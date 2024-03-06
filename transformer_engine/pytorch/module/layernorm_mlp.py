@@ -43,6 +43,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    use_reentrant_activation_recompute,
 )
 
 from .. import cpp_extensions as tex
@@ -63,6 +64,7 @@ def _act_func(activation: str):
             'geglu': (tex.geglu, tex.dgeglu),
             'reglu': (tex.reglu, tex.dreglu),
             'swiglu': (tex.swiglu, tex.dswiglu),
+            'qgelu': (tex.qgelu, tex.dqgelu)
     }
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
@@ -103,6 +105,7 @@ class _LayerNormMLP(torch.autograd.Function):
         tensor_parallel: bool,
         activation_dtype: torch.dtype,
         return_layernorm_output: bool,
+        return_layernorm_output_gathered: bool,
         bias_gelu_nvfusion: bool,
         set_parallel_mode: bool,
         is_grad_enabled: bool,
@@ -118,6 +121,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_atomic_gemm_rs: bool,
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
+        gemm_gelu_fusion: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -171,11 +175,23 @@ class _LayerNormMLP(torch.autograd.Function):
                                                   fwd_ln_sm_margin,
                                                   zero_centered_gamma,
                                                   is_grad_enabled)
+
+        # Column Parallel Linear
+        ln_out_gathered = False
+        if ub_overlap_ag:
+            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out = torch.empty_like(ln_out)
+        elif set_parallel_mode and sequence_parallel:
+            ln_out_gathered = True
+            ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
+        else:
+            ln_out_total = ln_out
+
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
         if return_layernorm_output:
-            ln_out_return = ln_out
+            ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
                 ln_out = tex.cast_to_fp8(
                     ln_out,
@@ -183,14 +199,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     tex.FP8FwdTensors.GEMM1_INPUT,
                     fp8_dtype_forward,
                 )
-        # Column Parallel Linear
-        if ub_overlap_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
-            ln_out = torch.empty_like(ln_out)
-        elif set_parallel_mode and sequence_parallel:
-            ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
-        else:
-            ln_out_total = ln_out
 
         if fp8:
             bias_dtype = (
@@ -261,7 +269,9 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
-            fc1_out, _ = tex.fp8_gemm(
+
+            # Perform FP8 GEMM
+            fp8_gemm_args = [
                 fc1_weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -272,6 +282,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_forward,
                 activation_dtype,
                 get_workspace(),
+            ]
+            fp8_gemm_kwargs = dict(
                 bias=fc1_bias,
                 use_bias=use_fc1_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
@@ -279,15 +291,31 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
+            if gemm_gelu_fusion:
+                fp8_gemm_args[8] = torch.uint8  # out_dtype
+                fp8_gemm_kwargs.update(
+                    dict(
+                        gelu=True,
+                        out_index=tex.FP8FwdTensors.GEMM2_INPUT,
+                        fp8_meta_tensor=fp8_meta["scaling_fwd"],
+                        D_dtype=fp8_dtype_forward,
+                    )
+                )
+            fp8_gemm_out = tex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
             if not is_grad_enabled:
                 clear_tensor_data(ln_out_total)
 
-            gelu_out = activation_func(
-                fc1_out,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM2_INPUT,
-                fp8_dtype_forward,
-            )
+            # Perform activation
+            if gemm_gelu_fusion:
+                gelu_out, fc1_out = fp8_gemm_out
+            else:
+                fc1_out, _ = fp8_gemm_out
+                gelu_out = activation_func(
+                    fc1_out,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM2_INPUT,
+                    fp8_dtype_forward,
+                )
             if not is_grad_enabled:
                 clear_tensor_data(fc1_out)
 
@@ -480,6 +508,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
             ctx.return_layernorm_output = return_layernorm_output
+            ctx.return_layernorm_output_gathered = return_layernorm_output_gathered \
+                                                   and ln_out_gathered
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
@@ -502,6 +532,10 @@ class _LayerNormMLP(torch.autograd.Function):
         fc2_out = fc2_out.view(-1, *inp.shape[1:-1], fc2_out.shape[-1])
 
         if return_layernorm_output:
+            if return_layernorm_output_gathered:
+                shape = list(inp.shape)
+                shape[0] *= tp_size
+                return fc2_out, ln_out_return.view(shape)
             return fc2_out, ln_out_return.view_as(inp)
         return fc2_out
 
@@ -539,10 +573,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
+            update_transpose_cache = "reuse_only" if ctx.is_first_microbatch is None else "lazy"
             if ctx.fp8 and fc1_weight_t_fp8 is None:
-                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=ctx.is_first_microbatch)
+                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=update_transpose_cache)
             if ctx.fp8 and fc2_weight_t_fp8 is None:
-                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=ctx.is_first_microbatch)
+                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=update_transpose_cache)
 
             activation_func = _act_func(ctx.activation)[1]
 
@@ -580,7 +615,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
+                if tp_world_size == 1 or not fc1_weight.requires_grad:
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
@@ -676,9 +711,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     clear_tensor_data(fc1_out)
                 else:
                     if fc2_weight.requires_grad:
-                        gelu_out_c = tex.cast_from_fp8(
+                        gelu_out_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             gelu_out,
-                            ctx.fp8_meta["scaling_fwd"],
+                            fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM2_INPUT,
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
@@ -832,6 +867,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
                 if not ctx.ub_bulk_wgrad:
+                    if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
+                        fc1_dgrad = fc1_dgrad + grad_outputs[1].view_as(fc1_dgrad)
                     fc1_dgrad, handle = reduce_scatter_along_first_dim(
                         fc1_dgrad, ctx.tp_group, async_op=True
                     )
@@ -875,9 +912,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         )
                         clear_tensor_data(ln_out_total_t, dgelu_t)
                     else:
-                        ln_out_total_c = tex.cast_from_fp8(
+                        ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             ln_out_total,
-                            ctx.fp8_meta["scaling_fwd"],
+                            fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
@@ -934,7 +971,7 @@ class _LayerNormMLP(torch.autograd.Function):
             dgrad = fc1_dgrad.view(inputmat.shape)
 
             # Residual gradient
-            if ctx.return_layernorm_output:
+            if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
@@ -1033,6 +1070,8 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
 
@@ -1055,7 +1094,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu'.
+          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -1068,6 +1107,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module
                              is taken post layernorm.
+    return_layernorm_output_gathered : bool, default = `False`
+                             if set to `True`, output of layernorm is returned after the all
+                             gather operation. Ignored if return_layernorm_output is False.
+                             Example use case: with sequence parallel, input to residual connection
+                             for transformer module (e.g. LoRA) will need to be gathered.
+                             Returning layernorm output gathered will prevent a redundant gather.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -1141,6 +1186,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fuse_wgrad_accumulation: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
+        return_layernorm_output_gathered: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
@@ -1164,6 +1210,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
+        self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.bias_gelu_nvfusion = (bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1"))) and
                                    self.activation == 'gelu')
         self.set_parallel_mode = set_parallel_mode
@@ -1175,6 +1222,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
+        self.gemm_gelu_fusion = (bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0"))) and
+                                 self.activation == 'gelu' and self.ub_split_ag)
 
         if (ub_bulk_wgrad # pylint: disable=too-many-boolean-expressions
             or ub_bulk_dgrad
@@ -1388,6 +1438,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         is_first_microbatch
                 )
 
+            # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
+            if (self.bias_gelu_nvfusion
+                and not use_reentrant_activation_recompute()):
+                self.bias_gelu_nvfusion = False
+
             from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():
@@ -1423,6 +1478,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.tp_size > 1,
                 self.activation_dtype,
                 self.return_layernorm_output,
+                self.return_layernorm_output_gathered,
                 self.bias_gelu_nvfusion,
                 self.set_parallel_mode,
                 torch.is_grad_enabled(),
@@ -1438,6 +1494,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_atomic_gemm_rs,
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
+                self.gemm_gelu_fusion,
             )
             out = fwd_fn(*args)
 

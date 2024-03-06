@@ -7,6 +7,10 @@
 #include "common.h"
 #include "common/common.h"
 
+/***************************************************************************************************
+ * Attention
+ **************************************************************************************************/
+
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
@@ -149,8 +153,11 @@ std::vector<at::Tensor> fused_attn_bwd(
                 c10::optional<at::Tensor> amax_dQKV);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
-
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+/***************************************************************************************************
+ * GEMM
+ **************************************************************************************************/
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -201,6 +208,10 @@ void te_atomic_gemm(at::Tensor A,
                     bool gemm_producer,
                     at::Tensor counter
 );
+
+/***************************************************************************************************
+ * Transpose
+ **************************************************************************************************/
 
 void fused_cast_transpose(at::Tensor input,
                           at::Tensor scale,
@@ -291,6 +302,13 @@ at::Tensor swiglu(at::Tensor input,
                   transformer_engine::DType otype
 );
 
+at::Tensor qgelu(at::Tensor input,
+                  at::Tensor scale,
+                  at::Tensor amax,
+                  at::Tensor scale_inv,
+                  transformer_engine::DType otype
+);
+
 at::Tensor dgelu(at::Tensor grad,
                  at::Tensor input,
                  transformer_engine::DType otype
@@ -312,6 +330,11 @@ at::Tensor dreglu(at::Tensor grad,
 );
 
 at::Tensor dswiglu(at::Tensor grad,
+                   at::Tensor input,
+                   transformer_engine::DType otype
+);
+
+at::Tensor dqgelu(at::Tensor grad,
                    at::Tensor input,
                    transformer_engine::DType otype
 );
@@ -521,6 +544,32 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        float scale_factor
 );
 
+
+at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input,
+                                                        float scale_factor
+);
+
+
+at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
+                                                         at::Tensor softmax_results_,
+                                                         float scale_factor
+);
+
+/***************************************************************************************************
+ * FP8 recipe
+ **************************************************************************************************/
+
+void fused_amax_and_scale_update(const at::Tensor &amax_history,
+                                 const at::Tensor &scale,
+                                 const at::Tensor &scale_inv,
+                                 const at::Tensor &scale_inv_mask,
+                                 at::Tensor updated_amax_history,
+                                 at::Tensor updated_scale,
+                                 at::Tensor updated_scale_inv,
+                                 const std::string& amax_compute_algo,
+                                 transformer_engine::DType fp8_dtype,
+                                 float margin);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
@@ -546,7 +595,7 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
 );
 
 /***************************************************************************************************
- * Misc
+ * Miscellaneous
  **************************************************************************************************/
 
 size_t get_cublasLt_version();

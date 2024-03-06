@@ -105,8 +105,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool flag_m512 = false;
     bool flag_arb = false;
     if ((sm_arch_ == 80 || sm_arch_ == 90)
-            && (max_seqlen_q <= 512)
-            && (max_seqlen_kv <= 512)
+            && (max_seqlen_q <= 512 && max_seqlen_q % 64 == 0)
+            && (max_seqlen_kv <= 512 && max_seqlen_kv % 64 == 0)
             && (head_dim == 64)
             && (num_attn_heads == num_gqa_groups)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
@@ -135,6 +135,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
                         || (bias_type == NVTE_Bias_Type::NVTE_ALIBI
                             && attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK
+                            && attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK
                             && sm_arch_ == 90)
                         || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS
                             && sm_arch_ == 90))))
