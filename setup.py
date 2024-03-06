@@ -14,7 +14,6 @@ import subprocess
 from subprocess import CalledProcessError
 import sys
 import sysconfig
-import tempfile
 from typing import List, Optional, Tuple, Union
 
 import setuptools
@@ -360,14 +359,16 @@ class CMakeBuildExtension(BuildExtension):
         for ext in self.extensions:
             if isinstance(ext, CMakeExtension):
                 print(f"Building CMake extension {ext.name}")
-                with tempfile.TemporaryDirectory() as build_dir:
-                    build_dir = Path(build_dir)
-                    package_path = Path(self.get_ext_fullpath(ext.name))
-                    install_dir = package_path.resolve().parent
-                    ext._build_cmake(
-                        build_dir=build_dir,
-                        install_dir=install_dir,
-                    )
+                # Set up incremental builds for CMake extensions
+                setup_dir = Path(__file__).resolve().parent
+                build_dir = setup_dir / "build" / "cmake"
+                build_dir.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+                package_path = Path(self.get_ext_fullpath(ext.name))
+                install_dir = package_path.resolve().parent
+                ext._build_cmake(
+                    build_dir=build_dir,
+                    install_dir=install_dir,
+                )
 
         # Paddle requires linker search path for libtransformer_engine.so
         paddle_ext = None
