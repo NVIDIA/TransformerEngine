@@ -240,6 +240,7 @@ def fused_attn_bwd_qkvpacked(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
+    dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -278,6 +279,8 @@ def fused_attn_bwd_qkvpacked(
                 same shape as Q, i.e. thd, sbhd or bshd (see `qkv_layout` for details)
     qkv_dtype: tex.DType
                 data type of QKV; in tex.DType, not torch.dtype
+    dqkv_dtype: tex.DType
+                data type of dQKV; in tex.DType, not torch.dtype
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -357,7 +360,7 @@ def fused_attn_bwd_qkvpacked(
     output_tensors = tex.fused_attn_bwd_qkvpacked(
             max_seqlen, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens, qkv, o, d_o, qkv_dtype, aux_ctx_tensors,
+            cu_seqlens, qkv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -544,6 +547,7 @@ def fused_attn_bwd_kvpacked(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
+    dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -588,7 +592,9 @@ def fused_attn_bwd_kvpacked(
                 input tensor dO (gradient of O);
                 same shape as Q, i.e. thd, sbhd or bshd (see `qkv_layout` for details)
     qkv_dtype: tex.DType
-                data type of QKV; in tex.DType, not torch.dtype
+                data type of Q and KV; in tex.DType, not torch.dtype
+    dqkv_dtype: tex.DType
+                data type of dQ and dKV; in tex.DType, not torch.dtype
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -672,7 +678,7 @@ def fused_attn_bwd_kvpacked(
     output_tensors = tex.fused_attn_bwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, aux_ctx_tensors,
+            cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -867,6 +873,7 @@ def fused_attn_bwd(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
+    dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -915,6 +922,8 @@ def fused_attn_bwd(
                 same shape as Q
     qkv_dtype: tex.DType
                 data type of Q, K and V; in tex.DType, not torch.dtype
+    dqkv_dtype: tex.DType
+                data type of dQ, dK and dV; in tex.DType, not torch.dtype
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -1002,7 +1011,7 @@ def fused_attn_bwd(
     output_tensors = tex.fused_attn_bwd(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, aux_ctx_tensors,
+            cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )

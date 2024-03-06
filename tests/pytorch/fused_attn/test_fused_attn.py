@@ -985,10 +985,6 @@ def test_dpa_fp8(dtype, model):
     config = model_configs_fp8[model]
 
     # Skip if not supported
-    #fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
-    #    config, dtype)
-    #if not fused_attn_supported:
-    #    pytest.skip("FusedAttention does not support this model config")
     if (fe_ver == 0) and ((config.head_dim != 64) or (config.attn_mask_type == "causal")):
         pytest.skip("FusedAttention does not support this model config")
 
@@ -1005,10 +1001,10 @@ def test_dpa_fp8(dtype, model):
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
     #tols = dict(atol=5e-2, rtol=5e-2)
     #tols = dtype_tols(torch.float8_e4m3fn)
-    torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
-    torch.save(unfused_attn_fwd, 'unfused_attn_fwd.pt')
-    torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
-    torch.save(unfused_attn_bwd, 'unfused_attn_bwd.pt')
+    torch.save(fused_attn_fwd, 'fused_attn_fwd_'+str(fe_ver)+'.pt')
+    torch.save(unfused_attn_fwd, 'unfused_attn_fwd_'+str(fe_ver)+'.pt')
+    torch.save(fused_attn_bwd, 'fused_attn_bwd_'+str(fe_ver)+'.pt')
+    torch.save(unfused_attn_bwd, 'unfused_attn_bwd_'+str(fe_ver)+'.pt')
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
 
@@ -1044,7 +1040,7 @@ def _run_dpa_fp8(dtype, config, backend):
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         interval=1,
-        fp8_format=recipe.Format.E4M3,#HYBRID,
+        fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
     )
@@ -1292,6 +1288,7 @@ class _dpa_fp8(torch.autograd.Function):
                     out,
                     proj_dgrad.view_as(out),
                     fp8_dtype_forward,
+                    fp8_dtype_backward,
                     ctx.aux_ctx_tensors,
                     FusedAttnBackend["FP8"],
                     fwd_scale_inverses[META_QKV], # d_scale_qkv,

@@ -1893,7 +1893,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             void* devPtrAmaxO, void* devPtrAmaxS,
             void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
             void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-            cudnn_frontend::DataType_t tensorType,
+            cudnn_frontend::DataType_t fwd_tensor_type,
             void* workspace,
             size_t* workspace_size,
             cudaStream_t stream,
@@ -1918,7 +1918,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                                    scaling_factor,      is_training,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType};
+                                   fwd_tensor_type,     fwd_tensor_type};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
@@ -1957,7 +1957,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 
             // otherwise, build the op_graph and the plan. Then update cache
             auto mha_graph = std::make_shared<fe::graph::Graph>();
-            mha_graph->set_io_data_type(tensorType)
+            mha_graph->set_io_data_type(fwd_tensor_type)
                     .set_intermediate_data_type(fe::DataType_t::FLOAT)
                     .set_compute_data_type(fe::DataType_t::FLOAT);
 
@@ -2191,7 +2191,8 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV,
             void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
             void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-            cudnn_frontend::DataType_t tensorType,
+            cudnn_frontend::DataType_t fwd_tensor_type,
+            cudnn_frontend::DataType_t bwd_tensor_type,
             void* workspace,
             size_t* workspace_size,
             cudaStream_t stream,
@@ -2215,7 +2216,7 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                                    scaling_factor,      true,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType};
+                                   fwd_tensor_type,     bwd_tensor_type};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
@@ -2268,11 +2269,7 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             // otherwise, build the op_graph and the plan. Then update cache
             auto mha_graph = std::make_shared<fe::graph::Graph>();
 
-            auto data_type_forward_tensors = fe::DataType_t::FP8_E4M3; // according to the mix recipe
-            auto data_type_backward_tensors = fe::DataType_t::FP8_E4M3; // should be e5m2 in TE, but devtech kernel is hardcoded for e4m3
-
-            //mha_graph->set_io_data_type(tensorType)
-            mha_graph->set_io_data_type(data_type_forward_tensors)
+            mha_graph->set_io_data_type(fwd_tensor_type)
                     .set_intermediate_data_type(fe::DataType_t::FLOAT)
                     .set_compute_data_type(fe::DataType_t::FLOAT);
 
@@ -2432,10 +2429,10 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                     .set_dim({1, 1, 1, 1})
                     .set_data_type(fe::DataType_t::FLOAT);
 
-            dO->set_data_type(data_type_backward_tensors);
-            dQ->set_data_type(data_type_backward_tensors);
-            dK->set_data_type(data_type_backward_tensors);
-            dV->set_data_type(data_type_backward_tensors);
+            dO->set_data_type(bwd_tensor_type);
+            dQ->set_data_type(bwd_tensor_type);
+            dK->set_data_type(bwd_tensor_type);
+            dV->set_data_type(bwd_tensor_type);
 
             std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // q
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // k
@@ -2756,6 +2753,7 @@ void fused_attn_fp8_bwd_qkvpacked(
                   reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
   const DType QKV_type = input_QKV->data.dtype;
+  const DType dQKV_type = output_dQKV->data.dtype;
   size_t workspace_size = 0;
 
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
@@ -2777,6 +2775,7 @@ void fused_attn_fp8_bwd_qkvpacked(
                   devPtrcuSeqlens, devPtrcuSeqlens,
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_fe_dtype(QKV_type),
+                  get_cudnn_fe_dtype(dQKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_bwd_impl(
@@ -2995,6 +2994,7 @@ void fused_attn_fp8_bwd(
                   reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
   const DType QKV_type = input_Q->data.dtype;
+  const DType dQKV_type = output_dQ->data.dtype;
   size_t workspace_size = 0;
 
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
@@ -3017,6 +3017,7 @@ void fused_attn_fp8_bwd(
                   devPtrcuSeqlensQ, devPtrcuSeqlensKV,
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_fe_dtype(QKV_type),
+                  get_cudnn_fe_dtype(dQKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_bwd_impl(
