@@ -13,6 +13,9 @@ from transformer_engine.pytorch.fuser.ops.op import (
     OperationContext,
     UnfusedOperation,
 )
+from transformer_engine.pytorch.fuser.ops.fused_forward import (
+    fuse_forward_linear_bias_activation,
+)
 from transformer_engine.pytorch.utils import clear_tensor_data
 
 ### TODO Handle no_grad
@@ -144,6 +147,7 @@ class Pipeline:
             self.fuse_ops()
 
     def _fuse_forward_ops(self, ops):
+        ops = fuse_forward_linear_bias_activation(ops)
         return ops
 
     def _fuse_backward_ops(self, ops):

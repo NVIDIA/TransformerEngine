@@ -35,6 +35,28 @@ class Sequential(torch.nn.Module):
         super().add_module(*args, **kwargs)
         self._module_groups = None
 
+    def __getitem__(
+        self,
+        idx: slice | int,
+    ) -> list[torch.nn.Module] | torch.nn.Module:
+        if isinstance(idx, slice):
+            return list(self._modules.values())[idx]
+        else:
+            size = len(self)
+            if not -size <= idx < size:
+                raise IndexError(
+                    f"Attempted to access index {idx}, "
+                    f"but there are {size} entries"
+                )
+            idx %= size
+            for i, op in enumerate(self._modules.values()):
+                if i == idx:
+                    break
+            return op
+
+    def __len__(self) -> int:
+        return len(self._modules)
+
     def _make_module_groups(
         self,
         modules: Iterable[torch.nn.Module],

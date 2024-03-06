@@ -12,6 +12,9 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.fuser as te_fuser
 from transformer_engine.pytorch.fuser.ops._common import is_float8_tensor
+from transformer_engine.pytorch.fuser.ops.fused_forward import (
+    ForwardLinearBiasActivation,
+)
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -444,4 +447,131 @@ class TestFuserOps:
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
         if bias:
             db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+class TestFuserFusions:
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("weight_shape", ((32, 48), (3, 5)))
+    @pytest.mark.parametrize("in_shape", ([], [1, 7], [4, 2, 10]))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_compute", (False, True))
+    @pytest.mark.parametrize("fp8_input", (False, True))
+    @pytest.mark.parametrize("fp8_weight", (False, True))
+    def test_linear_bias_activation(
+        self,
+        *,
+        bias: bool = True,
+        weight_shape: tuple[int, int],
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_compute: bool,
+        fp8_input: bool,
+        fp8_weight: bool,
+    ) -> None:
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        in_shape = list(in_shape) + [in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Skip invalid configurations
+        if fp8_input or fp8_weight or fp8_compute:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+        if fp8_compute:
+            if (
+                math.prod(in_shape[:-1]) % 16 != 0
+                or in_features % 16 != 0
+                or out_features % 16 != 0
+            ):
+                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=(fp8_compute or fp8_input),
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (out_features, in_features),
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=(fp8_compute or fp8_weight),
+        )
+        if bias:
+            b_ref, b_test = make_reference_and_test_tensors(
+                out_features,
+                test_dtype=dtype,
+                test_device=device,
+            )
+        else:
+            b_ref, b_test = None, None
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusable operations
+        with te.fp8_model_init(enabled=fp8_weight):
+            model = te_fuser.Sequential(
+                te_fuser.ops.Linear(
+                    in_features,
+                    out_features,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                ),
+            )
+        with torch.no_grad():
+            model[0].weight.copy_(w_test)
+            if bias:
+                model[0].bias.copy_(b_test)
+            del w_test
+            del b_test
+        with te.fp8_autocast(enabled=fp8_compute):
+            y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Check that forward operations have been fused
+        forward_ops = model._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], ForwardLinearBiasActivation)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if fp8_compute:
+            tols = dtype_tols(
+                model[0].weight._fp8_dtype
+                if is_float8_tensor(model[0].weight)
+                else tex.DType.kFloat8E4M3
+            )
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+        if bias:
+            db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)

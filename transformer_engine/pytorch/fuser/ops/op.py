@@ -195,7 +195,7 @@ class FusedOperation(FusableOperation):
     def pipeline_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
-        input_: torch.Tensor,
+        input: torch.Tensor,
         unfused_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
         raise NotImplementedError(
