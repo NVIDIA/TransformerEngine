@@ -1907,11 +1907,14 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
     //is_training = true; //false;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
     auto hg = h;
+    auto bias_b = b;
+    auto bias_h = h;
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
                                    hg,                  s_q,
                                    s_kv,                d,
+                                   bias_b,              bias_h,
                                    scaling_factor,      is_training,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
@@ -2201,11 +2204,14 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
     bool is_training = true;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
     auto hg = h;
+    auto bias_b = b;
+    auto bias_h = h;
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
                                    hg,                  s_q,
                                    s_kv,                d,
+                                   bias_b,              bias_h,
                                    scaling_factor,      true,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
