@@ -2075,9 +2075,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 register_primitive(SelfFusedAttnFwdPrimitive)
 
 
-def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray, seed: jnp.ndarray,
-                        attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                        scaling_factor: float, dropout_probability: float, is_training: bool):
+def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray | None, seqlen: jnp.ndarray,
+                        seed: jnp.ndarray | None, attn_bias_type: NVTE_Bias_Type,
+                        attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                        dropout_probability: float, is_training: bool):
     """
     Wrapper for TE self fused attention fwd
     Return BMM1 -> (PreScaleBias) -> Scale -> (PostScaleBias) -> Softmax -> (Dropout) -> BMM2
