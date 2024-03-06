@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
-import transformer_engine.pytorch.fuser.ops
+import transformer_engine.pytorch.fuser.ops as ops
 from .sequential import Sequential
 
 __all__ = [
+    "ops",
     "Sequential",
 ]

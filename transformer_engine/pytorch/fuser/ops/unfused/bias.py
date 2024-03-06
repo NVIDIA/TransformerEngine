@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import torch
 
-from ._common import (
+from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from .._common import (
     canonicalize_device,
     canonicalize_dtype,
 )
-from .op import UnfusedOperation
 
 
 class Bias(UnfusedOperation):

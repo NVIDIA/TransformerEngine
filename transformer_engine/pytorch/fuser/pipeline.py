@@ -8,8 +8,12 @@ from typing import Any, Optional
 
 import torch
 
-from ..utils import clear_tensor_data
-from .ops import FusableOperation, OperationContext
+from transformer_engine.pytorch.fuser.ops.op import (
+    FusableOperation,
+    OperationContext,
+    UnfusedOperation,
+)
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 ### TODO Handle no_grad
 class _PipelineAutogradFunction(torch.autograd.Function):

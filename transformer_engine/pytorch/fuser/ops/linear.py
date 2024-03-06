@@ -9,9 +9,8 @@ from typing import Optional
 
 import torch
 
-from .bias import Bias
-from .op import FusedOperation
-from .unfused_linear import UnfusedLinear
+from transformer_engine.pytorch.fuser.ops.op import FusedOperation
+from transformer_engine.pytorch.fuser.ops.unfused import Bias, UnfusedLinear
 
 
 class Linear(FusedOperation):

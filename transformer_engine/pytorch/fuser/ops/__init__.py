@@ -2,24 +2,14 @@
 #
 # See LICENSE for license information.
 
-from .bias import Bias
+from transformer_engine.pytorch.fuser.ops.op import FusableOperation
+from transformer_engine.pytorch.fuser.ops.unfused import *
 from .linear import Linear
-from .reshape import Reshape
-from .op import (
-    FusableOperation,
-    FusedOperation,
-    OperationContext,
-    UnfusedOperation,
-)
-from .unfused_linear import UnfusedLinear
 
 __all__ = [
     "Bias",
     "FusableOperation",
-    "FusedOperation",
-    "Linear,"
-    "OperationContext",
+    "Linear",
     "Reshape",
     "UnfusedLinear",
-    "UnfusedOperation",
 ]

@@ -19,14 +19,14 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
 from transformer_engine.pytorch.module.base import get_workspace
-from ._common import (
+from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
     is_float8_tensor,
 )
-from .op import UnfusedOperation
 
 
 class UnfusedLinear(UnfusedOperation):

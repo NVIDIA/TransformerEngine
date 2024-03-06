@@ -8,8 +8,8 @@ from collections.abc import Iterable
 
 import torch
 
-from ._common import convert_tensor
-from .op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from .._common import convert_tensor
 
 
 class Reshape(UnfusedOperation):
