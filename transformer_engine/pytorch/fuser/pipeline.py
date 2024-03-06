@@ -20,7 +20,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         input_: torch.Tensor,
         forward_ops: list[FusableOperation],
         backward_ops: list[FusableOperation],
-        unfused_ops: list[FusableOperation],
+        unfused_ops: list[UnfusedOperation],
         unfused_op_ctxs: list[OperationContext],
         unfused_op_kwargs: list[dict[str, Any]],
         *params: torch.nn.Parameter,
@@ -29,7 +29,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         # Apply forward ops
         x = input_
         for op, unfused_op_idxs in forward_ops:
-            x = op._pipeline_forward(
+            x = op.pipeline_forward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 x,
                 [unfused_op_kwargs[idx] for idx in unfused_op_idxs],
@@ -75,7 +75,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         dx = grad_output
         grad_params = [None for _ in range(len(unfused_ops))]
         for op, unfused_op_idxs in backward_ops:
-            dx, fused_op_dparams = op._pipeline_backward(
+            dx, fused_op_dparams = op.pipeline_backward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 dx,
             )
@@ -120,11 +120,11 @@ class Pipeline:
         unfused_ops = []
         for op in ops:
             if op.is_fused_op:
-                unfused_ops.extend(op._unfused_ops)
+                unfused_ops.extend(op.unfused_ops)
             else:
                 unfused_ops.append(op)
         self._num_unfused_ops: int = len(unfused_ops)
-        self._unfused_ops: list[FusableOperation] = unfused_ops
+        self._unfused_ops: list[UnfusedOperation] = unfused_ops
 
         # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusableOperation, list[int]]]
@@ -155,9 +155,9 @@ class Pipeline:
         unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
 
-        # Make sure ops are initialized
+        # Initialization before forward pass
         for op in self._unfused_ops:
-            op._pre_forward()
+            op.pre_forward()
 
         # Construct autograd contexts
         num_unfused_ops = len(self._unfused_ops)

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from ...float8_tensor import Float8Tensor
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
-    """Canonicalize PyTorch device"""
+    """Canonicalize PyTorch device
+
+    If `None`, then returns the default CUDA device.
+
+    """
     if device is None:
         # Use default CUDA device
         device = torch.get_default_device()
@@ -16,15 +20,19 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     return device
 
 def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
-    """Canonicalize PyTorch dtype"""
+    """Canonicalize PyTorch datatype
+
+    If `None`, then returns the default PyTorch datatype.
+
+    """
     if dtype is None:
         # Use default dtype
         dtype = torch.get_default_dtype()
     return dtype
 
 def is_float8_tensor(tensor: Any) -> bool:
-    """Check if tensor is a Float8Tensor"""
-    return getattr(tensor, "_is_float8_tensor", False)
+    """Check if object is a `Float8Tensor`"""
+    return isinstance(tensor, Float8Tensor)
 
 def convert_tensor(
     tensor: torch.Tensor | Float8Tensor,

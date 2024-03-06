@@ -10,10 +10,10 @@ from ._common import (
     canonicalize_device,
     canonicalize_dtype,
 )
-from .op import FusableOperation
+from .op import UnfusedOperation
 
 
-class Bias(FusableOperation):
+class Bias(UnfusedOperation):
 
     def __init__(
         self,
@@ -87,12 +87,12 @@ class Bias(FusableOperation):
             bias = torch.nn.Parameter(bias)
         self.bias = bias
 
-    def _pre_forward(self) -> None:
-        super()._pre_forward()
+    def pre_forward(self) -> None:
+        super().pre_forward()
         if self.bias.device.type == "meta":
             self.reset_parameters()
 
-    def _unfused_op_forward(
+    def op_forward(
         self,
         ctx: OperationContext,
         input: torch.Tensor,
@@ -101,7 +101,7 @@ class Bias(FusableOperation):
         b = self.bias.reshape([1] * (x.dim() - 1) + [self.local_size])
         return x + b
 
-    def _unfused_op_backward(
+    def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,

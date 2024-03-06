@@ -10,11 +10,11 @@ from typing import Optional
 import torch
 
 from .bias import Bias
-from .op import FusableOperation
+from .op import FusedOperation
 from .unfused_linear import UnfusedLinear
 
 
-class Linear(FusableOperation):
+class Linear(FusedOperation):
 
     def __init__(
         self,
@@ -59,5 +59,5 @@ class Linear(FusableOperation):
         super().__init__(ops)
 
         # Register parameters
-        self.register_parameter("weight", self._unfused_ops[0].weight)
-        self.register_parameter("bias", self._unfused_ops[1].bias if bias else None)
+        self.register_parameter("weight", self.unfused_ops[0].weight)
+        self.register_parameter("bias", self.unfused_ops[1].bias if bias else None)

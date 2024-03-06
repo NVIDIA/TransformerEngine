@@ -4,20 +4,21 @@
 
 from __future__ import annotations
 
+import abc
 from collections.abc import Iterable
-from dataclasses import dataclass
+import dataclasses
 from typing import Optional
 
 import torch
 
-import transformer_engine_extensions as tex
-from ...fp8 import (
+from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
+import transformer_engine_extensions as tex
 from ._common import canonicalize_device, is_float8_tensor
 
-@dataclass
+@dataclasses.dataclass
 class OperationContext:
 
     to_save: Optional[tuple[Optional[torch.Tensor], ...]] = None
@@ -28,37 +29,48 @@ class OperationContext:
         self.to_save = tensors
 
 
-class FusableOperation(torch.nn.Module):
+class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
-    def __init__(
+    @property
+    @abc.abstractmethod
+    def is_fused_op(self) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def pre_forward(self) -> None:
+        ...
+
+    @abc.abstractmethod
+    def pipeline_forward(
         self,
-        unfused_ops: Optional[Iterable[FusableOperation]] = None,
-    ) -> None:
-        super().__init__()
+        unfused_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        unfused_op_kwargs: list[dict[str, Any]],
+    ) -> torch.Tensor:
+        ...
 
-        # Unfused operations that comprise this operation
-        if unfused_ops is None:
-            unfused_ops = ()
-        else:
-            unfused_ops = tuple(unfused_ops)
-        if any(op.is_fused_op for op in unfused_ops):
-            raise ValueError("Attempted to fuse an already-fused operation")
-        self._unfused_ops: tuple[FusableOperation] = unfused_ops
+    @abc.abstractmethod
+    def pipeline_backward(
+        self,
+        unfused_op_ctxs: list[OperationContext],
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
+        ...
+
+
+class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
+
+    def __init__(self) -> None:
+        super().__init__()
 
         # FP8 metadata objects
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
 
     @property
-    def is_fused_op(self):
-        return len(self._unfused_ops) > 0
+    def is_fused_op(self) -> bool:
+        return False
 
     def num_fp8_scales(self, mode: str) -> int:
-        if self.is_fused_op:
-            raise RuntimeError(
-                "Attempted to get number of FP8 scaling factors "
-                "for fused operation. "
-                "Only unfused operations support logic for FP8 meta tensors."
-            )
         return 0
 
     def _make_fp8_metas(self) -> dict[str, Any]:
@@ -94,21 +106,12 @@ class FusableOperation(torch.nn.Module):
             grad_output=_make_meta(self.num_fp8_scales("grad_output"), False),
         )
 
-    def _get_fp8_meta(self, mode: str) -> dict:
-        if self.is_fused_op:
-            raise RuntimeError(
-                "Attempted to get FP8 meta tensors for fused operation."
-                "Only unfused operations support logic for FP8 meta tensors."
-            )
+    def get_fp8_meta(self, mode: str) -> dict:
+        if self._fp8_metas is None:
+            self._fp8_metas = self._make_fp8_metas()
         return self._fp8_metas[mode]
 
-    def _pre_forward(self) -> None:
-
-        # Make sure unfused ops are initialized
-        if self.is_fused_op:
-            for op in self._unfused_ops:
-                op._pre_forward()
-            return
+    def pre_forward(self) -> None:
 
         # Initialize FP8 metadata if needed
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
@@ -120,93 +123,102 @@ class FusableOperation(torch.nn.Module):
             pass
             ### TODO Update fp8_metas
 
-    def _unfused_op_forward(
+    @abc.abstractmethod
+    def op_forward(
         self,
         ctx: OperationContext,
         input: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "Forward pass is not implemented for unfused operation"
-        )
+        ...
 
-    def _fused_op_forward(
-        self,
-        unfused_op_ctxs: list[OperationContext],
-        input: torch.Tensor,
-        unfused_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
-        raise NotImplementedError(
-            "Forward pass is not implemented for fused operation"
-        )
-
-    def _unfused_op_backward(
+    @abc.abstractmethod
+    def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
-        raise NotImplementedError(
-            "Backward pass is not implemented for unfused operation"
-        )
+        ...
 
-    def _fused_op_backward(
-        self,
-        unfused_op_ctxs: list[OperationContext],
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
-        raise NotImplementedError(
-            "Backward pass is not implemented for fused operation"
-        )
-
-    def _pipeline_forward(
+    def pipeline_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         unfused_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
-        if self.is_fused_op:
-            return self._fused_op_forward(
-                unfused_op_ctxs,
-                input_,
-                unfused_op_kwargs,
-            )
-        else:
-            return self._unfused_op_forward(
-                unfused_op_ctxs[0],
-                input_,
-                **unfused_op_kwargs[0],
-            )
+        return self.op_forward(
+            unfused_op_ctxs[0],
+            input_,
+            **unfused_op_kwargs[0],
+        )
 
-    def _pipeline_backward(
+    def pipeline_backward(
         self,
         unfused_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
-        if self.is_fused_op:
-            return self._fused_op_backward(unfused_op_ctxs, grad_output)
-        else:
-            grad_input, grad_params = self._unfused_op_backward(
-                unfused_op_ctxs[0],
-                grad_output,
+        grad_input, grad_params = self.op_backward(
+            unfused_op_ctxs[0],
+            grad_output,
+        )
+        return grad_input, [grad_params]
+
+    def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        from ..pipeline import Pipeline
+        return Pipeline([self], fuse_ops=False)(input, [kwargs])
+
+
+class FusedOperation(FusableOperation):
+
+    def __init__(
+        self,
+        unfused_ops: Iterable[FusableOperation],
+    ) -> None:
+        super().__init__()
+
+        # Unfused operations that comprise this fused operation
+        self.unfused_ops: torch.nn.ModuleList = torch.nn.ModuleList(unfused_ops)
+        if len(self.unfused_ops) == 0:
+            raise ValueError(
+                "Attempted to construct a fused operation "
+                "without specifying its corresponding unfused operations"
             )
-            return grad_input, [grad_params]
+
+    @property
+    def is_fused_op(self) -> bool:
+        return True
+
+    def pre_forward(self) -> None:
+        for op in self.unfused_ops:
+            op.pre_forward()
+
+    def pipeline_forward(
+        self,
+        unfused_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        unfused_op_kwargs: list[dict[str, Any]],
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "Forward pass is not implemented for fused operation "
+            f"({self.__class__.__name__})"
+        )
+
+    def pipeline_backward(
+        self,
+        unfused_op_ctxs: list[OperationContext],
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
+        raise NotImplementedError(
+            "Backward pass is not implemented for fused operation "
+            f"({self.__class__.__name__})"
+        )
 
     def forward(
         self,
         input: torch.Tensor,
         unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
-        **kwargs: Any,
     ) -> torch.Tensor:
-
-        # Check op kwargs
-        if unfused_op_kwargs is not None and kwargs:
-            raise ValueError(
-                "Provided both unfused_op_kwargs and normal kwargs"
-            ) ### TODO Clean up
         if unfused_op_kwargs is None:
-            num_unfused_ops = len(self._unfused_ops) if self.is_fused_op else 1
-            unfused_op_kwargs = [kwargs for _ in range(num_unfused_ops)]
-
-        # Launch pipeline
+            unfused_op_kwargs = [dict() for _ in range(len(self.unfused_ops))]
         from ..pipeline import Pipeline
         return Pipeline([self], fuse_ops=False)(input, unfused_op_kwargs)

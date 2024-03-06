@@ -11,25 +11,25 @@ from typing import Optional
 
 import torch
 
-from ...cpp_extensions import fp8_gemm, gemm
-from ...distributed import (
+from transformer_engine.pytorch.cpp_extensions import fp8_gemm, gemm
+from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...float8_tensor import Float8Tensor
-from ...fp8 import FP8GlobalStateManager
-from ...module.base import get_workspace
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.module.base import get_workspace
 from ._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
     is_float8_tensor,
 )
-from .op import FusableOperation
+from .op import UnfusedOperation
 
 
-class UnfusedLinear(FusableOperation):
+class UnfusedLinear(UnfusedOperation):
 
     def __init__(
         self,
@@ -154,7 +154,7 @@ class UnfusedLinear(FusableOperation):
         if self._with_fp8_parameters:
             weight = Float8Tensor.to_float8(
                 weight,
-                fp8_meta=self._get_fp8_meta("param"),
+                fp8_meta=self.get_fp8_meta("param"),
                 fp8_meta_index=0,
             )
 
@@ -163,12 +163,12 @@ class UnfusedLinear(FusableOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def _pre_forward(self) -> None:
-        super()._pre_forward()
+    def pre_forward(self) -> None:
+        super().pre_forward()
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
-    def _unfused_op_forward(
+    def op_forward(
         self,
         ctx: OperationContext,
         input: torch.Tensor,
@@ -195,7 +195,7 @@ class UnfusedLinear(FusableOperation):
         if fp8_enabled and not is_float8_tensor(x):
             x = Float8Tensor.to_float8(
                 x,
-                fp8_meta=self._get_fp8_meta("input"),
+                fp8_meta=self.get_fp8_meta("input"),
                 fp8_meta_index=0,
             )
         elif not fp8_enabled and is_float8_tensor(x):
@@ -222,7 +222,7 @@ class UnfusedLinear(FusableOperation):
         if fp8_enabled and not is_float8_tensor(w):
             w = Float8Tensor.to_float8(
                 w,
-                fp8_meta=self._get_fp8_meta("param"),
+                fp8_meta=self.get_fp8_meta("param"),
                 fp8_meta_index=0,
             )
         elif not fp8_enabled and is_float8_tensor(w):
@@ -283,7 +283,7 @@ class UnfusedLinear(FusableOperation):
             y = y.reshape(-1)
         return y
 
-    def _unfused_op_backward(
+    def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
@@ -329,7 +329,7 @@ class UnfusedLinear(FusableOperation):
         if fp8_enabled and not is_float8_tensor(dy):
             dy = Float8Tensor.to_float8(
                 dy,
-                fp8_meta=self._get_fp8_meta("grad_output"),
+                fp8_meta=self.get_fp8_meta("grad_output"),
                 fp8_meta_forward=False,
                 fp8_meta_index=0,
             )
@@ -355,7 +355,7 @@ class UnfusedLinear(FusableOperation):
                 if not is_float8_tensor(w_t):
                     w_t = Float8Tensor.to_float8(
                         w_t,
-                        fp8_meta=self._get_fp8_meta("param"),
+                        fp8_meta=self.get_fp8_meta("param"),
                         fp8_meta_index=0,
                     )
             else:

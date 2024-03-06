@@ -5,14 +5,21 @@
 from .bias import Bias
 from .linear import Linear
 from .reshape import Reshape
-from .op import FusableOperation, OperationContext
+from .op import (
+    FusableOperation,
+    FusedOperation,
+    OperationContext,
+    UnfusedOperation,
+)
 from .unfused_linear import UnfusedLinear
 
 __all__ = [
     "Bias",
     "FusableOperation",
+    "FusedOperation",
     "Linear,"
     "OperationContext",
     "Reshape",
     "UnfusedLinear",
+    "UnfusedOperation",
 ]

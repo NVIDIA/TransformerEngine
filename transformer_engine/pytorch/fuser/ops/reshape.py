@@ -9,16 +9,16 @@ from collections.abc import Iterable
 import torch
 
 from ._common import convert_tensor
-from .op import FusableOperation
+from .op import UnfusedOperation
 
 
-class Reshape(FusableOperation):
+class Reshape(UnfusedOperation):
 
     def __init__(self, shape: Iterable[int]) -> None:
         super().__init__()
         self._shape = tuple(shape)
 
-    def _unfused_op_forward(
+    def op_forward(
         self,
         ctx: OperationContext,
         input: torch.Tensor,
@@ -27,7 +27,7 @@ class Reshape(FusableOperation):
         x = convert_tensor(input, memory_format=torch.contiguous_format)
         return x.view(self._shape)
 
-    def _unfused_op_backward(
+    def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
