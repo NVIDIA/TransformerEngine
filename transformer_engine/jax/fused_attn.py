@@ -66,9 +66,10 @@ def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, 
                            max_seqlen_q, max_seqlen_kv, head_dim).is_fused_attn_kernel_available()
 
 
-def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
-                    attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
-                    scaling_factor: float, dropout_probability: float, is_training: bool):
+def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray | None, mask: jnp.ndarray,
+                    seed: jnp.ndarray | None, attn_bias_type: AttnBiasType,
+                    attn_mask_type: AttnMaskType, scaling_factor: float,
+                    dropout_probability: float, is_training: bool):
     """
     Self fused attention wrapper
     """
@@ -86,19 +87,22 @@ def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
-def _self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
-                     attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
-                     scaling_factor: float, dropout_probability: float, is_training: bool):
+def _self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray | None, mask: jnp.ndarray,
+                     seed: jnp.ndarray | None, attn_bias_type: AttnBiasType,
+                     attn_mask_type: AttnMaskType, scaling_factor: float,
+                     dropout_probability: float, is_training: bool):
 
     output, _ = _self_fused_attn_fwd_rule(qkv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                           scaling_factor, dropout_probability, is_training)
     return output
 
 
-def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
-                              seed: jnp.ndarray, attn_bias_type: AttnBiasType,
-                              attn_mask_type: AttnMaskType, scaling_factor: float,
-                              dropout_probability: float, is_training: bool):
+def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray | None,
+                              mask: jnp.ndarray, seed: jnp.ndarray | None,
+                              attn_bias_type: AttnBiasType,
+                              attn_mask_type: AttnMaskType,
+                              scaling_factor: float, dropout_probability: float,
+                              is_training: bool):
     if mask is None:
         batch, seqlen, *_ = qkv.shape
         actual_seqlen = jnp.full((batch,), seqlen, dtype=jnp.int32)
