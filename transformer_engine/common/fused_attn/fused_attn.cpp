@@ -278,7 +278,7 @@ void nvte_fused_attn_fwd_qkvpacked(
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_qkvpacked(
             b, h, max_seqlen, d,
-            is_training, attn_scale, dropout, qkv_layout,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_QKV, input_output_S, output_O,
             Aux_CTX_Tensors,
             input_cu_seqlens,
@@ -388,7 +388,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_qkvpacked(
                     b, h, max_seqlen, d,
-                    attn_scale, dropout, qkv_layout,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_QKV, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,
@@ -625,11 +625,6 @@ void nvte_fused_attn_fwd(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-//    float descale_s_host = 100.0f;
-//    cudaMemcpy(&descale_s_host, input_output_S->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-//    cudaDeviceSynchronize();
-//    std::cout << " 2 host devPtrDescaleS : " << descale_s_host << std::endl;
-
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h_q = input_Q->data.shape[ndim - 2];
@@ -677,7 +672,7 @@ void nvte_fused_attn_fwd(
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(
             b, h_q, max_seqlen_q, max_seqlen_kv, d,
-            is_training, attn_scale, dropout, qkv_layout,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_Q, input_K, input_V, input_output_S, output_O,
             Aux_CTX_Tensors,
             input_cu_seqlens_q, input_cu_seqlens_kv,
@@ -790,7 +785,7 @@ void nvte_fused_attn_bwd(
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd(
                     b, h_q, max_seqlen_q, max_seqlen_kv, d,
-                    attn_scale, dropout, qkv_layout,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_Q, input_K, input_V, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,

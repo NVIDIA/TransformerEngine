@@ -133,9 +133,9 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
       O.fill_(0);
     }
     if ((!descale_QKV.has_value()) || (!descale_S.has_value())
-                    || (!scale_S.has_value()) || (!scale_O.has_value())
-                    || (!amax_S.has_value()) || (!amax_O.has_value())) {
-      std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
+        || (!scale_S.has_value()) || (!scale_O.has_value())
+        || (!amax_S.has_value()) || (!amax_O.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_QKV = makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape,
@@ -299,13 +299,14 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
     } else {
       dQKV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
-                    || (!descale_O.has_value()) || (!descale_dO.has_value())
-                    || (!scale_S.has_value()) || (!scale_dP.has_value())
-                    || (!scale_dQKV.has_value())
-                    || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
-      std::string err_tensors = "descale_QKV, descale_S, descale_O, scale_S, scale_dP, ";
-      err_tensors = err_tensors + std::string("scale_dQKV, amax_dP and amax_dQKV");
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+        || (!descale_O.has_value()) || (!descale_dO.has_value())
+        || (!descale_dP.has_value()) || (!scale_S.has_value())
+        || (!scale_dP.has_value()) || (!scale_dQKV.has_value())
+        || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, descale_O, descale_dO, descale_dP, ";
+      err_tensors = err_tensors + std::string("scale_S, scale_dP, scale_dQKV, ");
+      err_tensors = err_tensors + std::string("amax_dP and amax_dQKV ");
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_QKV = makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape,
@@ -316,10 +317,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     nullptr, scale_S.value().data_ptr(), descale_S.value().data_ptr());
-//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0},
-                    DType::kFloat32, amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
-                    descale_dP.value().data_ptr());
+                    DType::kFloat32, amax_dP.value().data_ptr(),
+                    scale_dP.value().data_ptr(), descale_dP.value().data_ptr());
     te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(), qkv_shape, qkv_type,
                     amax_dQKV.value().data_ptr(), scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
@@ -467,9 +467,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
       O.fill_(0);
     }
     if ((!descale_QKV.has_value()) || (!descale_S.has_value())
-                    || (!scale_S.has_value()) || (!scale_O.has_value())
-                    || (!amax_S.has_value()) || (!amax_O.has_value())) {
-      std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
+        || (!scale_S.has_value()) || (!scale_O.has_value())
+        || (!amax_S.has_value()) || (!amax_O.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape,
@@ -654,13 +654,14 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
       dQ.fill_(0);
       dKV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
-                    || (!descale_O.has_value()) || (!descale_dO.has_value())
-                    || (!scale_S.has_value()) || (!scale_dP.has_value())
-                    || (!scale_dQKV.has_value())
-                    || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
-      std::string err_tensors = "descale_QKV, descale_S, descale_O, scale_S, scale_dP, ";
-      err_tensors = err_tensors + std::string("scale_dQKV, amax_dP and amax_dQKV");
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+        || (!descale_O.has_value()) || (!descale_dO.has_value())
+        || (!descale_dP.has_value()) || (!scale_S.has_value())
+        || (!scale_dP.has_value()) || (!scale_dQKV.has_value())
+        || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, descale_O, descale_dO, descale_dP, ";
+      err_tensors = err_tensors + std::string("scale_S, scale_dP, scale_dQKV, ");
+      err_tensors = err_tensors + std::string("amax_dP and amax_dQKV ");
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape,
@@ -673,7 +674,6 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32, nullptr,
                     scale_S.value().data_ptr(), descale_S.value().data_ptr());
-//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
                     descale_dP.value().data_ptr());
@@ -843,9 +843,9 @@ std::vector<at::Tensor> fused_attn_fwd(
       O.fill_(0);
     }
     if ((!descale_QKV.has_value()) || (!descale_S.has_value())
-                    || (!scale_S.has_value()) || (!scale_O.has_value())
-                    || (!amax_S.has_value()) || (!amax_O.has_value())) {
-      std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
+        || (!scale_S.has_value()) || (!scale_O.has_value())
+        || (!amax_S.has_value()) || (!amax_O.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape,
@@ -1100,13 +1100,14 @@ std::vector<at::Tensor> fused_attn_bwd(
       dK.fill_(0);
       dV.fill_(0);
     }
-    if ((!descale_QKV.has_value()) || (!descale_dP.has_value()) || (!descale_S.has_value())
-                    || (!descale_O.has_value()) || (!descale_dO.has_value())
-                    || (!scale_S.has_value()) || (!scale_dP.has_value())
-                    || (!scale_dQKV.has_value())
-                    || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
-      std::string err_tensors = "descale_QKV, descale_S, descale_O, scale_S, scale_dP, ";
-      err_tensors = err_tensors + std::string("scale_dQKV, amax_dP and amax_dQKV");
+    if ((!descale_QKV.has_value()) || (!descale_S.has_value())
+        || (!descale_O.has_value()) || (!descale_dO.has_value())
+        || (!descale_dP.has_value()) || (!scale_S.has_value())
+        || (!scale_dP.has_value()) || (!scale_dQKV.has_value())
+        || (!amax_dP.has_value()) || (!amax_dQKV.has_value())) {
+      std::string err_tensors = "descale_QKV, descale_S, descale_O, descale_dO, descale_dP, ";
+      err_tensors = err_tensors + std::string("scale_S, scale_dP, scale_dQKV, ");
+      err_tensors = err_tensors + std::string("amax_dP and amax_dQKV ");
       NVTE_ERROR(err_tensors + std::string("are required for FP8 operation. \n"));
     }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape,
@@ -1121,7 +1122,6 @@ std::vector<at::Tensor> fused_attn_bwd(
                     qkv_type, nullptr, nullptr, descale_dO.value().data_ptr());
     te_S = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32, nullptr,
                     scale_S.value().data_ptr(), descale_S.value().data_ptr());
-//    at::Tensor descale_dP = torch::empty_like(scale_dP.value());
     te_dP = makeTransformerEngineTensor(nullptr, {0}, DType::kFloat32,
                     amax_dP.value().data_ptr(), scale_dP.value().data_ptr(),
                     descale_dP.value().data_ptr());

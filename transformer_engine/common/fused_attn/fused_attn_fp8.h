@@ -17,6 +17,7 @@ void fused_attn_fp8_fwd_qkvpacked(
             size_t b, size_t h, size_t max_seqlen, size_t d,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
             Tensor *input_output_S,
             Tensor *output_O,
@@ -31,6 +32,7 @@ void fused_attn_fp8_fwd_qkvpacked(
 void fused_attn_fp8_bwd_qkvpacked(
             size_t b, size_t h, size_t max_seqlen, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
             const Tensor *input_O,
             const Tensor *input_dO,
@@ -50,6 +52,7 @@ void fused_attn_fp8_fwd(
             size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
             Tensor *input_output_S,
             Tensor *output_O,
@@ -65,6 +68,7 @@ void fused_attn_fp8_fwd(
 void fused_attn_fp8_bwd(
             size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
             const Tensor *input_O,
             const Tensor *input_dO,

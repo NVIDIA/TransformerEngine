@@ -906,17 +906,67 @@ def _run_transformer_layer(
 
     return out, inp.grad
 
+def dtype_tols(
+    dtype: Union[tex.DType, torch.dtype],
+    reference_value: float = 1.0,
+) -> Dict[str, float]:
+    """Expected numerical tolerance for a data type.
+
+    Args:
+      dtype: data type.
+      reference_value: reference value (default: 1).
+
+    Returns:
+      Dictionary with "rtol" and "atol" as keys
+
+    """
+    if isinstance(dtype, tex.DType):
+        dtype = {
+            tex.DType.kByte: torch.uint8,
+            tex.DType.kInt32: torch.int32,
+            tex.DType.kInt64: torch.int64,
+            tex.DType.kFloat32: torch.float32,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+            tex.DType.kFloat8E5M2: torch.float8_e5m2,
+        }[dtype]
+    elif isinstance(dtype, torch.dtype):
+        pass
+
+    # Expect bit-wise accuracy for integer dtypes
+    if dtype in [torch.uint8, torch.int32, torch.int64]:
+        return dict(rtol=0, atol=0)
+
+    # Estimate floating-point error
+    finfo = torch.finfo(dtype)
+    eps_relaxed = pow(finfo.eps, 2 / 3)
+    if isinstance(reference_value, (float, int)):
+        reference_value = torch.Tensor([reference_value]).to(dtype=dtype)
+    else:
+        reference_value = reference_value.to(dtype=dtype)
+    spacing_high = torch.nextafter(reference_value, torch.Tensor([finfo.max])) - reference_value
+    spacing_low = reference_value - torch.nextafter(reference_value, torch.Tensor([finfo.min]))
+    ulp = max(spacing_high.item(), spacing_low.item())
+    return dict(
+        rtol=eps_relaxed,
+        atol=max(ulp, eps_relaxed),
+    )
 
 model_configs_fp8 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    #"fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    #"fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    "fp8_1": ModelConfig(1, 1, 1,  128,  512,  512, 0.0, "causal", "no_bias"),
-    #"fp8_1": ModelConfig(2, 8, 8,  128,  512,  512, 0.0, "causal", "no_bias"),
-    #"fp8_1": ModelConfig(1, 1, 1,  128,  2048,  2048, 0.0, "causal", "no_bias"),
-    #"fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "causal", "no_bias"),
+    "fp8_1": ModelConfig(1,  1,  1,  64,  512,  512, 0.0, "no_mask", "no_bias"),
+    "fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
+    "fp8_3": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_4": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_5": ModelConfig(1,  1,  1,  64,  512,  512, 0.0,  "causal", "no_bias"),
+    "fp8_6": ModelConfig(4, 16, 16,  64,  512,  512, 0.0,  "causal", "no_bias"),
+    "fp8_7": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16]
+
+fe_ver = int(os.getenv('NVTE_FUSED_ATTN_FE_VER','1'))
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -935,9 +985,11 @@ def test_dpa_fp8(dtype, model):
     config = model_configs_fp8[model]
 
     # Skip if not supported
-    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
-        config, dtype)
-    if not fused_attn_supported:
+    #fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
+    #    config, dtype)
+    #if not fused_attn_supported:
+    #    pytest.skip("FusedAttention does not support this model config")
+    if (fe_ver == 0) and ((config.head_dim != 64) or (config.attn_mask_type == "causal")):
         pytest.skip("FusedAttention does not support this model config")
 
     # Run dot-product attention with different backends
@@ -946,11 +998,13 @@ def test_dpa_fp8(dtype, model):
     unfused_attn_fwd, unfused_attn_bwd = _run_dpa_fp8_ref(
         dtype, config, "UnfusedDotProductAttention")
 
-    print('fused_attn_fwd',fused_attn_fwd.min(),fused_attn_fwd.max())
-    print('unfused_attn_fwd',unfused_attn_fwd.min(),unfused_attn_fwd.max())
-    print('fused_attn_bwd',fused_attn_bwd.min(),fused_attn_bwd.max())
-    print('unfused_attn_bwd',unfused_attn_bwd.min(),unfused_attn_bwd.max())
+    print('  fused_attn_fwd min {:.6f} max {:.6f}'.format(fused_attn_fwd.min().item(),fused_attn_fwd.max().item()))
+    print('unfused_attn_fwd min {:.6f} max {:.6f}'.format(unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item()))
+    print('  fused_attn_bwd min {:.6f} max {:.6f}'.format(fused_attn_bwd.min().item(), fused_attn_bwd.max().item()))
+    print('unfused_attn_bwd min {:.6f} max {:.6f}'.format(unfused_attn_bwd.min().item(), unfused_attn_bwd.max().item()))
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    #tols = dict(atol=5e-2, rtol=5e-2)
+    #tols = dtype_tols(torch.float8_e4m3fn)
     torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
     torch.save(unfused_attn_fwd, 'unfused_attn_fwd.pt')
     torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
@@ -970,9 +1024,8 @@ def _run_dpa_fp8(dtype, config, backend):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    # bshd
     #inp = 0.1 *  torch.randn(
-    #inp = 0.5 *  torch.randn(
+    #inp = 0.02 * torch.randn(
     inp = 0.01 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda", requires_grad=True)
@@ -981,9 +1034,8 @@ def _run_dpa_fp8(dtype, config, backend):
     cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
 
-    # bshd
     #out_grad = 0.1 * torch.randn(
-    #out_grad = 0.5 * torch.randn(
+    #out_grad = 0.02 * torch.randn(
     out_grad = 0.01 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda")
@@ -1002,9 +1054,9 @@ def _run_dpa_fp8(dtype, config, backend):
         out = dpa(inp, cu_seqlens, config.max_seqlen_q)
         out.backward(out_grad)
 
-    context = torch.load("ctx.pt")
+    out = torch.load("out.pt")
     dqkv = torch.load('dqkv.pt')
-    return (context.view(config.batch_size, config.max_seqlen_q, -1),
+    return (out.view(config.batch_size, config.max_seqlen_q, -1),
             dqkv.view(config.batch_size, config.max_seqlen_q, 3,
             config.num_heads, config.head_dim).contiguous())
 
@@ -1057,9 +1109,9 @@ def _run_dpa_fp8_ref(dtype, config, backend):
         ).to(dtype=dtype, device="cuda")
     )
 
-    q = inp[:, :,0,:,:]
-    k = inp[:, :,1,:,:]
-    v = inp[:, :,2,:,:]
+    q = inp[:,:,0,:,:]
+    k = inp[:,:,1,:,:]
+    v = inp[:,:,2,:,:]
     out = block(q, k, v, attn_mask_type=config.attn_mask_type)
     out.backward(out_grad)
 
@@ -1072,15 +1124,11 @@ _2X_ACC_DGRAD = False
 _2X_ACC_WGRAD = False
 
 META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
-#META_O    = tex.FP8FwdTensors.GEMM2_OUTPUT
-#META_DO   = tex.FP8BwdTensors.GRAD_OUTPUT2
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
 META_O    = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-
-META_S    = tex.FP8FwdTensors.GEMM3_WEIGHT
-#META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DS   = tex.FP8BwdTensors.GRAD_INPUT3
+META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
+META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
 class _dpa_fp8(torch.autograd.Function):
     @staticmethod
@@ -1097,6 +1145,7 @@ class _dpa_fp8(torch.autograd.Function):
         fp8_meta: Dict[str, Any],
         workspace: torch.Tensor,
         is_training: bool,
+        mask_type: str,
     ) -> torch.Tensor:
 
         assert inp.dim() == 2
@@ -1104,12 +1153,10 @@ class _dpa_fp8(torch.autograd.Function):
         h = num_heads
         d = in_features // h
         b = cu_seqlens.numel() - 1
-        if b < 4 and b > 1:
-            max_s = 512
 
         fp8_dtype_forward = fp8.get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
-        inputmat, inputmat_t = ext.fp8_cast_transpose_fused(
+        inp_fp8, inp_t_fp8 = ext.fp8_cast_transpose_fused(
             inp,
             fp8_meta["scaling_fwd"],
             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -1127,12 +1174,12 @@ class _dpa_fp8(torch.autograd.Function):
         ZInv = None
         philox_unpacked = None
 
-        qkv_out, _ = ext.fp8_gemm(
+        qkv, _ = ext.fp8_gemm(
             qkv_weight_fp8,
             fp8_meta["scaling_fwd"].scale_inv,
             tex.FP8FwdTensors.GEMM1_WEIGHT,
             fp8_dtype_forward,
-            inputmat,
+            inp_fp8,
             fp8_meta["scaling_fwd"].scale_inv,
             tex.FP8FwdTensors.GEMM1_INPUT,
             fp8_dtype_forward,
@@ -1145,23 +1192,24 @@ class _dpa_fp8(torch.autograd.Function):
             use_split_accumulator=_2X_ACC_FPROP,
             D_dtype=fp8_dtype_forward,
         )
-        qkv_out = qkv_out.view(-1, 3, h, d)
-        qkv_out_fp16 = ext.cast_from_fp8(qkv_out, fp8_meta["scaling_fwd"],
+        qkv = qkv.view(-1, 3, h, d)
+        qkv_fp16 = ext.cast_from_fp8(qkv, fp8_meta["scaling_fwd"],
                 META_QKV, fp8_dtype_forward,
                 tex.DType.kFloat16).view(b, max_s, 3, h, d).contiguous()
-        torch.save(qkv_out_fp16, 'qkv.pt')
-        qkv_out = qkv_out.view(b, max_s, 3, h, d)
+        torch.save(qkv_fp16, 'qkv.pt')
+        if fe_ver == 1:
+            qkv = qkv.view(b, max_s, 3, h, d) # bs3hd
 
         # FMHA
-        context_, aux_ctx_tensors, *rest = fused_attn_fwd(
+        out, aux_ctx_tensors, *rest = fused_attn_fwd(
                 is_training,
                 max_s,
                 max_s,
                 cu_seqlens,
                 cu_seqlens,
-                qkv_out[:,:,0,:,:],#.contiguous(),
-                qkv_out[:,:,1,:,:],#.contiguous(),
-                qkv_out[:,:,2,:,:],#.contiguous(),
+                qkv[:,:,0,:,:] if fe_ver == 1 else qkv[:,0,:,:],
+                qkv[:,:,1,:,:] if fe_ver == 1 else qkv[:,1,:,:],
+                qkv[:,:,2,:,:] if fe_ver == 1 else qkv[:,2,:,:],
                 fp8_dtype_forward,
                 FusedAttnBackend["FP8"],
                 None,
@@ -1174,21 +1222,21 @@ class _dpa_fp8(torch.autograd.Function):
                 attn_scale=None,
                 dropout=p_dropout,
                 fast_zero_fill=fast_zero_fill,
-                qkv_layout="bs3hd",#"bshd_bshd_bshd",#"t3hd",
+                qkv_layout="bs3hd" if fe_ver == 1 else "t3hd",
+                #qkv_layout="t3hd",
                 attn_bias_type="no_bias",
-                attn_mask_type="causal",#"padding",
+                attn_mask_type=mask_type if fe_ver == 1 else "padding",
+                #attn_mask_type="padding",
                 rng_gen=None,
                 )
+        #fp8.amax_and_scale_update(fp8_meta, True, True)
 
         M, ZInv, philox_unpacked = aux_ctx_tensors
-        torch.save(context_, 'context_.pt')
-        context = context_.view(-1, in_features)
-        context_t = tex.fp8_transpose(context, fp8_dtype_forward)
+        out = out.view(-1, in_features) # (bs)(hd)
 
         ctx.save_for_backward(
-            inputmat_t, qkv_weight_t_fp8, workspace,
-            qkv_out,
-            context_, context_t,
+            inp_t_fp8, qkv_weight_t_fp8, workspace,
+            qkv, out,
             fp8_meta["scaling_fwd"].scale,
             fp8_meta["scaling_fwd"].scale_inv,
         )
@@ -1200,11 +1248,12 @@ class _dpa_fp8(torch.autograd.Function):
         ctx.fast_zero_fill = fast_zero_fill
         ctx.hidden_size = in_features
         ctx.num_heads = num_heads
+        ctx.mask_type = mask_type
 
-        context_fp16 = ext.cast_from_fp8(context, fp8_meta["scaling_fwd"],
+        out_fp16 = ext.cast_from_fp8(out, fp8_meta["scaling_fwd"],
                 META_O, fp8_dtype_forward, tex.DType.kFloat16)
-        torch.save(context_fp16, 'ctx.pt')
-        return context_fp16
+        torch.save(out_fp16, 'out.pt') # (bs)(hd)
+        return out_fp16
 
 
     @staticmethod
@@ -1214,11 +1263,10 @@ class _dpa_fp8(torch.autograd.Function):
 
         with _prepare_backward(True, ctx.fp8_meta, None, 1, name="_DPA"):
             (
-                inputmat_t,
+                inp_t_fp8,
                 qkv_weight_t_fp8,
                 workspace,
-                qkv_out,
-                context, context_t,
+                qkv, out,
                 fwd_scales,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
@@ -1231,18 +1279,18 @@ class _dpa_fp8(torch.autograd.Function):
 
             proj_dgrad = ext.cast_to_fp8(
                 grad_output, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
-            )
+            ) # (bs)(hd)
 
             dq, dk, dv, *rest = fused_attn_bwd(
                     ctx.max_s,
                     ctx.max_s,
                     ctx.cu_seqlens,
                     ctx.cu_seqlens,
-                    qkv_out[:,:,0,:,:],#.contiguous(),
-                    qkv_out[:,:,1,:,:],#.contiguous(),
-                    qkv_out[:,:,2,:,:],#.contiguous(),
-                    context,
-                    proj_dgrad.view_as(context),
+                    qkv[:,:,0,:,:] if fe_ver == 1 else qkv[:,0,:,:],
+                    qkv[:,:,1,:,:] if fe_ver == 1 else qkv[:,1,:,:],
+                    qkv[:,:,2,:,:] if fe_ver == 1 else qkv[:,2,:,:],
+                    out,
+                    proj_dgrad.view_as(out),
                     fp8_dtype_forward,
                     ctx.aux_ctx_tensors,
                     FusedAttnBackend["FP8"],
@@ -1250,38 +1298,37 @@ class _dpa_fp8(torch.autograd.Function):
                     fwd_scale_inverses[META_S], # d_scale_s,
                     fwd_scale_inverses[META_O], # d_scale_o,
                     ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
-                    ctx.fp8_meta['scaling_bwd'].scale_inv[META_DS], # d_scale_ds
+                    ctx.fp8_meta['scaling_bwd'].scale_inv[META_DP], # d_scale_dp
                     fwd_scales[META_S], # q_scale_s
-                    ctx.fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                    ctx.fp8_meta['scaling_bwd'].scale[META_DP], # q_scale_dp
                     ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
-                    ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                    ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP], # amax_dp
                     ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
                     attn_scale=None,
                     dropout=ctx.p_dropout,
                     fast_zero_fill=ctx.fast_zero_fill,
-                    qkv_layout="bs3hd",#"bshd_bshd_bshd",#"t3hd",
+                    qkv_layout="bs3hd" if fe_ver == 1 else "t3hd",
+                    #qkv_layout="t3hd",
                     attn_bias_type="no_bias",
-                    attn_mask_type="causal",#"padding",
+                    attn_mask_type=ctx.mask_type if fe_ver == 1 else "padding",
+                    #attn_mask_type="padding",
                     )
+            dim = 2 if fe_ver == 1 else 1
             dqkv = torch.Tensor().to(device=dq.device, dtype=dq.dtype)
-            new_shape = list(dq.shape)
-            new_shape.insert(2, 3)
-            new_stride = list(dq.stride())
-            new_stride.insert(2, int(new_stride[1]/3))
-            dqkv.set_(dq.untyped_storage(),
-                dq.storage_offset(),
-                new_shape,
-                new_stride,
-                )
+            dqkv_shape = list(dq.shape)
+            dqkv_shape.insert(dim, 3)
+            dqkv_stride = list(dq.stride())
+            dqkv_stride.insert(dim, int(dqkv_stride[-3]/3))
+            dqkv.set_(dq.untyped_storage(), dq.storage_offset(), dqkv_shape, dqkv_stride) # bs3hd
 
-            dqkv_grad_output_c = dqkv.view(-1, 3*ctx.hidden_size)
-            dqkv_grad_output_c_fp16 = ext.cast_from_fp8(dqkv_grad_output_c,
+            dqkv_c = dqkv.view(-1, 3*ctx.hidden_size)
+            dqkv_c_fp16 = ext.cast_from_fp8(dqkv_c,
                 ctx.fp8_meta["scaling_bwd"], META_DQKV,
                 fp8_dtype_backward, tex.DType.kFloat16)
-            torch.save(dqkv_grad_output_c_fp16, 'dqkv.pt')
+            torch.save(dqkv_c_fp16, 'dqkv.pt')
 
-            qkv_bgrad, dqkv_grad_output_t = ext.fp8_transpose_bgrad_fused(
-                dqkv_grad_output_c,
+            qkv_bgrad, dqkv_t = ext.fp8_transpose_bgrad_fused(
+                dqkv_c,
                 ctx.fp8_meta["scaling_bwd"],
                 META_DQKV,
                 fp8_dtype_backward,
@@ -1294,7 +1341,7 @@ class _dpa_fp8(torch.autograd.Function):
                 fwd_scale_inverses,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
                 fp8_dtype_forward,
-                dqkv_grad_output_c,
+                dqkv_c,
                 ctx.fp8_meta["scaling_bwd"].scale_inv,
                 META_DQKV,
                 fp8_dtype_backward,
@@ -1304,11 +1351,11 @@ class _dpa_fp8(torch.autograd.Function):
             )
             # QKV WGRAD
             qkv_wgrad, _ = ext.fp8_gemm(
-                inputmat_t,
+                inp_t_fp8,
                 fwd_scale_inverses,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
-                dqkv_grad_output_t,
+                dqkv_t,
                 ctx.fp8_meta["scaling_bwd"].scale_inv,
                 META_DQKV,
                 fp8_dtype_backward,
@@ -1342,6 +1389,7 @@ class DPA_FP8(TransformerEngineBaseModule):
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim
         self.fast_zero_fill = True
+        self.mask_type = config.attn_mask_type
 
         self.qkv_weight = torch.nn.Parameter(
             torch.empty(
@@ -1382,7 +1430,8 @@ class DPA_FP8(TransformerEngineBaseModule):
                 self.fast_zero_fill,
                 self.fp8_meta,
                 self.workspace,
-                self.training)
+                self.training,
+                self.mask_type)
         return out
 
     def get_fp8_weights_scratchpad(
