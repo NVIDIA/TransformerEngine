@@ -367,7 +367,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
+                if tp_world_size == 1 or not weight.requires_grad:
                     ctx.ub_bulk_wgrad = False
 
             # Column Parallel Linear

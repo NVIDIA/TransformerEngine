@@ -492,12 +492,6 @@ def checkpoint(
         be numerically equivalent.
 
     .. warning::
-
-        The tuple :attr:`args` must contain only tensors (or :attr:`None`) in order to comply with
-        PyTorch's :attr:`save_for_backward` method. :attr:`function` must be callable to produce
-        valid outputs with the inputs :attr:`args` and :attr:`kwargs`.
-
-    .. warning::
         `use_reentrant=False` does not support early stopping, and will execute the entire forward
         pass for the checkpointed module when recomputing activations in the backward pass.
 
