@@ -233,24 +233,37 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             TransformerEngineBaseModule.bwd_hook_for_amax_reduction))
         self.fp8_meta["first_module"] = False
 
+    def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
+        """Increase or decrease size of amax history based on given `length`.
+
+        .. warning::
+            This changes the underlying amax memory location.
+        """
+        if fwd is None:
+            fp8_meta_tensor_keys = ("scaling_fwd", "scaling_bwd")
+        else:
+            fp8_meta_tensor_keys = ("scaling_fwd" if fwd else "scaling_bwd",)
+
+        for key in fp8_meta_tensor_keys:
+            curr_len = self.fp8_meta[key].amax_history.shape[0]
+            if length == curr_len:
+                continue
+            if length < curr_len:
+                self.fp8_meta[key].amax_history = self.fp8_meta[key].amax_history[: length].clone()
+            elif length > curr_len:
+                extra_rows = length - curr_len
+                self.fp8_meta[key].amax_history = F.pad(
+                    self.fp8_meta[key].amax_history, pad=(0, 0, 0, extra_rows)
+                )
+
+
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
-            curr_len = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[0]
-            need_len = self.fp8_meta["recipe"].amax_history_len
-            if need_len < curr_len:
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = (
-                    self.fp8_meta[fp8_meta_tensor_key]
-                    .amax_history[: self.fp8_meta["recipe"].amax_history_len].clone()
-                )
-            elif need_len > curr_len:
-                extra_rows = need_len - curr_len
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = F.pad(
-                    self.fp8_meta[fp8_meta_tensor_key].amax_history, pad=(0, 0, 0, extra_rows)
-                )
+            self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
             return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -527,6 +540,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         num_gemms: int = 1,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
@@ -535,6 +549,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        if skip_fp8_weight_update is None:
+            skip_fp8_weight_update = is_first_microbatch is not None and not is_first_microbatch
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
@@ -553,27 +569,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if is_first_microbatch is not None and not self.primary_weights_in_fp8:
                 self.set_fp8_weights()
 
-            update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, \
                 "Amax reduction across tensor parallel group is " \
                 "necessary when using sequence parallelism with FP8."
 
+            amax_reduction = (self.fp8_meta["recipe"].reduce_amax
+                              and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1)
+
             # Previous iteration was grad_enabled
             if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
-                if (self.fp8_meta["recipe"].reduce_amax
-                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
-                    # TODO(ksivaman): Cleanup
-                    pass
-                else:
+                if not amax_reduction:
                     amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        self.fp8_meta, True, skip_weight_scale_inv_update=skip_fp8_weight_update
                     )
 
             if self.fp8 and self.training:
                 # Setup for amax reduction
-                if (self.fp8_meta["recipe"].reduce_amax
-                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
+                if amax_reduction:
                     if not in_fp8_graph_capture_mode():
                         self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
@@ -608,7 +621,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.fp8_meta,
                 self.tp_group,
                 self.tp_size,
-                forward=True
+                forward=True,
+                skip_weight_scale_inv_update=skip_fp8_weight_update,
             )
             FP8GlobalStateManager.setup_amax_forward_global_reduce_func(reduce_func)
 

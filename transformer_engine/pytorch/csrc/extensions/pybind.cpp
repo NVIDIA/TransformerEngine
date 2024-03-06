@@ -42,6 +42,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD");
   m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
+  m.def("fused_cast_transpose_noop", &fused_cast_transpose_noop,
+                                              "Fused Cast + Transpose with noop option");
   m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
@@ -67,6 +69,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_attn_bwd", &fused_attn_bwd,
                   "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
+  m.def("fp8_transpose_noalloc", &fp8_transpose_noalloc, "Transpose with FP8 I/O");
+  m.def("fp8_transpose_noalloc_noop", &fp8_transpose_noalloc_noop,
+                            "Transpose with FP8 I/O with noop option.");
   m.def("gelu", &gelu, "GeLU with FP8 output");
   m.def("relu", &relu, "ReLU with FP8 output");
   m.def("geglu", &geglu, "GeGLU with FP8 output");

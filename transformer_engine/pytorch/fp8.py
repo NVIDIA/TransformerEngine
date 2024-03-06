@@ -285,6 +285,7 @@ class FP8GlobalStateManager:
         tp_group: dist_group_type,
         tp_size: int,
         forward: bool = True,
+        skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
         if len(cls.global_fp8_buffer) == 0:
@@ -341,7 +342,7 @@ class FP8GlobalStateManager:
                 fp8_meta["recipe"].margin,
                 fp8_meta["recipe"].amax_compute_algo,
                 cls.global_non_weight_mask_buffer[amax_buffer_key],
-                True,
+                skip_weight_scale_inv_update,
             )
         else:
             _non_fused_amax_and_scale_update_after_reduction(
@@ -354,7 +355,7 @@ class FP8GlobalStateManager:
                 get_fp8_te_dtype(fp8_meta["recipe"], forward),
                 fp8_meta["recipe"].margin,
                 fp8_meta["recipe"].amax_compute_algo,
-                True,
+                skip_weight_scale_inv_update,
             )
 
         return wait_handle
@@ -597,16 +598,20 @@ def _fused_amax_and_scale_update(
     margin: int,
     amax_compute_algo: str,
     non_weight_mask: torch.Tensor,
-    update_weight_scale_inv: bool,
+    skip_weight_scale_inv_update: Union[bool, torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Update amax history and FP8 scaling factors"""
-    if update_weight_scale_inv:
-        non_weight_mask = torch.Tensor()
+    if isinstance(skip_weight_scale_inv_update, bool):
+        if not skip_weight_scale_inv_update:
+            non_weight_mask = torch.Tensor()
+        skip_weight_scale_inv_update = torch.Tensor()
+
     tex.fused_amax_and_scale_update(
         amax_history,
         scale,
         scale_inv,
         non_weight_mask,
+        skip_weight_scale_inv_update,
         amax_history,
         scale,
         scale_inv,
@@ -627,7 +632,7 @@ def _non_fused_amax_and_scale_update_after_reduction(
     fp8_dtype: tex.DType,
     margin: int,
     amax_compute_algo: str,
-    update_weight_scale_inv: bool,
+    skip_weight_scale_inv_update: Union[bool, torch.Tensor],
 ) -> None:
     """
     After forward or backward reduction of DP/TP groups,
@@ -640,13 +645,17 @@ def _non_fused_amax_and_scale_update_after_reduction(
     for amax_history, scale, scale_inv, non_weight_mask in zip(
         amax_history_buffer, scale_buffer, scale_inv_buffer, non_weight_mask_buffer
     ):
-        if update_weight_scale_inv:
-            non_weight_mask = torch.Tensor()
+        if isinstance(skip_weight_scale_inv_update, bool):
+            if not skip_weight_scale_inv_update:
+                non_weight_mask = torch.Tensor()
+            skip_weight_scale_inv_update = torch.Tensor()
+
         tex.fused_amax_and_scale_update(
             amax_history,
             scale,
             scale_inv,
             non_weight_mask,
+            skip_weight_scale_inv_update,
             amax_history,
             scale,
             scale_inv,
@@ -665,7 +674,7 @@ def _fused_amax_and_scale_update_after_reduction(
     margin: int,
     amax_compute_algo: str,
     non_weight_masks: List[torch.Tensor],
-    update_weight_scale_inv: bool,
+    skip_weight_scale_inv_update: Union[bool, torch.Tensor],
 ) -> None:
     """
     After forward or backward reduction of DP/TP groups,
@@ -673,15 +682,18 @@ def _fused_amax_and_scale_update_after_reduction(
     update the local amax_history, scale, scale_inv in
     each FP8 module.
     """
+    if isinstance(skip_weight_scale_inv_update, bool):
+        if not skip_weight_scale_inv_update:
+            non_weight_masks = [torch.Tensor()] * len(amax_histories)
+        skip_weight_scale_inv_update = torch.Tensor()
 
-    if update_weight_scale_inv:
-        non_weight_masks = [torch.Tensor()] * len(amax_histories)
     tex.fused_amax_and_scale_update_after_reduction(
         amax_reduction_buffer,
         amax_histories,
         scales,
         scale_invs,
         non_weight_masks,
+        skip_weight_scale_inv_update,
         amax_compute_algo,
         fp8_dtype,
         margin,
@@ -725,7 +737,7 @@ def _compute_scaling_factor(
 def amax_and_scale_update(
     fp8_meta: Dict[str, Any],
     fwd_update: bool,
-    update_weight_scale_inv: bool = True,
+    skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
@@ -746,9 +758,12 @@ def amax_and_scale_update(
             fp8_meta["recipe"].margin,
             fp8_meta["recipe"].amax_compute_algo,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
-            update_weight_scale_inv,
+            skip_weight_scale_inv_update,
         )
     else:
+        assert (
+            isinstance(skip_weight_scale_inv_update, bool)
+         ), "`skip_weight_scale_inv_update` must be a boolean for unfused amax and scale update."
         fp8_meta[fp8_meta_tensor_key].amax_history, amax = _compute_amax_and_update_history(
             fp8_meta[fp8_meta_tensor_key].amax_history,
             fp8_meta["recipe"],
@@ -763,7 +778,7 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key].scale,
             fp8_meta[fp8_meta_tensor_key].scale_inv,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
-            update_weight_scale_inv,
+            not skip_weight_scale_inv_update,
         )
 
 

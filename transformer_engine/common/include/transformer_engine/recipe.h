@@ -44,17 +44,19 @@ extern "C" {
  *  \param[in] margin                   Scaling factor margin.
  *  \param[in] stream                   CUDA stream.
  */
-void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_history,
-                                                       const NVTETensor scale,
-                                                       const NVTETensor scale_inv,
-                                                       const NVTETensor scale_inv_mask,
-                                                       NVTETensor updated_amax_history,
-                                                       NVTETensor updated_scale,
-                                                       NVTETensor updated_scale_inv,
-                                                       const char* amax_compute_algo,
-                                                       NVTEDType fp8_dtype,
-                                                       float margin,
-                                                       cudaStream_t stream);
+void nvte_delayed_scaling_recipe_amax_and_scale_update(
+    const NVTETensor amax_history,
+    const NVTETensor scale,
+    const NVTETensor scale_inv,
+    const NVTETensor scale_inv_mask,
+    const NVTETensor skip_weight_scale_inv_update,
+    NVTETensor updated_amax_history,
+    NVTETensor updated_scale,
+    NVTETensor updated_scale_inv,
+    const char* amax_compute_algo,
+    NVTEDType fp8_dtype,
+    float margin,
+    cudaStream_t stream);
 
 /*! \brief Bulk-update FP8 scaling factors with delayed scaling recipe after amax reduction.
  *
@@ -92,6 +94,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
                            std::vector<NVTETensor> scales,
                            std::vector<NVTETensor> scale_invs,
                            std::vector<NVTETensor> scale_inv_masks,
+                           const NVTETensor skip_weight_scale_inv_update,
                            const char *amax_compute_algo,
                            NVTEDType fp8_dtype,
                            float margin,

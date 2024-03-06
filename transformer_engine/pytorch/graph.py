@@ -13,6 +13,7 @@ from .fp8 import (
     FP8GlobalStateManager,
     set_fp8_graph_capture_start,
     set_fp8_graph_capture_end,
+    get_default_fp8_recipe,
 )
 from .distributed import _set_cuda_rng_state
 from .module.base import TransformerEngineBaseModule
@@ -33,6 +34,7 @@ def _make_graphed_callables(
     sample_args,
     num_warmup_iters=3,
     allow_unused_input=False,
+    fp8_weight_caching=False,
 ):
     """
     Helper method for `make_graphed_callables`
@@ -52,6 +54,13 @@ def _make_graphed_callables(
         sample_args = (sample_args,)
 
     flatten_sample_args = []
+
+    if fp8_weight_caching:
+        modified_sample_args = []
+        for args in sample_args:
+            args += (torch.empty(1, device="cuda"),)
+            modified_sample_args.append(args)
+        sample_args = modified_sample_args
 
     for c, args in zip(callables, sample_args):
         if isinstance(c, torch.nn.Module):
@@ -220,11 +229,19 @@ def _make_graphed_callables(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )
 
-        def functionalized(*user_args):
+        def functionalized(*user_args, **user_kwargs):
             # Runs the autograd function with inputs == all
             # inputs to the graph that might require grad
             # (explicit user args + module parameters)
             # Assumes module params didn't change since capture.
+            if fp8_weight_caching:
+                assert (
+                    ("is_first_microbatch" in user_kwargs
+                     and isinstance(user_kwargs["is_first_microbatch"], bool))
+                ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
+                f = torch.zeros if user_kwargs["is_first_microbatch"] else torch.ones
+                user_args += (f(1, device="cuda"),)
+
             flatten_user_args, _ = _tree_flatten(user_args)
             out = Graphed.apply(*(tuple(flatten_user_args) + module_params))
             return _tree_unflatten(out, output_unflatten_spec)
@@ -249,12 +266,12 @@ def _make_graphed_callables(
         if isinstance(func, torch.nn.Module):
 
             def make_graphed_forward(func, graph_training_state, graphed, orig_fwd):
-                def new_fwd(*user_args):
+                def new_fwd(*user_args, **user_kwargs):
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
-                        return graphed(*user_args)
-                    return orig_fwd(*user_args)
+                        return graphed(*user_args, **user_kwargs)
+                    return orig_fwd(*user_args, **user_kwargs)
 
                 return new_fwd
 
@@ -269,15 +286,40 @@ def _make_graphed_callables(
     return tuple(ret)
 
 
+def save_fp8_tensors(modules, amax_history_len):
+    """
+    Returns the FP8 tensors for all modules
+    with adjusted amax history sizes.
+    """
+    saved_fp8_meta_tensors = []
+    for module in modules:
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                if m.primary_weights_in_fp8:
+                    m.adjust_amax_history_length(amax_history_len)
+                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
+    return saved_fp8_meta_tensors
+
+
+def restore_fp8_tensors(modules, fp8_tensors):
+    """Restore FP8 tensors."""
+    for module in modules:
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                m.reset_fp8_meta_tensors(fp8_tensors.pop(0))
+    assert len(fp8_tensors) == 0, "TE internal error."
+
+
 def make_graphed_callables(
     modules,
     sample_args,
     num_warmup_iters=3,
     allow_unused_input=False,
-    enabled = False,
-    calibrating = False,
-    fp8_recipe = None,
-    fp8_group = None,
+    enabled=False,
+    calibrating=False,
+    fp8_recipe=None,
+    fp8_group=None,
+    fp8_weight_caching=False,
 ):
     """
     Accepts TransformerEngine modules and returns graphed versions. This function is based
@@ -291,6 +333,8 @@ def make_graphed_callables(
         set_fp8_graph_capture_start()
         assert num_warmup_iters > 0, "Warmup is required for FP8 graph capture."
 
+    fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+
     # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
@@ -298,22 +342,17 @@ def make_graphed_callables(
         modules = (modules,)
 
     # Store FP8 tensors to reset later.
-    saved_fp8_meta_tensors = []
-    for module in modules:
-        # Recursively handle cases, including sequential.
-        for m in module.modules():
-            if isinstance(m, TransformerEngineBaseModule):
-                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
+    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe.amax_history_len)
 
     # FP8 wrapper.
     def wrap_autocast(block):
         old_forward = block.forward
-        def forward_func(*args):
+        def forward_func(*args, **kwargs):
             with fp8_autocast(enabled=enabled,
                               calibrating=calibrating,
                               fp8_recipe=fp8_recipe,
                               fp8_group=fp8_group):
-                outputs = old_forward(*args)
+                outputs = old_forward(*args, **kwargs)
             return outputs
         block.forward = forward_func
 
@@ -341,20 +380,19 @@ def make_graphed_callables(
 
     graphed_callables = _make_graphed_callables(
         forward_funcs, sample_args, num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input)
+        allow_unused_input=allow_unused_input,
+        fp8_weight_caching=fp8_weight_caching)
 
     # Ensures warmup does not affect numerics for ops such as dropout.
     _set_cuda_rng_state(cuda_rng_state)
 
-    # Reset FP8 state.
+    # Reset FP8 gradients.
     for module in modules:
-        for m in module.modules():
-            if isinstance(m, TransformerEngineBaseModule):
-                m.reset_fp8_meta_tensors(saved_fp8_meta_tensors.pop(0))
         for p in module.parameters():
             p.grad = None
 
-    assert len(saved_fp8_meta_tensors) == 0, "TE internal error."
+    # Restore FP8 state.
+    restore_fp8_tensors(modules, saved_fp8_tensors)
 
     set_fp8_graph_capture_end()
     return graphed_callables
