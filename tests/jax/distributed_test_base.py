@@ -106,7 +106,6 @@ def compare_ops(target_func,
                 metric_bwd_dtype=None,
                 in_shardings=_UNSPECIFIED,
                 out_shardings=_UNSPECIFIED,
-                check_collectives=False,
                 **kwargs):
     assert len(inputs) >= 1
 
@@ -132,5 +131,5 @@ def compare_ops(target_func,
     for i in range(len(target_grads)):
         assert_allclose(target_grads[i], ref_grads[i], dtype=metric_bwd_dtype)
 
-    if check_collectives:
-        assert_equal_collectives(target_hlo, coll_count_ref)
+
+    assert_equal_collectives(target_hlo, coll_count_ref)

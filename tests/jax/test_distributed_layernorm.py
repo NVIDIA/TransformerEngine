@@ -81,8 +81,10 @@ class TestDistributedLayernorm:
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
-            beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
+            g_spec_forced = PartitionSpec(*(None,) * len(g_pspec))
+            b_spec_forced = PartitionSpec(*(None,) * len(b_pspec))
+            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_spec_forced))
+            beta_ = jax.device_put(beta, NamedSharding(mesh, b_spec_forced))
 
             compare_ops(target_func,
                         ref_func, [x_, gamma_, beta_],
@@ -90,9 +92,8 @@ class TestDistributedLayernorm:
                         grad_args=(0, 1, 2),
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, g_pspec, b_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec, b_pspec)),
-                        check_collectives=False)
+                        in_shardings=(x_pspec, g_spec_forced, b_spec_forced),
+                        out_shardings=(None, (x_pspec, g_spec_forced, b_spec_forced)))
 
     @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
     @pytest.mark.parametrize('data_shape', [[32, 128, 1024], [32, 1024]])
@@ -119,7 +120,8 @@ class TestDistributedLayernorm:
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
+            g_spec_forced = PartitionSpec(*(None,) * len(g_pspec))
+            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_spec_forced))
 
             compare_ops(target_func,
                         ref_func, [x_, gamma_],
@@ -127,6 +129,5 @@ class TestDistributedLayernorm:
                         grad_args=(0, 1),
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, g_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec)),
-                        check_collectives=False)
+                        in_shardings=(x_pspec, g_spec_forced),
+                        out_shardings=(None, (x_pspec, g_spec_forced)))
