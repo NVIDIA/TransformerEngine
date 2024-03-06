@@ -233,24 +233,37 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             TransformerEngineBaseModule.bwd_hook_for_amax_reduction))
         self.fp8_meta["first_module"] = False
 
+    def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
+        """Increase or decrease size of amax history based on given `length`.
+
+        .. warning::
+            This changes the underlying amax memory location.
+        """
+        if fwd is None:
+            fp8_meta_tensor_keys = ("scaling_fwd", "scaling_bwd")
+        else:
+            fp8_meta_tensor_keys = ("scaling_fwd" if fwd else "scaling_bwd",)
+
+        for key in fp8_meta_tensor_keys:
+            curr_len = self.fp8_meta[key].amax_history.shape[0]
+            if length == curr_len:
+                continue
+            if length < curr_len:
+                self.fp8_meta[key].amax_history = self.fp8_meta[key].amax_history[: length].clone()
+            elif length > curr_len:
+                extra_rows = length - curr_len
+                self.fp8_meta[key].amax_history = F.pad(
+                    self.fp8_meta[key].amax_history, pad=(0, 0, 0, extra_rows)
+                )
+
+
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
-            curr_len = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[0]
-            need_len = self.fp8_meta["recipe"].amax_history_len
-            if need_len < curr_len:
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = (
-                    self.fp8_meta[fp8_meta_tensor_key]
-                    .amax_history[: self.fp8_meta["recipe"].amax_history_len].clone()
-                )
-            elif need_len > curr_len:
-                extra_rows = need_len - curr_len
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = F.pad(
-                    self.fp8_meta[fp8_meta_tensor_key].amax_history, pad=(0, 0, 0, extra_rows)
-                )
+            self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
             return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

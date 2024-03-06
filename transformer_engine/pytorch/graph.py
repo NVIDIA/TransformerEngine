@@ -286,6 +286,30 @@ def _make_graphed_callables(
     return tuple(ret)
 
 
+def save_fp8_tensors(modules, amax_history_len):
+    """
+    Returns the FP8 tensors for all modules
+    with adjusted amax history sizes.
+    """
+    saved_fp8_meta_tensors = []
+    for module in modules:
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                if m.primary_weights_in_fp8:
+                    m.adjust_amax_history_length(amax_history_len)
+                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
+    return saved_fp8_meta_tensors
+
+
+def restore_fp8_tensors(modules, fp8_tensors):
+    """Restore FP8 tensors."""
+    for module in modules:
+        for m in module.modules():
+            if isinstance(m, TransformerEngineBaseModule):
+                m.reset_fp8_meta_tensors(fp8_tensors.pop(0))
+    assert len(fp8_tensors) == 0, "TE internal error."
+
+
 def make_graphed_callables(
     modules,
     sample_args,
@@ -318,12 +342,7 @@ def make_graphed_callables(
         modules = (modules,)
 
     # Store FP8 tensors to reset later.
-    saved_fp8_meta_tensors = []
-    for module in modules:
-        # Recursively handle cases, including sequential.
-        for m in module.modules():
-            if isinstance(m, TransformerEngineBaseModule):
-                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
+    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe.amax_history_len)
 
     # FP8 wrapper.
     def wrap_autocast(block):
@@ -367,15 +386,13 @@ def make_graphed_callables(
     # Ensures warmup does not affect numerics for ops such as dropout.
     _set_cuda_rng_state(cuda_rng_state)
 
-    # Reset FP8 state.
+    # Reset FP8 gradients.
     for module in modules:
-        for m in module.modules():
-            if isinstance(m, TransformerEngineBaseModule):
-                m.reset_fp8_meta_tensors(saved_fp8_meta_tensors.pop(0))
         for p in module.parameters():
             p.grad = None
 
-    assert len(saved_fp8_meta_tensors) == 0, "TE internal error."
+    # Restore FP8 state.
+    restore_fp8_tensors(modules, saved_fp8_tensors)
 
     set_fp8_graph_capture_end()
     return graphed_callables

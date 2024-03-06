@@ -516,18 +516,19 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
 }  // namespace delayed_scaling_recipe
 }  // namespace transformer_engine
 
-void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_history,
-                                                       const NVTETensor scale,
-                                                       const NVTETensor scale_inv,
-                                                       const NVTETensor scale_inv_mask,
-                                                       const NVTETensor skip_weight_scale_inv_update,
-                                                       NVTETensor updated_amax_history,
-                                                       NVTETensor updated_scale,
-                                                       NVTETensor updated_scale_inv,
-                                                       const char *amax_compute_algo,
-                                                       NVTEDType fp8_dtype,
-                                                       float margin,
-                                                       cudaStream_t stream) {
+void nvte_delayed_scaling_recipe_amax_and_scale_update(
+  const NVTETensor amax_history,
+  const NVTETensor scale,
+  const NVTETensor scale_inv,
+  const NVTETensor scale_inv_mask,
+  const NVTETensor skip_weight_scale_inv_update,
+  NVTETensor updated_amax_history,
+  NVTETensor updated_scale,
+  NVTETensor updated_scale_inv,
+  const char *amax_compute_algo,
+  NVTEDType fp8_dtype,
+  float margin,
+  cudaStream_t stream) {
   NVTE_API_CALL(nvte_delayed_scaling_recipe_amax_and_scale_update);
   using namespace transformer_engine;
   delayed_scaling_recipe::amax_and_scale_update(
