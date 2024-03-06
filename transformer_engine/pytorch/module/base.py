@@ -111,7 +111,7 @@ def initialize_ub(
     shape: list,
     tp_size: int,
     use_fp8: bool = False,
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
