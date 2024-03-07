@@ -152,8 +152,10 @@ def initialize_ub(
         num_splits: int = 4,
         aggregate: int = 0,
     ) -> None:
-        dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else dtype
-        sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
+        sample_buffer = torch.empty(
+            shape,
+            dtype=torch.uint8 if (use_fp8 and name in fp8_buf) else dtype,
+            device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
                     sample_buffer,          # Sample userbuffer
