@@ -1853,7 +1853,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
             is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
             fused_attention_backend, attn_bias,
-            None, None, None, None, None,
+            None, None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
@@ -1894,9 +1894,9 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         else:
             dqkv, *rest = fused_attn_bwd_qkvpacked(
                 ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
-                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
                 ctx.fused_attention_backend,
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None,
                 ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
                 ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
@@ -1922,7 +1922,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, kv, qkv_dtype, fused_attention_backend, attn_bias,
-            None, None, None, None, None,
+            None, None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
@@ -1967,9 +1967,9 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             dq, dkv, *rest = fused_attn_bwd_kvpacked(
                 ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, out, d_out,
-                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
                 ctx.fused_attention_backend,
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None,
                 ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
                 ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
@@ -1995,7 +1995,7 @@ class FusedAttnFunc(torch.autograd.Function):
         out, aux_ctx_tensors = fused_attn_fwd(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
-            None, None, None, None, None,
+            None, None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
@@ -2051,9 +2051,9 @@ class FusedAttnFunc(torch.autograd.Function):
             dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, out, d_out,
-                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
                 ctx.fused_attention_backend,
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None,
                 ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
                 ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
