@@ -72,7 +72,7 @@ def _prepare_backward(
     if fp8:
         # Amax and scale update fused with post reduction split and copy.
         if fp8_meta["recipe"].reduce_amax:
-            FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+            FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(fp8_meta, forward=False)
         else:
             amax_and_scale_update(fp8_meta, False)
 
@@ -81,7 +81,7 @@ def _prepare_backward(
 
     if fp8 and fp8_meta["recipe"].reduce_amax:
         reduce_func = partial(
-            FP8GlobalStateManager.global_amax_reduction,
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors,
             fp8_meta,
             forward=False
         )
@@ -575,7 +575,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.fp8_meta["recipe"].reduce_amax:
                     if not in_fp8_graph_capture_mode():
                         self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
-                    FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                        self.fp8_meta, forward=True)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
@@ -597,7 +598,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
             reduce_func = partial(
-                FP8GlobalStateManager.global_amax_reduction,
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors,
                 self.fp8_meta,
                 forward=True,
                 skip_weight_scale_inv_update=skip_fp8_weight_update,

@@ -155,7 +155,8 @@ class FP8GlobalStateManager:
         cls.amax_backward_global_reduce_func = f
 
     @classmethod
-    def add_amax_to_global_buffer(cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+    def add_fp8_tensors_to_global_buffer(
+        cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
         """Append 1D tensor `amax` to global buffer."""
         key = cls.get_amax_buffer_key(forward)
         fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
@@ -254,7 +255,7 @@ class FP8GlobalStateManager:
             )
 
     @classmethod
-    def global_amax_reduction(
+    def reduce_and_update_fp8_tensors(
         cls,
         fp8_meta: Dict[str, Any],
         forward: bool = True,
