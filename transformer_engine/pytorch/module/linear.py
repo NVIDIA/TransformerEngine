@@ -336,9 +336,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_Linear"
-        ):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_Linear"):
             (
                 inputmat,
                 inputmat_t,

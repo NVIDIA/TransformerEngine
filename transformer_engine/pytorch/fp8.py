@@ -71,13 +71,8 @@ class FP8GlobalStateManager:
     fp8_tensors_recompute_buffer = []
     amax_forward_global_reduce_func = None
     amax_backward_global_reduce_func = None
-    amax_reduce_handle_fwd = None
-    amax_reduce_handle_bwd = None
     fp8_available = None
     reason_for_no_fp8 = ""
-    dp_amax_reduce_interval = None
-    dp_amax_reduce_forward_idx = 0
-    dp_amax_reduce_backward_idx = 0
 
     @classmethod
     def reset(cls) -> None:
@@ -96,13 +91,8 @@ class FP8GlobalStateManager:
         cls.fp8_tensors_recompute_buffer = []
         cls.amax_forward_global_reduce_func = None
         cls.amax_backward_global_reduce_func = None
-        cls.amax_reduce_handle_fwd = None
-        cls.amax_reduce_handle_bwd = None
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
-        cls.dp_amax_reduce_interval = None
-        cls.dp_amax_reduce_forward_idx = 0
-        cls.dp_amax_reduce_backward_idx = 0
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -119,9 +109,6 @@ class FP8GlobalStateManager:
         # checkpoint backwards compatible.
         global_fp8_state = {}
         global_fp8_state["FP8_AUTOCAST_DEPTH"] = cls.FP8_AUTOCAST_DEPTH
-        global_fp8_state["dp_amax_reduce_interval"] = cls.dp_amax_reduce_interval
-        global_fp8_state["dp_amax_reduce_forward_idx"] = cls.dp_amax_reduce_forward_idx
-        global_fp8_state["dp_amax_reduce_backward_idx"] = cls.dp_amax_reduce_backward_idx
         return global_fp8_state
 
     @classmethod
@@ -156,16 +143,6 @@ class FP8GlobalStateManager:
     def get_amax_buffer_key(forward: bool = True) -> str:
         """Return a key in `cls.global_fp8_buffer` for the AMAX storage."""
         return "forward" if forward else "backward"
-
-    @classmethod
-    def get_amax_reduce_handle_fwd(cls) -> Union[bool, None]:
-        """Return amax reduction wait handle for fprop."""
-        return cls.amax_reduce_handle_fwd
-
-    @classmethod
-    def get_amax_reduce_handle_bwd(cls) -> Union[bool, None]:
-        """Return amax reduction wait handle for backprop."""
-        return cls.amax_reduce_handle_bwd
 
     @classmethod
     def setup_amax_forward_global_reduce_func(cls, f: Callable) -> None:
@@ -265,73 +242,39 @@ class FP8GlobalStateManager:
 
     @staticmethod
     def reduce_tensor_across_group_op_max(
-        tensor: torch.Tensor, group: dist_group_type, async_op: bool
+        tensor: torch.Tensor, group: dist_group_type
     ) -> None:
         """Reduce tensor across given group."""
         if torch.distributed.is_initialized():
-            wait_handle = torch.distributed.all_reduce(
+            torch.distributed.all_reduce(
                 tensor,
                 op=torch.distributed.ReduceOp.MAX,
                 group=group,
-                async_op=async_op,
+                async_op=False,
             )
-            return wait_handle
-        return None
 
     @classmethod
     def global_amax_reduction(
         cls,
         fp8_meta: Dict[str, Any],
-        tp_group: dist_group_type,
-        tp_size: int,
         forward: bool = True,
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
         if len(cls.global_fp8_buffer) == 0:
-            return None
+            return
+        if not torch.distributed.is_initialized():
+            return
+        if torch.distributed.get_world_size(group=fp8_meta["fp8_group"]) <= 1:
+            return
 
         amax_buffer_key = cls.get_amax_buffer_key(forward)
 
-        # Reduce AMAX in DP-domain at an interval.
-        # `NVTE_DP_AMAX_REDUCE_INTERVAL` should be set as an integer value larger than 0. If
-        # `NVTE_DP_AMAX_REDUCE_INTERVAL` is set to 0, AMAX is reduced only in TP domain.
-        if cls.dp_amax_reduce_interval is None:
-            cls.dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
-
-        if cls.dp_amax_reduce_interval == 0:
-            tp_amax_reduce = True
-        else:
-            tp_amax_reduce = False
-            if forward:
-                if cls.dp_amax_reduce_forward_idx == 0:
-                    reduce_group = fp8_meta["fp8_group"]
-                else:
-                    tp_amax_reduce = True
-                cls.dp_amax_reduce_forward_idx = (
-                    (cls.dp_amax_reduce_forward_idx + 1) % cls.dp_amax_reduce_interval)
-            else:
-                if cls.dp_amax_reduce_backward_idx == 0:
-                    reduce_group = fp8_meta["fp8_group"]
-                else:
-                    tp_amax_reduce = True
-                cls.dp_amax_reduce_backward_idx = (
-                    (cls.dp_amax_reduce_backward_idx + 1) % cls.dp_amax_reduce_interval)
-
-        if tp_amax_reduce:
-            if tp_size > 1:
-                reduce_group = tp_group
-            else:
-                return None
-
+        # Reduction.
         contiguous_amax = torch.cat(cls.global_fp8_buffer[amax_buffer_key])
+        cls.reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"])
 
-        wait_handle = cls.reduce_tensor_across_group_op_max(
-            contiguous_amax,
-            reduce_group,
-            fp8_meta["async_amax_reduction"],
-        )
-
+        # Amax and scale update.
         if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
             _fused_amax_and_scale_update_after_reduction(
                 contiguous_amax,
@@ -358,8 +301,6 @@ class FP8GlobalStateManager:
                 skip_weight_scale_inv_update,
             )
 
-        return wait_handle
-
     @classmethod
     def fp8_autocast_enter(
         cls,
@@ -371,7 +312,7 @@ class FP8GlobalStateManager:
         """Set state and tracking variables for entry into FP8 region."""
         if cls.FP8_AUTOCAST_DEPTH == 0:
             if callable(cls.amax_forward_global_reduce_func) and not in_fp8_graph_capture_mode():
-                cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
+                cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating

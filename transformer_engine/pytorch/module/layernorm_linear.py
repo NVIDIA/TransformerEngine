@@ -328,9 +328,7 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
-        ):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_LayerNormLinear"):
             (
                 inputmat,
                 ln_weight,
