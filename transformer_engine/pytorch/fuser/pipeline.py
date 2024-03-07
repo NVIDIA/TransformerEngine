@@ -18,7 +18,6 @@ from transformer_engine.pytorch.fuser.ops.fused_forward import (
 )
 from transformer_engine.pytorch.utils import clear_tensor_data
 
-### TODO Handle no_grad
 class _PipelineAutogradFunction(torch.autograd.Function):
 
     @staticmethod
@@ -35,12 +34,24 @@ class _PipelineAutogradFunction(torch.autograd.Function):
 
         # Apply forward ops
         x = input_
+        requires_grad = x.requires_grad
         for op, unfused_op_idxs in forward_ops:
+
+            # Forward op
             x = op.pipeline_forward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 x,
                 [unfused_op_kwargs[idx] for idx in unfused_op_idxs],
             )
+
+            # Check if backward op is required
+            if not requires_grad:
+                requires_grad = any(
+                    param.requires_grad for param in op.parameters()
+                )
+            for idx in unfused_op_idxs:
+                unfused_op_ctxs[idx].requires_grad = requires_grad
+            x.requires_grad_(requires_grad=requires_grad)
 
         # Flatten list of saved tensors
         to_save = []
@@ -82,6 +93,16 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         dx = grad_output
         grad_params = [None for _ in range(len(unfused_ops))]
         for op, unfused_op_idxs in backward_ops:
+
+            # Stop if no more gradients are required
+            if all(
+                not unfused_op_ctxs[idx].requires_grad
+                for idx in unfused_op_idxs
+            ):
+                dx = None
+                break
+
+            # Backward op
             dx, fused_op_dparams = op.pipeline_backward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 dx,
@@ -93,7 +114,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         # Flatten list of parameter gradients
         grad_params_flat = []
         for idx, dparams in enumerate(grad_params):
-            params = list(unfused_ops[idx].parameters(recurse=False))
+            params = list(unfused_ops[idx].parameters())
             if dparams is None:
                 dparams = [None for _ in range(len(params))]
             else:
@@ -178,7 +199,7 @@ class Pipeline:
         # Flatten list of parameters
         params = []
         for op in self._unfused_ops:
-            params.extend(op.parameters(recurse=False))
+            params.extend(op.parameters())
 
         # Pipeline forward pass
         return _PipelineAutogradFunction.apply(

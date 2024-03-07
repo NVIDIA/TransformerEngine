@@ -18,15 +18,23 @@ from transformer_engine.pytorch.distributed import (
     reduce_scatter_along_first_dim,
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import (
+    FP8GlobalStateManager,
+    get_fp8_te_dtype,
+)
 from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
 from transformer_engine.pytorch.module.base import get_workspace
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
+    fp8_cast_transpose,
     is_float8_tensor,
 )
+
+def _wait_async(handle: Optional[Any]) -> None:
+    if handle is not None:
+        handle.wait()
 
 
 class UnfusedLinear(UnfusedOperation):
@@ -76,7 +84,11 @@ class UnfusedLinear(UnfusedOperation):
             sequence_parallel = False
         else:
             tensor_parallel_size = torch.distributed.get_world_size(tensor_parallel_group)
-            if tensor_parallel_group == "column":
+            if tensor_parallel_size == 1:
+                tensor_parallel_mode = None
+                tensor_parallel_group = None
+                sequence_parallel = False
+            elif tensor_parallel_mode == "column":
                 if out_features % tensor_parallel_size != 0:
                     raise ValueError(
                         "Invalid configuration for tensor parallelism "
@@ -85,7 +97,7 @@ class UnfusedLinear(UnfusedOperation):
                         f"{tensor_parallel_size=})"
                     )
                 local_out_features /= tensor_parallel_size
-            elif tensor_parallel_group == "row":
+            elif tensor_parallel_mode == "row":
                 if in_features % tensor_parallel_size != 0:
                     raise ValueError(
                         "Invalid configuration for tensor parallelism "
@@ -185,27 +197,40 @@ class UnfusedLinear(UnfusedOperation):
                 f"and weight tensor (shape={tuple(self.weight.size())}) "
                 "are not compatible"
             )
-        x = convert_tensor(
+        local_x = convert_tensor(
             input,
             device=self.device,
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
-        x = x.view(-1, input_dims[-1])
-        if fp8_enabled and not is_float8_tensor(x):
-            x = Float8Tensor.to_float8(
-                x,
-                fp8_meta=self.get_fp8_meta("input"),
-                fp8_meta_index=0,
-            )
-        elif not fp8_enabled and is_float8_tensor(x):
-            x = x.from_float8()
-
-        # Gather sequence-parallel input if needed
-        local_x = x
-        async_handle = None
+        local_x = local_x.view(-1, input_dims[-1])  ### TODO Preserve transpose
+        if fp8_enabled and not is_float8_tensor(local_x):
+            fp8_meta = self.get_fp8_meta("input")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            with_cast_transpose = self.weight.requires_grad
+            if self.tensor_parallel_mode == "column" and self.sequence_parallel:
+                with_cast_transpose = False
+            if with_cast_transpose:
+                local_x = fp8_cast_transpose(
+                    local_x,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
+            else:
+                local_x = Float8Tensor.to_float8(
+                    local_x,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
+        elif not fp8_enabled and is_float8_tensor(local_x):
+            local_x = local_x.from_float8()
+        x = local_x
+        x_async = None
         if self.tensor_parallel_mode == "column" and self.sequence_parallel:
-            x, async_handle = gather_along_first_dim(
+            x, x_async = gather_along_first_dim(
                 local_x,
                 self.tensor_parallel_group,
                 async_op=True,
@@ -220,17 +245,16 @@ class UnfusedLinear(UnfusedOperation):
             memory_format=torch.contiguous_format,
         )
         if fp8_enabled and not is_float8_tensor(w):
+            fp8_meta = self.get_fp8_meta("param")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             w = Float8Tensor.to_float8(
                 w,
-                fp8_meta=self.get_fp8_meta("param"),
+                fp8_meta=fp8_meta,
                 fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
             )
         elif not fp8_enabled and is_float8_tensor(w):
             w = w.from_float8()
-
-        # Synchronize async communication
-        if async_handle is not None:
-            async_handle.wait()
 
         # Perform GEMM
         y = torch.empty(
@@ -238,6 +262,7 @@ class UnfusedLinear(UnfusedOperation):
             dtype=self.dtype,
             device=self.device,
         )
+        x_async = _wait_async(x_async)
         if fp8_enabled:
             fp8_gemm(
                 w._data,
@@ -274,7 +299,7 @@ class UnfusedLinear(UnfusedOperation):
         )
         ctx.fp8_enabled = fp8_enabled
         ctx.input_dims = input_dims
-        ctx.requires_dgrad = True  ### TODO input.requires_grad
+        ctx.requires_dgrad = input.requires_grad
 
         # Reshape output tensor
         if len(input_dims) > 1:
@@ -295,78 +320,86 @@ class UnfusedLinear(UnfusedOperation):
         ) = ctx.saved_tensors
         fp8_enabled = ctx.fp8_enabled
 
-        # Helper function for async communication
-        async_handle = None
-        def wait_async_handle():
-            nonlocal async_handle
-            if async_handle is not None:
-                async_handle.wait()
-                async_handle = None
-
-        # Gather sequence-parallel input if needed
-        wait_async_handle()
-        x = local_x
-        if (
-            self.weight.requires_grad
-            and self.tensor_parallel_mode == "column"
-            and self.sequence_parallel
-        ):
-            x, async_handle = gather_along_first_dim(
-                x,
-                self.tensor_parallel_group,
-                async_op=ctx.requires_dgrad,
-            )
-
         # Check grad output tensor
-        ### TODO: fused cast-transpose
+        dy_async = None
         dy = convert_tensor(
             grad_output,
             device=self.device,
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
-        dy = dy.view(-1, dy.size(-1))
+        dy = dy.view(-1, dy.size(-1))  ### TODO Preserve transpose
         if fp8_enabled and not is_float8_tensor(dy):
-            dy = Float8Tensor.to_float8(
-                dy,
-                fp8_meta=self.get_fp8_meta("grad_output"),
-                fp8_meta_forward=False,
-                fp8_meta_index=0,
-            )
+            fp8_meta = self.get_fp8_meta("grad_output")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
+            with_cast_transpose = self.weight.requires_grad
+            if self.tensor_parallel_mode == "row" and self.sequence_parallel:
+                with_cast_transpose = False
+            if with_cast_transpose:
+                dy = fp8_cast_transpose(
+                    dy,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
+            else:
+                dy = Float8Tensor.to_float8(
+                    dy,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
         elif not fp8_enabled and is_float8_tensor(dy):
             dy = dy.from_float8()
+        if self.tensor_parallel_mode == "row" and self.sequence_parallel:
+            dy, dy_async = gather_along_first_dim(
+                dy,
+                self.tensor_parallel_group,
+                async_op=True,
+            )
+
+        # Gather sequence-parallel input if needed
+        x = local_x
+        x_async = None
+        if (
+            self.weight.requires_grad
+            and self.tensor_parallel_mode == "column"
+            and self.sequence_parallel
+        ):
+            x, x_async = gather_along_first_dim(
+                x,
+                self.tensor_parallel_group,
+                async_op=True,
+            )
 
         # Compute grad input
         dx = None
+        dx_async = None
         if ctx.requires_dgrad:
 
             # Check weight tensor
             ### TODO: Weight caching without FP8 params
-            ### TODO: FP8 transpose caching
-            ### TODO: fused cast-transpose
-            w, w_t = None, None
-            if fp8_enabled:
-                w_t = convert_tensor(
-                    self.weight.transpose(0, 1),
-                    device=self.device,
-                    dtype=self.dtype,
-                    memory_format=torch.contiguous_format,
+            ### TODO Configurable FP8 transpose caching
+            w = convert_tensor(
+                self.weight,
+                device=self.device,
+                dtype=self.dtype,
+                memory_format=torch.contiguous_format,
+            )
+            if fp8_enabled and not is_float8_tensor(w):
+                fp8_meta = self.get_fp8_meta("param")
+                fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                w = fp8_cast_transpose(
+                    w,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
                 )
-                if not is_float8_tensor(w_t):
-                    w_t = Float8Tensor.to_float8(
-                        w_t,
-                        fp8_meta=self.get_fp8_meta("param"),
-                        fp8_meta_index=0,
-                    )
-            else:
-                w = convert_tensor(
-                    self.weight,
-                    device=self.device,
-                    dtype=self.dtype,
-                    memory_format=torch.contiguous_format,
-                )
-                if is_float8_tensor(w):
-                    w = w.from_float8()
+            elif not fp8_enabled and is_float8_tensor(w):
+                w = w.from_float8()
 
             # Perform dgrad GEMM
             dx = torch.empty(
@@ -374,12 +407,13 @@ class UnfusedLinear(UnfusedOperation):
                 dtype=self.dtype,
                 device=self.device,
             )
+            dy_async = _wait_async(dy_async)
             if fp8_enabled:
                 fp8_gemm(
-                    w_t._data,
-                    w_t._scale_inv,
+                    w.transpose()._data,
+                    w._scale_inv,
                     0,
-                    w_t._fp8_dtype,
+                    w._fp8_dtype,
                     dy._data,
                     dy._scale_inv,
                     0,
@@ -398,26 +432,23 @@ class UnfusedLinear(UnfusedOperation):
                     out=dx,
                 )
 
-        # Reduce tensor-parallel grad input if needed
-        # Note: Try overlapping with wgrad
-        wait_async_handle()
-        if ctx.requires_dgrad and self.tensor_parallel_mode == "column":
-            if self.sequence_parallel:
-                dx, async_handle = reduce_scatter_along_first_dim(
-                    dx,
-                    self.tensor_parallel_group,
-                    async_op=self.weight.requires_grad,
-                )
-            else:
-                async_handle = torch.distributed.all_reduce(
-                    dx,
-                    group=self.tensor_parallel_group,
-                    async_op=self.weight.requires_grad,
-                )
+            # Reduce tensor-parallel grad input if needed
+            if self.tensor_parallel_mode == "column":
+                if self.sequence_parallel:
+                    dx, dx_async = reduce_scatter_along_first_dim(
+                        dx,
+                        self.tensor_parallel_group,
+                        async_op=True,
+                    )
+                else:
+                    dx_async = torch.distributed.all_reduce(
+                        dx,
+                        group=self.tensor_parallel_group,
+                        async_op=True,
+                    )
 
         # Perform wgrad GEMM
         ### TODO: grad accumulation
-        ### TODO: smarter handling of transpose
         dw = None
         if self.weight.requires_grad:
             dw = torch.empty(
@@ -426,9 +457,11 @@ class UnfusedLinear(UnfusedOperation):
                 device=self.device,
                 memory_format=torch.contiguous_format,
             )
+            dy_async = _wait_async(dy_async)
+            x_async = _wait_async(x_async)
             if fp8_enabled:
                 fp8_gemm(
-                    x.transpose(0, 1)._data,
+                    x.transpose()._data,
                     x._scale_inv,
                     0,
                     x._fp8_dtype,
@@ -451,7 +484,9 @@ class UnfusedLinear(UnfusedOperation):
             )
 
         # Clean up and return grads
-        wait_async_handle()
+        _wait_async(dy_async)
+        _wait_async(x_async)
+        _wait_async(dx_async)
         if dx is not None:
             dx = dx.reshape(ctx.input_dims)
         return dx, [dw]

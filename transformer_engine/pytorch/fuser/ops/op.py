@@ -24,6 +24,7 @@ class OperationContext:
     to_save: Optional[tuple[Optional[torch.Tensor], ...]] = None
     saved_tensors: Optional[tuple[Optional[torch.Tensor], ...]] = None
     saved_tensors_range: Optional[tuple[int, int]] = None
+    requires_grad: bool = False
 
     def save_for_backward(self, *tensors):
         self.to_save = tensors

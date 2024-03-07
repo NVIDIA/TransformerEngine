@@ -18,7 +18,10 @@ from transformer_engine.pytorch.distributed import (
     reduce_scatter_along_first_dim,
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import (
+    FP8GlobalStateManager,
+    get_fp8_te_dtype,
+)
 from transformer_engine.pytorch.fuser.ops.op import FusedOperation
 from transformer_engine.pytorch.fuser.ops.unfused import Bias, UnfusedLinear
 from transformer_engine.pytorch.module.base import get_workspace
@@ -26,6 +29,7 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
+    fp8_cast_transpose,
     is_float8_tensor,
 )
 
@@ -97,28 +101,44 @@ class ForwardLinearBiasActivation(FusedOperation):
                 f"and weight tensor (shape={tuple(linear_op.weight.size())}) "
                 "are not compatible"
             )
-        x = convert_tensor(
+        local_x = convert_tensor(
             input,
             device=linear_op.device,
             dtype=linear_op.dtype,
             memory_format=torch.contiguous_format,
         )
-        x = x.view(-1, input_dims[-1])
-        if fp8_enabled and not is_float8_tensor(x):
-            x = Float8Tensor.to_float8(
+        local_x = local_x.view(-1, input_dims[-1])  ### TODO Preserve transpose
+        if fp8_enabled and not is_float8_tensor(local_x):
+            fp8_meta = linear_op.get_fp8_meta("input")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            with_cast_transpose = linear_op.weight.requires_grad
+            if linear_op.tensor_parallel_mode == "column" and linear_op.sequence_parallel:
+                with_cast_transpose = False
+            if with_cast_transpose:
+                local_x = fp8_cast_transpose(
+                    local_x,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
+            else:
+                local_x = Float8Tensor.to_float8(
+                    local_x,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                )
+        elif not fp8_enabled and is_float8_tensor(local_x):
+            local_x = local_x.from_float8()
+        x = local_x
+        x_async = None
+        if (
+            linear_op.tensor_parallel_mode == "column"
+            and linear_op.sequence_parallel
+        ):
+            x, x_async = gather_along_first_dim(
                 x,
-                fp8_meta=linear_op.get_fp8_meta("input"),
-                fp8_meta_index=0,
-            )
-        elif not fp8_enabled and is_float8_tensor(x):
-            x = x.from_float8()
-
-        # Gather sequence-parallel input if needed
-        local_x = x
-        async_handle = None
-        if linear_op.tensor_parallel_mode == "column" and linear_op.sequence_parallel:
-            x, async_handle = gather_along_first_dim(
-                local_x,
                 linear_op.tensor_parallel_group,
                 async_op=True,
             )
@@ -132,10 +152,13 @@ class ForwardLinearBiasActivation(FusedOperation):
             memory_format=torch.contiguous_format,
         )
         if fp8_enabled and not is_float8_tensor(w):
+            fp8_meta = linear_op.get_fp8_meta("param")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             w = Float8Tensor.to_float8(
                 w,
-                fp8_meta=linear_op.get_fp8_meta("param"),
+                fp8_meta=fp8_meta,
                 fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
             )
         elif not fp8_enabled and is_float8_tensor(w):
             w = w.from_float8()
@@ -150,16 +173,14 @@ class ForwardLinearBiasActivation(FusedOperation):
                 memory_format=torch.contiguous_format,
             )
 
-        # Synchronize async communication
-        if async_handle is not None:
-            async_handle.wait()
-
         # Perform GEMM
         y = torch.empty(
             (x.size(0), w.size(0)),
             dtype=linear_op.dtype,
             device=linear_op.device,
         )
+        if x_async is not None:
+            x_async.wait()
         if fp8_enabled:
             fp8_gemm(
                 w._data,
@@ -193,7 +214,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         )
         linear_op_ctx.fp8_enabled = fp8_enabled
         linear_op_ctx.input_dims = input_dims
-        linear_op_ctx.requires_dgrad = True  ### TODO input.requires_grad
+        linear_op_ctx.requires_dgrad = input.requires_grad
 
         # Reshape output tensor
         if len(input_dims) > 1:
@@ -218,10 +239,7 @@ def fuse_forward_linear_bias_activation(
         op1, _ = window[0]
         if not isinstance(op1, UnfusedLinear):
             continue
-        if (
-            op1.tensor_parallel_size > 1
-            and op1.tensor_parallel_mode == "row"
-        ):
+        if op1.tensor_parallel_mode == "row":
             continue
 
         # Check if second op is bias
