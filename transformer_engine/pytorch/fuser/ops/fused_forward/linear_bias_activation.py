@@ -240,6 +240,12 @@ def fuse_forward_linear_bias_activation(
         if not isinstance(op1, UnfusedLinear):
             continue
         if op1.tensor_parallel_mode == "row":
+            # Row tensor-parallelism requires communication after the
+            # GEMM
+            continue
+        if op1.dtype not in (torch.float16, torch.bfloat16):
+            # cuBLAS only supports fused GEMM+bias+activation with
+            # FP16 and BF16 output
             continue
 
         # Check if second op is bias

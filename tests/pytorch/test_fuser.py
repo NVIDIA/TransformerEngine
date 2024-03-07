@@ -495,6 +495,11 @@ class TestFuserFusions:
                 or out_features % 16 != 0
             ):
                 pytest.skip("FP8 GEMMs require dims that are divisible by 16")
+        if dtype not in (torch.float16, torch.bfloat16):
+            pytest.skip(
+                "FP8 fused linear-bias-activation "
+                "is only supported with FP16 or BF16 output"
+            )
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
