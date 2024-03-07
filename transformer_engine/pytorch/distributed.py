@@ -954,7 +954,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
     fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
     for state, module in zip(fsdp_states, fsdp_modules):
         if _is_te_module(module):
-            setattr(module, "fsdp_wrapepd", True)
+            setattr(module, "fsdp_wrapped", True)
             setattr(module, "fsdp_group", state.process_group)
 
 
