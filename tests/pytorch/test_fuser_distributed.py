@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import itertools
 import os
 import pathlib
 import subprocess
@@ -33,28 +34,8 @@ if torch.cuda.device_count() < 2:
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 @functools.cache
-def world_sizes() -> list[int]:
-    """World sizes for multi-GPU jobs"""
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < 2:
-        return []
-    sizes = [2]
-    while sizes[-1] * 2 <= num_gpus:
-        sizes.append(sizes[-1] * 2)
-    return sizes
-
-@functools.cache
-def current_file() -> pathlib.Path:
-    """Path to current Python file"""
-    return pathlib.Path(__file__).resolve()
-
-@functools.cache
-def python_exe() -> pathlib.Path:
-    """Path to Python executable"""
-    return pathlib.Path(sys.executable).resolve()
-
-def init_distributed() -> tuple[torch.distributed.ProcessGroup, int, int]:
-    """Initialize NCCL process group"""
+def world_group() -> torch.distributed.ProcessGroup:
+    """Get NCCL process group, initializing if needed"""
     world_size = int(os.environ['WORLD_SIZE'])
     rank = int(os.environ['LOCAL_RANK'])
     torch.cuda.set_device(rank)
@@ -64,7 +45,7 @@ def init_distributed() -> tuple[torch.distributed.ProcessGroup, int, int]:
         world_size=world_size,
         rank=rank,
     )
-    return group, world_size, rank
+    return group
 
 def reset_rng(seed: int = 1234) -> None:
     """Reset random number generators"""
@@ -140,31 +121,34 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
         return dict(rtol=1e-7, atol=1e-7)
     raise ValueError(f"Unsupported dtype ({dtype})")
 
-def _test_unfused_linear() -> None:
+def _test_unfused_linear(
+    *,
+    local_weight_shape: tuple[int, int] = (16, 16),
+    batch_size: int = 16,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = "cuda",
+    fp8_compute: bool = False,
+    fp8_input: bool = False,
+    fp8_weight: bool = False,
+    fp8_grad_output: bool = False,
+    tensor_parallel_mode: str = "column",
+    sequence_parallel: bool = False,
+) -> None:
 
-    # Initialize process group
-    process_group, world_size, rank = init_distributed()
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
 
     # Tensor dimensions
-    batch_size = int(os.getenv("BATCH_SIZE", "16"))
-    in_features = int(os.getenv("IN_FEATURES", "16"))
-    out_features = int(os.getenv("OUT_FEATURES", "16"))
+    local_out_features, local_in_features = local_weight_shape
+    out_features, in_features = local_out_features, local_in_features
+    if tensor_parallel_mode == "column":
+        out_features *= world_size
+    elif tensor_parallel_mode == "row":
+        in_features *= world_size
     in_shape = [batch_size, in_features]
     out_shape = [batch_size, out_features]
-
-    # Tensor-parallel configuration
-    tensor_parallel_mode = os.getenv("TENSOR_PARALLEL_MODE", "column")
-    sequence_parallel = bool(int(os.getenv("SEQUENCE_PARALLEL", "0")))
-
-    # Compute configuration
-    dtype = torch.float32
-    device = "cuda"
-
-    # FP8 configuration
-    fp8_compute = bool(int(os.getenv("FP8_COMPUTE", "0")))
-    fp8_input = bool(int(os.getenv("FP8_INPUT", "0")))
-    fp8_weight = bool(int(os.getenv("FP8_WEIGHT", "0")))
-    fp8_grad_output = bool(int(os.getenv("FP8_GRAD_OUTPUT", "0")))
 
     # Random data
     reset_rng()
@@ -202,24 +186,24 @@ def _test_unfused_linear() -> None:
                 rank * local_out_features,
                 (rank+1) * local_out_features,
             )
-            w_ref = w_ref[local_slice, :].clone()
-            dw_ref = dw_ref[local_slice, :].clone()
-            w_test = w_test[local_slice, :].clone()
-            y_ref = y_ref[:, local_slice].clone()
-            dy_ref = dy_ref[:, local_slice].clone()
-            dy_test = dy_test[:, local_slice].clone()
+            w_ref = w_ref[local_slice, :]
+            dw_ref = dw_ref[local_slice, :]
+            w_test = w_test[local_slice, :]
+            y_ref = y_ref[..., local_slice]
+            dy_ref = dy_ref[..., local_slice]
+            dy_test = dy_test[..., local_slice].clone()
         elif tensor_parallel_mode == "row":
             local_in_features = in_features // world_size
             local_slice = slice(
                 rank * local_in_features,
                 (rank+1) * local_in_features,
             )
-            w_ref = w_ref[:, local_slice].clone()
-            dw_ref = dw_ref[:, local_slice].clone()
-            w_test = w_test[:, local_slice].clone()
-            x_ref = x_ref[:, local_slice].clone()
-            dx_ref = dx_ref[:, local_slice].clone()
-            x_test = x_test[:, local_slice].clone()
+            w_ref = w_ref[:, local_slice]
+            dw_ref = dw_ref[:, local_slice]
+            w_test = w_test[:, local_slice]
+            x_ref = x_ref[..., local_slice]
+            dx_ref = dx_ref[..., local_slice]
+            x_test = x_test[..., local_slice].clone()
         if sequence_parallel:
             local_batch_size = batch_size // world_size
             local_slice = slice(
@@ -227,13 +211,13 @@ def _test_unfused_linear() -> None:
                 (rank+1) * local_batch_size,
             )
             if tensor_parallel_mode == "column":
-                x_ref = x_ref[local_slice, :].clone()
-                dx_ref = dx_ref[local_slice, :].clone()
-                x_test = x_test[local_slice, :].clone()
+                x_ref = x_ref[local_slice, ...]
+                dx_ref = dx_ref[local_slice, ...]
+                x_test = x_test[local_slice, ...].clone()
             elif tensor_parallel_mode == "row":
-                y_ref = y_ref[local_slice, :].clone()
-                dy_ref = dy_ref[local_slice, :].clone()
-                dy_test = dy_test[local_slice, :].clone()
+                y_ref = y_ref[local_slice, ...]
+                dy_ref = dy_ref[local_slice, ...]
+                dy_test = dy_test[local_slice, ...].clone()
     x_test.requires_grad_()
 
     # Implementation with fusable operation
@@ -273,96 +257,66 @@ def _test_unfused_linear() -> None:
     torch.testing.assert_close(dx_test, dx_ref, **tols)
     torch.testing.assert_close(dw_test, dw_ref, **tols)
 
+def run_parallel_tests() -> None:
+    """Run parallel tests"""
 
-@pytest.mark.skipif(torch.cuda.device_count() <= 1, reason="")
-class TestDistributedFuserOps:
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
 
-    @pytest.mark.parametrize("fp8_compute", (False, True))
-    @pytest.mark.parametrize("fp8_input", (False, True))
-    @pytest.mark.parametrize("fp8_weight", (False, True))
-    @pytest.mark.parametrize("fp8_grad_output", (False, True))
-    @pytest.mark.parametrize("world_size", world_sizes())
-    @pytest.mark.parametrize("tensor_parallel_mode", ("row", "column"))
-    @pytest.mark.parametrize("sequence_parallel", (False, True))
-    def test_unfused_linear(
-        self,
-        *,
-        local_weight_shape: tuple[int, int] = (16, 16),
-        batch_size: Iterable[int] = 16,
-        dtype: torch.dtype = torch.float32,
-        device: torch.device = "cuda",
-        fp8_compute: bool,
-        fp8_input: bool,
-        fp8_weight: bool,
-        fp8_grad_output: bool,
-        world_size: int,
-        tensor_parallel_mode: str,
-        sequence_parallel: bool,
+    # Unfused linear op
+    for config in itertools.product(
+        (False, True) if fp8_available else (False,),
+        ("column", "row"),
+        (False, True),
     ):
+        if rank == 0:
+            print(f"Running _test_unfused_linear with {config=}")
+        fp8, tensor_parallel_mode, sequence_parallel = config
+        _test_unfused_linear(
+            fp8_compute=fp8,
+            fp8_input=fp8,
+            fp8_weight=fp8,
+            fp8_grad_output=fp8,
+            tensor_parallel_mode=tensor_parallel_mode,
+            sequence_parallel=sequence_parallel,
+        )
 
-        # Tensor dimensions
-        local_out_features, local_in_features = local_weight_shape
-        out_features, in_features = local_out_features, local_in_features
-        if tensor_parallel_mode == "column":
-            out_features *= world_size
-        elif tensor_parallel_mode == "row":
-            in_features *= world_size
+def world_sizes() -> list[int]:
+    """World sizes for parallel jobs"""
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < 2:
+        return []
+    sizes = [2]
+    while sizes[-1] * 2 <= num_gpus:
+        sizes.append(sizes[-1] * 2)
+    return sizes
 
-        # Skip invalid configurations
-        if fp8_compute or fp8_input or fp8_weight or fp8_grad_output:
-            if not fp8_available:
-                pytest.skip(reason_for_no_fp8)
-            if torch.device(device).type != "cuda":
-                pytest.skip("FP8 is only supported on CUDA devices")
-        if fp8_compute:
-            if (
-                batch_size % 16 != 0
-                or local_in_features % 16 != 0
-                or local_out_features % 16 != 0
-            ):
-                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
-
-        # Launch distributed job
-        env = dict(os.environ)
-        env["BATCH_SIZE"] = batch_size
-        env["IN_FEATURES"] = in_features
-        env["OUT_FEATURES"] = out_features
-        env["TENSOR_PARALLEL_MODE"] = tensor_parallel_mode
-        env["SEQUENCE_PARALLEL"] = int(sequence_parallel)
-        env["FP8_COMPUTE"] = int(fp8_compute)
-        env["FP8_INPUT"] = int(fp8_input)
-        env["FP8_WEIGHT"] = int(fp8_weight)
-        env["FP8_GRAD_OUTPUT"] = int(fp8_grad_output)
-        env = { key: str(val) for key, val in env.items() }
-        command = [
-            python_exe(),
-            "-m",
-            "torch.distributed.launch",
-            "--use-env",
-            f"--nproc_per_node={world_size}",
-            current_file(),
-            "--test=unfused_linear",
-        ]
-        result = subprocess.run(command, stderr=subprocess.STDOUT, env=env)
-        if result.returncode != 0:
-            print(result.stdout, file=sys.stderr)
-            result.check_returncode()
-
+@pytest.mark.parametrize("world_size", world_sizes())
+def test_distributed_fuser_ops(world_size: int) -> None:
+    """Launch parallel job that runs parallel tests"""
+    python_exe = pathlib.Path(sys.executable).resolve()
+    current_file = pathlib.Path(__file__).resolve()
+    command = [
+        python_exe,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={world_size}",
+        current_file,
+        "--parallel",
+    ]
+    result = subprocess.run(
+        command,
+        check=True,
+    )
 
 def main() -> None:
-
-    # Parse command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('--test', type=str, default=None, help="Test name")
+    parser.add_argument('--parallel', action="store_true", help="Run parallel tests")
     args = parser.parse_args()
-
-    # Execute test if provided
-    if args.test is None:
-        pass
-    elif args.test == "unfused_linear":
-        _test_unfused_linear()
-    else:
-        raise RuntimeError(f"Unrecognized test ({args.test})")
+    if args.parallel:
+        run_parallel_tests()
 
 if __name__ == "__main__":
     main()
