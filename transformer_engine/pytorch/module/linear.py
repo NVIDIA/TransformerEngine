@@ -74,7 +74,7 @@ class _Linear(torch.autograd.Function):
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
-        explicit_expert_comm: bool,
+        explicit_parallel_comm: bool,
         tensor_parallel: bool,
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
@@ -303,7 +303,7 @@ class _Linear(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
-            ctx.explicit_expert_comm = explicit_expert_comm
+            ctx.explicit_parallel_comm = explicit_parallel_comm
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
@@ -315,7 +315,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
-        if not explicit_expert_comm:
+        if not explicit_parallel_comm:
             if ub_split_rs or ub_atomic_gemm_rs:
                 out = rs_out
             elif parallel_mode == "row" and sequence_parallel:
@@ -431,7 +431,7 @@ class _Linear(torch.autograd.Function):
                     )
 
                 # Overlap dgrad-RS/AR with wgrad
-                if not ctx.explicit_expert_comm:
+                if not ctx.explicit_parallel_comm:
                     if ctx.parallel_mode == "column" and ctx.sequence_parallel:
                         if handle is not None:
                             handle.wait()
@@ -592,8 +592,9 @@ class Linear(TransformerEngineBaseModule):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    ep_size : int, default = 1
-             used as EP (expert parallel) world size.
+    explicit_parallel_comm : bool, default = `False`
+             if set to `True`, the communications (AR/RS/AG) across TP ranks are ignored and
+             should be handled outside the Linear Layer.
     parallel_mode : {None, 'Column', 'Row'}, default = `None`
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
@@ -627,8 +628,7 @@ class Linear(TransformerEngineBaseModule):
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
-        is_expert: bool = False,
-        ep_size: int = 1,
+        explicit_parallel_comm: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         rng_tracker_name: Optional[str] = None,
         init_method: Optional[Callable] = None,
@@ -658,11 +658,7 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
-        self.is_expert = is_expert
-        self.expert_parallel = ep_size > 1
-        self.explicit_expert_comm = self.is_expert and (
-            sequence_parallel or self.expert_parallel
-        )
+        self.explicit_parallel_comm = explicit_parallel_comm
         if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
@@ -827,8 +823,6 @@ class Linear(TransformerEngineBaseModule):
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
-                setattr(getattr(self, weight), 'allreduce',
-                        not (self.is_expert and self.expert_parallel))
 
             # Set parallelism attributes for linear biases
             if self.use_bias:
@@ -837,8 +831,6 @@ class Linear(TransformerEngineBaseModule):
                         setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
-                    setattr(getattr(self, bias), 'allreduce',
-                            not (self.is_expert and self.expert_parallel))
 
     def get_fp8_weights_scratchpad(
         self,
@@ -945,8 +937,8 @@ class Linear(TransformerEngineBaseModule):
                 CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
-                self.sequence_parallel if not self.explicit_expert_comm else False,
-                self.explicit_expert_comm,
+                self.sequence_parallel and not self.explicit_parallel_comm,
+                self.explicit_parallel_comm,
                 self.tp_size > 1,
                 self.activation_dtype,
                 self.parallel_mode,
