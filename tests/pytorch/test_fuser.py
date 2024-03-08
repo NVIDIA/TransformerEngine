@@ -179,7 +179,7 @@ class TestFuserOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
     @pytest.mark.parametrize("size", (1, 7, 32))
-    @pytest.mark.parametrize("in_shape", ([], [1, 3], [2, 3, 4]))
+    @pytest.mark.parametrize("in_shape", ((-1,), (1, 3, -1), (2, 3, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", _devices)
     @pytest.mark.parametrize("fp8", (False, True))
@@ -195,7 +195,7 @@ class TestFuserOps:
         """Bias operation"""
 
         # Make input and bias shapes consistent
-        in_shape = list(in_shape) + [size]
+        in_shape = list(in_shape)[:-1] + [size]
 
         # Skip invalid configurations
         if fp8 and not fp8_available:
@@ -244,7 +244,7 @@ class TestFuserOps:
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
     @pytest.mark.parametrize("weight_shape", ((48, 16), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ([], [5, 1], [2, 2, 4]))
+    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (2, 2, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("fp8_compute", (False, True))
     @pytest.mark.parametrize("fp8_input", (False, True))
@@ -265,7 +265,7 @@ class TestFuserOps:
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
-        in_shape = list(in_shape) + [in_features]
+        in_shape = list(in_shape)[:-1] + [in_features]
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
@@ -348,8 +348,8 @@ class TestFuserOps:
         self,
         *,
         bias: bool,
-        weight_shape: tuple[int, int] = (32, 32),
-        in_shape: Iterable[int] = (32,),
+        weight_shape: tuple[int, int] = (16, 16),
+        in_shape: Iterable[int] = (16, -1),
         dtype: torch.dtype = torch.float32,
         device: torch.device = "cuda",
         fp8_compute: bool,
@@ -359,7 +359,7 @@ class TestFuserOps:
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
-        in_shape = list(in_shape) + [in_features]
+        in_shape = list(in_shape)[:-1] + [in_features]
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
@@ -459,7 +459,7 @@ class TestFuserFusions:
         torch.cuda.manual_seed(seed)
 
     @pytest.mark.parametrize("weight_shape", ((32, 48), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ([], [1, 7], [4, 2, 10]))
+    @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (4, 2, 10, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("fp8_compute", (False, True))
     @pytest.mark.parametrize("fp8_input", (False, True))
@@ -479,7 +479,7 @@ class TestFuserFusions:
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
-        in_shape = list(in_shape) + [in_features]
+        in_shape = list(in_shape)[:-1] + [in_features]
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations

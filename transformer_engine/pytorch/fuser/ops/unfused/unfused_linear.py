@@ -96,7 +96,7 @@ class UnfusedLinear(UnfusedOperation):
                         f"{out_features=}, "
                         f"{tensor_parallel_size=})"
                     )
-                local_out_features /= tensor_parallel_size
+                local_out_features //= tensor_parallel_size
             elif tensor_parallel_mode == "row":
                 if in_features % tensor_parallel_size != 0:
                     raise ValueError(
@@ -105,7 +105,7 @@ class UnfusedLinear(UnfusedOperation):
                         f"{in_features=}, "
                         f"{tensor_parallel_size=})"
                     )
-                local_in_features /= tensor_parallel_size
+                local_in_features //= tensor_parallel_size
             else:
                 raise ValueError(
                     'Supported modes for tensor parallelism are "row" and "column" '
@@ -288,8 +288,8 @@ class UnfusedLinear(UnfusedOperation):
 
         # Reduce tensor-parallel output if needed
         if self.tensor_parallel_mode == "row":
-            if sequence_parallel:
-                y = reduce_scatter_along_first_dim(y, self.tensor_parallel_group)
+            if self.sequence_parallel:
+                y, _ = reduce_scatter_along_first_dim(y, self.tensor_parallel_group)
             else:
                 torch.distributed.all_reduce(y, group=self.tensor_parallel_group)
 

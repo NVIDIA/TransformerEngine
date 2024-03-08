@@ -14,6 +14,7 @@ from torch.utils.checkpoint import detach_variable
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
+from .float8_tensor import Float8Tensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
