@@ -62,6 +62,7 @@ def get_workspace() -> torch.Tensor:
         )
     return _cublas_workspace
 
+
 @contextmanager
 def _prepare_backward(
     fp8: bool,
@@ -69,12 +70,8 @@ def _prepare_backward(
     name: str = ""
 ) -> Generator[None, None, None]:
     """Checks and prep for BWD."""
-    if fp8:
-        # Amax and scale update fused with post reduction split and copy.
-        if fp8_meta["recipe"].reduce_amax:
-            FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(fp8_meta, forward=False)
-        else:
-            amax_and_scale_update(fp8_meta, False)
+    if fp8 and not fp8_meta["recipe"].reduce_amax:
+        amax_and_scale_update(fp8_meta, False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
@@ -86,6 +83,7 @@ def _prepare_backward(
             forward=False
         )
         FP8GlobalStateManager.setup_amax_backward_global_reduce_func(reduce_func)
+
 
 def initialize_ub(
     shape: list,
@@ -575,8 +573,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.fp8_meta["recipe"].reduce_amax:
                     if not in_fp8_graph_capture_mode():
                         self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
-                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                        self.fp8_meta, forward=True)
+                        FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False

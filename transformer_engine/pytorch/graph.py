@@ -198,6 +198,8 @@ def _make_graphed_callables(
             @staticmethod
             def forward(ctx, *inputs):
                 # At this stage, only the user args may (potentially) be new tensors.
+
+                # For backward reduction.
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 for i in range(len_user_args):
                     if static_input_surface[i].data_ptr() != inputs[i].data_ptr():
@@ -271,12 +273,12 @@ def _make_graphed_callables(
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
                         # Set the FP8 group from global amax reduction.
-                        for module in func.modules():
-                            if isinstance(module, TransformerEngineBaseModule):
-                                module.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+                        for m in func.modules():
+                            if isinstance(m, TransformerEngineBaseModule):
+                                m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+                                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(m.fp8_meta)
                         return graphed(*user_args, **user_kwargs)
                     return orig_fwd(*user_args, **user_kwargs)
-
                 return new_fwd
 
             func.forward = make_graphed_forward(func, func.training, graphed, func.forward)

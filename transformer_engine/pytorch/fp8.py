@@ -155,35 +155,37 @@ class FP8GlobalStateManager:
         cls.amax_backward_global_reduce_func = f
 
     @classmethod
-    def add_fp8_tensors_to_global_buffer(
-        cls, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+    def add_fp8_tensors_to_global_buffer(cls, fp8_meta: Dict[str, Any]) -> None:
         """Append 1D tensor `amax` to global buffer."""
-        key = cls.get_amax_buffer_key(forward)
-        fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
-        # Every module must call this function exactly once since
-        # the amax tensors are static. Ensures that compatibility
-        # with non-graphed modules is maintained.
-        amax_added_key = f"{key}_amax_added_to_buffer"
-        if amax_added_key not in fp8_meta:
-            fp8_meta[amax_added_key] = True
-        else:
-            return
+        for forward in (True, False):
+            key = cls.get_amax_buffer_key(forward)
+            fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
-        if key not in cls.global_fp8_buffer:
-            cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
-            cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
-            cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
-            cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
-            cls.global_non_weight_mask_buffer[key] = [
-                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
-        else:
-            cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
-            cls.global_amax_history_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history)
-            cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
-            cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
-            cls.global_non_weight_mask_buffer[key].append(
-                fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
+            # Every module must call this function exactly once since
+            # the amax tensors are static. Ensures that compatibility
+            # with non-graphed modules is maintained.
+            amax_added_key = f"{key}_amax_added_to_buffer"
+            if amax_added_key not in fp8_meta:
+                fp8_meta[amax_added_key] = True
+            else:
+                continue
+
+            if key not in cls.global_fp8_buffer:
+                cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+                cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
+                cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+                cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
+                cls.global_non_weight_mask_buffer[key] = [
+                    fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
+            else:
+                cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
+                cls.global_amax_history_buffer[key].append(
+                    fp8_meta[fp8_meta_tensor_key].amax_history)
+                cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+                cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
+                cls.global_non_weight_mask_buffer[key].append(
+                    fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
