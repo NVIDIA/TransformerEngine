@@ -10,13 +10,13 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.fuser as te_fuser
 from transformer_engine.pytorch.fuser.ops._common import is_float8_tensor
 from transformer_engine.pytorch.fuser.ops.fused_forward import (
     ForwardLinearBiasActivation,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_extensions as tex
 
@@ -389,14 +389,13 @@ class TestFuserOps:
             test_device=device,
             test_is_fp8=(fp8_compute or fp8_weight),
         )
+        b_ref, b_test = None, None
         if bias:
             b_ref, b_test = make_reference_and_test_tensors(
                 out_features,
                 test_dtype=dtype,
                 test_device=device,
             )
-        else:
-            b_ref, b_test = None, None
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
             test_dtype=dtype,
@@ -514,14 +513,13 @@ class TestFuserFusions:
             test_device=device,
             test_is_fp8=(fp8_compute or fp8_weight),
         )
+        b_ref, b_test = None, None
         if bias:
             b_ref, b_test = make_reference_and_test_tensors(
                 out_features,
                 test_dtype=dtype,
                 test_device=device,
             )
-        else:
-            b_ref, b_test = None, None
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
             test_dtype=dtype,

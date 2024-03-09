@@ -51,7 +51,7 @@ class Bias(UnfusedOperation):
                     "Invalid configuration for tensor parallelism "
                     f"({size=}, {tensor_parallel_size=})"
                 )
-            local_size /= tensor_parallel_size
+            local_size //= tensor_parallel_size
         else:
             tensor_parallel_group = None
         self.tensor_parallel: bool = tensor_parallel

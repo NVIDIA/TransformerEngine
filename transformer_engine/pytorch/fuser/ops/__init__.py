@@ -7,9 +7,10 @@ from transformer_engine.pytorch.fuser.ops.unfused import *
 from .linear import Linear
 
 __all__ = [
+    "AllGather",
+    "AllReduce",
     "Bias",
-    "FusableOperation",
-    "Linear",
+    "ReduceScatter",
     "Reshape",
     "UnfusedLinear",
 ]
