@@ -9,7 +9,6 @@ import pickle
 import warnings
 from abc import ABC, abstractmethod
 from typing import Generator, Union, Optional, Tuple, Dict, Any, List
-from functools import partial
 from contextlib import contextmanager
 
 import torch
@@ -75,14 +74,6 @@ def _prepare_backward(
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
-
-    if fp8 and fp8_meta["recipe"].reduce_amax:
-        reduce_func = partial(
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors,
-            fp8_meta,
-            forward=False
-        )
-        FP8GlobalStateManager.setup_amax_backward_global_reduce_func(reduce_func)
 
 
 def initialize_ub(
@@ -214,11 +205,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_weight_shapes = []
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
-
-        # Register hook for backward reduction of amaxes.
-        self.fp8_meta["bwd_amax_reduce_hook"] = (self.register_full_backward_hook(
-            TransformerEngineBaseModule.bwd_hook_for_amax_reduction))
-        self.fp8_meta["first_module"] = False
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -591,7 +577,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # Setup for amax reduction
                 if self.fp8_meta["recipe"].reduce_amax:
                     if not in_fp8_graph_capture_mode():
-                        self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                         FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
@@ -611,15 +596,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
             return
-
-        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
-            reduce_func = partial(
-                FP8GlobalStateManager.reduce_and_update_fp8_tensors,
-                self.fp8_meta,
-                forward=True,
-                skip_weight_scale_inv_update=skip_fp8_weight_update,
-            )
-            FP8GlobalStateManager.setup_amax_forward_global_reduce_func(reduce_func)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
@@ -824,6 +800,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             setattr(self, name, torch.nn.Parameter(param))
+            FP8GlobalStateManager.add_param_for_backward_reduction_hook(getattr(self, name))
 
     @abstractmethod
     def forward(self):
@@ -835,26 +812,3 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         is_first_microbatch: Union[bool, None],
     ) -> List[torch.Tensor]:
         """Needs override."""
-
-    @staticmethod
-    def bwd_hook_for_amax_reduction(module, inp, output): # pylint: disable=unused-argument
-        """
-        Backward hook that must be attached to first module within the fp8_autocast region
-        in order to execute global reduction of backward amaxes outside the module itself.
-        This is necessary for expert-model like cases where certain devices could skip fwd
-        or bwd passes, thus resulting in a hang during the communication.
-
-        There are 2 scenarios in which this hook is fired:
-        Case 1: This is an FP8 base module in which case we can check for `first_module`'s
-                and delete the hook (if needed) to minimize pytorch overhead in subsequent
-                calls. This module may or may not be graphed.
-        Case 2: Not a base FP8 module. This module is always graphed, and hooks should not
-                not be tampered with.
-        """
-        if (isinstance(module, TransformerEngineBaseModule)
-            and not module.fp8_meta["first_module"]
-            and module.fp8_meta["bwd_amax_reduce_hook"] is not None):
-            module.fp8_meta["bwd_amax_reduce_hook"].remove()
-        if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
-            FP8GlobalStateManager.amax_reduce_handle_bwd = (
-                FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable

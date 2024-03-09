@@ -69,10 +69,12 @@ class FP8GlobalStateManager:
     global_scale_inv_buffer = {}
     global_non_weight_mask_buffer = {}
     fp8_tensors_recompute_buffer = []
-    amax_forward_global_reduce_func = None
-    amax_backward_global_reduce_func = None
     fp8_available = None
     reason_for_no_fp8 = ""
+    all_fp8_params = []
+    fp8_group = [] #TODO(ksivaman) fix
+    fp8_recipe = [] #TODO(ksivaman) fix
+    backward_amax_reduction_hook_registered = False
 
     @classmethod
     def reset(cls) -> None:
@@ -89,10 +91,10 @@ class FP8GlobalStateManager:
         cls.global_scale_inv_buffer = {}
         cls.global_non_weight_mask_buffer = {}
         cls.fp8_tensors_recompute_buffer = []
-        cls.amax_forward_global_reduce_func = None
-        cls.amax_backward_global_reduce_func = None
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
+        cls.all_fp8_params = []
+        cls.backward_amax_reduction_hook_registered = False
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -154,16 +156,6 @@ class FP8GlobalStateManager:
     def get_amax_buffer_key(forward: bool = True) -> str:
         """Return a key in `cls.global_fp8_buffer` for the AMAX storage."""
         return "forward" if forward else "backward"
-
-    @classmethod
-    def setup_amax_forward_global_reduce_func(cls, f: Callable) -> None:
-        """Sets up call to forward amax reduction during autocast entry."""
-        cls.amax_forward_global_reduce_func = f
-
-    @classmethod
-    def setup_amax_backward_global_reduce_func(cls, f: Callable) -> None:
-        """Sets up call to backward amax reduction after completion of backward pass."""
-        cls.amax_backward_global_reduce_func = f
 
     @classmethod
     def get_buffer_index_key(cls) -> str:
@@ -275,7 +267,8 @@ class FP8GlobalStateManager:
     @classmethod
     def reduce_and_update_fp8_tensors(
         cls,
-        fp8_meta: Dict[str, Any],
+        group,
+        recipe,
         forward: bool = True,
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
@@ -284,14 +277,17 @@ class FP8GlobalStateManager:
             return
         if not torch.distributed.is_initialized():
             return
-        if torch.distributed.get_world_size(group=fp8_meta["fp8_group"]) <= 1:
+        if torch.distributed.get_world_size(group=group) <= 1:
             return
 
         amax_buffer_key = cls.get_amax_buffer_key(forward)
 
+        if len(cls.global_fp8_buffer[amax_buffer_key]) == 0:
+            return
+
         # Reduction.
         contiguous_amax = torch.cat(cls.global_fp8_buffer[amax_buffer_key])
-        cls.reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"])
+        cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
 
         # Amax and scale update.
         if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
@@ -300,9 +296,9 @@ class FP8GlobalStateManager:
                 cls.global_amax_history_buffer[amax_buffer_key],
                 cls.global_scale_buffer[amax_buffer_key],
                 cls.global_scale_inv_buffer[amax_buffer_key],
-                get_fp8_te_dtype(fp8_meta["recipe"], forward),
-                fp8_meta["recipe"].margin,
-                fp8_meta["recipe"].amax_compute_algo,
+                get_fp8_te_dtype(recipe, forward),
+                recipe.margin,
+                recipe.amax_compute_algo,
                 cls.global_non_weight_mask_buffer[amax_buffer_key],
                 skip_weight_scale_inv_update,
             )
@@ -314,11 +310,21 @@ class FP8GlobalStateManager:
                 cls.global_scale_buffer[amax_buffer_key],
                 cls.global_scale_inv_buffer[amax_buffer_key],
                 cls.global_non_weight_mask_buffer[amax_buffer_key],
-                get_fp8_te_dtype(fp8_meta["recipe"], forward),
-                fp8_meta["recipe"].margin,
-                fp8_meta["recipe"].amax_compute_algo,
+                get_fp8_te_dtype(recipe, forward),
+                recipe.margin,
+                recipe.amax_compute_algo,
                 skip_weight_scale_inv_update,
             )
+
+    @classmethod
+    def add_param_for_backward_reduction_hook(cls, param):
+        """Collect all FP8 params to register the bwd amax reduce multi grad hook."""
+        cls.all_fp8_params.append(param)
+
+    @classmethod
+    def hook_for_bwd_amax_reduction(cls, grads: Tuple[torch.Tensor]) -> None: # pylint: disable=unused-argument
+        """Executes at the end of backward pass."""
+        cls.reduce_and_update_fp8_tensors(cls.fp8_group, cls.fp8_recipe, forward=False)
 
     @classmethod
     def fp8_autocast_enter(
@@ -329,9 +335,16 @@ class FP8GlobalStateManager:
         fp8_group: Optional[dist_group_type] = None,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
-        if cls.FP8_AUTOCAST_DEPTH == 0:
-            if callable(cls.amax_forward_global_reduce_func) and not in_fp8_graph_capture_mode():
-                cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
+
+        cls.fp8_group = fp8_group
+        cls.fp8_recipe = fp8_recipe
+
+        if enabled and fp8_recipe.reduce_amax and cls.FP8_AUTOCAST_DEPTH == 0:
+            cls.reduce_and_update_fp8_tensors(fp8_group, fp8_recipe, forward=True)
+            if not cls.backward_amax_reduction_hook_registered and len(cls.all_fp8_params) > 0:
+                torch.autograd.graph.register_multi_grad_hook(
+                    tuple(cls.all_fp8_params), cls.hook_for_bwd_amax_reduction)
+                cls.backward_amax_reduction_hook_registered = True
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating

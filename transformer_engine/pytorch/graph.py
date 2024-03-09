@@ -198,9 +198,6 @@ def _make_graphed_callables(
             @staticmethod
             def forward(ctx, *inputs):
                 # At this stage, only the user args may (potentially) be new tensors.
-
-                # For backward reduction.
-                ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 for i in range(len_user_args):
                     if static_input_surface[i].data_ptr() != inputs[i].data_ptr():
                         static_input_surface[i].copy_(inputs[i])
@@ -219,11 +216,6 @@ def _make_graphed_callables(
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
                 bwd_graph.replay()
-
-                if ctx.is_first_module:
-                    if callable(FP8GlobalStateManager.amax_backward_global_reduce_func):
-                        FP8GlobalStateManager.amax_reduce_handle_bwd = (
-                            FP8GlobalStateManager.amax_backward_global_reduce_func()) # pylint: disable=not-callable
 
                 # Input args that didn't require grad expect a None gradient.
                 assert isinstance(static_grad_inputs, tuple)
