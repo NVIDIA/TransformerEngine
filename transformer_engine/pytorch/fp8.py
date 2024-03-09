@@ -339,7 +339,9 @@ class FP8GlobalStateManager:
         cls.fp8_group = fp8_group
         cls.fp8_recipe = fp8_recipe
 
-        if enabled and fp8_recipe.reduce_amax and cls.FP8_AUTOCAST_DEPTH == 0:
+        if (enabled and fp8_recipe.reduce_amax
+            and cls.FP8_AUTOCAST_DEPTH == 0
+            and not in_fp8_graph_capture_mode()):
             cls.reduce_and_update_fp8_tensors(fp8_group, fp8_recipe, forward=True)
             if not cls.backward_amax_reduction_hook_registered and len(cls.all_fp8_params) > 0:
                 torch.autograd.graph.register_multi_grad_hook(

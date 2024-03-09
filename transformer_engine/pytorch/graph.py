@@ -358,14 +358,6 @@ def make_graphed_callables(
         wrap_autocast(module)
         forward_funcs.append(module)
 
-        # This is not strictly necessary since adding bwd hooks to children modules
-        # is okay for graph capture as long it's just for kernel launches, but it's
-        # safer to remove these hooks now and re-add them post capture.
-        for m in module.modules():
-            if isinstance(m, TransformerEngineBaseModule):
-                if m.fp8_meta["bwd_amax_reduce_hook"] is not None:
-                    m.fp8_meta["bwd_amax_reduce_hook"].remove()
-
     if just_one_callable:
         forward_funcs = forward_funcs[0]
     else:
