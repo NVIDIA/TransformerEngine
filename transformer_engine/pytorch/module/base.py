@@ -239,8 +239,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Ensures that module fp8 tensors and global buffers
             # share same memory.
             self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
-            index = self.fp8_meta[FP8GlobalStateManager.get_buffer_index_key()]
-            key = FP8GlobalStateManager.get_fwd_bwd_key(fwd)
+            index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
+            fwd_bwd_key = FP8GlobalStateManager.get_fwd_bwd_key(fwd)
+            key = f"{fwd_bwd_key}_{autocast_key}"
             self.fp8_meta[fp8_meta_tensor_key].amax_history = buffers["amax_history"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale = buffers["scale"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale_inv = buffers["scale_inv"][key][index]
@@ -350,7 +351,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
-                if isinstance(v, (bool, int, float, str, list)):
+                if isinstance(v, (bool, int, float, str, tuple, list)):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 

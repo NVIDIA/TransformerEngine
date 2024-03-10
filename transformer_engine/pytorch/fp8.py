@@ -72,8 +72,6 @@ class FP8GlobalStateManager:
     fp8_available = None
     reason_for_no_fp8 = ""
     all_fp8_params = []
-    fp8_group = [] #TODO(ksivaman) fix
-    fp8_recipe = [] #TODO(ksivaman) fix
     backward_amax_reduction_hook_registered = False
     autocast_parameters = {}
 
@@ -84,6 +82,7 @@ class FP8GlobalStateManager:
         cls.FP8_CALIBRATION = False
         cls.FP8_RECIPE = None
         cls.FP8_DISTRIBUTED_GROUP = None
+        cls.FP8_PARAMETERS = False
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_AUTOCAST_DEPTH = 0
         cls.global_fp8_buffer = {}
@@ -160,9 +159,12 @@ class FP8GlobalStateManager:
         return "forward" if forward else "backward"
 
     @classmethod
-    def get_buffer_index_key(cls) -> str:
-        """Returns a key for `fp8_meta` that stores the module's index in the global buffers"""
-        return "index_in_global_buffers"
+    def get_buffer_info(cls) -> str:
+        """
+        Returns a key for `fp8_meta` that stores the module's index
+        in the global buffers along with autocast information.
+        """
+        return "buffer_index_and_autocast_key"
 
     @classmethod
     def add_fp8_tensors_to_global_buffer(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -183,7 +185,7 @@ class FP8GlobalStateManager:
         # Every module must call this function exactly once since
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
-        index_in_buffer = cls.get_buffer_index_key()  # Same index for fwd/bwd fp8 tensors.
+        index_in_buffer = cls.get_buffer_info()  # Same index for fwd/bwd fp8 tensors.
         if index_in_buffer in fp8_meta:
             return
 
@@ -208,8 +210,7 @@ class FP8GlobalStateManager:
                 cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
                 cls.global_non_weight_mask_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
-            fp8_meta[index_in_buffer] = len(cls.global_non_weight_mask_buffer[key]) - 1
-            fp8_meta["autocast_key"] = autocast_key
+            fp8_meta[index_in_buffer] = (len(cls.global_non_weight_mask_buffer[key]) - 1, autocast_key)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -366,6 +367,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
 
+        fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         cls.autocast_parameters[autocast_key] = (fp8_recipe, fp8_group)
 
@@ -380,7 +382,7 @@ class FP8GlobalStateManager:
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating
-        cls.FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        cls.FP8_RECIPE = fp8_recipe
         cls.FP8_DISTRIBUTED_GROUP = fp8_group
 
         if cls.FP8_AUTOCAST_DEPTH == 0:
