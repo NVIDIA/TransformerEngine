@@ -75,6 +75,7 @@ class FP8GlobalStateManager:
     fp8_group = [] #TODO(ksivaman) fix
     fp8_recipe = [] #TODO(ksivaman) fix
     backward_amax_reduction_hook_registered = False
+    autocast_parameters = {}
 
     @classmethod
     def reset(cls) -> None:
@@ -95,6 +96,7 @@ class FP8GlobalStateManager:
         cls.reason_for_no_fp8 = ""
         cls.all_fp8_params = []
         cls.backward_amax_reduction_hook_registered = False
+        cls.autocast_parameters = {}
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -153,8 +155,8 @@ class FP8GlobalStateManager:
         return "scaling_bwd"
 
     @staticmethod
-    def get_amax_buffer_key(forward: bool = True) -> str:
-        """Return a key in `cls.global_fp8_buffer` for the AMAX storage."""
+    def get_fwd_bwd_key(forward: bool = True) -> str:
+        """Convert bool `forward` to string."""
         return "forward" if forward else "backward"
 
     @classmethod
@@ -164,7 +166,19 @@ class FP8GlobalStateManager:
 
     @classmethod
     def add_fp8_tensors_to_global_buffer(cls, fp8_meta: Dict[str, Any]) -> None:
-        """Append 1D tensor `amax` to global buffer."""
+        """
+        The amax reduction process happens completely outside the FP8 modules.
+        To participate in the reduction, the only role played by a module is
+        to call this function in order to append it's FP8 tensor into a global
+        buffer. There are 5 global buffers maintained, one each for amax, amax
+        history, scale, scale-inverse, and non-weight-mask. Each buffer has
+        keys that hold FP8 tensors. Keys have a `forward_` or `backward_` prefix
+        to indicate the type of FP8 tensor, since the forward and backward
+        reductions happen separately.
+
+        Note: For CG capture, this method is called from the graphed
+        wrapper. For non CG case, it's called from within the module.
+        """
 
         # Every module must call this function exactly once since
         # the amax tensors are static. Ensures that compatibility
@@ -174,7 +188,9 @@ class FP8GlobalStateManager:
             return
 
         for forward in (True, False):
-            key = cls.get_amax_buffer_key(forward)
+            autocast_key = cls.get_unique_autocast_key(fp8_meta["recipe"], fp8_meta["fp8_group"])
+            fwd_bwd_key = cls.get_fwd_bwd_key(forward)
+            key = f"{fwd_bwd_key}_{autocast_key}"
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
             if key not in cls.global_fp8_buffer:
@@ -184,7 +200,6 @@ class FP8GlobalStateManager:
                 cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
                 cls.global_non_weight_mask_buffer[key] = [
                     fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
-                fp8_meta[index_in_buffer] = 0
             else:
                 cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 cls.global_amax_history_buffer[key].append(
@@ -193,7 +208,8 @@ class FP8GlobalStateManager:
                 cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
                 cls.global_non_weight_mask_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
-                fp8_meta[index_in_buffer] = len(cls.global_non_weight_mask_buffer[key]) - 1
+            fp8_meta[index_in_buffer] = len(cls.global_non_weight_mask_buffer[key]) - 1
+            fp8_meta["autocast_key"] = autocast_key
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -267,8 +283,6 @@ class FP8GlobalStateManager:
     @classmethod
     def reduce_and_update_fp8_tensors(
         cls,
-        group,
-        recipe,
         forward: bool = True,
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
@@ -277,44 +291,50 @@ class FP8GlobalStateManager:
             return
         if not torch.distributed.is_initialized():
             return
-        if torch.distributed.get_world_size(group=group) <= 1:
-            return
 
-        amax_buffer_key = cls.get_amax_buffer_key(forward)
+        fwd_bwd_key = cls.get_fwd_bwd_key(forward)
 
-        if len(cls.global_fp8_buffer[amax_buffer_key]) == 0:
-            return
+        for buffer_key in cls.global_fp8_buffer.keys():
+            # Check for forward or backward reduction.
+            fwd, autocast_key = buffer_key.split("_", 1)
+            if fwd != fwd_bwd_key:
+                continue
 
-        # Reduction.
-        contiguous_amax = torch.cat(cls.global_fp8_buffer[amax_buffer_key])
-        cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
+            # Retrieve autocast specific args.
+            recipe, group = cls.autocast_parameters[autocast_key]
+            if torch.distributed.get_world_size(group=group) <= 1:
+                continue
 
-        # Amax and scale update.
-        if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
-            _fused_amax_and_scale_update_after_reduction(
-                contiguous_amax,
-                cls.global_amax_history_buffer[amax_buffer_key],
-                cls.global_scale_buffer[amax_buffer_key],
-                cls.global_scale_inv_buffer[amax_buffer_key],
-                get_fp8_te_dtype(recipe, forward),
-                recipe.margin,
-                recipe.amax_compute_algo,
-                cls.global_non_weight_mask_buffer[amax_buffer_key],
-                skip_weight_scale_inv_update,
-            )
-        else:
-            _non_fused_amax_and_scale_update_after_reduction(
-                contiguous_amax,
-                cls.global_amax_history_buffer[amax_buffer_key],
-                cls.global_fp8_buffer[amax_buffer_key],
-                cls.global_scale_buffer[amax_buffer_key],
-                cls.global_scale_inv_buffer[amax_buffer_key],
-                cls.global_non_weight_mask_buffer[amax_buffer_key],
-                get_fp8_te_dtype(recipe, forward),
-                recipe.margin,
-                recipe.amax_compute_algo,
-                skip_weight_scale_inv_update,
-            )
+            # Reduction.
+            contiguous_amax = torch.cat(cls.global_fp8_buffer[buffer_key])
+            cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
+
+            # Amax and scale update.
+            if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
+                _fused_amax_and_scale_update_after_reduction(
+                    contiguous_amax,
+                    cls.global_amax_history_buffer[buffer_key],
+                    cls.global_scale_buffer[buffer_key],
+                    cls.global_scale_inv_buffer[buffer_key],
+                    get_fp8_te_dtype(recipe, forward),
+                    recipe.margin,
+                    recipe.amax_compute_algo,
+                    cls.global_non_weight_mask_buffer[buffer_key],
+                    skip_weight_scale_inv_update,
+                )
+            else:
+                _non_fused_amax_and_scale_update_after_reduction(
+                    contiguous_amax,
+                    cls.global_amax_history_buffer[buffer_key],
+                    cls.global_fp8_buffer[buffer_key],
+                    cls.global_scale_buffer[buffer_key],
+                    cls.global_scale_inv_buffer[buffer_key],
+                    cls.global_non_weight_mask_buffer[buffer_key],
+                    get_fp8_te_dtype(recipe, forward),
+                    recipe.margin,
+                    recipe.amax_compute_algo,
+                    skip_weight_scale_inv_update,
+                )
 
     @classmethod
     def add_param_for_backward_reduction_hook(cls, param):
@@ -324,7 +344,17 @@ class FP8GlobalStateManager:
     @classmethod
     def hook_for_bwd_amax_reduction(cls, grads: Tuple[torch.Tensor]) -> None: # pylint: disable=unused-argument
         """Executes at the end of backward pass."""
-        cls.reduce_and_update_fp8_tensors(cls.fp8_group, cls.fp8_recipe, forward=False)
+        cls.reduce_and_update_fp8_tensors(forward=False)
+
+    @classmethod
+    def get_unique_autocast_key(
+        cls,
+        recipe: Optional[DelayedScaling] = None,
+        group: Optional[dist_group_type] = None,
+    ):
+        """For FP8, each autocast can be uniquely identified by the recipe and fp8 group."""
+        # TODO(ksivaman): Handle custom functions in recipe for amax and scale update.
+        return f"{hash(recipe)}_{hash(group)}"
 
     @classmethod
     def fp8_autocast_enter(
@@ -336,13 +366,13 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
 
-        cls.fp8_group = fp8_group
-        cls.fp8_recipe = fp8_recipe
+        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+        cls.autocast_parameters[autocast_key] = (fp8_recipe, fp8_group)
 
         if (enabled and fp8_recipe.reduce_amax
             and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
-            cls.reduce_and_update_fp8_tensors(fp8_group, fp8_recipe, forward=True)
+            cls.reduce_and_update_fp8_tensors(forward=True)
             if not cls.backward_amax_reduction_hook_registered and len(cls.all_fp8_params) > 0:
                 torch.autograd.graph.register_multi_grad_hook(
                     tuple(cls.all_fp8_params), cls.hook_for_bwd_amax_reduction)

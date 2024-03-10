@@ -240,7 +240,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # share same memory.
             self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
             index = self.fp8_meta[FP8GlobalStateManager.get_buffer_index_key()]
-            key = FP8GlobalStateManager.get_amax_buffer_key(fwd)
+            key = FP8GlobalStateManager.get_fwd_bwd_key(fwd)
             self.fp8_meta[fp8_meta_tensor_key].amax_history = buffers["amax_history"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale = buffers["scale"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale_inv = buffers["scale_inv"][key][index]

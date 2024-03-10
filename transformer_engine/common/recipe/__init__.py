@@ -133,3 +133,15 @@ class DelayedScaling:
             (False, False, False),
             (False, False, True),
         ), "Only wgrad GEMM override is currently supported."
+
+    def __hash__(self) -> int:
+        return hash((
+            self.margin,
+            self.interval,
+            self.fp8_format,
+            self.amax_history_len,
+            self.amax_compute_algo,
+            self.override_linear_precision,
+            self.scaling_factor_compute_algo,
+            self.reduce_amax,
+        ))
