@@ -184,7 +184,7 @@ class _Linear(torch.autograd.Function):
                     or (is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase())):
                     # Gather Fp8 transposed-weight buffers if needed
-                    weight_t_fp8_shape = tuple(reversed(weight_t_fp8._data))
+                    weight_t_fp8_shape = tuple(reversed(weight_t_fp8._data.shape))
                     if (fsdp_group is not None
                         and weight_t_fp8._data.shape != weight_t_fp8_shape):
                         _fsdp_gather_tensors(fsdp_group,
