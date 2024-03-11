@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Top level package"""
+from ._version import __version__
 from . import common
 
 try:
