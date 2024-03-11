@@ -18,7 +18,6 @@ def generate_configs():
     if is_devices_enough(2):
         configs.append([2, (2,), ('dp'), MeshResource(dp_resource='dp')])
         configs.append([2, (2,), ('tp'), MeshResource(tp_resource='tp')])
-        
 
     if is_devices_enough(4):
         TP_size = 2
@@ -130,6 +129,5 @@ def compare_ops(target_func,
 
     for i in range(len(target_grads)):
         assert_allclose(target_grads[i], ref_grads[i], dtype=metric_bwd_dtype)
-
 
     assert_equal_collectives(target_hlo, coll_count_ref)
