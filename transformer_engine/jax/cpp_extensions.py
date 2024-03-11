@@ -466,8 +466,8 @@ class LayerNormFwdPrimitive(BasePrimitive):
 
 
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
-        b_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(b_spec)))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
+        b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
 
@@ -647,7 +647,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
             )
 
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_b_spec)))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         return dx_sharding, dgamma_sharding, dbeta_sharding
 
     @staticmethod
@@ -668,11 +668,11 @@ class LayerNormBwdPrimitive(BasePrimitive):
             )
         
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_b_spec)))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
         x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
-        arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(*(None,) * len(g_b_spec))))
+        arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, mu, rsigma, gamma):
             local_dx, local_dgamma, local_dbeta = \
@@ -859,7 +859,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             )
         
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (x_sharding, g_sharding)
@@ -1018,7 +1018,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
         return dx_sharding, dgamma_sharding
 
     @staticmethod
@@ -1038,11 +1038,11 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding
         x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
-        arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec))))
+        arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, rsigma, gamma):
             local_dx, local_dgamma = \
@@ -4394,8 +4394,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
-        b_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(b_spec)))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
+        b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(
             mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
@@ -4632,7 +4632,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*(None,) * len(g_spec)))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))

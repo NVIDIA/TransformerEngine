@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import warnings
 import pytest
 
 import jax
@@ -20,7 +21,7 @@ DTYPES = [jnp.bfloat16, jnp.float32]
 
 class TestDistributedLayernorm:
 
-    def generate_inputs(self, shape, mesh_resource, dtype):
+    def generate_inputs(self, shape, mesh_resource, dtype, shard_weights):
         weight_shape = (shape[-1],)
 
         x = random.normal(random.PRNGKey(1124), shape, dtype=dtype)
@@ -34,7 +35,7 @@ class TestDistributedLayernorm:
         else:
             raise NotImplementedError
 
-        g_pspec = b_pspec = PartitionSpec(None)
+        g_pspec = b_pspec = PartitionSpec(mesh_resource.dp_resource) if shard_weights else PartitionSpec(None)
 
         return (x, gamma, beta), (x_pspec, g_pspec, b_pspec)
 
@@ -54,8 +55,9 @@ class TestDistributedLayernorm:
     @pytest.mark.parametrize('data_shape', [[32, 128, 1024], [32, 1024]])
     @pytest.mark.parametrize('dtype', DTYPES)
     @pytest.mark.parametrize('zero_centered_gamma', [False, True])
+    @pytest.mark.parametrize('shard_weights', [False, True])
     def test_layernorm(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape, dtype,
-                       zero_centered_gamma):
+                       zero_centered_gamma, shard_weights):
         epsilon = 1e-6
         ln_type = 'layernorm'
 
@@ -74,31 +76,45 @@ class TestDistributedLayernorm:
             return jnp.mean(output)
 
         (x, gamma, beta), (x_pspec, g_pspec, b_pspec) = \
-                self.generate_inputs(data_shape, mesh_resource, dtype)
+                self.generate_inputs(data_shape, mesh_resource, dtype, shard_weights)
         collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type,
                                                                    data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            g_spec_forced = PartitionSpec(*(None,) * len(g_pspec))
-            b_spec_forced = PartitionSpec(*(None,) * len(b_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_spec_forced))
-            beta_ = jax.device_put(beta, NamedSharding(mesh, b_spec_forced))
+            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
+            beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
 
-            compare_ops(target_func,
-                        ref_func, [x_, gamma_, beta_],
-                        collective_count_ref,
-                        grad_args=(0, 1, 2),
-                        metric_fwd_dtype=dtype,
-                        metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, g_pspec, b_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec, b_pspec)))
+            with warnings.catch_warnings(record=True) as warns:
+                try:
+                    compare_ops(target_func,
+                                ref_func, [x_, gamma_, beta_],
+                                collective_count_ref,
+                                grad_args=(0, 1, 2),
+                                metric_fwd_dtype=dtype,
+                                metric_bwd_dtype=dtype,
+                                in_shardings=(x_pspec, g_pspec, b_pspec),
+                                out_shardings=(None, (x_pspec, g_pspec, b_pspec)))
+                except AssertionError as err:
+                    # Layernorm should still produce the correct numerical result with
+                    # gamma/beta sharded. However, the collective count may not be the same
+                    # when XLA is forced to unshard gamma and/or beta. We can catch
+                    # and ignore that specific error here.
+                    if (g_pspec[-1] is None and b_pspec[-1] is None) or "Expected collective count" not in str(err):
+                        raise err
+                finally:
+                    for w in warns:
+                        assert "Enforcing no sharding of parameters hidden dim!" in str(w), (
+                            "Layernorm primitive did not raise the correct warning for "
+                            "unsupported sharding of gamma and/or beta"
+                        )
 
     @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
     @pytest.mark.parametrize('data_shape', [[32, 128, 1024], [32, 1024]])
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_rmsnorm(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape, dtype):
+    @pytest.mark.parametrize('shard_weights', [False, True])
+    def test_rmsnorm(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape, dtype, shard_weights):
         epsilon = 1e-6
         ln_type = 'rmsnorm'
 
@@ -113,21 +129,35 @@ class TestDistributedLayernorm:
             return jnp.mean(output)
 
         (x, gamma, _), (x_pspec, g_pspec, _) = \
-                self.generate_inputs(data_shape, mesh_resource, dtype)
+                self.generate_inputs(data_shape, mesh_resource, dtype, shard_weights)
         collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type,
                                                                    data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            g_spec_forced = PartitionSpec(*(None,) * len(g_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_spec_forced))
+            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
 
-            compare_ops(target_func,
-                        ref_func, [x_, gamma_],
-                        collective_count_ref,
-                        grad_args=(0, 1),
-                        metric_fwd_dtype=dtype,
-                        metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, g_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec)))
+            with warnings.catch_warnings(record=True) as warns:
+                try:
+                    compare_ops(target_func,
+                                ref_func, [x_, gamma_],
+                                collective_count_ref,
+                                grad_args=(0, 1),
+                                metric_fwd_dtype=dtype,
+                                metric_bwd_dtype=dtype,
+                                in_shardings=(x_pspec, g_pspec),
+                                out_shardings=(None, (x_pspec, g_pspec)))
+                except AssertionError as err:
+                    # RmsNorm should still produce the correct numerical result with
+                    # gamma/beta sharded. However, the collective count may not be the same
+                    # when XLA is forced to unshard gamma. We can catch
+                    # and ignore that specific error here.
+                    if g_pspec[-1] is None or "Expected collective count" not in str(err):
+                        raise err
+                finally:
+                    for w in warns:
+                        assert "Enforcing no sharding of parameters hidden dim!" in str(w), (
+                            "RmsNorm primitive did not raise the correct warning for "
+                            "unsupported sharding of gamma and/or beta"
+                        )
