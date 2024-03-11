@@ -775,20 +775,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                     else:
                         if thd:
                             b, np, sq = softmax_lse.shape
-                            cur_lse = softmax_lse_per_step[i-1]
-                            # [b, np, sq//2] -> [b, sq//2, np] -> [b*sq//2, np]
-                            cur_lse = cur_lse.transpose(1, 2).contiguous().view(-1, np)
-                            # [b*sq//2, np] -> [t//2, np]
-                            cur_lse = cur_lse[cht_q]
-                            # [b, np, sq] -> [b, sq, np] -> [b*sq, np]
-                            softmax_lse = softmax_lse.transpose(1, 2).contiguous().view(-1, np)
-                            # [b*sq, np] -> [t//2, np]
-                            softmax_lse_ = softmax_lse[cr_q]
-                            flash_attn_fwd_softmax_lse_correction(softmax_lse_, cur_lse)
-                            softmax_lse[cr_q] = softmax_lse_
-                            # [b*sq, np] -> [b, sq, np] -> [b, np, sq]
-                            softmax_lse = softmax_lse.view(b, sq, np).transpose(1, 2)
-                        else:
+                            total_tokens = q.shape[0]
+                            tex.lse_correction(softmax_lse, softmax_lse_per_step[i-1], cu_seqlens_q, b, np, sq, total_tokens, 108)
+                        else:    
                             flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
                                                                   softmax_lse_per_step[i-1])
 

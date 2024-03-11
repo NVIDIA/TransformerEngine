@@ -1419,3 +1419,65 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
     return qkv;
 }
+
+/*
+Context Parralel Flash attention THD kernel
+*/
+
+__forceinline__
+__device__ int binary_search(int target, int *array, int len) {
+  int left = 1, right = len - 1;
+  while (left < right) {
+    int mid = (left + right) / 2;
+    if (array[mid] <= target) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left - 1;
+}
+
+__global__ void LseCorrectionKernel(double *lse, float *lse_per_step, int *cu_seqlens_per_step,
+                                    int batch, int num_heads, int max_seqlen) {
+  extern __shared__ int cu_seqlens_s[];
+  if (threadIdx.x < batch + 1) { //threadIdx.x is x dim thread nums
+    cu_seqlens_s[threadIdx.x] = cu_seqlens_per_step[threadIdx.x] / 2; //batch + 1 = len(cu_seqlens_per_step)
+  }
+  __syncthreads();
+
+  int token_id = blockIdx.x * blockDim.x + threadIdx.x;
+  if (token_id >= cu_seqlens_s[batch]) { //if tid > cu_seqlens_s[batch] return.
+    return;
+  }
+
+  int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
+  for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
+    int row = seq_id * num_heads + head_id;
+    int col = token_id - cu_seqlens_s[seq_id];
+    int len_per_step = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+
+    double val = lse[row * max_seqlen + col + len_per_step];
+    float val_per_step = lse_per_step[row * max_seqlen / 2 + col];
+   // printf("blockIdx is %d, cur_tid is %d, head_id is %d, row is %d, col is %d, val is %f, val_per_step is %f, exp(val) is %f, exp((double)val_per_step) is %f, final_val is %f\n", blockIdx.x, token_id, head_id, row, col, val, val_per_step, exp(val), exp((double)val_per_step), log(exp(val) + exp((double)val_per_step)));
+    val = log(exp(val) + exp((double)val_per_step));
+    lse[row * max_seqlen + col + len_per_step] = val;
+  }
+}
+
+
+void lse_correction(at::Tensor &lse, const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens_per_step,
+                    int batch, int num_heads, int max_seqlen, int total_tokens, int num_sms) {
+  auto lse_type = lse.scalar_type();
+  auto lse_per_step_type = lse_per_step.scalar_type();
+  auto cu_seqlens_per_step_type = cu_seqlens_per_step.scalar_type();
+  NVTE_CHECK((lse_type == at::ScalarType::Double) && (lse_per_step_type == at::ScalarType::Float) && (cu_seqlens_per_step_type == at::ScalarType::Int), "Lse should be Double, Lse_per_step should be Float, cu_seqlens_per_step should be int");
+  constexpr unsigned int block = 256;
+  unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
+  unsigned int grid_y = (num_sms * 2 + grid_x - 1) / grid_x;
+  dim3 grid = {grid_x, grid_y, 1};
+  LseCorrectionKernel<<<grid, block, (batch + 1) * sizeof(int), at::cuda::getCurrentCUDAStream()>>>(
+   (double*)lse.data_ptr(), (float*)lse_per_step.data_ptr(), (int*)cu_seqlens_per_step.data_ptr(), batch, num_heads, max_seqlen);
+
+}
+

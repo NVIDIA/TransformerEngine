@@ -10,6 +10,8 @@
 #endif  // NVTE_WITH_USERBUFFERS
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  //CP Flash Attention THD
+  m.def("lse_correction", &lse_correction, "Lse Correction");
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
   m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD");

@@ -605,3 +605,12 @@ size_t get_cudnn_version();
 bool userbuf_comm_available();
 
 void placeholder();
+
+
+/***************************************************************************************************
+ * Context Parallel Flash Attention
+ **************************************************************************************************/
+
+void lse_correction(at::Tensor &lse, const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens_per_step,
+                    int batch, int num_heads, int max_seqlen, int total_tokens, int num_sms = 108);
+
