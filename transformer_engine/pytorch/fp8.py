@@ -71,8 +71,8 @@ class FP8GlobalStateManager:
     fp8_tensors_recompute_buffer = []
     fp8_available = None
     reason_for_no_fp8 = ""
-    all_fp8_params = []
-    backward_amax_reduction_hook_registered = False
+    multi_grad_hook_tensors = []
+    bwd_amax_reduction_hook_registered = False
     autocast_parameters = {}
 
     @classmethod
@@ -93,8 +93,8 @@ class FP8GlobalStateManager:
         cls.fp8_tensors_recompute_buffer = []
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
-        cls.all_fp8_params = []
-        cls.backward_amax_reduction_hook_registered = False
+        cls.multi_grad_hook_tensors = []
+        cls.bwd_amax_reduction_hook_registered = False
         cls.autocast_parameters = {}
 
     @classmethod
@@ -338,9 +338,9 @@ class FP8GlobalStateManager:
                 )
 
     @classmethod
-    def add_param_for_backward_reduction_hook(cls, param):
-        """Collect all FP8 params to register the bwd amax reduce multi grad hook."""
-        cls.all_fp8_params.append(param)
+    def add_tensor_for_bwd_reduction_multi_grad_hook(cls, tensor):
+        """Add tensor to list for multi grad hook."""
+        cls.multi_grad_hook_tensors.append(tensor)
 
     @classmethod
     def hook_for_bwd_amax_reduction(cls, grads: Tuple[torch.Tensor]) -> None: # pylint: disable=unused-argument
@@ -375,10 +375,10 @@ class FP8GlobalStateManager:
             and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
             cls.reduce_and_update_fp8_tensors(forward=True)
-            if not cls.backward_amax_reduction_hook_registered and len(cls.all_fp8_params) > 0:
+            if not cls.bwd_amax_reduction_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
                 torch.autograd.graph.register_multi_grad_hook(
-                    tuple(cls.all_fp8_params), cls.hook_for_bwd_amax_reduction)
-                cls.backward_amax_reduction_hook_registered = True
+                    tuple(cls.multi_grad_hook_tensors), cls.hook_for_bwd_amax_reduction)
+                cls.bwd_amax_reduction_hook_registered = True
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating

@@ -801,7 +801,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             setattr(self, name, torch.nn.Parameter(param))
-            FP8GlobalStateManager.add_param_for_backward_reduction_hook(getattr(self, name))
 
     @abstractmethod
     def forward(self):

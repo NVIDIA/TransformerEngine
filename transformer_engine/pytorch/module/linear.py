@@ -84,7 +84,8 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
-        ub_name: str
+        ub_name: str,
+        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -555,6 +556,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -810,6 +812,10 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
+        self.dummy_tensor = torch.zeros(1, device="cuda", requires_grad=True)
+        FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
+
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -955,6 +961,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag,
                 self.ub_name,
+                self.dummy_tensor,
             )
             out = linear_fn(*args)
 
