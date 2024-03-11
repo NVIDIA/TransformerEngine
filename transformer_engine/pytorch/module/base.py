@@ -229,6 +229,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     self.fp8_meta[key].amax_history, pad=(0, 0, 0, extra_rows)
                 )
 
+            # Update the global buffers with new amax and history pointers.
+            if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
+                index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
+                buffer_key = f"{key}_{autocast_key}"
+                if buffer_key in FP8GlobalStateManager.global_fp8_buffer:
+                    assert (
+                        buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                    ), "TE internal error during amax history change."
+                    FP8GlobalStateManager.global_fp8_buffer[buffer_key][index] = (
+                        self.fp8_meta[key].amax_history[0])
+                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][index] = (
+                        self.fp8_meta[key].amax_history)
+
 
     def set_meta_tensor(self, fwd: bool, buffers: Dict = None) -> None:
         """Init scales and amaxes for fwd | bwd."""

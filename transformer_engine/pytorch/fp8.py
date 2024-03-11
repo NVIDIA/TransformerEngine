@@ -355,7 +355,7 @@ class FP8GlobalStateManager:
     ):
         """For FP8, each autocast can be uniquely identified by the recipe and fp8 group."""
         # TODO(ksivaman): Handle custom functions in recipe for amax and scale update.
-        return f"{hash(recipe)}_{hash(group)}"
+        return f"{str(recipe)}_{torch.distributed.get_process_group_ranks(group)}"
 
     @classmethod
     def fp8_autocast_enter(
