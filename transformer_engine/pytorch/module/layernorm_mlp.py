@@ -240,13 +240,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 if fsdp_group is not None:
                     weights_to_gather = []
                     gather_shapes = []
-                    if fc1_weight_fp8._data.shape != fc1_weight.data.shape:
+                    if fc1_weight_fp8._data.shape != fc1_weight.shape:
                         weights_to_gather.append(fc1_weight_fp8)
-                        gather_shapes.append(fc1_weight.data.shape)
-                    if fc2_weight_fp8._data.shape != fc2_weight.data.shape:
+                        gather_shapes.append(fc1_weight.shape)
+                    if fc2_weight_fp8._data.shape != fc2_weight.shape:
                         weights_to_gather.append(fc2_weight_fp8)
-                        gather_shapes.append(fc2_weight.data.shape)
-                    _fsdp_gather_tensors(fsdp_group, gather_shapes, weights_to_gather)
+                        gather_shapes.append(fc2_weight.shape)
+                    _fsdp_gather_tensors(fsdp_group, gather_shapes, *weights_to_gather)
                 # Need to cast weights to FP8
                 fc1_weight_fp8 = Float8Tensor(
                     data=fc1_weight_fp8._data,
@@ -265,13 +265,15 @@ class _LayerNormMLP(torch.autograd.Function):
                     if fsdp_group is not None:
                         weights_to_gather = []
                         gather_shapes = []
-                        if fc1_weight_t_fp8._data.shape != reversed(fc1_weight.data.shape):
+                        fc1_weight_t_fp8_shape = tuple(reversed(fc1_weight_fp8._data.shape))
+                        if fc1_weight_t_fp8._data.shape != fc1_weight_t_fp8_shape:
                             weights_to_gather.append(fc1_weight_t_fp8)
-                            gather_shapes.append(tuple(reversed(fc1_weight.data.shape)))
-                        if fc2_weight_t_fp8._data.shape != reversed(fc2_weight.data.shape):
+                            gather_shapes.append(fc1_weight_t_fp8_shape)
+                        fc2_weight_t_fp8_shape = tuple(reversed(fc2_weight_fp8._data.shape))
+                        if fc2_weight_t_fp8._data.shape != fc2_weight_t_fp8_shape:
                             weights_to_gather.append(fc2_weight_t_fp8)
-                            gather_shapes.append(tuple(reversed(fc2_weight.data.shape)))
-                        _fsdp_gather_tensors(fsdp_group, gather_shapes, weights_to_gather)
+                            gather_shapes.append(fc2_weight_t_fp8_shape)
+                        _fsdp_gather_tensors(fsdp_group, gather_shapes, *weights_to_gather)
                     # Fused cast-transpose kernels
                     tex.fp8_cast_transpose_fused(
                         fc1_weight,
@@ -1187,8 +1189,7 @@ class _LayerNormMLP(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         # Scatter Fp8 tranposed-weight buffers
-        _fsdp_scatter_tensors(ctx.fsdp_group, fc1_weight_t_fp8)
-        _fsdp_scatter_tensors(ctx.fsdp_group, fc2_weight_t_fp8)
+        _fsdp_scatter_tensors(ctx.fsdp_group, fc1_weight_t_fp8, fc2_weight_t_fp8)
 
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,

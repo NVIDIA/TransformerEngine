@@ -881,7 +881,7 @@ def _fsdp_scatter_tensors(
                 target = t._data if isinstance(t, Float8Tensor) else t
                 shapes.append(target.data.shape)
                 safely_set_viewless_tensor_data(
-                    target, split_tensor_into_1d_equal_chunks(t.data, fsdp_group, new_buffer=True)
+                    target, split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True)
                 )
             else:
                 shapes.append(None)
@@ -947,15 +947,13 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
     if _is_te_module(fsdp_root.module):
         root_state = _get_module_fsdp_state(fsdp_root)
         assert root_state is not None, "Root module does not have a valid _FSDPState."
-        setattr(fsdp_root.module, "fsdp_wrapped", True)
         setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
 
     # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
     fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
-    for state, module in zip(fsdp_states, fsdp_modules):
-        if _is_te_module(module):
-            setattr(module, "fsdp_wrapped", True)
-            setattr(module, "fsdp_group", state.process_group)
+    for state, fsdp_module in zip(fsdp_states, fsdp_modules):
+        if _is_te_module(fsdp_module.module):
+            setattr(fsdp_module.module, "fsdp_group", state.process_group)
 
 
 class FullyShardedDataParallel(FSDP):

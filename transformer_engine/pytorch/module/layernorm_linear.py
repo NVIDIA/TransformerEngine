@@ -224,10 +224,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     or (is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase())):
                     # Gather Fp8 transposed-weight buffers if needed
+                    weight_t_fp8_shape = tuple(reversed(weight_t_fp8._data.shape))
                     if (fsdp_group is not None
-                        and weight_t_fp8._data.shape != reversed(weight.data.shape)):
+                        and weight_t_fp8._data.shape != weight_t_fp8_shape):
                         _fsdp_gather_tensors(fsdp_group,
-                                             [tuple(reversed(weight.data.shape))],
+                                             [weight_t_fp8_shape],
                                              weight_t_fp8)
                     tex.fp8_cast_transpose_fused(
                         weight,
