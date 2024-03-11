@@ -288,8 +288,6 @@ class FP8GlobalStateManager:
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        if len(cls.global_fp8_buffer) == 0:
-            return
         if not torch.distributed.is_initialized():
             return
 
@@ -299,6 +297,8 @@ class FP8GlobalStateManager:
             # Check for forward or backward reduction.
             fwd, autocast_key = buffer_key.split("_", 1)
             if fwd != fwd_bwd_key:
+                continue
+            if len(cls.global_fp8_buffer[buffer_key]) == 0:
                 continue
 
             # Retrieve autocast specific args.
@@ -376,6 +376,7 @@ class FP8GlobalStateManager:
             and not in_fp8_graph_capture_mode()):
             cls.reduce_and_update_fp8_tensors(forward=True)
             if not cls.bwd_amax_reduction_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
+                # This hook does not fire for graphed modules.
                 torch.autograd.graph.register_multi_grad_hook(
                     tuple(cls.multi_grad_hook_tensors), cls.hook_for_bwd_amax_reduction)
                 cls.bwd_amax_reduction_hook_registered = True
