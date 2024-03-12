@@ -568,8 +568,8 @@ def _test_linear(
         tols = dtype_tols(torch.float16)  # TF32 GEMM
     if fp8_compute:
         tols = dtype_tols(
-            op.weight._fp8_dtype
-            if is_float8_tensor(op.weight)
+            model[0].weight._fp8_dtype
+            if is_float8_tensor(model[0].weight)
             else tex.DType.kFloat8E4M3
         )
 
