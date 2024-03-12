@@ -642,7 +642,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
         g_b_spec = get_padded_spec(arg_infos[4])
         if g_b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients of gamma and beta of Layernorm" \
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
+                f"of gamma and beta of Layernorm " \
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
 
@@ -663,10 +664,11 @@ class LayerNormBwdPrimitive(BasePrimitive):
         g_b_spec = get_padded_spec(arg_infos[4])
         if g_b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients of gamma and beta of Layernorm" \
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
+                f"of gamma and beta of Layernorm " \
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
-        
+
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
@@ -857,7 +859,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
                 f"{RmsNormFwdPrimitive.name} does not support sharding of parameter gamma " \
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
-        
+
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
