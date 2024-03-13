@@ -214,10 +214,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if fwd is None:
             fp8_meta_tensor_keys = ("scaling_fwd", "scaling_bwd")
+            fwd_bwd_keys = ("forward", "backward")
         else:
             fp8_meta_tensor_keys = ("scaling_fwd" if fwd else "scaling_bwd",)
+            fwd_bwd_keys = ("forward" if fwd else "backward",)
 
-        for key in fp8_meta_tensor_keys:
+        for key, fwd_bwd_key in zip(fp8_meta_tensor_keys, fwd_bwd_keys):
             curr_len = self.fp8_meta[key].amax_history.shape[0]
             if length == curr_len:
                 continue
@@ -232,7 +234,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
                 index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
-                buffer_key = f"{key}_{autocast_key}"
+                buffer_key = f"{fwd_bwd_key}_{autocast_key}"
                 if buffer_key in FP8GlobalStateManager.global_fp8_buffer:
                     assert (
                         buffer_key in FP8GlobalStateManager.global_amax_history_buffer
