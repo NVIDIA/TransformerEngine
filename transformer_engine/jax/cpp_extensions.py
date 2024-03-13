@@ -2371,9 +2371,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 register_primitive(FusedAttnBwdPrimitive)
 
 
-def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray, seed: jnp.ndarray,
-                        attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                        scaling_factor: float, dropout_probability: float, is_training: bool):
+def fused_attn_fwd_qkvpacked(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray,
+                             seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                             attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                             dropout_probability: float, is_training: bool):
     """
     Wrapper for TE self fused attention fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
@@ -2401,11 +2402,11 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray
                                                       is_training=is_training)
 
 
-def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.ndarray,
-                        rng_state: jnp.ndarray, output: jnp.ndarray, doutput: jnp.ndarray,
-                        seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                        attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                        dropout_probability: float, is_training: bool):
+def fused_attn_bwd_qkvpacked(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.ndarray,
+                             rng_state: jnp.ndarray, output: jnp.ndarray, doutput: jnp.ndarray,
+                             seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                             attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                             dropout_probability: float, is_training: bool):
     """
     Wrapper for TE self fused attention bwd
     Return the gradients of self fused attention with packed qkv input
@@ -2434,12 +2435,12 @@ def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.nd
     return dqkv, dbias
 
 
-def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_seqlen: jnp.ndarray,
-                         kv_seqlen: jnp.ndarray, seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                         attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                         dropout_probability: float, is_training: bool):
+def fused_attn_fwd_kvpacked(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
+                            q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray, seed: jnp.ndarray,
+                            attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                            scaling_factor: float, dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE cross fused attention fwd
+    Wrapper for TE fused attention fwd with kvpacked inputs
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
     checker = _FusedAttnRNGStateChecker()
@@ -2464,14 +2465,14 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, q_s
                                                       is_training=is_training)
 
 
-def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
-                         softmax_aux: jnp.ndarray, rng_state: jnp.ndarray, output: jnp.ndarray,
-                         doutput: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
-                         attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                         scaling_factor: float, dropout_probability: float, is_training: bool):
+def fused_attn_bwd_kvpacked(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
+                            softmax_aux: jnp.ndarray, rng_state: jnp.ndarray, output: jnp.ndarray,
+                            doutput: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
+                            attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                            scaling_factor: float, dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE cross fused attention bwd
-    Return the gradients of cross fused attention with packed kv input
+    Wrapper for TE fused attention bwd with kvpacked inputs
+    Return the gradients of fused attention with packed kv input
     """
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None

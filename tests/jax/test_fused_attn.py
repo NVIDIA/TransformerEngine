@@ -19,7 +19,7 @@ from jax import value_and_grad, jit
 from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
+from transformer_engine.jax.fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -142,12 +142,12 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
         case QKVLayout.BS3HD:
             query, key, value = map(partial(jnp.expand_dims, axis=-3), [query, key, value])
             qkv = jnp.concatenate((query, key, value), axis=-3)
-            return self_fused_attn(qkv, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
+            return fused_attn_qkvpacked(qkv, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
         case QKVLayout.BSHD_BS2HD:
             key, value = map(partial(jnp.expand_dims, axis=-3), [key, value])
             kv = jnp.concatenate((key, value), axis=-3)
-            return cross_fused_attn(query, kv, bias, mask, dropout_rng,
-                                    **kwargs).astype(query.dtype)
+            return fused_attn_kvpacked(query, kv, bias, mask, dropout_rng,
+                                       **kwargs).astype(query.dtype)
         case QKVLayout.BSHD_BSHD_BSHD:
             return fused_attn(query, key, value, bias, mask, dropout_rng,
                               **kwargs).astype(query.dtype)
