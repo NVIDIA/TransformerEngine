@@ -357,7 +357,6 @@ class FP8GlobalStateManager:
         if (enabled and fp8_recipe.reduce_amax
             and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
-            cls.reduce_and_update_fp8_tensors(forward=True)
             if not cls.bwd_amax_reduction_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
                 # This hook does not fire for graphed modules.
                 torch.autograd.graph.register_multi_grad_hook(
@@ -378,9 +377,17 @@ class FP8GlobalStateManager:
             assert fp8_available, reason_for_no_fp8
 
     @classmethod
-    def fp8_autocast_exit(cls):
+    def fp8_autocast_exit(
+        cls,
+        enabled: bool = False,
+        fp8_recipe: Optional[DelayedScaling] = None,
+    ) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
+        if (enabled and fp8_recipe.reduce_amax
+            and cls.FP8_AUTOCAST_DEPTH == 0
+            and not in_fp8_graph_capture_mode()):
+            cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -524,7 +531,7 @@ def fp8_autocast(
         yield
     finally:
         FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
-        FP8GlobalStateManager.fp8_autocast_exit()
+        FP8GlobalStateManager.fp8_autocast_exit(enabled, fp8_recipe)
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
