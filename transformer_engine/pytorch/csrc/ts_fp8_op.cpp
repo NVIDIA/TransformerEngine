@@ -6,7 +6,9 @@
 
 #include <torch/script.h>
 #include "extensions.h"
-
+#include <cuda.h>
+#include <cuda_fp8.h>
+#include "common/util/system.h"
 
 namespace {
   transformer_engine::DType reverse_map_dtype(int64_t dtype) {
@@ -316,6 +318,13 @@ at::Tensor te_gemm_ts(at::Tensor A,
   bool accumulate_arg = static_cast<bool>(accumulate);
   bool use_split_accumulator_arg = static_cast<bool>(use_split_accumulator);
 
+  // Set an external SM Margin to all the GEMMs.
+  // This comes in handy when DP is overlapped with GEMMs
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  int num_math_sms = prop.multiProcessorCount \
+                     - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+
   if (A_scale_inverse.numel())
     A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -342,7 +351,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
           workspaceSize_arg,
           accumulate_arg,
           use_split_accumulator_arg,
-          0);
+          num_math_sms);
   return D;
 }
 
