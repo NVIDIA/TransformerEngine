@@ -2324,6 +2324,9 @@ class FusedAttention(torch.nn.Module):
             assert (fused_attention_backend
                 == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                 ), f"{fused_attention_backend} does not work with context parallelism!"
+            assert (
+                attn_bias_type is not in ["alibi"]
+            ), f"Attention bias type of {attn_bias_type} is not supported with context parallelism!"
             if qkv_format == 'sbhd':
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                     for x in (query_layer, key_layer, value_layer)]
