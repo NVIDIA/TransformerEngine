@@ -16,6 +16,7 @@ from .fp8 import FP8GlobalStateManager
 
 aten = torch.ops.aten
 c10d = torch.ops.c10d
+updated_fp8_params = {}
 
 
 def _make_fp8_attr_property_funcs(name: str) -> Any:
@@ -578,7 +579,6 @@ class Float8Tensor(torch.Tensor):
                 dst.copy_(src.from_float8())
 
             elif dst_is_fp8 and not src_is_fp8:
-
                 # Make sure input is in expected format
                 src = src.expand(dst.size())
                 src = src.to(
@@ -611,6 +611,30 @@ class Float8Tensor(torch.Tensor):
                     dst._fp8_dtype,
                 )
 
+                # This branch is where the FP8 parameters are updated in-place during optimization.
+                # TODO(ksivaman): Are there any other edge cases or scenarios I'm missing?
+                # Handle forward amax reduction.
+                param_id = id(dst._data)
+
+                if param_id not in FP8GlobalStateManager.fp8_param_to_autocast:
+                    return None
+
+                autocast_key = FP8GlobalStateManager.fp8_param_to_autocast[param_id]
+
+                if autocast_key not in FP8GlobalStateManager.autocast_to_fp8_params:
+                    return None
+
+                if autocast_key in updated_fp8_params:
+                    updated_fp8_params[autocast_key].add(param_id)
+                else:
+                    updated_fp8_params[autocast_key] = {param_id}
+
+                current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
+                # All FP8 trainable parameters have been updated.
+                if updated_fp8_params[autocast_key] == current_fp8_params_set:
+                    FP8GlobalStateManager.reduce_and_update_fp8_tensors(
+                                                        forward=True, fp8_weights=True)
+                    del updated_fp8_params[autocast_key]
             else:
 
                 # Invalid case

@@ -73,7 +73,9 @@ class FP8GlobalStateManager:
     reason_for_no_fp8 = ""
     multi_grad_hook_tensors = []
     bwd_amax_reduction_hook_registered = False
-    autocast_parameters = {}
+    autocast_arguments = {}
+    autocast_to_fp8_params = {}
+    fp8_param_to_autocast = {}
 
     @classmethod
     def reset(cls) -> None:
@@ -95,7 +97,9 @@ class FP8GlobalStateManager:
         cls.reason_for_no_fp8 = ""
         cls.multi_grad_hook_tensors = []
         cls.bwd_amax_reduction_hook_registered = False
-        cls.autocast_parameters = {}
+        cls.autocast_arguments = {}
+        cls.autocast_to_fp8_params = {}
+        cls.fp8_param_to_autocast = {}
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -174,7 +178,7 @@ class FP8GlobalStateManager:
     def add_fp8_tensors_to_global_buffer(
         cls,
         fp8_meta: Dict[str, Any],
-        fp8_weights: bool = False,
+        fp8_weights: Optional[List[torch.Tensor]] = None,
     ) -> None:
         """
         The amax reduction process happens completely outside the FP8 modules.
@@ -198,8 +202,25 @@ class FP8GlobalStateManager:
             return
 
         for forward in (True, False):
+            # This algorithm creates a two-way map with `autocast_to_fp8_params` and
+            # `fp8_param_to_autocast`. This is used for keeping track of FP8 weights
+            # in an autocasted region and cross reference them in `float8_tensor.py`
+            # to perform the forward amax reduction.
+            if forward and fp8_weights is not None:
+                autocast_key = cls.get_unique_autocast_key(
+                                    fp8_meta["recipe"], fp8_meta["fp8_group"])
+                fp8_weight_set = set([id(w._data) for w in fp8_weights])
+                if autocast_key not in cls.autocast_to_fp8_params:
+                    cls.autocast_to_fp8_params[autocast_key] = fp8_weight_set
+                else:
+                    cls.autocast_to_fp8_params[autocast_key] = (
+                        cls.autocast_to_fp8_params[autocast_key].union(fp8_weight_set))
+                # Identify correct autocast key for a given param.
+                for w in fp8_weight_set:
+                    cls.fp8_param_to_autocast[w] = autocast_key
+
             key = cls.get_key_in_buffer(
-                forward, fp8_weights, fp8_meta["recipe"], fp8_meta["fp8_group"])
+                forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
             if key not in cls.global_fp8_buffer:
@@ -310,7 +331,7 @@ class FP8GlobalStateManager:
                 continue
 
             # Retrieve autocast specific args.
-            recipe, group = cls.autocast_parameters[autocast_key]
+            recipe, group = cls.autocast_arguments[autocast_key]
             if torch.distributed.get_world_size(group=group) <= 1:
                 continue
 
@@ -377,7 +398,7 @@ class FP8GlobalStateManager:
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
-        cls.autocast_parameters[autocast_key] = (fp8_recipe, fp8_group)
+        cls.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
 
         if (enabled and fp8_recipe.reduce_amax
             and cls.FP8_AUTOCAST_DEPTH == 0

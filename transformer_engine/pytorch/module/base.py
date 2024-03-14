@@ -504,6 +504,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.tp_group = tp_group
         self.tp_group_initialized = True
 
+    def get_fp8_params(self) -> Union[List[torch.Tensor], None]:
+        """returns the FP8 weights."""
+        fp8_params = []
+        for param in self.parameters():
+            if isinstance(param, Float8Tensor) and param.requires_grad:
+                fp8_params.append(param)
+        if len(fp8_params) == 0:
+            return None
+        return fp8_params
+
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
@@ -591,7 +601,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.fp8_meta["recipe"].reduce_amax:
                     if not in_fp8_graph_capture_mode():
                         FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                            self.fp8_meta, fp8_weights=self.primary_weights_in_fp8)
+                            self.fp8_meta, fp8_weights=self.get_fp8_params())
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
