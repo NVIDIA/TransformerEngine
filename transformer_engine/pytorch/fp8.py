@@ -105,23 +105,6 @@ class FP8GlobalStateManager:
         return cls.fp8_available, cls.reason_for_no_fp8
 
     @classmethod
-    def get_global_fp8_state_checkpoint(cls) -> Dict[str, Union[int, str]]:
-        """Returns global fp8 state variables."""
-        # Convert attributes to dictionary to make future proof against
-        # changes in global state variables in order to make setting the
-        # checkpoint backwards compatible.
-        global_fp8_state = {}
-        global_fp8_state["FP8_AUTOCAST_DEPTH"] = cls.FP8_AUTOCAST_DEPTH
-        return global_fp8_state
-
-    @classmethod
-    def set_global_fp8_state_checkpoint(cls, state: Dict[str, Union[int, str]]) -> None:
-        """Sets global fp8 state variables."""
-        for k, v in state.items():
-            if hasattr(cls, k):
-                setattr(cls, k, v)
-
-    @classmethod
     def get_global_fp8_buffer_checkpoint(cls) -> Dict[str, List[torch.Tensor]]:
         """Returns all global fp8 buffer."""
         buffers = {}

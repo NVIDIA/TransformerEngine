@@ -361,7 +361,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
             state["global_fp8_buffers"] = FP8GlobalStateManager.get_global_fp8_buffer_checkpoint()
-            state["global_fp8_state"] = FP8GlobalStateManager.get_global_fp8_state_checkpoint()
 
             # Store other pickelable values.
             extra = {}
@@ -396,8 +395,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Restore global FP8 amax buffer.
         FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffers"])
-        # Restore global FP8 state.
-        FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
 
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
