@@ -358,11 +358,27 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     attention_dropout: float, default = 0.0
         Dropout probability for the dropout op after the softmax.
     attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the self attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     attn_bias_type: Optional[str], default = None
-        Type of the attention bias passed in the self attention.
+        Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
         Where it is :attr:`post_scale_bias` if there is bias. Otherwise :attr:`no_bias` is used.
@@ -438,6 +454,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means to mask out the corresponding values.
+            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *:
@@ -639,9 +656,25 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float, default = 0.0
         Dropout probability for the dropout op after the softmax.
     attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -809,6 +842,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means mask out the corresponding values.
+            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
@@ -1299,9 +1333,25 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         is added after self-attention.this can be used for structures like `T5`
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     self_attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the self attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation in the self attention.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the self attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     self_attn_bias_type: Optional[str], default = None
         Type of the attention bias passed into the self attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -1420,9 +1470,12 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             :attr:`layer_type=TransformerLayerType.DECODER`.
         attention_mask : jax.numpy.ndarray, default = None
             Boolean tensor used to mask out self-attention softmax input.
+            :attr:`True` means mask out the corresponding values.
+            Ignored when :attr:`self.self_attn_mask_type` is either 'no_mask' or 'causal'.
         encoder_decoder_mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.
+            :attr:`True` means mask out the corresponding values.
         deterministic: bool, default = False
             Disable dropout layers if set to True.
         decode: bool, default = False
