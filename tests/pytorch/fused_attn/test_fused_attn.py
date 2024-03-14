@@ -963,6 +963,8 @@ model_configs_fp8 = {
     "fp8_6": ModelConfig(4, 16, 16,  64,  512,  512, 0.0,  "causal", "no_bias"),
     "fp8_7": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     "fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_9": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16]
 
@@ -970,7 +972,7 @@ param_types_fp8 = [torch.float16]
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
-@pytest.mark.parametrize("model", ["fp8_2"])
+@pytest.mark.parametrize("model", ["fp8_9", "fp8_10"])
 def test_dpa_fp8_v1(dtype, model):
     config = model_configs_fp8[model]
 
@@ -999,7 +1001,7 @@ def test_dpa_fp8_v1(dtype, model):
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
             print('fused_attn_bwd     min {:.6f} max {:.6f}'.format(
                 fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item()))
-        #torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd[i], **tols)
+        torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd[i], **tols)
 
 def _run_dpa_fp8_v1(dtype, config, fp8_dpa):
 
@@ -1044,7 +1046,7 @@ def _run_dpa_fp8_v1(dtype, config, fp8_dpa):
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
 
-    qkv_layout = 'bs3hd'
+    qkv_layout = 'sbh3d' #'bshd_bshd_bshd' #'bs3hd'
     qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
     dim_to_num = {
         'b'  : config.batch_size,
@@ -1094,7 +1096,7 @@ def _run_dpa_fp8_v1(dtype, config, fp8_dpa):
 
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         out = dpa(inp[0], inp[1], inp[2],
-            qkv_format='bshd',
+            qkv_format=qkv_format,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=config.max_seqlen_q,

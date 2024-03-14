@@ -1997,6 +1997,19 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
+def _combine_tensors(tensors, dim):
+    num_tensors = len(tensors)
+    combined_tensor = torch.Tensor().to(
+        device=tensors[0].device, dtype=tensors[0].dtype)
+    new_shape = list(tensors[0].shape)
+    new_shape.insert(dim, num_tensors)
+    new_stride = list(tensors[0].stride())
+    new_stride.insert(dim, int(new_stride[dim-1]/num_tensors))
+    combined_tensor.set_(
+        tensors[0].untyped_storage(),
+        tensors[0].storage_offset(),
+        new_shape, new_stride)
+    return combined_tensor
 
 class FusedAttnFunc(torch.autograd.Function):
     """Function for FusedAttention with separate Q, K, V tensors"""
@@ -2010,17 +2023,42 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             fused_attention_backend = FusedAttnBackend["FP8"]
             #assert qkv_layout == 'bs3hd', "currently only testing bs3hd"
-            print('b qqq',q.is_contiguous())#, q_fp8.is_contiguous())
-            q_fp8 = ext.cast_to_fp8(q.contiguous(),
-                fp8_meta["scaling_fwd"],
-                META_QKV, fp8_dtype_forward).view(q.shape)
-            k_fp8 = ext.cast_to_fp8(k.contiguous(),
-                fp8_meta["scaling_fwd"],
-                META_QKV, fp8_dtype_forward).view(k.shape)
-            v_fp8 = ext.cast_to_fp8(v.contiguous(),
-                fp8_meta["scaling_fwd"],
-                META_QKV, fp8_dtype_forward).view(v.shape)
-            print('qqq',q.is_contiguous(), q_fp8.is_contiguous(),v_fp8.is_contiguous(),v_fp8.is_contiguous())
+            print('b qqq',qkv_layout,q.is_contiguous())#, q_fp8.is_contiguous())
+            # 1: qkvpacked, 2: kvpacked, 3: qkv separate
+            qkv_group = len(qkv_layout.split('_'))
+            if qkv_group == 1:
+                dim = qkv_layout.find('3')
+                qkv = _combine_tensors([q,k,v], dim)
+                print('qkv shpae',dim,qkv.shape, qkv.is_contiguous(),q.shape,qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+                qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+                qkv_fp8 = ext.cast_to_fp8(qkv_c,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(qkv.shape)
+                q_fp8, k_fp8, v_fp8 = _SplitAlongDim.apply(qkv_fp8, dim, [1,1,1])
+                q_fp8, k_fp8, v_fp8 = [x.squeeze(dim) for x in [q_fp8, k_fp8, v_fp8]]
+            if qkv_group == 2:
+                q_fp8 = ext.cast_to_fp8(q,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(q.shape)
+                dim = qkv_layout.split('_')[1].find('2')
+                kv = _combine_tensors([k,v], dim)
+                kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
+                kv_fp8 = ext.cast_to_fp8(kv_c,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(kv.shape)
+                k_fp8, v_fp8 = _SplitAlongDim.apply(kv_fp8, dim, [1,1])
+                k_fp8, v_fp8 = [x.squeeze(dim) for x in [k_fp8, v_fp8]]
+            if qkv_group == 3:
+                q_fp8 = ext.cast_to_fp8(q,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(q.shape)
+                k_fp8 = ext.cast_to_fp8(k,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(k.shape)
+                v_fp8 = ext.cast_to_fp8(v,
+                    fp8_meta["scaling_fwd"],
+                    META_QKV, fp8_dtype_forward).view(v.shape)
+            print('qqq',q.shape, q_fp8.shape,q.is_contiguous(),q.contiguous().is_contiguous(), q_fp8.is_contiguous(),v_fp8.is_contiguous(),v_fp8.is_contiguous())
             #dim = 2 # if fe_ver == 1 else 1
             #qkv = torch.Tensor().to(device=q.device, dtype=q.dtype)
             #qkv_shape = list(q.shape)
@@ -2035,7 +2073,7 @@ class FusedAttnFunc(torch.autograd.Function):
             #q_fp8 = qkv_fp8[:,:,0,:,:]
             #k_fp8 = qkv_fp8[:,:,1,:,:]
             #v_fp8 = qkv_fp8[:,:,2,:,:]
-            qkv_layout = 'bshd_bshd_bshd'
+            #qkv_layout = 'bshd_bshd_bshd'
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q_fp8, k_fp8, v_fp8, fp8_dtype_forward, fused_attention_backend, attn_bias,
@@ -2047,10 +2085,12 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][META_O],
                 attn_scale, dropout_p, fast_zero_fill, qkv_layout,
                 attn_bias_type, attn_mask_type, rng_gen)
+            print('out_fp8',out_fp8.is_contiguous(),out_fp8.shape)
             out = ext.cast_from_fp8(
-                out_fp8.view(out_fp8.shape[0] * out_fp8.shape[1], -1),
+                out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
                 fp8_meta["scaling_fwd"], META_O,
                 fp8_dtype_forward, qkv_dtype).view(out_fp8.shape)
+            print('out',out.is_contiguous(),out.shape)
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8,
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
@@ -2125,7 +2165,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     #assert ctx.qkv_layout == 'bs3hd', "currently only testing bs3hd"
                     print('ctx.qkv_layout ',ctx.qkv_layout)
                     d_out_fp8 = ext.cast_to_fp8(
-                        d_out.view(d_out.shape[0] * d_out.shape[1], -1),
+                        d_out.view(-1, d_out.shape[-2] * d_out.shape[-1]),
                         ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                         ).view(d_out.shape)
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
@@ -2160,29 +2200,71 @@ class FusedAttnFunc(torch.autograd.Function):
                     #dq = dqkv[:,:,0,:,:]
                     #dk = dqkv[:,:,1,:,:]
                     #dv = dqkv[:,:,2,:,:]
+                    qkv_group = len(ctx.qkv_layout.split('_'))
+                    if qkv_group == 1:
+                        dim = ctx.qkv_layout.find('3')
+                        dqkv_fp8 = _combine_tensors([dq_fp8,dk_fp8,dv_fp8], dim)
+                        dqkv_c_fp8 = dqkv_fp8.view(-1,
+                            dqkv_fp8.shape[-3] * dqkv_fp8.shape[-2] * dqkv_fp8.shape[-1])
+                        dqkv = ext.cast_from_fp8(dqkv_c_fp8,
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dqkv_fp8.shape)
+                        dq, dk, dv = _SplitAlongDim.apply(dqkv, dim, [1,1,1])
+                        dq, dk, dv = [x.squeeze(dim) for x in [dq, dk, dv]]
+                    if qkv_group == 2:
+                        dq = ext.cast_from_fp8(
+                            dq_fp8.view(-1, dq_fp8.shape[-2] * dq_fp8.shape[-1]),
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dq_fp8.shape)
+                        dim = ctx.qkv_layout.split('_')[1].find('2')
+                        dkv_fp8 = _combine_tensors([dk_fp8,dv_fp8], dim)
+                        dkv_c_fp8 = dkv_fp8.view(-1,
+                            dkv_fp8.shape[-3] * dkv_fp8.shape[-2] * dkv_fp8.shape[-1])
+                        dkv = ext.cast_from_fp8(dkv_c_fp8,
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dkv_fp8.shape)
+                        dk, dv = _SplitAlongDim.apply(dkv, dim, [1,1])
+                        dk, dv = [x.squeeze(dim) for x in [dk, dv]]
+                    if qkv_group == 3:
+                        dq = ext.cast_from_fp8(
+                            dq_fp8.view(-1, dq_fp8.shape[-2] * dq_fp8.shape[-1]),
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dq_fp8.shape)
+                        dk = ext.cast_from_fp8(
+                            dk_fp8.view(-1, dk_fp8.shape[-2] * dk_fp8.shape[-1]),
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dk_fp8.shape)
+                        dv = ext.cast_from_fp8(
+                            dv_fp8.view(-1, dv_fp8.shape[-2] * dv_fp8.shape[-1]),
+                            ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                            fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                     print('dq kv ',dq_fp8.is_contiguous(),dk_fp8.is_contiguous(),dv_fp8.is_contiguous())
-                    dq = ext.cast_from_fp8(
-                        dq_fp8.view(dq_fp8.shape[0] * dq_fp8.shape[1], -1),
-                        ctx.fp8_meta["scaling_bwd"], META_DQKV,
-                        fp8_dtype_backward, ctx.qkv_dtype).view(dq_fp8.shape)
-                    dk = ext.cast_from_fp8(
-                        dk_fp8.view(dk_fp8.shape[0] * dk_fp8.shape[1], -1),
-                        ctx.fp8_meta["scaling_bwd"], META_DQKV,
-                        fp8_dtype_backward, ctx.qkv_dtype).view(dk_fp8.shape)
-                    dv = ext.cast_from_fp8(
-                        dv_fp8.view(dv_fp8.shape[0] * dv_fp8.shape[1], -1),
-                        ctx.fp8_meta["scaling_bwd"], META_DQKV,
-                        fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
+                    #dq = ext.cast_from_fp8(
+                    #    dq_fp8.view(dq_fp8.shape[0] * dq_fp8.shape[1], -1),
+                    #    ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                    #    fp8_dtype_backward, ctx.qkv_dtype).view(dq_fp8.shape)
+                    print('dq_fp8 min max',dq_fp8.shape,dq_fp8.min().item(),dq_fp8.max().item())
+                    #dk = ext.cast_from_fp8(
+                    #    dk_fp8.view(dk_fp8.shape[0] * dk_fp8.shape[1], -1),
+                    #    ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                    #    fp8_dtype_backward, ctx.qkv_dtype).view(dk_fp8.shape)
+                    #dv = ext.cast_from_fp8(
+                    #    dv_fp8.view(dv_fp8.shape[0] * dv_fp8.shape[1], -1),
+                    #    ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                    #    fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                     print('d_out min max',d_out_fp8.min().item(),d_out_fp8.max().item())
+                    print('dq_fp8 vs dq',dq_fp8[0,0,0,:10],dq[0,0,0,:10])
+                    torch.save(dq_fp8, 'dq_fp8.pt')
+                    torch.save(dq, 'dq.pt')
                     print('dq min max',dq.min().item(),dq.max().item())
                     print('dk min max',dk.min().item(),dk.max().item())
                     print('dv min max',dv.min().item(),dv.max().item())
                     print('dkv shape',dq.shape,dq.is_contiguous())
-                    dqkv = torch.cat([dq.unsqueeze(2), dk.unsqueeze(2), dv.unsqueeze(2)], dim=2).contiguous()
-                    print('dkv shape',dqkv.shape,dqkv.is_contiguous())
-                    dq = dqkv[:,:,0,:,:]
-                    dk = dqkv[:,:,1,:,:]
-                    dv = dqkv[:,:,2,:,:]
+                    #dqkv = torch.cat([dq.unsqueeze(2), dk.unsqueeze(2), dv.unsqueeze(2)], dim=2).contiguous()
+                    #print('dkv shape',dqkv.shape,dqkv.is_contiguous())
+                    #dq = dqkv[:,:,0,:,:]
+                    #dk = dqkv[:,:,1,:,:]
+                    #dv = dqkv[:,:,2,:,:]
                 else:
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
@@ -2911,6 +2993,7 @@ class DotProductAttention(torch.nn.Module):
                 max_seqlen_q, max_seqlen_kv = (query_layer.shape[1], key_layer.shape[1])
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                print('seqlens_q ',seqlens_q, max_seqlen_q)
                 assert (all(seqlens_q <= max_seqlen_q)
                     ), """Sequence lengths indicated by cu_seqlens_q must be no greater than
                     the sequence dimention in 'query_layer'!"""
