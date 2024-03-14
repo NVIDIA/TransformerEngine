@@ -88,7 +88,8 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         cu_seqlens_q = None
         cu_seqlens_kv = None
     else:
-        seqlens_q = torch.randint(world_size*2, config.max_seqlen_q*2, [config.batch_size]).to(torch.int32)
+        assert(config.max_seqlen_q % (world_size * 2) == 0)
+        seqlens_q = torch.randint(world_size * 2, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q = seqlens_q - seqlens_q % (world_size * 2)
         cu_seqlens_q = torch.cat([torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0)])
         cu_seqlens_kv = cu_seqlens_q
