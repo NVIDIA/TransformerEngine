@@ -149,14 +149,14 @@ class _NoopCatFunc(torch.autograd.Function):
         # Out-of-place concatenation if needed
         dtype = tensors[0].dtype
         device = tensors[0].device
-        strides = tensors[0].strides()
+        strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
         for tensor in tensors[1:]:
             if (
                 tensor.dtype != dtype
                 or tensor.device != device
-                or tensor.strides() != strides
+                or tensor.stride() != strides
                 or tensor.data_ptr() != data_ptr
             ):
                 return torch.cat(tensors, dim=dim)
@@ -180,9 +180,9 @@ class _NoopCatFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         grad_inputs = []
         for split_start, split_end in ctx.split_ranges:
-            idxs = [None] * grad_output.dim()
-            idxs[ctx.dim] = slice(split_start, split_end)
-            grad_inputs.append(grad_output[idxs])
+            slices = [slice(None)] * grad_output.dim()
+            slices[ctx.dim] = slice(split_start, split_end)
+            grad_inputs.append(grad_output[tuple(slices)])
         return None, *grad_inputs
 
 
