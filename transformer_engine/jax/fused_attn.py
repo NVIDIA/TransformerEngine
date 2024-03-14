@@ -20,14 +20,23 @@ from .cpp_extensions import fused_attn_fwd, fused_attn_bwd
 
 
 class AttnBiasType(Enum):
-    """Attention Bias Type."""
+    """
+    NO_BIAS: Softmax is performed as softmax(scale * qk)
+    PRE_SCALE_BIAS: Softmax is performed as softmax(scale * (qk + bias))
+    POST_SCALE_BIAS: Softmax is performed as softmax(scale * qk + bias)
+    """
     NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
     PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
     POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
 
 
 class AttnMaskType(Enum):
-    """Attention Mask Type."""
+    """
+    NO_MASK: No attention mask is applied.
+    PADDING_MASK: Indicates the presence of paddings at the end of each sequence.
+    CAUSAL_MASK: An upper triangular mask is applied to the softmax inputs.
+    PADDING_CAUSAL_MASK: A combination of both causal and padding masks.
+    """
     NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
@@ -47,12 +56,17 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
     The overhead between padding and non-padding version should be small.
     However, we will lease this limitation in the near feature.
     """
-    if attn_mask_type in ['causal', 'padding_causal']:
-        return AttnMaskType.PADDING_CAUSAL_MASK
-    if attn_mask_type in ['no_mask', 'padding']:
-        return AttnMaskType.PADDING_MASK
-    raise ValueError(f"Unsupported {attn_mask_type=}, "
-                     "supported attn_mask_type={'no_mask', 'padding', 'causal', 'padding_causal'}")
+    match attn_mask_type:
+        case 'no_mask':
+            return AttnMaskType.NO_MASK
+        case 'padding':
+            return AttnMaskType.PADDING_MASK
+        case 'causal':
+            return AttnMaskType.CAUSAL_MASK
+        case 'padding_causal' | 'causal_padding':
+            return AttnMaskType.PADDING_CAUSAL_MASK
+    raise ValueError(f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+                     "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}")
 
 
 def is_fused_attn_kernel_available(q_dtype, kv_dtype, qkv_layout, attn_bias_type, attn_mask_type,
@@ -102,10 +116,11 @@ def _fused_attn_fwd_qkvpacked_rule(qkv: jnp.ndarray, bias: jnp.ndarray | None, m
                                    seed: jnp.ndarray | None, attn_bias_type: AttnBiasType,
                                    attn_mask_type: AttnMaskType, scaling_factor: float,
                                    dropout_probability: float, is_training: bool):
-    if mask is None:
+    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
         batch, seqlen, *_ = qkv.shape
         actual_seqlen = jnp.full((batch,), seqlen, dtype=jnp.int32)
     else:
+        assert mask is not None
         mask = jnp.logical_not(mask)
         actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
     output, softmax_aux, rng_state = fused_attn_fwd_qkvpacked(
@@ -186,15 +201,16 @@ def _fused_attn_kvpacked(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mas
 
 def _fused_attn_fwd_kvpacked_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                   scaling_factor, dropout_probability, is_training):
-    if mask is None:
+    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
         batch, s_q, *_ = q.shape
         s_kv = kv.shape[1]
         q_actual_seqlen = jnp.full((batch,), s_q, dtype=jnp.int32)
         kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
     else:
+        assert mask is not None
         mask = jnp.logical_not(mask)
         q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-        if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+        if attn_mask_type == AttnMaskType.PADDING_MASK:
             kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         else:
             # When mask is causal, the actual seqlen is not the last row, use max to find it
@@ -281,15 +297,16 @@ def _fused_attn(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray, bias: jnp.ndarra
 
 def _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
                          dropout_probability, is_training):
-    if mask is None:
+    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
         batch, s_q, *_ = q.shape
         s_kv = k.shape[1]
         q_actual_seqlen = jnp.full((batch,), s_q, dtype=jnp.int32)
         kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
     else:
+        assert mask is not None
         mask = jnp.logical_not(mask)
         q_actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-        if attn_mask_type not in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+        if attn_mask_type == AttnMaskType.PADDING_MASK:
             kv_actual_seqlen = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         else:
             # When mask is causal, the actual seqlen is not the last row, use max to find it

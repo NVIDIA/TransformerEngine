@@ -190,16 +190,19 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
 
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxType"""
+            # mask is ignored for no_mask and causal_mask
+            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+                mask = None
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
                 if mask is not None:
-                    return SoftmaxType.SCALED_MASKED
-                return SoftmaxType.SCALED
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
+                    return SoftmaxType.SCALED_MASKED, mask
+                return SoftmaxType.SCALED, mask
+            raise ValueError(f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+                             "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}")
 
-        softmax_type = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(softmax_type=softmax_type,
                                scale_factor=fused_scale_factor)(attn_weights, mask,
