@@ -567,6 +567,10 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    get_rng_state_tracker : Callable, default = `None`
+                 used to get the random number generator state tracker for initilizeing weights.
+    rng_tracker_name : str, default = `None`
+                 the param passed to get_rng_state_tracker to get the specific rng tracker.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
                       Configuration for splitting the weight and bias tensors along dim 0 into
                       multiple PyTorch parameters. If a list or tuple of strings is provided,
