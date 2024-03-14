@@ -108,31 +108,6 @@ class FP8GlobalStateManager:
             cls.fp8_available, cls.reason_for_no_fp8 = check_fp8_support()
         return cls.fp8_available, cls.reason_for_no_fp8
 
-    @classmethod
-    def get_global_fp8_buffer_checkpoint(cls) -> Dict[str, List[torch.Tensor]]:
-        """Returns all global fp8 buffer."""
-        buffers = {}
-        buffers["amax"] = cls.global_fp8_buffer
-        buffers["amax_history"] = cls.global_amax_history_buffer
-        buffers["scale"] = cls.global_scale_buffer
-        buffers["scale_inv"] = cls.global_scale_inv_buffer
-        buffers["non_weight_mask"] = cls.global_non_weight_mask_buffer
-        return buffers
-
-    @classmethod
-    def set_global_fp8_buffer_checkpoint(cls, buffers: Dict[str, List[torch.Tensor]]) -> None:
-        """Sets global fp8 amax buffer."""
-        # Map all tensors back to GPU.
-        for _, buffer in buffers.items():
-            for k, v in buffer.items():
-                buffer[k] = [tensor.cuda() for tensor in v]
-
-        cls.global_fp8_buffer = buffers["amax"]
-        cls.global_amax_history_buffer = buffers["amax_history"]
-        cls.global_scale_buffer = buffers["scale"]
-        cls.global_scale_inv_buffer = buffers["scale_inv"]
-        cls.global_non_weight_mask_buffer = buffers["non_weight_mask"]
-
     @staticmethod
     def get_meta_tensor_key(forward: bool = True) -> str:
         """Returns scaling key in `fp8_meta`."""

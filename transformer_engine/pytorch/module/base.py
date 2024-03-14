@@ -230,24 +230,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         self.fp8_meta[key].amax_history)
 
 
-    def set_meta_tensor(self, fwd: bool, buffers: Dict = None) -> None:
+    def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
-
-        if buffers is not None:
-            # This case is when we're loading from a checkpoint.
-            # Ensures that module fp8 tensors and global buffers
-            # share same memory.
-            self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
-            index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
-            fwd_bwd_key = FP8GlobalStateManager.get_fwd_bwd_key(fwd)
-            key = f"{fwd_bwd_key}_{autocast_key}" #TODO(ksivaman) fix
-            self.fp8_meta[fp8_meta_tensor_key].amax_history = buffers["amax_history"][key][index]
-            self.fp8_meta[fp8_meta_tensor_key].scale = buffers["scale"][key][index]
-            self.fp8_meta[fp8_meta_tensor_key].scale_inv = buffers["scale_inv"][key][index]
-            self.fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] = (
-                buffers["non_weight_mask"][key][index])
-            return
 
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
@@ -292,10 +277,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 [True, True] * self.fp8_meta["num_gemms"]
             ).cuda()
 
-    def init_fp8_meta_tensors(self, buffers: Dict = None) -> None:
+    def init_fp8_meta_tensors(self) -> None:
         """Init scales and amaxes."""
-        self.set_meta_tensor(True, buffers)
-        self.set_meta_tensor(False, buffers)
+        self.set_meta_tensor(True)
+        self.set_meta_tensor(False)
         self.fp8_meta_tensors_initialized = True
 
     def get_fp8_meta_tensors(self) -> None:
@@ -345,7 +330,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
-            state["global_fp8_buffers"] = FP8GlobalStateManager.get_global_fp8_buffer_checkpoint()
 
             # Store other pickelable values.
             extra = {}
@@ -378,9 +362,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Restore global FP8 amax buffer.
-        FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffers"])
-
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
@@ -388,7 +369,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
         # Initialize before loading.
-        self.init_fp8_meta_tensors(state["global_fp8_buffers"])
+        self.init_fp8_meta_tensors()
         self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
