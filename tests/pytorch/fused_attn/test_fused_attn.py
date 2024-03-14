@@ -1228,7 +1228,6 @@ class _dpa_fp8(torch.autograd.Function):
         #fp8.amax_and_scale_update(fp8_meta, True, True)
 
         M, ZInv, philox_unpacked = aux_ctx_tensors
-        out = out.view(-1, in_features) # (bs)(hd)
 
         ctx.save_for_backward(
             inp_t_fp8, qkv_weight_t_fp8, workspace,
@@ -1246,6 +1245,7 @@ class _dpa_fp8(torch.autograd.Function):
         ctx.num_heads = num_heads
         ctx.mask_type = mask_type
 
+        out = out.view(-1, in_features) # (bs)(hd)
         out_fp16 = ext.cast_from_fp8(out, fp8_meta["scaling_fwd"],
                 META_O, fp8_dtype_forward, tex.DType.kFloat16)
         torch.save(out_fp16, 'out.pt') # (bs)(hd)
