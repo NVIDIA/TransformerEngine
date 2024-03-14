@@ -325,7 +325,11 @@ class FP8GlobalStateManager:
             fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
                 continue
-            if fwd_update and fp8_weights != fp8_weights_update:
+            # Only skip a forward update when `fp8_weights` is explicitly set to `True`
+            # (inside optimizer) and the current key is not an `fp8_weight_update` key.
+            # For other cases, we need to reduce because of activation tensors.
+            # TODO(ksivaman) consider separate weight and activation fp8_tensors.
+            if fwd_update and fp8_weights and not fp8_weights_update:
                 continue
             if len(cls.global_fp8_buffer[buffer_key]) == 0:
                 continue

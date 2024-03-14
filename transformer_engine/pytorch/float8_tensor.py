@@ -68,6 +68,31 @@ class _FromFloat8Func(torch.autograd.Function):
         return grad, None
 
 
+def post_optimizer_step_fwd_amax_reduction(param: Float8Tensor) -> None:
+    """Amax scale and update when there is at least 1 trainable FP8 parameter."""
+    param_id = id(param._data)
+
+    if param_id not in FP8GlobalStateManager.fp8_param_to_autocast:
+        return
+
+    autocast_key = FP8GlobalStateManager.fp8_param_to_autocast[param_id]
+
+    if autocast_key not in FP8GlobalStateManager.autocast_to_fp8_params:
+        return
+
+    if autocast_key in updated_fp8_params:
+        updated_fp8_params[autocast_key].add(param_id)
+    else:
+        updated_fp8_params[autocast_key] = {param_id}
+
+    current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
+    # All FP8 trainable parameters have been updated.
+    if updated_fp8_params[autocast_key] == current_fp8_params_set:
+        FP8GlobalStateManager.reduce_and_update_fp8_tensors(
+                                            forward=True, fp8_weights=True)
+        del updated_fp8_params[autocast_key]
+
+
 class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
     @staticmethod
@@ -167,6 +192,7 @@ class _ToFloat8Func(torch.autograd.Function):
     def backward(ctx, grad):
         # Assume that we want gradients in full precision
         return grad, None, None, None, None, None, None, None
+
 
 class _IdentityFunc(torch.autograd.Function):
     """Identity function
@@ -612,29 +638,9 @@ class Float8Tensor(torch.Tensor):
                 )
 
                 # This branch is where the FP8 parameters are updated in-place during optimization.
-                # TODO(ksivaman): Are there any other edge cases or scenarios I'm missing?
+                # TODO(ksivaman): Are there any other edge cases/paths or scenarios I'm missing?
                 # Handle forward amax reduction.
-                param_id = id(dst._data)
-
-                if param_id not in FP8GlobalStateManager.fp8_param_to_autocast:
-                    return None
-
-                autocast_key = FP8GlobalStateManager.fp8_param_to_autocast[param_id]
-
-                if autocast_key not in FP8GlobalStateManager.autocast_to_fp8_params:
-                    return None
-
-                if autocast_key in updated_fp8_params:
-                    updated_fp8_params[autocast_key].add(param_id)
-                else:
-                    updated_fp8_params[autocast_key] = {param_id}
-
-                current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
-                # All FP8 trainable parameters have been updated.
-                if updated_fp8_params[autocast_key] == current_fp8_params_set:
-                    FP8GlobalStateManager.reduce_and_update_fp8_tensors(
-                                                        forward=True, fp8_weights=True)
-                    del updated_fp8_params[autocast_key]
+                post_optimizer_step_fwd_amax_reduction(dst)
             else:
 
                 # Invalid case
