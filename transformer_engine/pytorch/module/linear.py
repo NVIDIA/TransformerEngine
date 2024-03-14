@@ -12,7 +12,6 @@ import transformer_engine_extensions as tex
 
 from .base import (
     get_workspace,
-    _prepare_backward,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -337,7 +336,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_Linear"):
+        with torch.cuda.nvtx.range("_Linear_backward"):
             (
                 inputmat,
                 inputmat_t,
@@ -799,7 +798,6 @@ class Linear(TransformerEngineBaseModule):
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
         self.reset_parameters(defer_init=(device == 'meta'))
 

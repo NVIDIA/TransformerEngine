@@ -21,7 +21,6 @@ from ..fp8 import (
     get_default_fp8_recipe,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
-    amax_and_scale_update,
     in_fp8_graph_capture_mode,
 )
 from ..distributed import (
@@ -60,20 +59,6 @@ def get_workspace() -> torch.Tensor:
             get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
         )
     return _cublas_workspace
-
-
-@contextmanager
-def _prepare_backward(
-    fp8: bool,
-    fp8_meta: Dict[str, Any],
-    name: str = ""
-) -> Generator[None, None, None]:
-    """Checks and prep for BWD."""
-    if fp8 and not fp8_meta["recipe"].reduce_amax:
-        amax_and_scale_update(fp8_meta, False)
-
-    with torch.cuda.nvtx.range(name + " backward"):
-        yield
 
 
 def initialize_ub(
@@ -564,9 +549,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
-        if skip_fp8_weight_update is None:
-            skip_fp8_weight_update = is_first_microbatch is not None and not is_first_microbatch
-
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
@@ -589,22 +571,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 "Amax reduction across tensor parallel group is " \
                 "necessary when using sequence parallelism with FP8."
 
-            # Previous iteration was grad_enabled
-            if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
-                if not self.fp8_meta["recipe"].reduce_amax:
-                    amax_and_scale_update(
-                        self.fp8_meta, True, skip_weight_scale_inv_update=skip_fp8_weight_update
-                    )
-
-            if self.fp8 and self.training:
-                # Setup for amax reduction
-                if self.fp8_meta["recipe"].reduce_amax:
-                    if not in_fp8_graph_capture_mode():
-                        FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                            self.fp8_meta, fp8_weights=self.get_fp8_params())
-                self.fp8_meta["update_amax_and_scale_fwd"] = True
-            else:
-                self.fp8_meta["update_amax_and_scale_fwd"] = False
+            if self.fp8 and not in_fp8_graph_capture_mode():
+                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                    self.fp8_meta, fp8_weights=self.get_fp8_params())
 
             # Activation recomputation is used and this is the first forward phase.
             if (

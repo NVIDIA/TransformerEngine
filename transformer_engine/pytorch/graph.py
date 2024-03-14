@@ -271,7 +271,8 @@ def _make_graphed_callables(
                     if func.training == graph_training_state:
                         # Set the FP8 group from global amax reduction.
                         for m in func.modules():
-                            if isinstance(m, TransformerEngineBaseModule):
+                            if (isinstance(m, TransformerEngineBaseModule)
+                                and FP8GlobalStateManager.is_fp8_enabled()):
                                 m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
                                 m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
                                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(

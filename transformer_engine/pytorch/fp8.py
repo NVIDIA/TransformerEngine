@@ -72,7 +72,7 @@ class FP8GlobalStateManager:
     fp8_available = None
     reason_for_no_fp8 = ""
     multi_grad_hook_tensors = []
-    bwd_amax_reduction_hook_registered = False
+    bwd_amax_update_hook_registered = False
     autocast_arguments = {}
     autocast_to_fp8_params = {}
     fp8_param_to_autocast = {}
@@ -96,7 +96,7 @@ class FP8GlobalStateManager:
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
         cls.multi_grad_hook_tensors = []
-        cls.bwd_amax_reduction_hook_registered = False
+        cls.bwd_amax_update_hook_registered = False
         cls.autocast_arguments = {}
         cls.autocast_to_fp8_params = {}
         cls.fp8_param_to_autocast = {}
@@ -317,9 +317,6 @@ class FP8GlobalStateManager:
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        if not torch.distributed.is_initialized():
-            return
-
         for buffer_key in cls.global_fp8_buffer.keys():
             # Check for forward or backward reduction.
             fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
@@ -334,14 +331,15 @@ class FP8GlobalStateManager:
             if len(cls.global_fp8_buffer[buffer_key]) == 0:
                 continue
 
-            # Retrieve autocast specific args.
+            # Retrieve autocast specific args and concat amaxes.
             recipe, group = cls.autocast_arguments[autocast_key]
-            if torch.distributed.get_world_size(group=group) <= 1:
-                continue
+            contiguous_amax = torch.cat(cls.global_fp8_buffer[buffer_key])
 
             # Reduction.
-            contiguous_amax = torch.cat(cls.global_fp8_buffer[buffer_key])
-            cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
+            if (recipe.reduce_amax
+                and torch.distributed.is_initialized()
+                and torch.distributed.get_world_size(group=group) > 1):
+                cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
 
             # Amax and scale update.
             if bool(int(os.getenv("NVTE_POST_AMAX_REDUCTION_FUSION", "1"))):
@@ -404,14 +402,13 @@ class FP8GlobalStateManager:
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         cls.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
 
-        if (enabled and fp8_recipe.reduce_amax
-            and cls.FP8_AUTOCAST_DEPTH == 0
+        if (enabled and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
-            if not cls.bwd_amax_reduction_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
+            if not cls.bwd_amax_update_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
                 # This hook does not fire for graphed modules.
                 torch.autograd.graph.register_multi_grad_hook(
                     tuple(cls.multi_grad_hook_tensors), cls.hook_for_bwd_amax_reduction)
-                cls.bwd_amax_reduction_hook_registered = True
+                cls.bwd_amax_update_hook_registered = True
 
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating
@@ -437,8 +434,7 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if (enabled and fp8_recipe.reduce_amax
-            and cls.FP8_AUTOCAST_DEPTH == 0
+        if (enabled and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
             cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
 

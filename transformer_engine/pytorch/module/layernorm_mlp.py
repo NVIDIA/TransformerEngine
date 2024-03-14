@@ -13,7 +13,6 @@ from torch.nn import init
 
 from .base import (
     get_workspace,
-    _prepare_backward,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -552,7 +551,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_LayerNormMLP"):
+        with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             (
                 inputmat,
                 ln_weight,
@@ -1340,7 +1339,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
