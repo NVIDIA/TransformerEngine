@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import TransformerLayer, fp8_autocast
+from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     RotaryPositionEmbedding,
@@ -965,6 +965,149 @@ model_configs_fp8 = {
     "fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16]
+
+@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.parametrize("dtype", param_types_fp8)
+@pytest.mark.parametrize("model", ["fp8_2"])
+def test_dpa_fp8_v1(dtype, model):
+    config = model_configs_fp8[model]
+
+    if _NVTE_DEBUG:
+        print("[test_dpa_fp8_v1]: run with fp8_dpa = True")
+    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_v1(
+        dtype, config, True)
+    if _NVTE_DEBUG:
+        print("[test_dpa_fp8_v1]: run with fp8_dpa = False")
+    fused_attn_fwd, fused_attn_bwd = _run_dpa_fp8_v1(
+        dtype, config, False)
+
+    tols = dict(atol=5e-3, rtol=5e-3)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    if _NVTE_DEBUG:
+        print("[test_dpa_fp8_v1]: FP8 fused attn (i/o in F16) vs F16 fused attn")
+        print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
+            fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
+        print('fused_attn_fwd     min {:.6f} max {:.6f}'.format(
+            fused_attn_fwd.min().item(), fused_attn_fwd.max().item()))
+    torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd, **tols)
+    for i,_ in enumerate(fused_attn_bwd):
+        if _NVTE_DEBUG:
+            print('fused_attn_bwd_fp8 min {:.6f} max {:.6f}'.format(
+                fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
+            print('fused_attn_bwd     min {:.6f} max {:.6f}'.format(
+                fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item()))
+        torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd[i], **tols)
+
+def _run_dpa_fp8_v1(dtype, config, fp8_dpa):
+
+    reset_rng_states()
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+    def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        interval=1,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=fp8_dpa,
+    )
+
+    with fp8_model_init(enabled=fp8_dpa):
+        dpa = (
+             DotProductAttention(
+                    config.num_heads,
+                    config.head_dim,
+                    attention_dropout=config.dropout_p,
+                    sequence_parallel=False,
+                    tp_size=1,
+                    get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                    tp_group=None,
+                    layer_number=1,
+                    attention_type="self",
+                    qkv_format="bshd",
+            ).to(dtype=dtype, device="cuda")
+        )
+
+    seqlens_q = torch.full([config.batch_size], config.max_seqlen_q,
+        dtype=torch.int32, device="cuda")
+    seqlens_kv = torch.full([config.batch_size], config.max_seqlen_kv,
+        dtype=torch.int32, device="cuda")
+    cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
+    cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+
+    qkv_layout = 'bs3hd'
+    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+    dim_to_num = {
+        'b'  : config.batch_size,
+        'sq' : config.max_seqlen_q,
+        'skv': config.max_seqlen_kv,
+        'h'  : config.num_heads,
+        'hg' : config.num_gqa_groups,
+        'd'  : config.head_dim,
+        't'  : cu_seqlens_q[-1],
+        'tg' : cu_seqlens_kv[-1],
+        '3'  : 3,
+        '2'  : 2,
+        '1'  : 1,
+        }
+    inp = []
+    for i,layout in enumerate(qkv_layout.split('_')):
+        layout = '_'.join(layout)
+        if i == 0:
+            layout = layout.replace('s', 'sq')
+        else:
+            layout = layout.replace('s', 'skv')
+            layout = layout.replace('h', 'hg')
+            layout = layout.replace('t', 'tg')
+        tensor_shape = [dim_to_num[j] for j in layout.split('_')]
+        tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        tensor_count = 1
+        split_dim = 0
+        for dim, l in enumerate(layout.split('_')):
+            if l.isdigit():
+                tensor_count = int(l)
+                split_dim = dim
+                break
+        tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
+        for j in range(tensor_count):
+            if split_dim != 0:
+                inp.append(tensors[j].squeeze(split_dim))
+            else:
+                inp.append(tensors[j])
+    for i in range(3):
+        inp[i].requires_grad = True
+
+    qkv_format_kv = '_'.join(qkv_format)
+    qkv_format_kv = qkv_format_kv.replace('s', 'sq')
+    out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split('_')]
+    out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
+    out_grad = 0.1 * torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
+
+    with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        out = dpa(inp[0], inp[1], inp[2],
+            qkv_format='bshd',
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
+            attn_mask_type=config.attn_mask_type,
+            checkpoint_core_attention=False,
+            core_attention_bias_type=config.attn_bias_type,
+            is_first_microbatch=True,
+            )
+        out.backward(out_grad)
+
+    return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+
 
 fe_ver = int(os.getenv('NVTE_FUSED_ATTN_FE_VER','1'))
 

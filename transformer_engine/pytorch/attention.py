@@ -19,6 +19,8 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_extensions as tex
+from transformer_engine.pytorch.distributed import get_distributed_world_size
+import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
@@ -31,7 +33,13 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
     FusedAttnBackend,
 )
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
+from transformer_engine.pytorch.module.base import (
+    _prepare_backward,
+    TransformerEngineBaseModule,
+)
 from transformer_engine.pytorch.utils import (
     divide,
     attention_mask_func,
@@ -69,6 +77,12 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
 
+META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
+META_O    = tex.FP8FwdTensors.GEMM2_INPUT
+META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
+META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
+META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 _alibi_cache = {
@@ -1990,14 +2004,52 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
-                qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend, use_FAv2_bwd):
-        out, aux_ctx_tensors = fused_attn_fwd(
-            is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-            q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
-            None, None, None, None, None, None,
-            attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
-            rng_gen)
+                qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
+                use_FAv2_bwd, fp8, fp8_meta, tp_size, tp_group):
+        if fp8:
+            fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            fused_attention_backend = FusedAttnBackend["FP8"]
+            assert qkv_layout == 'bs3hd', "currently only testing bs3hd"
+            dim = 2 # if fe_ver == 1 else 1
+            qkv = torch.Tensor().to(device=q.device, dtype=q.dtype)
+            qkv_shape = list(q.shape)
+            qkv_shape.insert(dim, 3)
+            qkv_stride = list(q.stride())
+            qkv_stride.insert(dim, int(qkv_stride[-3]/3))
+            qkv.set_(q.untyped_storage(), q.storage_offset(), qkv_shape, qkv_stride) # bs3hd
+            qkv_c = qkv.view(-1, qkv_shape[2] * qkv_shape[3] * qkv_shape[4])
+            qkv_fp8 = ext.cast_to_fp8(qkv_c,
+                fp8_meta["scaling_fwd"],
+                META_QKV, fp8_dtype_forward).view(qkv_shape)
+            q_fp8 = qkv_fp8[:,:,0,:,:]
+            k_fp8 = qkv_fp8[:,:,1,:,:]
+            v_fp8 = qkv_fp8[:,:,2,:,:]
+            out_fp8, aux_ctx_tensors = fused_attn_fwd(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q_fp8, k_fp8, v_fp8, fp8_dtype_forward, fused_attention_backend, attn_bias,
+                fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+                fp8_meta["scaling_fwd"].scale_inv[META_S],
+                fp8_meta["scaling_fwd"].scale[META_S],
+                fp8_meta["scaling_fwd"].scale[META_O],
+                fp8_meta["scaling_fwd"].amax_history[0][META_S],
+                fp8_meta["scaling_fwd"].amax_history[0][META_O],
+                attn_scale, dropout_p, fast_zero_fill, qkv_layout,
+                attn_bias_type, attn_mask_type, rng_gen)
+            out = ext.cast_from_fp8(
+                out_fp8.view(out_fp8.shape[0] * out_fp8.shape[1], -1),
+                fp8_meta["scaling_fwd"], META_O,
+                fp8_dtype_forward, qkv_dtype).view(out_fp8.shape)
+            fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8,
+                fp8_meta["scaling_fwd"].scale.clone(),
+                fp8_meta["scaling_fwd"].scale_inv.clone())
+        else:
+            out, aux_ctx_tensors = fused_attn_fwd(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
+                None, None, None, None, None, None,
+                attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen)
+            fp8_tensors = (None, None, None, None, None, None)
 
         from .cpu_offload import CPUOffloadEnabled
         if CPUOffloadEnabled:
@@ -2007,8 +2059,11 @@ class FusedAttnFunc(torch.autograd.Function):
                 if tensor is not None:
                     tensor.activation_offloading = True
 
-
-        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
+        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
+        ctx.fp8 = fp8
+        ctx.fp8_meta = fp8_meta
+        ctx.tp_size = tp_size
+        ctx.tp_group = tp_group
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -2027,7 +2082,8 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         d_out = d_out.contiguous()
-        q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        (q, k, v, out, cu_seqlens_q, cu_seqlens_kv,
+            q_fp8, k_fp8, v_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
@@ -2048,27 +2104,73 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = dk[..., :d_out.shape[-1]]
             dv = dv[..., :d_out.shape[-1]]
         else:
-            dq, dk, dv, *rest = fused_attn_bwd(
-                ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-                q, k, v, out, d_out,
-                ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
-                ctx.fused_attention_backend,
-                None, None, None, None, None, None, None, None, None, None,
-                ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
-                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+            with _prepare_backward(
+                ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn"
+            ):
+                if ctx.fp8:
+                    fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
+                    fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+                    assert ctx.qkv_layout == 'bs3hd', "currently only testing bs3hd"
+                    d_out_fp8 = ext.cast_to_fp8(
+                        d_out.view(d_out.shape[0] * d_out.shape[1], -1),
+                        ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
+                        ).view(d_out.shape)
+                    dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
+                        ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                        q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
+                        fp8_dtype_forward, fp8_dtype_backward, ctx.aux_ctx_tensors,
+                        ctx.fused_attention_backend,
+                        fwd_scale_invs[META_QKV], # d_scale_qkv,
+                        fwd_scale_invs[META_S], # d_scale_s,
+                        fwd_scale_invs[META_O], # d_scale_o,
+                        ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                        ctx.fp8_meta['scaling_bwd'].scale_inv[META_DP], # d_scale_dp
+                        fwd_scales[META_S], # q_scale_s
+                        ctx.fp8_meta['scaling_bwd'].scale[META_DP], # q_scale_dp
+                        ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                        ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP], # amax_dp
+                        ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                        ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                        ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+                    dim = 2 # if fe_ver == 1 else 1
+                    dqkv_fp8 = torch.Tensor().to(device=dq_fp8.device, dtype=dq_fp8.dtype)
+                    dqkv_shape = list(dq_fp8.shape)
+                    dqkv_shape.insert(dim, 3)
+                    dqkv_stride = list(dq_fp8.stride())
+                    dqkv_stride.insert(dim, int(dqkv_stride[-3]/3))
+                    dqkv_fp8.set_(dq_fp8.untyped_storage(),
+                        dq_fp8.storage_offset(), dqkv_shape, dqkv_stride) # bs3hd
+                    dqkv = ext.cast_from_fp8(
+                        dqkv_fp8.view(dqkv_fp8.shape[0] * dqkv_fp8.shape[1], -1),
+                        ctx.fp8_meta["scaling_bwd"], META_DQKV,
+                        fp8_dtype_backward, ctx.qkv_dtype).view(dqkv_fp8.shape)
+                    dq = dqkv[:,:,0,:,:]
+                    dk = dqkv[:,:,1,:,:]
+                    dv = dqkv[:,:,2,:,:]
+                else:
+                    dq, dk, dv, *rest = fused_attn_bwd(
+                        ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                        q, k, v, out, d_out,
+                        ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                        ctx.fused_attention_backend,
+                        None, None, None, None, None, None, None, None, None, None,
+                        ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                        ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
             return (None, None, None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
-                    None, None, None, None, None, None)
+                    None, None, None, None, None, None,
+                    None, None)
         # else, return (dqkv, dbias)
         return (None, None, None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
-                None, None, None, None, None, None)
+                None, None, None, None, None, None,
+                None, None)
 
 
-class FusedAttention(torch.nn.Module):
+class FusedAttention(TransformerEngineBaseModule):
     """Dot product attention, with multiple backends:
 
     1. FusedAttnBackend["F16_max512_seqlen"]
@@ -2104,6 +2206,8 @@ class FusedAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        tp_size: int = 1,
+        tp_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__()
 
@@ -2130,6 +2234,32 @@ class FusedAttention(torch.nn.Module):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
+        if self.primary_weights_in_fp8:
+            self.init_fp8_metadata(num_gemms=3)
+            self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        super().reset_parameters(defer_init=False)
+
+        if tp_group is None:
+            self.tp_size = tp_size
+            if tp_size == 1:
+                self.set_tensor_parallel_group(tp_group)
+        else:
+            self.tp_size = get_distributed_world_size(tp_group)
+            self.set_tensor_parallel_group(tp_group)
+        self.set_nccl_overlap_warning_if_tp()
+
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[Float8Tensor]:
+        """
+        Fetch the fp8 weight tensor placeholders if they exist (when
+        `is_first_microbatch` is not `None`) or return empty fp8 weight
+        tensors (if `is_first_microbatch is None`)
+        """
+        return None
+
     @no_torch_dynamo()
     def forward(
         self,
@@ -2151,6 +2281,7 @@ class FusedAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        is_first_microbatch: Optional[bool] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
 
@@ -2243,23 +2374,31 @@ class FusedAttention(torch.nn.Module):
                 output = output.transpose(0,1).contiguous()
         else:
             with self.attention_dropout_ctx():
-                output = FusedAttnFunc.apply(
-                    self.training,
-                    max_seqlen_q, max_seqlen_kv,
-                    cu_seqlens_q, cu_seqlens_kv,
-                    query_layer, key_layer, value_layer,
-                    qkv_dtype,
-                    core_attention_bias,
-                    1.0/self.norm_factor,
-                    self.attention_dropout if self.training else 0.0,
-                    fast_zero_fill,
-                    qkv_layout,
-                    core_attention_bias_type,
-                    attn_mask_type,
-                    None, # rng_gen
-                    fused_attention_backend,
-                    use_FAv2_bwd,
-                )
+                inp = query_layer.clone()
+                with self.prepare_forward(inp, is_first_microbatch) as inp:
+                    assert self.fp8 or not self.primary_weights_in_fp8, \
+                       "Need to run inside fp8_autocast region when weights are stored in FP8."
+                    output = FusedAttnFunc.apply(
+                        self.training,
+                        max_seqlen_q, max_seqlen_kv,
+                        cu_seqlens_q, cu_seqlens_kv,
+                        query_layer, key_layer, value_layer,
+                        qkv_dtype,
+                        core_attention_bias,
+                        1.0/self.norm_factor,
+                        self.attention_dropout if self.training else 0.0,
+                        fast_zero_fill,
+                        qkv_layout,
+                        core_attention_bias_type,
+                        attn_mask_type,
+                        None, # rng_gen
+                        fused_attention_backend,
+                        use_FAv2_bwd,
+                        self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                        self.fp8_meta,
+                        self.tp_size,
+                        self.tp_group,
+                    )
 
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
@@ -2454,7 +2593,9 @@ class DotProductAttention(torch.nn.Module):
                                                   attention_type=attention_type,
                                                   layer_number=layer_number,
                                                   deterministic=self.deterministic,
-                                                  **attn_kwargs)
+                                                  **attn_kwargs,
+                                                  tp_size=self.tp_size,
+                                                  tp_group=self.tp_group)
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
@@ -2523,6 +2664,7 @@ class DotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
         inference_params: Optional[InferenceParams] = None,
+        is_first_microbatch: Optional[bool] = None,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -2626,6 +2768,19 @@ class DotProductAttention(torch.nn.Module):
             Adjustments of the sequence_len_offset should be done after a complete forward pass.
             If rotary positional embeddings (RoPE) are utilized, they must be prepared beforehand.
             Supports "sbhd" and "bshd" layouts, with the "sbhd" layout being more efficient.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
+                             * it also allows skipping gradient accumulation during the
+                               first microbatch (since it is the first gradient being
+                               produced)
         """
 
         assert (
@@ -2933,6 +3088,8 @@ class DotProductAttention(torch.nn.Module):
                     qkv_layout=qkv_layout,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     fused_attention_backend=fused_attention_backend,
@@ -2942,8 +3099,7 @@ class DotProductAttention(torch.nn.Module):
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv)
+                    is_first_microbatch=is_first_microbatch)
             return self.fused_attention(
                 query_layer,
                 key_layer,
@@ -2951,6 +3107,8 @@ class DotProductAttention(torch.nn.Module):
                 qkv_layout=qkv_layout,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
                 attn_mask_type=attn_mask_type,
                 attention_mask=attention_mask,
                 fused_attention_backend=fused_attention_backend,
@@ -2960,8 +3118,7 @@ class DotProductAttention(torch.nn.Module):
                 cp_group=self.cp_group,
                 cp_global_ranks=self.cp_global_ranks,
                 cp_stream=self.cp_stream,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv)
+                is_first_microbatch=is_first_microbatch)
 
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
