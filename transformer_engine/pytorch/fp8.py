@@ -150,7 +150,32 @@ class FP8GlobalStateManager:
         return "buffer_index_and_autocast_key"
 
     @classmethod
-    def add_fp8_tensors_to_global_buffer(cls, fp8_meta: Dict[str, Any]) -> None:
+    def get_key_in_buffer(
+        cls,
+        forward: bool,
+        fp8_weights: bool,
+        fp8_recipe: DelayedScaling,
+        fp8_group: dist_group_type,
+    ) -> str:
+        """Returns a key into the global FP8 buffers."""
+        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+        fwd_bwd_key = cls.get_fwd_bwd_key(forward)
+        return f"{fwd_bwd_key}_{fp8_weights}_{autocast_key}"
+
+    @classmethod
+    def split_key_in_buffer(cls, key: str) -> Tuple[bool, bool, str]:
+        """Splits buffer key into relevant parts."""
+        forward, fp8_weights, autocast_key = key.split("_", 2)
+        forward = True if forward == "forward" else False
+        fp8_weights = True if fp8_weights == "True" else False
+        return forward, fp8_weights, autocast_key
+
+    @classmethod
+    def add_fp8_tensors_to_global_buffer(
+        cls,
+        fp8_meta: Dict[str, Any],
+        fp8_weights: bool = False,
+    ) -> None:
         """
         The amax reduction process happens completely outside the FP8 modules.
         To participate in the reduction, the only role played by a module is
@@ -173,9 +198,8 @@ class FP8GlobalStateManager:
             return
 
         for forward in (True, False):
-            autocast_key = cls.get_unique_autocast_key(fp8_meta["recipe"], fp8_meta["fp8_group"])
-            fwd_bwd_key = cls.get_fwd_bwd_key(forward)
-            key = f"{fwd_bwd_key}_{autocast_key}"
+            key = cls.get_key_in_buffer(
+                forward, fp8_weights, fp8_meta["recipe"], fp8_meta["fp8_group"])
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
             if key not in cls.global_fp8_buffer:
@@ -193,7 +217,7 @@ class FP8GlobalStateManager:
                 cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
                 cls.global_non_weight_mask_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"])
-            fp8_meta[index_in_buffer] = (len(cls.global_non_weight_mask_buffer[key]) - 1, autocast_key)
+            fp8_meta[index_in_buffer] = (len(cls.global_non_weight_mask_buffer[key]) - 1, key)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -268,18 +292,19 @@ class FP8GlobalStateManager:
     def reduce_and_update_fp8_tensors(
         cls,
         forward: bool = True,
+        fp8_weights: bool = False,
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
         if not torch.distributed.is_initialized():
             return
 
-        fwd_bwd_key = cls.get_fwd_bwd_key(forward)
-
         for buffer_key in cls.global_fp8_buffer.keys():
             # Check for forward or backward reduction.
-            fwd, autocast_key = buffer_key.split("_", 1)
-            if fwd != fwd_bwd_key:
+            fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
+            if fwd_update != forward:
+                continue
+            if fwd_update and fp8_weights != fp8_weights_update:
                 continue
             if len(cls.global_fp8_buffer[buffer_key]) == 0:
                 continue
@@ -338,7 +363,7 @@ class FP8GlobalStateManager:
     ):
         """For FP8, each autocast can be uniquely identified by the recipe and fp8 group."""
         # TODO(ksivaman): Handle custom functions in recipe for amax and scale update.
-        return f"{str(recipe)}_{torch.distributed.get_process_group_ranks(group)}"
+        return f"{str(recipe)}:{torch.distributed.get_process_group_ranks(group)}"
 
     @classmethod
     def fp8_autocast_enter(
@@ -384,10 +409,13 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
+        # Reduce only the non-FP8 weight modules here.
+        # FP8 weight modules are reduced at the end of the optimizer
+        # step after the weight amax is populated.
         if (enabled and fp8_recipe.reduce_amax
             and cls.FP8_AUTOCAST_DEPTH == 0
             and not in_fp8_graph_capture_mode()):
-            cls.reduce_and_update_fp8_tensors(forward=True)
+            cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:

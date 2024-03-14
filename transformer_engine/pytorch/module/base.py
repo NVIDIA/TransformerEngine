@@ -234,7 +234,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
                 index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
-                buffer_key = f"{fwd_bwd_key}_{autocast_key}"
+                buffer_key = f"{fwd_bwd_key}_{autocast_key}" #TODO(ksivaman) fix
                 if buffer_key in FP8GlobalStateManager.global_fp8_buffer:
                     assert (
                         buffer_key in FP8GlobalStateManager.global_amax_history_buffer
@@ -256,7 +256,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
             index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
             fwd_bwd_key = FP8GlobalStateManager.get_fwd_bwd_key(fwd)
-            key = f"{fwd_bwd_key}_{autocast_key}"
+            key = f"{fwd_bwd_key}_{autocast_key}" #TODO(ksivaman) fix
             self.fp8_meta[fp8_meta_tensor_key].amax_history = buffers["amax_history"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale = buffers["scale"][key][index]
             self.fp8_meta[fp8_meta_tensor_key].scale_inv = buffers["scale_inv"][key][index]
@@ -590,7 +590,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # Setup for amax reduction
                 if self.fp8_meta["recipe"].reduce_amax:
                     if not in_fp8_graph_capture_mode():
-                        FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
+                        FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                            self.fp8_meta, fp8_weights=self.primary_weights_in_fp8)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
