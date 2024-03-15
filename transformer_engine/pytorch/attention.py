@@ -704,7 +704,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                             )
                             if len(rest) > 0:
-                                attn_biases[i] = rest
+                                attn_biases[i] = rest[0]
                         else:
                             # [b, sq, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
