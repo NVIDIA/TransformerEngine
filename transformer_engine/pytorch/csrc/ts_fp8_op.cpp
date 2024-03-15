@@ -321,7 +321,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
-  
+
   const int sm_count = transformer_engine::cuda::sm_count();
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
