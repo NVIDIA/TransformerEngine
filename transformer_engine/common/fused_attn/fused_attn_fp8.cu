@@ -2566,8 +2566,6 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
         //    variant_pack[dropout_offset] = devPtrDropoutOffset;
         //}
 
-std::cout << "GRAPH PRINT -----------" << std::endl;
-std::cout << mha_graph->print() << std::endl;
         NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
