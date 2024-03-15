@@ -306,6 +306,8 @@ at::Tensor fp8_transpose(at::Tensor input,
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
+  if (M == 0 || N == 0)
+    return input;
 
   auto output =
             allocateTorchTensor(input.size(1),
