@@ -2864,7 +2864,11 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
     warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+    callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+  } else {
     callranks_ag(2) callranks_ag(4) callranks_ag(8)
+  }
 }
 
 void allgather2_userbuff_inplace_sliced(const int handler, const int offset, const int elements,
