@@ -903,7 +903,6 @@ class Linear(TransformerEngineBaseModule):
                 weight_tensor = self.weight_tensor
                 bias_tensor = self.bias_tensor
 
-
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
                 is_first_microbatch

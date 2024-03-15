@@ -42,8 +42,7 @@ def cast_to_fp8(
             fp8_tensor,
             otype,
         )
-    else:
-        return inp
+    return inp
 
 def cast_from_fp8(
     inp: torch.Tensor,
