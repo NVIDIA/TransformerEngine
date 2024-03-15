@@ -516,13 +516,13 @@ class AttnFuncWithCP(torch.autograd.Function):
             assert (len(attn_bias.shape) == 4), "Attention bias shape should be [b, h, sq, sk]"
             # [b, np, sq, sk] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_bias_ = attn_bias.view( \
-                attn_bias.shape[:-2], \
+                *attn_bias.shape[:-2], \
                 2, attn_bias.shape[-2]//2, \
                 2*cp_size, attn_bias.shape[-1]//(2*cp_size) \
             )
             # [b, np, sq, sk] -> [b, np, sq, 2*cp, sk//(2*cp)]
             attn_bias = attn_bias.view( \
-                attn_bias.shape[:-1], \
+                *attn_bias.shape[:-1], \
                 2*cp_size, attn_bias.shape[-1]//(2*cp_size) \
             )
         assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
@@ -799,7 +799,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             )
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_dbias_ = attn_dbias.view(
-                attn_dbias.shape[:-3], 2, attn_dbias.shape[-3]//2, attn_dbias.shape[-2:]
+                *attn_dbias.shape[:-3], 2, attn_dbias.shape[-3]//2, *attn_dbias.shape[-2:]
             )
         else:
             attn_dbias = None
