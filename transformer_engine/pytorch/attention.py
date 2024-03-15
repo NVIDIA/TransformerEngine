@@ -504,7 +504,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         cp_size = get_distributed_world_size(cp_group)
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size]
-        recv_src = cp_global_ranks[(rank + cp_size - 1) % cp_size]
+        recv_src = cp_global_ranks[(rank - 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         causal = (attn_mask_type == "causal")
@@ -578,9 +578,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 kv_inputs[i%2] = kv_inputs[i%2].view(
                                     2, k.shape[0], -1, *k.shape[-2:])
                                 if attn_bias is not None:
+                                    idx = (rank - i) % cp_size
                                     attn_bias_inputs[i%2] = torch.cat(
-                                        (attn_bias[..., i, :], \
-                                         attn_bias[..., (2*cp_size-i-1), :]),
+                                        (attn_bias[..., idx, :], \
+                                         attn_bias[..., (2*cp_size-idx-1), :]),
                                         dim=-1
                                     ).contiguous()
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
@@ -614,7 +615,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                                 if attn_bias is not None:
-                                    attn_bias_inputs[i%2] = attn_bias[..., i, :].contiguous()
+                                    idx = (rank - i) % cp_size
+                                    attn_bias_inputs[i%2] = attn_bias[..., idx, :].contiguous()
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q,
@@ -651,9 +653,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 kv_inputs[i%2] = kv_inputs[i%2].view(
                                     2, k.shape[0], -1, *k.shape[-2:])
                                 if attn_bias is not None:
+                                    idx = (rank - i) % cp_size
                                     attn_bias_inputs[i%2] = torch.cat(
-                                        (attn_bias_[..., 1, :, i, :], \
-                                         attn_bias_[..., 1, :, (2*cp_size-i-1), :]),
+                                        (attn_bias_[..., 1, :, idx, :], \
+                                         attn_bias_[..., 1, :, (2*cp_size-idx-1), :]),
                                         dim=-1
                                     ).contiguous()
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
@@ -685,8 +688,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                     else:
                         if use_fused_attention:
                             if attn_bias is not None:
+                                idx = (rank - i) % cp_size
                                 attn_bias_inputs[i%2] = torch.cat(
-                                    (attn_bias[..., i, :], attn_bias[..., (2*cp_size-i-1), :]),
+                                    (attn_bias[..., idx, :], attn_bias[..., (2*cp_size-idx-1), :]),
                                     dim=-1
                                 ).contiguous()
                             out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
@@ -786,7 +790,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
-        send_dst = ctx.cp_global_ranks[(rank + cp_size - 1) % cp_size]
+        send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
@@ -1092,7 +1096,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 idx = (rank+i+1)%cp_size
                 if i == (cp_size - 1) or not ctx.causal:
                     # [b, np, sq, sk//cp] -> [b, np, sq, 2, sk//(2*cp)]
-                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1])
+                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
                     attn_dbias[..., idx, :].copy_(dbias_[..., 0, :])
                     attn_dbias[..., (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
                 elif i >= (cp_size-rank-1):
@@ -1100,7 +1104,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     attn_dbias[..., idx, :].copy_(dbias_)
                 else:
                     # [b, np, sq//2, sk//cp] -> [b, np, sq//2, 2, sk//(2*cp)]
-                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1])
+                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
                     attn_dbias_[..., 1, :, idx, :].copy_(dbias_[..., 0, :])
                     attn_dbias_[..., 1, :, (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
 
