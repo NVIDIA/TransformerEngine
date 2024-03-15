@@ -74,7 +74,6 @@ class _Linear(torch.autograd.Function):
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
-        explicit_parallel_comm: bool,
         tensor_parallel: bool,
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
@@ -303,7 +302,6 @@ class _Linear(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
-            ctx.explicit_parallel_comm = explicit_parallel_comm
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
@@ -315,13 +313,12 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
-        if not explicit_parallel_comm:
-            if ub_split_rs or ub_atomic_gemm_rs:
-                out = rs_out
-            elif parallel_mode == "row" and sequence_parallel:
-                out, _ = reduce_scatter_along_first_dim(out, tp_group)
-            elif parallel_mode == "row" and tensor_parallel:
-                out, _ = allreduce(out, tp_group)
+        if ub_split_rs or ub_atomic_gemm_rs:
+            out = rs_out
+        elif parallel_mode == "row" and sequence_parallel:
+            out, _ = reduce_scatter_along_first_dim(out, tp_group)
+        elif parallel_mode == "row" and tensor_parallel:
+            out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -431,15 +428,14 @@ class _Linear(torch.autograd.Function):
                     )
 
                 # Overlap dgrad-RS/AR with wgrad
-                if not ctx.explicit_parallel_comm:
-                    if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                        if handle is not None:
-                            handle.wait()
-                        dgrad, handle = reduce_scatter_along_first_dim(
-                            dgrad, ctx.tp_group, async_op=True
-                        )
-                    elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-                        dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+                if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                    if handle is not None:
+                        handle.wait()
+                    dgrad, handle = reduce_scatter_along_first_dim(
+                        dgrad, ctx.tp_group, async_op=True
+                    )
+                elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+                    dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
             if weight.requires_grad:
                 if ctx.fp8:
@@ -596,9 +592,6 @@ class Linear(TransformerEngineBaseModule):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    explicit_parallel_comm : bool, default = `False`
-             if set to `True`, the communications (AR/RS/AG) across TP ranks are ignored and
-             should be handled outside the Linear Layer.
     parallel_mode : {None, 'Column', 'Row'}, default = `None`
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
@@ -632,7 +625,6 @@ class Linear(TransformerEngineBaseModule):
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
-        explicit_parallel_comm: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         rng_tracker_name: Optional[str] = None,
         init_method: Optional[Callable] = None,
@@ -662,7 +654,6 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
-        self.explicit_parallel_comm = explicit_parallel_comm
         if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
@@ -941,8 +932,7 @@ class Linear(TransformerEngineBaseModule):
                 CPUOffloadEnabled,
                 self.tp_group,
                 self.tp_size,
-                self.sequence_parallel and not self.explicit_parallel_comm,
-                self.explicit_parallel_comm,
+                self.sequence_parallel,
                 self.tp_size > 1,
                 self.activation_dtype,
                 self.parallel_mode,
