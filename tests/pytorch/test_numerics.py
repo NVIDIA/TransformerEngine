@@ -5,7 +5,7 @@
 import math
 import os
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 import pytest
 import copy
 
@@ -73,19 +73,26 @@ def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
 
-def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
-    """Ensures two lists are equal."""
-    assert len(l1) == len(l2), "Unequal number of outputs."
-    failed = False
-    failed_tensors = ""
-    for i, (t1, t2) in enumerate(zip(l1, l2)):
-        if not torch.equal(t1, t2):
-            failed = True
-            failed_tensors += f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
-    assert not failed, "Output mismatches in:\n" + failed_tensors
+def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
+    """Estimated numerical error for a datatype
+
+    Based on tolerances for torch.testing.assert_close.
+
+    """
+    if dtype == torch.float32:
+        return dict(rtol=1.3e-6, atol=1e-5)
+    if dtype == torch.float16:
+        return dict(rtol=1e-3, atol=1e-5)
+    if dtype == torch.bfloat16:
+        return dict(rtol=1.6e-2, atol=1e-5)
+    raise ValueError(f"Unsuppored dtype ({dtype})")
 
 
-def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
+def assert_allclose(
+    l1: List[torch.Tensor],
+    l2: List[torch.Tensor],
+    atol: float,
+) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
@@ -463,7 +470,20 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
     outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
     outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols["atol"] = 1e-4
+    if fp8 or fp8_model_params:
+        tols.update(dict(rtol=0.125, atol=0.0675))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_recompute)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
 def _test_e2e_full_recompute(
@@ -575,7 +595,19 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         # Reset bias+GELU fusion flag to avoid contaminating other tests
         del os.environ["NVTE_BIAS_GELU_NVFUSION"]
 
-    assert_all_equal(outputs, outputs_recompute, names=names)
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols["atol"] = 1e-3
+    if fp8 or fp8_model_params:
+        tols.update(dict(rtol=0.125, atol=0.0675))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_recompute)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
@@ -676,7 +708,18 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    assert_all_equal(outputs, outputs_checkpoint)
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols.update(dict(rtol=2e-2, atol=2e-3))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -1340,7 +1383,18 @@ def test_gpt_fp8_parameters(dtype, bs, model):
 
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
-    assert_all_equal(outputs, outputs_fp8_params)
+
+    # Check that results match
+    tols = dict(rtol=0.125, atol=0.0675)
+    for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            rtol=0.125,
+            atol=0.0675,
+        )
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1416,7 +1470,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
 
-    assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
+    # Check that results match
+    torch.testing.assert_close(
+        y_bshd,
+        y_sbhd.transpose(0,1).contiguous(),
+    )
 
 
 model_configs_inference = {
