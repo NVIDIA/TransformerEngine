@@ -697,7 +697,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                 attn_scale=softmax_scale, dropout=dropout_p,
                                 qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
-                                attn_bias_type=attn_bias_type, attn_bias=attn_bias_input[i%2],
+                                attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                             )
                             if len(rest) > 0:
                                 attn_biases[i] = rest
