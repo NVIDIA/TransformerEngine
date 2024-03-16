@@ -503,6 +503,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
         num_gemms: int = 1,
+        allow_non_contiguous: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
@@ -581,7 +582,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
-            yield inp.contiguous()
+            if not allow_non_contiguous:
+                yield inp.contiguous()
+            else:
+                yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)

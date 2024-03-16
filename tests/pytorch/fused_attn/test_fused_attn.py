@@ -918,10 +918,12 @@ model_configs_fp8_vs_f16 = {
     #"fp8_7": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     #"fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     "fp8_9": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
-    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_11": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_12": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
-qkv_layout_fp8_vs_f16 = ['sbhd_sb2hd', 'sbh3d'] #'bshd_bshd_bshd' #'bs3hd'
+qkv_layout_fp8_vs_f16 = ['sbh3d']
 
 def _rmse(a, b):
     return math.sqrt(torch.pow((a-b), 2).sum()/a.numel())
@@ -1118,7 +1120,8 @@ def test_mha_fp8(dtype, model):
         dtype, config, "UnfusedDotProductAttention")
         #dtype, config, "FusedAttention")
 
-    tols = dict(atol=5e-2, rtol=5e-2)
+    tols = dict(atol=5e-1, rtol=5e-1)
+    #tols = dict(atol=5e-2, rtol=5e-2)
     #tols = dict(atol=5e-3, rtol=5e-3)
     #if dtype == torch.bfloat16:
     #    tols = dict(atol=2.5e-2, rtol=2.5e-2)

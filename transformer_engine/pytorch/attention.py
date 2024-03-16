@@ -2446,21 +2446,6 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata(num_gemms=3)
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
-
-        super().reset_parameters(defer_init=False)
-
-        if tp_group is None:
-            self.tp_size = tp_size
-            if tp_size == 1:
-                self.set_tensor_parallel_group(tp_group)
-        else:
-            self.tp_size = get_distributed_world_size(tp_group)
-            self.set_tensor_parallel_group(tp_group)
-        self.set_nccl_overlap_warning_if_tp()
-
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -2581,10 +2566,10 @@ class FusedAttention(TransformerEngineBaseModule):
                 output = output.transpose(0,1).contiguous()
         else:
             with self.attention_dropout_ctx():
-                inp = query_layer.clone()
-                with self.prepare_forward(inp, is_first_microbatch) as inp:
-                    assert self.fp8 or not self.primary_weights_in_fp8, \
-                       "Need to run inside fp8_autocast region when weights are stored in FP8."
+                with self.prepare_forward(query_layer,
+                    is_first_microbatch,
+                    num_gemms=3,
+                    allow_non_contiguous=True) as query_layer:
                     output = FusedAttnFunc.apply(
                         self.training,
                         max_seqlen_q, max_seqlen_kv,

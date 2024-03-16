@@ -3153,7 +3153,6 @@ void fused_attn_fp8_fwd(
   size_t workspace_size = 0;
 
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  std::cout << " calling fe_ver " << fe_ver << std::endl;
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
                   b, h, max_seqlen_q, max_seqlen_kv, d,
@@ -3265,7 +3264,6 @@ void fused_attn_fp8_bwd(
   size_t workspace_size = 0;
 
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  std::cout << " calling fe_ver " << fe_ver << std::endl;
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
                   b, h, max_seqlen_q, max_seqlen_kv, d,
