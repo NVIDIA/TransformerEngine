@@ -1856,31 +1856,6 @@ class FlashAttention(torch.nn.Module):
 
         return output
 
-class Combine_tensors(torch.autograd.Function):
-    """Combine tensors along a particular dimension"""
-    @staticmethod
-    def forward(ctx, dim, *tensors):
-        num_tensors = len(tensors)
-        combined_tensor = torch.Tensor().to(
-            device=tensors[0].device, dtype=tensors[0].dtype)
-        new_shape = list(tensors[0].shape)
-        new_shape.insert(dim, num_tensors)
-        new_stride = list(tensors[0].stride())
-        new_stride.insert(dim, int(new_stride[dim-1]/num_tensors))
-        combined_tensor.set_(
-            tensors[0].untyped_storage(),
-            tensors[0].storage_offset(),
-            new_shape, new_stride)
-
-        ctx.dim = dim
-        return combined_tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        ret = torch.split(grad_output, [1]*ctx.dim, dim = ctx.dim)
-        ret = [x.squeeze(ctx.dim) for x in ret]
-        return None, *ret
-
 def _combine_tensors(
         tensors: List[torch.Tensor],
         dim: int,
@@ -2610,75 +2585,27 @@ class FusedAttention(TransformerEngineBaseModule):
                 with self.prepare_forward(inp, is_first_microbatch) as inp:
                     assert self.fp8 or not self.primary_weights_in_fp8, \
                        "Need to run inside fp8_autocast region when weights are stored in FP8."
-                    if qkv_layout == 'sbh3d':
-                        mixed_layer = Combine_tensors.apply(
-                            3, query_layer, key_layer, value_layer)
-                        output = FusedAttnFunc_qkvpacked.apply(
-                            self.training,
-                            max_seqlen_q,
-                            cu_seqlens_q,
-                            mixed_layer,
-                            qkv_dtype,
-                            core_attention_bias,
-                            1.0/self.norm_factor,
-                            self.attention_dropout if self.training else 0.0,
-                            fast_zero_fill,
-                            qkv_layout,
-                            core_attention_bias_type,
-                            attn_mask_type,
-                            None, # rng_gen
-                            fused_attention_backend,
-                            use_FAv2_bwd,
-                            self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                            self.fp8_meta,
-                            self.tp_size,
-                            self.tp_group,
-                        )
-                    if qkv_layout == 'sbhd_sb2hd':
-                        mixed_layer = Combine_tensors.apply(
-                            2, key_layer, value_layer)
-                        output = FusedAttnFunc_kvpacked.apply(
-                            self.training,
-                            max_seqlen_q, max_seqlen_kv,
-                            cu_seqlens_q, cu_seqlens_kv,
-                            query_layer, mixed_layer,
-                            qkv_dtype,
-                            core_attention_bias,
-                            1.0/self.norm_factor,
-                            self.attention_dropout if self.training else 0.0,
-                            fast_zero_fill,
-                            qkv_layout,
-                            core_attention_bias_type,
-                            attn_mask_type,
-                            None, # rng_gen
-                            fused_attention_backend,
-                            use_FAv2_bwd,
-                            self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                            self.fp8_meta,
-                            self.tp_size,
-                            self.tp_group,
-                        )
-                    #output = FusedAttnFunc.apply(
-                    #    self.training,
-                    #    max_seqlen_q, max_seqlen_kv,
-                    #    cu_seqlens_q, cu_seqlens_kv,
-                    #    query_layer, key_layer, value_layer,
-                    #    qkv_dtype,
-                    #    core_attention_bias,
-                    #    1.0/self.norm_factor,
-                    #    self.attention_dropout if self.training else 0.0,
-                    #    fast_zero_fill,
-                    #    qkv_layout,
-                    #    core_attention_bias_type,
-                    #    attn_mask_type,
-                    #    None, # rng_gen
-                    #    fused_attention_backend,
-                    #    use_FAv2_bwd,
-                    #    self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                    #    self.fp8_meta,
-                    #    self.tp_size,
-                    #    self.tp_group,
-                    #)
+                    output = FusedAttnFunc.apply(
+                        self.training,
+                        max_seqlen_q, max_seqlen_kv,
+                        cu_seqlens_q, cu_seqlens_kv,
+                        query_layer, key_layer, value_layer,
+                        qkv_dtype,
+                        core_attention_bias,
+                        1.0/self.norm_factor,
+                        self.attention_dropout if self.training else 0.0,
+                        fast_zero_fill,
+                        qkv_layout,
+                        core_attention_bias_type,
+                        attn_mask_type,
+                        None, # rng_gen
+                        fused_attention_backend,
+                        use_FAv2_bwd,
+                        self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                        self.fp8_meta,
+                        self.tp_size,
+                        self.tp_group,
+                    )
 
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
