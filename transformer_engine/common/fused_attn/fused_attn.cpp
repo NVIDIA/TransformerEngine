@@ -485,7 +485,18 @@ void nvte_fused_attn_fwd_kvpacked(
       "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+#if (CUDNN_VERSION >= 8900)
+    fused_attn_fp8_fwd_kvpacked(
+            b, h_q, max_seqlen_q, max_seqlen_kv, d,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+            input_Q, input_KV, input_output_S, output_O,
+            Aux_CTX_Tensors,
+            input_cu_seqlens_q, input_cu_seqlens_kv,
+            input_rng_state,
+            wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
+#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
@@ -589,7 +600,23 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTE_ERROR(err_msg);
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+#if (CUDNN_VERSION >= 8900)
+    const Tensor *input_M = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    fused_attn_fp8_bwd_kvpacked(
+                    b, h_q, max_seqlen_q, max_seqlen_kv, d,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+                    input_Q, input_KV, input_O, input_dO,
+                    input_M, input_ZInv,
+                    input_S, input_output_dP,
+                    output_dQ, output_dKV,
+                    input_cu_seqlens_q, input_cu_seqlens_kv,
+                    input_rng_state,
+                    wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
+#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }

@@ -921,7 +921,7 @@ model_configs_fp8_vs_f16 = {
     "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
-qkv_layout_fp8_vs_f16 = ['sbh3d'] #'bshd_bshd_bshd' #'bs3hd'
+qkv_layout_fp8_vs_f16 = ['sbhd_sb2hd', 'sbh3d'] #'bshd_bshd_bshd' #'bs3hd'
 
 def _rmse(a, b):
     return math.sqrt(torch.pow((a-b), 2).sum()/a.numel())
@@ -930,7 +930,7 @@ def _rmse(a, b):
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
-@pytest.mark.parametrize("model", ["fp8_9", "fp8_10"])
+@pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout):
     config = model_configs_fp8_vs_f16[model]
@@ -1080,20 +1080,22 @@ model_configs_fp8 = {
     "fp8_1": ModelConfig(1,  1,  1,  64,  512,  512, 0.0, "no_mask", "no_bias"),
     "fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
     "fp8_3": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_4": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_4": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_5": ModelConfig(1,  1,  1,  64,  512,  512, 0.0,  "causal", "no_bias"),
     "fp8_6": ModelConfig(4, 16, 16,  64,  512,  512, 0.0,  "causal", "no_bias"),
     "fp8_7": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
-    "fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_8": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16, torch.bfloat16]
 fe_ver = int(os.getenv('NVTE_FUSED_ATTN_FE_VER','1'))
+models_v0 = ['fp8_1', 'fp8_2', 'fp8_5', 'fp8_6']
+models_v1 = ['fp8_3', 'fp8_4', 'fp8_7', 'fp8_8']
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
-@pytest.mark.parametrize("model", model_configs_fp8.keys())
+@pytest.mark.parametrize("model", models_v1 if fe_ver == 1 else models_v0) #model_configs_fp8.keys())
 def test_mha_fp8(dtype, model):
     """Test FP8 dot product attention
 
