@@ -14,6 +14,8 @@ from transformer_engine.pytorch.fp8 import (
     amax_and_scale_update,
     get_default_fp8_recipe,
 )
+import transformer_engine.pytorch.fuser
+import transformer_engine_extensions as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -31,7 +33,7 @@ class TestFP8Recipe:
     @pytest.mark.parametrize("amax_history_len", [1, 31, 1024])
     @pytest.mark.parametrize("amax_compute_algo", ["max", "most_recent"])
     @pytest.mark.parametrize("is_first_microbatch", [None, True, False])
-    def test_amax_and_scale_update(
+    def test_fp8_scale_update_with_linear_module(
         self,
         amax_history_len: int,
         amax_compute_algo: str,
@@ -162,3 +164,123 @@ class TestFP8Recipe:
             fp8_meta[backward_key].scale_inv,
             ref_scale_inv_backward,
         )
+
+    def test_fp8_scale_update_with_linear_fuser_op(
+        self,
+        num_steps: int = 4,
+        in_shape: tuple[int] = (16, 16),
+        dtype: torch.dtype = torch.float32,
+    ):
+        device = torch.device("cuda")
+
+        ### TODO Non-default recipe
+        amax_history_len: int = 1024
+        amax_compute_algo: str = "max"
+        margin: float = 0
+
+        # Construct linear op
+        op = te.fuser.ops.UnfusedLinear(in_shape[-1], in_shape[-1])
+
+        # Get FP8 meta tensors
+        forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+        backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+        x_fp8_meta = op.get_fp8_meta("input")[forward_key]
+        w_fp8_meta = op.get_fp8_meta("param")[forward_key]
+        dy_fp8_meta = op.get_fp8_meta("grad_output")[backward_key]
+
+        # Perform training steps
+        x_history = []
+        w_history = []
+        dy_history = []
+        for step in range(num_steps):
+
+            # Fill tensors with known values
+            x_history.append(step + 0.25)
+            w_history.append(step + 0.5)
+            dy_history.append(step + 0.75)
+            x = torch.full(
+                in_shape,
+                x_history[-1],
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
+            dy = torch.full(
+                in_shape,
+                dy_history[-1],
+                dtype=dtype,
+                device=device,
+            )
+            with torch.no_grad():
+                op.weight.fill_(w_history[-1])
+
+            # Forward and backward pass
+            with te.fp8_autocast(enabled=True):
+                y = op(x)
+            y.backward(dy)
+
+            # Check amax histories
+            def check_amax_history(fp8_meta, ref_amax_history):
+                if len(ref_amax_history) > amax_history_len:
+                    ref_amax_history = ref_amax_history[-amax_history_len:]
+                ref_amax_history = torch.tensor(
+                    ref_amax_history,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                test_amax_history = fp8_meta.amax_history[:, 0]
+                tols = dict(rtol=0, atol=0)
+                torch.testing.assert_close(
+                    test_amax_history[0],
+                    ref_amax_history[-1],
+                    **tols,
+                )
+                if step > 0:
+                    torch.testing.assert_close(
+                        test_amax_history[-step:],
+                        ref_amax_history[:step],
+                        **tols,
+                    )
+            check_amax_history(x_fp8_meta, x_history)
+            check_amax_history(w_fp8_meta, w_history)
+            check_amax_history(dy_fp8_meta, dy_history)
+
+            # Check scale and scale reciprocal
+            if step > 0:
+
+                def check_scale(
+                    fp8_meta,
+                    ref_amax_history,
+                    stage,
+                ):
+
+                    # Compute amax
+                    if len(ref_amax_history) > amax_history_len:
+                        ref_amax_history = ref_amax_history[-amax_history_len:]
+                    if amax_compute_algo == "max":
+                        ref_amax = max(ref_amax_history[:-1])
+                    elif amax_compute_algo == "most_recent":
+                        ref_amax = ref_amax_history[-2]
+                    else:
+                        raise RuntimeError(f"{amax_compute_algo=} is not supported")
+
+                    # Compute scale
+                    max_val ={
+                        "forward": 448.0,
+                        "backward": 57344.0,
+                    }[stage]
+                    ref_scale = (max_val / ref_amax) / (2 ** margin)
+
+                    # Check values in FP8 meta tensors
+                    torch.testing.assert_close(
+                        fp8_meta.scale.item(),
+                        ref_scale,
+                    )
+                    torch.testing.assert_close(
+                        fp8_meta.scale_inv.item(),
+                        1 / ref_scale,
+                    )
+
+                check_scale(x_fp8_meta, x_history, "forward")
+                check_scale(w_fp8_meta, w_history, "forward")
+                check_scale(dy_fp8_meta, dy_history, "backward")

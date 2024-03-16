@@ -50,7 +50,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
                     param.requires_grad for param in op.parameters()
                 )
             for idx in unfused_op_idxs:
-                unfused_op_ctxs[idx].requires_grad = requires_grad
+                unfused_op_ctxs[idx]._requires_grad = requires_grad
             x.requires_grad_(requires_grad=requires_grad)
 
         # Flatten list of saved tensors
@@ -60,8 +60,8 @@ class _PipelineAutogradFunction(torch.autograd.Function):
             if ctx.to_save is not None:
                 to_save.extend(ctx.to_save)
             range_end = len(to_save)
-            ctx.to_save = None
-            ctx.saved_tensors_range = (range_start, range_end)
+            ctx._to_save = None
+            ctx._saved_tensors_range = (range_start, range_end)
         func_ctx.save_for_backward(*to_save)
 
         # Other context for backward pass
@@ -86,8 +86,8 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         # Unflatten list of saved tensors
         saved_tensors = func_ctx.saved_tensors
         for ctx in unfused_op_ctxs:
-            ctx.saved_tensors = saved_tensors[slice(*ctx.saved_tensors_range)]
-            ctx.saved_tensors_range = None
+            ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
+            ctx._saved_tensors_range = None
 
         # Apply backward ops
         dx = grad_output
@@ -96,7 +96,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
 
             # Stop if no more gradients are required
             if all(
-                not unfused_op_ctxs[idx].requires_grad
+                not unfused_op_ctxs[idx]._requires_grad
                 for idx in unfused_op_idxs
             ):
                 dx = None
@@ -190,7 +190,19 @@ class Pipeline:
 
         # Construct autograd contexts
         num_unfused_ops = len(self._unfused_ops)
-        unfused_op_ctxs = [OperationContext() for _ in range(num_unfused_ops)]
+        unfused_op_ctxs = []
+        for idx, op in enumerate(self._unfused_ops):
+            next_op, prev_op = None, None
+            if idx < num_unfused_ops - 1:
+                next_op = self._unfused_ops[idx+1]
+            if idx > 0:
+                prev_op = self._unfused_ops[idx-1]
+            ctx = OperationContext(
+                op=op,
+                next_op=next_op,
+                prev_op=prev_op,
+            )
+            unfused_op_ctxs.append(ctx)
 
         # Canonicalize op kwargs
         if unfused_op_kwargs is None:
