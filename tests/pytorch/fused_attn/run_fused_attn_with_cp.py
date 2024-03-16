@@ -69,18 +69,30 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     v = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
 
+    # create flash attention bias
+    if config.attn_bias_type not in ["no_bias", "alibi"]:
+        attn_bias_shape = (1, 1, config.max_seqlen_q, config.max_seqlen_kv)
+        bias = torch.randn(*attn_bias_shape, dtype=dtypes[dtype]).cuda()
+    else:
+        bias = None
+
     # make sure all GPU ranks have same inputs
-    for x in [q, k, v, dout]:
+    for x in [q, k, v, dout] + ([] if bias is None else [bias]):
         dist.broadcast(x, 0, group=cp_comm_group)
 
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
-    out = core_attn(q, k, v)
+    out = core_attn(
+        q, k, v,
+        core_attention_bias_type=config.attn_bias_type,
+        core_attention_bias=bias,
+    )
     out.backward(dout)
 
     # run core_attn wit CP
-    q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
+    q_, k_, v_, dout_, *rest = [x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])]
+    bias_ = rest[0] if len(rest) else None
     seq_dim = qkv_format.index('s')
     q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
         for x in [q_, k_, v_, dout_]]
@@ -88,8 +100,16 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
     q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
+    if bias_ is not None:
+        bias_ = bias_.view(*bias_.shape[:-2], 2*world_size, bias_.shape[-2]//(2*world_size), bias_.shape[-1])
+        bias_ = bias_.index_select(2, seq_idx)
+        bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream())
-    out_ = core_attn(q_, k_, v_)
+    out_ = core_attn(
+        q_, k_, v_,
+        core_attention_bias_type=config.attn_bias_type,
+        core_attention_bias=bias_,
+    )
     out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:

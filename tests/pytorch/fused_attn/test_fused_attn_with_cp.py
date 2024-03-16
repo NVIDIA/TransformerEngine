@@ -43,6 +43,15 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
         check=True
     )
 
+model_configs_bias = {
+    #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,              bias
+    "cp_1_2": ModelConfig(1, 12, 12, 128, 16384, 16384, 0.0,  "causal", "post_scale_bias"), # MHA
+    "cp_1_3": ModelConfig(1, 12, 12, 128, 16384, 16384, 0.0, "no_mask", "post_scale_bias"), # MHA
+    "cp_2_2": ModelConfig(1, 12,  1, 128, 16384, 16384, 0.0,  "causal", "post_scale_bias"), # GQA
+    "cp_2_3": ModelConfig(1, 12,  1, 128, 16384, 16384, 0.0, "no_mask", "post_scale_bias"), # GQA
+}
+model_configs.update(model_configs_bias)
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs.keys())
