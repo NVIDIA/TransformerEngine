@@ -577,8 +577,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     if (is_reduce_scatter) {
       // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
       // outputs for reduction at the end of the pipelining.
-      ubuf_bytes = (int)(ubuf_bytes / tp_size * (tp_size * 2 - 1));
-      num_ubuf_chunks = (int)(tp_size * 2 - 1);
+      ubuf_bytes = static_cast<int>(ubuf_bytes / tp_size * (tp_size * 2 - 1));
+      num_ubuf_chunks = static_cast<int>(tp_size * 2 - 1);
     }
     _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
                                               _ub_comm, true);
@@ -1069,7 +1069,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     int n = B.size(0);
 
     // Get communication and GEMM input chunk sizes
-    int n_chunk = n / _tp_size; 
+    int n_chunk = n / _tp_size;
     const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
     const int input_b_chunk_bytes = n_chunk * k * B.element_size();
 
@@ -1191,4 +1191,3 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 };  // UbufP2PCommOverlap
 
 }  // namespace ubuf
-  
