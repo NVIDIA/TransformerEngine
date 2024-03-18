@@ -18,6 +18,7 @@
 #include <torch/types.h>
 
 #include "common/util/logging.h"
+#include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
 
 #define HALF_BYTES 2
@@ -112,6 +113,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
+    _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
     output_tensor = torch::Tensor();
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -587,6 +589,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
+    _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
     _tp_size = tp_size;
     _aggregate2 = aggregate2;
