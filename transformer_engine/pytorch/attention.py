@@ -1055,6 +1055,22 @@ class AttnFuncWithCP(torch.autograd.Function):
                 else:
                     dq.add_(dq_)
 
+            if attn_dbias is not None:
+                idx = (rank+i+1)%cp_size
+                if i == (cp_size - 1) or not ctx.causal:
+                    # [b, np, sq, sk//cp] -> [b, np, sq, 2, sk//(2*cp)]
+                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
+                    attn_dbias[..., idx, :].copy_(dbias_[..., 0, :])
+                    attn_dbias[..., (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
+                elif i >= (cp_size-rank-1):
+                    # [b, np, sq, sk//(2*cp)]
+                    attn_dbias[..., idx, :].copy_(dbias_)
+                else:
+                    # [b, np, sq//2, sk//cp] -> [b, np, sq//2, 2, sk//(2*cp)]
+                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
+                    attn_dbias_[..., 1, :, idx, :].copy_(dbias_[..., 0, :])
+                    attn_dbias_[..., 1, :, (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
+
             # wait until dKV is received
             for req in send_recv_reqs:
                 req.wait()
@@ -1091,22 +1107,6 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dkv.copy_(dkv_)
                 else:
                     dkv.add_(dkv_)
-
-            if attn_dbias is not None:
-                idx = (rank+i+1)%cp_size
-                if i == (cp_size - 1) or not ctx.causal:
-                    # [b, np, sq, sk//cp] -> [b, np, sq, 2, sk//(2*cp)]
-                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
-                    attn_dbias[..., idx, :].copy_(dbias_[..., 0, :])
-                    attn_dbias[..., (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
-                elif i >= (cp_size-rank-1):
-                    # [b, np, sq, sk//(2*cp)]
-                    attn_dbias[..., idx, :].copy_(dbias_)
-                else:
-                    # [b, np, sq//2, sk//cp] -> [b, np, sq//2, 2, sk//(2*cp)]
-                    dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
-                    attn_dbias_[..., 1, :, idx, :].copy_(dbias_[..., 0, :])
-                    attn_dbias_[..., 1, :, (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
 
         if ctx.causal:
             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
