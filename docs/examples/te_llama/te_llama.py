@@ -21,12 +21,12 @@ from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
 
 @contextmanager
-def replace_decoder(te_decodder_cls):
+def replace_decoder(te_decoder_cls):
     """
     Replace `LlamaDecoderLayer` with custom `TELlamaDecoderLayer`.
     """
     original_llama_decoder_cls = transformers.models.llama.modeling_llama.LlamaDecoderLayer
-    transformers.models.llama.modeling_llama.LlamaDecoderLayer = te_decodder_cls
+    transformers.models.llama.modeling_llama.LlamaDecoderLayer = te_decoder_cls
     try:
         yield
     finally:
@@ -56,6 +56,7 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
             normalization="RMSNorm",
             activation="swiglu",
             attn_input_format="bshd",
+            num_gqa_groups=config.num_key_value_heads,
         )
         te_rope = RotaryPositionEmbedding(config.hidden_size//config.num_attention_heads)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -84,7 +85,7 @@ class TELlamaForCausalLM:
     """
 
     def __new__(cls, config: LlamaConfig):
-        with replace_decoder(te_decodder_cls=TELlamaDecoderLayer):
+        with replace_decoder(te_decoder_cls=TELlamaDecoderLayer):
             llama_for_causal_lm = LlamaForCausalLM(config)
         return llama_for_causal_lm
 
