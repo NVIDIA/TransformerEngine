@@ -102,6 +102,62 @@ class TestFuserOps:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    @pytest.mark.parametrize("in_shape", ((1,),))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("device", ("cuda", "cpu"))
+    @pytest.mark.parametrize("fp8", (False, True))
+    def test_identity(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device,
+        fp8: bool,
+    ) -> None:
+        """Reshape operation"""
+
+        # Skip invalid configurations
+        if fp8 and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8 and torch.device(device).type != "cuda":
+            pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=fp8,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = x_ref
+        dx_ref = dy_ref
+
+        # Implementation with fusable operation
+        op = te_fuser.ops.Identity()
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        # Check results
+        tols = dict(rtol=0, atol=0)  # Identity is exact
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, dx_ref, **tols)
+
+        # Make sure we are not trivially passing the test
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(y_test, -y_ref, **tols)
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(dx_test, -dx_ref, **tols)
+
     @pytest.mark.parametrize(
         "shapes",
         (

@@ -33,11 +33,41 @@ from .._common import (
 )
 
 def _wait_async(handle: Optional[Any]) -> None:
+    """Wait for asynchronous communication to finish, if needed"""
     if handle is not None:
         handle.wait()
 
 
 class UnfusedLinear(UnfusedOperation):
+    """Apply linear transformation: :math:`y = x A^T`
+
+    This is a drop-in replacement for `torch.nn.Linear` with
+    `bias=False`.
+
+    Parameters
+    ----------
+    in_features: int
+        Inner dimension of input tensor
+    out_features: int
+        Inner dimension of output tensor
+    device: torch.device, default = default CUDA device
+        Tensor device
+    dtype: torch.dtype, default = default dtype
+        Tensor datatype
+    tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        Mode for tensor parallelism
+    tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+        Process group for tensor parallelism
+    sequence_parallel: bool, default = `False`
+        Whether to apply sequence parallelism together with tensor
+        parallelism, i.e. distributing input or output tensors along
+        outer dimension (sequence or batch dim) when not distributing
+        along inner dimension (embedding dim)
+    rng_state_tracker_function: callable
+        Function that returns `CudaRNGStatesTracker`, which is used
+        for model-parallel weight initialization
+
+    """
 
     def __init__(
         self,
@@ -76,47 +106,26 @@ class UnfusedLinear(UnfusedOperation):
         self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
         # Tensor parallel configuration
-        tensor_parallel_size = 1
-        local_in_features = in_features
-        local_out_features = out_features
-        if tensor_parallel_mode is None:
-            tensor_parallel_group = None
-            sequence_parallel = False
-        else:
-            tensor_parallel_size = torch.distributed.get_world_size(tensor_parallel_group)
-            if tensor_parallel_size == 1:
-                tensor_parallel_mode = None
-                tensor_parallel_group = None
-                sequence_parallel = False
-            elif tensor_parallel_mode == "column":
-                if out_features % tensor_parallel_size != 0:
-                    raise ValueError(
-                        "Invalid configuration for tensor parallelism "
-                        f"({tensor_parallel_mode=}, "
-                        f"{out_features=}, "
-                        f"{tensor_parallel_size=})"
-                    )
-                local_out_features //= tensor_parallel_size
-            elif tensor_parallel_mode == "row":
-                if in_features % tensor_parallel_size != 0:
-                    raise ValueError(
-                        "Invalid configuration for tensor parallelism "
-                        f"({tensor_parallel_mode=}, "
-                        f"{in_features=}, "
-                        f"{tensor_parallel_size=})"
-                    )
-                local_in_features //= tensor_parallel_size
-            else:
-                raise ValueError(
-                    'Supported modes for tensor parallelism are "row" and "column" '
-                    f"(got {tensor_parallel_mode=})"
-                )
-        self.tensor_parallel_mode: Optional[str] = tensor_parallel_mode
-        self.tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = tensor_parallel_group
-        self.tensor_parallel_size: int = tensor_parallel_size
-        self.sequence_parallel: bool = sequence_parallel
-        self.local_in_features: int = local_in_features
-        self.local_out_features: int = local_out_features
+        self.tensor_parallel_mode: Optional[str]
+        self.tensor_parallel_group: Optional[torch.distributed.ProcessGroup]
+        self.tensor_parallel_size: int
+        self.sequence_parallel: bool
+        self.local_in_features: int
+        self.local_out_features: int
+        (
+            self.tensor_parallel_mode,
+            self.tensor_parallel_group,
+            self.tensor_parallel_size,
+            self.sequence_parallel,
+            self.local_in_features,
+            self.local_out_features,
+        ) = self._canonicalize_tensor_parallelism(
+            mode=tensor_parallel_mode,
+            process_group=tensor_parallel_group,
+            sequence_parallel=sequence_parallel,
+            in_features=in_features,
+            out_features=out_features,
+        )
 
         # Whether weight tensor is natively in FP8
         self._with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
@@ -125,8 +134,8 @@ class UnfusedLinear(UnfusedOperation):
 
         # Initialize parameters if needed
         weight = torch.empty(
-            local_out_features,
-            local_in_features,
+            self.local_out_features,
+            self.local_in_features,
             device="meta",
             dtype=dtype,
         )
@@ -136,6 +145,106 @@ class UnfusedLinear(UnfusedOperation):
         self._rng_state_tracker_function = rng_state_tracker_function
         if not defer_param_init:
             self.reset_parameters()
+
+    @classmethod
+    def _canonicalize_tensor_parallelism(
+        cls,
+        *,
+        mode: Optional[str],
+        process_group: Optional[torch.distributed.ProcessGroup],
+        sequence_parallel: bool,
+        in_features: int,
+        out_features: int,
+    ) -> tuple[
+        Optional[str],
+        Optional[torch.distributed.ProcessGroup],
+        int,
+        bool,
+        int,
+        int,
+    ]:
+        """Check configuration for tensor parallelism
+
+        Parameters
+        ----------
+        mode: {`None`, "column", "row"}
+            Mode for tensor parallelism
+        process_group: torch.distributed.ProcessGroup
+            Process group for tensor parallelism
+        sequence_parallel: bool
+            Whether to apply sequence parallelism together with tensor
+            parallelism, i.e. distributing input or output tensors
+            along outer dimension (sequence or batch dim) when not
+            distributing along inner dimension (embedding dim)
+        in_features: int
+            Inner dimension of global input tensor
+        out_features: int
+            Inner dimension of global output tensor
+
+        Returns
+        -------
+        mode: {`None`, "column", "row"}
+            Mode for tensor parallelism
+        process_group: torch.distributed.ProcessGroup
+            Process group for tensor parallelism
+        group_size: int
+            Size of tensor-parallel process group
+        sequence_parallel: bool
+            Whether to apply sequence parallelism
+        local_in_features: int
+            Inner dimension of local input tensor
+        local_out_features: int
+            Inner dimension of local output tensor
+
+        """
+
+        # Tensor-parallel group size
+        if mode is None:
+            group_size = 1
+        else:
+            group_size = torch.distributed.get_world_size(process_group)
+
+        # Disable tensor parallelism if not needed
+        if group_size == 1:
+            mode = None
+            process_group = None
+            sequence_parallel = False
+
+        # Determine local tensor dims
+        local_in_features = in_features
+        local_out_features = out_features
+        if mode is None:
+            pass
+        elif mode == "column":
+            # Distribute output tensor
+            if out_features % group_size != 0:
+                raise ValueError(
+                    "Invalid configuration for tensor parallelism "
+                    f"({mode=}, {out_features=}, {group_size=})"
+                )
+            local_out_features //= group_size
+        elif mode == "row":
+            # Distribute input tensor
+            if in_features % group_size != 0:
+                raise ValueError(
+                    "Invalid configuration for tensor parallelism "
+                    f"({mode=}, {in_features=}, {group_size=})"
+                )
+            local_in_features //= group_size
+        else:
+            raise ValueError(
+                "Supported modes for tensor parallelism are "
+                f'`None`, "row", and "column" (got {mode=})'
+            )
+
+        return (
+            mode,
+            process_group,
+            group_size,
+            sequence_parallel,
+            local_in_features,
+            local_out_features,
+        )
 
     def num_fp8_scales(self, mode: str) -> int:
         if mode == "input":

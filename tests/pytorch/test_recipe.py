@@ -219,8 +219,8 @@ class TestFP8Recipe:
                 y = op(x)
             y.backward(dy)
 
-            # Check amax histories
             def check_amax_history(fp8_meta, ref_amax_history):
+                """Check that amax history matches expected values"""
                 if len(ref_amax_history) > amax_history_len:
                     ref_amax_history = ref_amax_history[-amax_history_len:]
                 ref_amax_history = torch.tensor(
@@ -241,46 +241,51 @@ class TestFP8Recipe:
                         ref_amax_history[:step],
                         **tols,
                     )
+
+            def check_scale(
+                fp8_meta,
+                ref_amax_history,
+                stage,
+            ):
+                """Check that scale and scale reciprocal match expected values"""
+
+                # Initial scale
+                if step == 0:
+                    torch.testing.assert_close(fp8_meta.scale.item(), 1.0)
+                    torch.testing.assert_close(fp8_meta.scale_inv.item(), 1.0)
+                    return
+
+                # Compute amax
+                if len(ref_amax_history) > amax_history_len:
+                    ref_amax_history = ref_amax_history[-amax_history_len:]
+                if amax_compute_algo == "max":
+                    ref_amax = max(ref_amax_history[:-1])
+                elif amax_compute_algo == "most_recent":
+                    ref_amax = ref_amax_history[-2]
+                else:
+                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
+
+                # Compute scale
+                max_val ={
+                    "forward": 448.0,
+                    "backward": 57344.0,
+                }[stage]
+                ref_scale = (max_val / ref_amax) / (2 ** margin)
+
+                # Check values in FP8 meta tensors
+                torch.testing.assert_close(
+                    fp8_meta.scale.item(),
+                    ref_scale,
+                )
+                torch.testing.assert_close(
+                    fp8_meta.scale_inv.item(),
+                    1 / ref_scale,
+                )
+
+            # Check that results match expected values
             check_amax_history(x_fp8_meta, x_history)
             check_amax_history(w_fp8_meta, w_history)
             check_amax_history(dy_fp8_meta, dy_history)
-
-            # Check scale and scale reciprocal
-            if step > 0:
-
-                def check_scale(
-                    fp8_meta,
-                    ref_amax_history,
-                    stage,
-                ):
-
-                    # Compute amax
-                    if len(ref_amax_history) > amax_history_len:
-                        ref_amax_history = ref_amax_history[-amax_history_len:]
-                    if amax_compute_algo == "max":
-                        ref_amax = max(ref_amax_history[:-1])
-                    elif amax_compute_algo == "most_recent":
-                        ref_amax = ref_amax_history[-2]
-                    else:
-                        raise RuntimeError(f"{amax_compute_algo=} is not supported")
-
-                    # Compute scale
-                    max_val ={
-                        "forward": 448.0,
-                        "backward": 57344.0,
-                    }[stage]
-                    ref_scale = (max_val / ref_amax) / (2 ** margin)
-
-                    # Check values in FP8 meta tensors
-                    torch.testing.assert_close(
-                        fp8_meta.scale.item(),
-                        ref_scale,
-                    )
-                    torch.testing.assert_close(
-                        fp8_meta.scale_inv.item(),
-                        1 / ref_scale,
-                    )
-
-                check_scale(x_fp8_meta, x_history, "forward")
-                check_scale(w_fp8_meta, w_history, "forward")
-                check_scale(dy_fp8_meta, dy_history, "backward")
+            check_scale(x_fp8_meta, x_history, "forward")
+            check_scale(w_fp8_meta, w_history, "forward")
+            check_scale(dy_fp8_meta, dy_history, "backward")

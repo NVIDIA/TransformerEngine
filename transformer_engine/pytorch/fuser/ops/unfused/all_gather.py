@@ -11,6 +11,17 @@ from .._common import convert_tensor, is_float8_tensor
 
 
 class AllGather(UnfusedOperation):
+    """All-gather tensor along outer dimension
+
+    Equivalent to gathering tensors from all processes and
+    concatenating along the first dimension.
+
+    Parameters
+    ----------
+    process_group: torch.distributed.ProcessGroup, default = world group
+        Process group for communication
+
+    """
 
     def __init__(
         self,
@@ -25,6 +36,10 @@ class AllGather(UnfusedOperation):
         ctx: OperationContext,
         input: torch.Tensor,
     ) -> torch.Tensor:
+
+        # Trivial case
+        if self.process_group_size == 1:
+            return input
 
         # Tensor dimensions
         input_dims = input.size()
@@ -68,6 +83,10 @@ class AllGather(UnfusedOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
+
+        # Trivial case
+        if self.process_group_size == 1:
+            return grad_output, ()
 
         # Tensor dimensions
         output_dims = grad_output.size()

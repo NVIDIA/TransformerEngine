@@ -13,6 +13,17 @@ from .._common import convert_tensor
 
 
 class Reshape(UnfusedOperation):
+    """Reshape tensor
+
+    See `torch.reshape`.
+
+    Parameters
+    ----------
+    shape: iterable of int
+        Output tensor dimensions. If one dimension is -1, it is
+        inferred based on input tensor dimensions.
+
+    """
 
     def __init__(self, shape: Iterable[int]) -> None:
         super().__init__()

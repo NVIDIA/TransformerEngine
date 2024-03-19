@@ -472,8 +472,12 @@ def _test_linear(
     )
     b_ref, b_test = None, None
     if bias:
+        if tensor_parallel_mode == "row":
+            bias_shape = [world_size, out_features]
+        else:
+            bias_shape = [out_features]
         b_ref, b_test = make_reference_and_test_tensors(
-            out_features,
+            bias_shape,
             test_dtype=dtype,
             test_device=device,
         )
@@ -486,7 +490,12 @@ def _test_linear(
     )
 
     # Plain PyTorch implementation
-    y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
+    y_ref = torch.nn.functional.linear(x_ref, w_ref)
+    if bias:
+        if tensor_parallel_mode == "row":
+            y_ref += b_ref.sum(dim=0)
+        else:
+            y_ref += b_ref
     y_ref.backward(dy_ref)
 
     # Convert to distributed tensors
@@ -519,6 +528,10 @@ def _test_linear(
             w_ref = w_ref[:, local_slice]
             dw_ref = dw_ref[:, local_slice]
             w_test = w_test[:, local_slice]
+            if bias:
+                b_ref = b_ref[rank, :]
+                db_ref = db_ref[rank, :]
+                b_test = b_test[rank, :]
             x_ref = x_ref[..., local_slice]
             dx_ref = dx_ref[..., local_slice]
             x_test = x_test[..., local_slice].clone()
@@ -642,6 +655,8 @@ def run_parallel_tests() -> None:
 
 # Parallel job sizes
 _world_sizes = [torch.cuda.device_count()]
+if 1 not in _world_sizes:
+    _world_sizes.append(1)
 if 2 not in _world_sizes:
     _world_sizes.append(2)
 
