@@ -18,7 +18,13 @@ from transformer_engine.pytorch.fuser.ops.fused_forward import (
 )
 from transformer_engine.pytorch.utils import clear_tensor_data
 
-class _PipelineAutogradFunction(torch.autograd.Function):
+class _FuserAutogradFunction(torch.autograd.Function):
+    """Autograd function for operation fuser
+
+    Autograd must be done at the pipeline level since we may apply
+    different fusions in the forward and backward passes.
+
+    """
 
     @staticmethod
     def forward(
@@ -38,7 +44,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
         for op, unfused_op_idxs in forward_ops:
 
             # Forward op
-            x = op.pipeline_forward(
+            x = op.fuser_forward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 x,
                 [unfused_op_kwargs[idx] for idx in unfused_op_idxs],
@@ -103,7 +109,7 @@ class _PipelineAutogradFunction(torch.autograd.Function):
                 break
 
             # Backward op
-            dx, fused_op_dparams = op.pipeline_backward(
+            dx, fused_op_dparams = op.fuser_backward(
                 [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
                 dx,
             )
@@ -136,7 +142,20 @@ class _PipelineAutogradFunction(torch.autograd.Function):
             *grad_params_flat,  # params
         )
 
-class Pipeline:
+class Fuser:
+    """Operation fuser
+
+    Manages the forward and backward passes for a pipeline of
+    `FusableOperation`s.
+
+    Parameters
+    ----------
+    ops: list of `FusableOperation`
+        Pipeline of operations
+    fuse_ops: bool, default = `True`
+        Whether to attempt fusing operations
+
+    """
 
     def __init__(
         self,
@@ -168,13 +187,16 @@ class Pipeline:
             self.fuse_ops()
 
     def _fuse_forward_ops(self, ops):
+        """Attempt to fuse operations in forward pass"""
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
 
     def _fuse_backward_ops(self, ops):
+        """Attempt to fuse operations in backward pass"""
         return ops
 
     def fuse_ops(self) -> None:
+        """Attempt to fuse operations"""
         self._forward_ops = self._fuse_forward_ops(self._forward_ops)
         self._backward_ops = self._fuse_backward_ops(self._backward_ops)
 
@@ -213,8 +235,8 @@ class Pipeline:
         for op in self._unfused_ops:
             params.extend(op.parameters())
 
-        # Pipeline forward pass
-        return _PipelineAutogradFunction.apply(
+        # Fuser forward pass
+        return _FuserAutogradFunction.apply(
             input,
             self._forward_ops,
             self._backward_ops,

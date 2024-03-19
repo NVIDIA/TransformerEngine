@@ -75,7 +75,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def pipeline_forward(
+    def fuser_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
@@ -83,7 +83,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> torch.Tensor:
         """Forward pass
 
-        Called within compute pipeline.
+        Called by `Fuser`.
 
         Parameters
         ----------
@@ -103,14 +103,14 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def pipeline_backward(
+    def fuser_backward(
         self,
         unfused_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         """Backward pass
 
-        Called within compute pipeline.
+        Called by `Fuser`.
 
         Parameters
         ----------
@@ -226,7 +226,7 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         ...
 
-    def pipeline_forward(
+    def fuser_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
@@ -238,7 +238,7 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
             **unfused_op_kwargs[0],
         )
 
-    def pipeline_backward(
+    def fuser_backward(
         self,
         unfused_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
@@ -251,8 +251,8 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
 
     def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Apply operation"""
-        from ..pipeline import Pipeline
-        return Pipeline([self], fuse_ops=False)(input, [kwargs])
+        from ..fuser import Fuser
+        return Fuser([self], fuse_ops=False)(input, [kwargs])
 
 
 class FusedOperation(FusableOperation):
@@ -292,7 +292,7 @@ class FusedOperation(FusableOperation):
         for op in self.unfused_ops:
             op.pre_forward()
 
-    def pipeline_forward(
+    def fuser_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
         input: torch.Tensor,
@@ -303,7 +303,7 @@ class FusedOperation(FusableOperation):
             f"({self.__class__.__name__})"
         )
 
-    def pipeline_backward(
+    def fuser_backward(
         self,
         unfused_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
@@ -321,5 +321,5 @@ class FusedOperation(FusableOperation):
         """Apply operation"""
         if unfused_op_kwargs is None:
             unfused_op_kwargs = [dict() for _ in range(len(self.unfused_ops))]
-        from ..pipeline import Pipeline
-        return Pipeline([self], fuse_ops=False)(input, unfused_op_kwargs)
+        from ..fuser import Fuser
+        return Fuser([self], fuse_ops=False)(input, unfused_op_kwargs)

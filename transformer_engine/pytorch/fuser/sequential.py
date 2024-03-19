@@ -9,10 +9,21 @@ from collections import OrderedDict
 import torch
 
 from transformer_engine.pytorch.fuser.ops import FusableOperation
-from transformer_engine.pytorch.fuser.pipeline import Pipeline
+from transformer_engine.pytorch.fuser.fuser import Fuser
 
 
 class Sequential(torch.nn.Module):
+    """Sequential container for fusable operations
+
+    This is a drop-in replacement for `torch.nn.Sequential`, with
+    support for fusing `FusableOperation`s.
+
+    Parameters
+    ----------
+o    *args: `FusableOperation` or `torch.nn.Module`
+        Neural network modules
+
+    """
 
     def __init__(
         self,
@@ -29,7 +40,7 @@ class Sequential(torch.nn.Module):
                 self.add_module(str(idx), module)
 
         # List of modules, with fusable operations grouped together
-        self._module_groups: Optional[list[Pipeline | torch.nn.Module]] = None
+        self._module_groups: Optional[list[Fuser | torch.nn.Module]] = None
 
     def add_module(self, *args, **kwargs) -> None:
         super().add_module(*args, **kwargs)
@@ -60,22 +71,22 @@ class Sequential(torch.nn.Module):
     def _make_module_groups(
         self,
         modules: Iterable[torch.nn.Module],
-    ) -> list[Pipeline | torch.nn.Module]:
+    ) -> list[Fuser | torch.nn.Module]:
         """Make list of modules, with fusable operations grouped together"""
         module_groups = []
         fusable_ops = []
-        def maybe_add_pipeline():
+        def maybe_add_fuser():
             nonlocal fusable_ops
             if fusable_ops:
-                module_groups.append(Pipeline(fusable_ops, fuse_ops=True))
+                module_groups.append(Fuser(fusable_ops, fuse_ops=True))
                 fusable_ops = []
         for module in modules:
             if isinstance(module, FusableOperation):
                 fusable_ops.append(module)
             else:
-                maybe_add_pipeline()
+                maybe_add_fuser()
                 module_groups.append(module)
-        maybe_add_pipeline()
+        maybe_add_fuser()
         return module_groups
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

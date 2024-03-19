@@ -35,6 +35,13 @@ from .._common import (
 
 
 class ForwardLinearBiasActivation(FusedOperation):
+    """Fused GEMM, bias, activation in the forward pass
+
+    Bias and activation are both optional. Row tensor parallelism is
+    not supported since that requires communication immediately after
+    the GEMM.
+
+    """
 
     def __init__(
         self,
@@ -64,7 +71,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         # Index of each unfused operations
         self._op_idxs: dict[str, Optional[int]] = op_idxs
 
-    def pipeline_forward(
+    def fuser_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
         input: torch.Tensor,
@@ -227,6 +234,20 @@ class ForwardLinearBiasActivation(FusedOperation):
 def fuse_forward_linear_bias_activation(
     ops: list[tuple[FusableOperation, list[int]]],
 ) -> list[tuple[FusableOperation, list[int]]]:
+    """Fuse GEMM, bias, activation in the forward pass
+
+    Parameters
+    ----------
+    ops: list of tuples
+        Forward pass operations and the indices of their corresponding
+        unfused operations.
+
+    Returns
+    -------
+    ops: list of tuples
+        Updated forward pass operations
+
+    """
 
     # Scan through ops, fusing if possible
     out = []
