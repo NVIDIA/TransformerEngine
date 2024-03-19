@@ -9,7 +9,7 @@ from collections import OrderedDict
 import torch
 
 from transformer_engine.pytorch.fuser.ops import FusableOperation
-from transformer_engine.pytorch.fuser.fuser import Fuser
+from transformer_engine.pytorch.fuser.fuser import OperationFuser
 
 
 class Sequential(torch.nn.Module):
@@ -20,7 +20,7 @@ class Sequential(torch.nn.Module):
 
     Parameters
     ----------
-o    *args: `FusableOperation` or `torch.nn.Module`
+    *args: FusableOperation or torch.nn.Module
         Neural network modules
 
     """
@@ -40,7 +40,8 @@ o    *args: `FusableOperation` or `torch.nn.Module`
                 self.add_module(str(idx), module)
 
         # List of modules, with fusable operations grouped together
-        self._module_groups: Optional[list[Fuser | torch.nn.Module]] = None
+        self._module_groups: Optional[list[OperationFuser | torch.nn.Module]]
+        self._module_groups = None
 
     def add_module(self, *args, **kwargs) -> None:
         super().add_module(*args, **kwargs)
@@ -71,14 +72,14 @@ o    *args: `FusableOperation` or `torch.nn.Module`
     def _make_module_groups(
         self,
         modules: Iterable[torch.nn.Module],
-    ) -> list[Fuser | torch.nn.Module]:
+    ) -> list[OperationFuser | torch.nn.Module]:
         """Make list of modules, with fusable operations grouped together"""
         module_groups = []
         fusable_ops = []
         def maybe_add_fuser():
             nonlocal fusable_ops
             if fusable_ops:
-                module_groups.append(Fuser(fusable_ops, fuse_ops=True))
+                module_groups.append(OperationFuser(fusable_ops, fuse_ops=True))
                 fusable_ops = []
         for module in modules:
             if isinstance(module, FusableOperation):

@@ -45,8 +45,8 @@ class Linear(FusedOperation):
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
     rng_state_tracker_function: callable
-        Function that returns `CudaRNGStatesTracker`, which is used
-        for model-parallel weight initialization
+        Function that returns CudaRNGStatesTracker, which is used for
+        model-parallel weight initialization
 
     """
 

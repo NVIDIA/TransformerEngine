@@ -239,7 +239,7 @@ def fuse_forward_linear_bias_activation(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of their corresponding
+        Forward pass operations and the indices of the corresponding
         unfused operations.
 
     Returns

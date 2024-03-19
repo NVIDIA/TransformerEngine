@@ -61,7 +61,7 @@ class OperationContext:
 
 
 class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
-    """Tensor operation supported by the sequential fuser"""
+    """Tensor operation supported by the operation fuser"""
 
     @property
     @abc.abstractmethod
@@ -69,12 +69,10 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         """Whether this op has been fused out of smaller, unfused ops"""
         ...
 
-    @abc.abstractmethod
     def pre_forward(self) -> None:
-        """Preprocessing before a forward pass"""
-        ...
+        """Preprocessing before forward pass"""
+        pass
 
-    @abc.abstractmethod
     def fuser_forward(
         self,
         unfused_op_ctxs: list[OperationContext],
@@ -83,26 +81,28 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> torch.Tensor:
         """Forward pass
 
-        Called by `Fuser`.
+        Called by `OperationFuser`.
 
         Parameters
         ----------
         unfused_op_ctxs: list of OperationContext
-            Contexts for corresponding unfused operations.
+            Contexts for corresponding unfused operations
         input_: torch.Tensor
-            Input tensor.
+            Input tensor
         unfused_op_kwargs: list of dict
             Keyword arguments to forward functions of corresponding
-            unfused operations.
+            unfused operations
 
         Returns
         -------
         torch.Tensor: Output tensor.
 
         """
-        ...
+        raise NotImplementedError(
+            "Forward pass is not implemented for operation "
+            f"({self.__class__.__name__})"
+        )
 
-    @abc.abstractmethod
     def fuser_backward(
         self,
         unfused_op_ctxs: list[OperationContext],
@@ -110,7 +110,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         """Backward pass
 
-        Called by `Fuser`.
+        Called by `OperationFuser`.
 
         Parameters
         ----------
@@ -125,14 +125,17 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Loss gradient w.r.t. operation input
         Iterable of iterable of torch.Tensor:
             Loss gradients w.r.t. parameters for corresponding unfused
-            operations.
+            operations
 
         """
-        ...
+        raise NotImplementedError(
+            "Backward pass is not implemented for operation "
+            f"({self.__class__.__name__})"
+        )
 
 
 class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
-    """Single tensor operation supported by the sequential fuser
+    """Single tensor operation supported by the operation fuser
 
     This class holds parameters and state, even if the actual forward
     and backward passes are performed by a fused operation.
@@ -150,9 +153,19 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
         return False
 
     def num_fp8_scales(self, mode: str) -> int:
+        """Number of FP8 scaling factors
+
+        Parameters
+        ----------
+        mode: {"input", "param", "grad_output"}
+            Type of FP8 scaling factor
+
+        """
+
         return 0
 
     def _make_fp8_metas(self) -> dict[str, Any]:
+        """Construct FP8 metadata"""
 
         # Shared objects for FP8 metadata
         dtype = torch.float32
@@ -187,11 +200,20 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
         )
 
     def get_fp8_meta(self, mode: str) -> dict:
+        """FP8 metadata
+
+        Parameters
+        ----------
+        mode: {"input", "param", "grad_output"}
+            Type of FP8 scaling factor
+
+        """
         if self._fp8_metas is None:
             self._fp8_metas = self._make_fp8_metas()
         return self._fp8_metas[mode]
 
     def pre_forward(self) -> None:
+        """Preprocessing before forward pass"""
 
         # Initialize FP8 metadata if needed
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
@@ -216,6 +238,21 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
         input: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
+        """Forward pass
+
+        Parameters
+        ----------
+        ctx: OperationContext
+            Context to coordinate between forward and backward passes
+        input: torch.Tensor
+            Input tensor
+
+        Returns
+        -------
+        torch.Tensor:
+            Output tensor
+
+        """
         ...
 
     @abc.abstractmethod
@@ -224,6 +261,23 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
+        """Backward pass
+
+        Parameters
+        ----------
+        ctx: OperationContext
+            Context to coordinate between forward and backward passes
+        grad_output: torch.Tensor
+            Loss gradient w.r.t. operation output
+
+        Returns
+        -------
+        torch.Tensor
+            Loss gradient w.r.t. operation input
+        Iterable of torch.Tensor:
+            Loss gradients w.r.t. parameters
+
+        """
         ...
 
     def fuser_forward(
@@ -251,14 +305,14 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
 
     def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Apply operation"""
-        from ..fuser import Fuser
-        return Fuser([self], fuse_ops=False)(input, [kwargs])
+        from ..fuser import OperationFuser
+        return OperationFuser([self], fuse_ops=False)(input, [kwargs])
 
 
 class FusedOperation(FusableOperation):
-    """Compound tensor operation supported by the sequential fuser
+    """Compound tensor operation supported by the operation fuser
 
-    If the forward or backward passes are defined, they are
+    If the forward or backward passes are defined, they must be
     functionally equivalent to the forward/backward passes of the
     corresponding unfused ops. This class should hold no parameters or
     other state, but should access them from the unfused ops.
@@ -289,29 +343,9 @@ class FusedOperation(FusableOperation):
         return True
 
     def pre_forward(self) -> None:
+        """Preprocessing before forward pass"""
         for op in self.unfused_ops:
             op.pre_forward()
-
-    def fuser_forward(
-        self,
-        unfused_op_ctxs: list[OperationContext],
-        input: torch.Tensor,
-        unfused_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
-        raise NotImplementedError(
-            "Forward pass is not implemented for fused operation "
-            f"({self.__class__.__name__})"
-        )
-
-    def fuser_backward(
-        self,
-        unfused_op_ctxs: list[OperationContext],
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
-        raise NotImplementedError(
-            "Backward pass is not implemented for fused operation "
-            f"({self.__class__.__name__})"
-        )
 
     def forward(
         self,
@@ -321,5 +355,5 @@ class FusedOperation(FusableOperation):
         """Apply operation"""
         if unfused_op_kwargs is None:
             unfused_op_kwargs = [dict() for _ in range(len(self.unfused_ops))]
-        from ..fuser import Fuser
-        return Fuser([self], fuse_ops=False)(input, unfused_op_kwargs)
+        from ..fuser import OperationFuser
+        return OperationFuser([self], fuse_ops=False)(input, unfused_op_kwargs)

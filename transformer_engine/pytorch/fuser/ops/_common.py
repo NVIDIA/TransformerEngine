@@ -87,6 +87,7 @@ def fp8_cast_transpose(
     fp8_meta_index: int,
     fp8_dtype: tex.DType,
 ) -> Float8Tensor:
+    """Fused FP8 cast and transpose"""
 
     # Check tensor
     device = tensor.device

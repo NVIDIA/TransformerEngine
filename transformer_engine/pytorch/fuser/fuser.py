@@ -18,8 +18,8 @@ from transformer_engine.pytorch.fuser.ops.fused_forward import (
 )
 from transformer_engine.pytorch.utils import clear_tensor_data
 
-class _FuserAutogradFunction(torch.autograd.Function):
-    """Autograd function for operation fuser
+class _OperationFuserAutogradFunction(torch.autograd.Function):
+    """Autograd function for a pipeline of operations
 
     Autograd must be done at the pipeline level since we may apply
     different fusions in the forward and backward passes.
@@ -28,15 +28,41 @@ class _FuserAutogradFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        func_ctx: Any,
+        func_ctx: torch.autograd.function.FunctionCtx,
         input_: torch.Tensor,
-        forward_ops: list[FusableOperation],
-        backward_ops: list[FusableOperation],
+        forward_ops: list[tuple[FusableOperation, list[int]]],
+        backward_ops: list[tuple[FusableOperation, list[int]]],
         unfused_ops: list[UnfusedOperation],
         unfused_op_ctxs: list[OperationContext],
         unfused_op_kwargs: list[dict[str, Any]],
         *params: torch.nn.Parameter,
     ) -> torch.Tensor:
+        """Forward pass
+
+        Parameters
+        ----------
+        func_ctx: torch.autograd.function.FunctionCtx
+            Context for PyTorch autograd function
+        input_: torch.Tensor
+            Input to first operation in pipeline
+        forward_ops: list of tuple
+            Forward pass operations and the indices of the
+            corresponding unfused operations. The order should match
+            unfused_ops.
+        backward_ops: list of tuple
+            Backward pass operations and the indices of the
+            corresponding unfused operations. The order should be the
+            reverse of unfused_ops.
+        unfused_ops: list of UnfusedOperation
+            Unfused operations
+        unfused_op_ctxs: list of OperationContext
+            Context for UnfusedOperation
+        unfused_op_kwargs: list of dict
+            Keyword arguments to UnfusedOperation
+        *params: torch.nn.Parameter
+            Parameters in operation pipeline
+
+        """
 
         # Apply forward ops
         x = input_
@@ -83,6 +109,7 @@ class _FuserAutogradFunction(torch.autograd.Function):
         func_ctx: Any,
         grad_output: torch.Tensor,
     ) -> tuple[Optional[torch.Tensor], ...]:
+        """Backward pass"""
 
         # Operations and autograd state
         backward_ops = func_ctx.backward_ops
@@ -142,15 +169,12 @@ class _FuserAutogradFunction(torch.autograd.Function):
             *grad_params_flat,  # params
         )
 
-class Fuser:
-    """Operation fuser
-
-    Manages the forward and backward passes for a pipeline of
-    `FusableOperation`s.
+class OperationFuser:
+    """Manages forward and backward passes for a pipeline of operations
 
     Parameters
     ----------
-    ops: list of `FusableOperation`
+    ops: list of FusableOperation
         Pipeline of operations
     fuse_ops: bool, default = `True`
         Whether to attempt fusing operations
@@ -236,7 +260,7 @@ class Fuser:
             params.extend(op.parameters())
 
         # Fuser forward pass
-        return _FuserAutogradFunction.apply(
+        return _OperationFuserAutogradFunction.apply(
             input,
             self._forward_ops,
             self._backward_ops,
