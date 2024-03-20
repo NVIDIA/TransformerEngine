@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Linear API"""
-import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
@@ -424,7 +423,8 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         layout="NN",
                         grad=True,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ctx.ub_overlap_ag else None,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P \
+                            if ctx.ub_overlap_ag else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
                     )
 

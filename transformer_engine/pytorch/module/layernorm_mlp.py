@@ -802,7 +802,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     gelu=(not ctx.bias_gelu_nvfusion) and (ctx.activation == 'gelu'),
                     grad=True,
                     gelu_input=fc1_out,
-                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ctx.ub_overlap_ag else None,
+                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P \
+                        if ctx.ub_overlap_ag else None,
                     ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
                 )
 
@@ -1218,8 +1219,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
-        self.gemm_gelu_fusion = (bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0"))) and
-                                 self.activation == 'gelu' and not get_ub("fc1_fprop").is_atomic_gemm())
+        self.gemm_gelu_fusion = \
+            (bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0"))) and
+            self.activation == 'gelu' and not get_ub("fc1_fprop").is_atomic_gemm())
 
         if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_rs, ub_overlap_ag]):
             assert (
