@@ -67,6 +67,12 @@ class UnfusedLinear(UnfusedOperation):
     rng_state_tracker_function: callable
         Function that returns `CudaRNGStatesTracker`, which is used
         for model-parallel weight initialization
+    accumulate_into_main_grad: bool, default = `False`
+        Whether to directly accumulate weight gradients into the
+        weight's `main_grad` attribute instead of relying on PyTorch
+        autograd. The weight's `main_grad` must be set externally and
+        there is no guarantee that `grad` will be set or be
+        meaningful.
 
     """
 
@@ -81,6 +87,7 @@ class UnfusedLinear(UnfusedOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
+        accumulate_into_main_grad: bool = False,
     ) -> None:
         super().__init__()
 
@@ -146,6 +153,9 @@ class UnfusedLinear(UnfusedOperation):
         self._rng_state_tracker_function = rng_state_tracker_function
         if not defer_param_init:
             self.reset_parameters()
+
+        # Whether to accumulate weight gradient into main_grad
+        self._accumulate_into_main_grad = accumulate_into_main_grad
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -488,7 +498,6 @@ class UnfusedLinear(UnfusedOperation):
 
             # Check weight tensor
             ### TODO: Weight caching without FP8 params
-            ### TODO Configurable FP8 transpose caching
             w = convert_tensor(
                 self.weight,
                 device=self.device,
@@ -555,15 +564,23 @@ class UnfusedLinear(UnfusedOperation):
                     )
 
         # Perform wgrad GEMM
-        ### TODO: grad accumulation
         dw = None
         if self.weight.requires_grad:
-            dw = torch.empty(
-                self.weight.size(),
-                dtype=self.dtype,
-                device=self.device,
-                memory_format=torch.contiguous_format,
-            )
+            if self._accumulate_into_main_grad:
+                if not hasattr(self.weight, "main_grad"):
+                    raise RuntimeError(
+                        "UnfusedLinear op is configured with "
+                        "accumulate_into_main_grad=True, "
+                        "but weight parameter does not have main_grad attribute"
+                    )
+                dw = self.weight.main_grad
+            else:
+                dw = torch.empty(
+                    self.weight.size(),
+                    dtype=self.dtype,
+                    device=self.device,
+                    memory_format=torch.contiguous_format,
+                )
             dy_async = _wait_async(dy_async)
             x_async = _wait_async(x_async)
             if fp8_enabled:
@@ -578,17 +595,21 @@ class UnfusedLinear(UnfusedOperation):
                     dy._fp8_dtype,
                     dw.dtype,
                     get_workspace(),
+                    accumulate=self._accumulate_into_main_grad,
                     out=dw,
                 )
             else:
                 gemm(
                     x,
                     dy,
-                    dw.dtype,
+                    x.dtype,
                     get_workspace(),
-                    out=dw,
+                    accumulate=self._accumulate_into_main_grad,
                     layout="NT",
+                    out=dw,
             )
+            if self._accumulate_into_main_grad:
+                dw = None
 
         # Clean up and return grads
         _wait_async(dy_async)

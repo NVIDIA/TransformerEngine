@@ -305,6 +305,7 @@ class TestFuserOps:
     @pytest.mark.parametrize("fp8_input", (False, True))
     @pytest.mark.parametrize("fp8_weight", (False, True))
     @pytest.mark.parametrize("fp8_grad_output", (False, True))
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     def test_unfused_linear(
         self,
         *,
@@ -316,6 +317,7 @@ class TestFuserOps:
         fp8_input: bool,
         fp8_weight: bool,
         fp8_grad_output: bool,
+        accumulate_into_main_grad: bool,
     ) -> None:
         """GEMM"""
 
@@ -370,10 +372,12 @@ class TestFuserOps:
                 out_features,
                 device=device,
                 dtype=dtype,
+                accumulate_into_main_grad=accumulate_into_main_grad,
             )
         with torch.no_grad():
             op.weight.copy_(w_test)
             del w_test
+            op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
         with te.fp8_autocast(enabled=fp8_compute):
             y_test = op(x_test)
         y_test.backward(dy_test)
@@ -392,9 +396,25 @@ class TestFuserOps:
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        if accumulate_into_main_grad:
+            if op.weight.grad is not None:
+                torch.testing.assert_close(
+                    op.weight.grad,
+                    torch.zeros_like(op.weight.grad),
+                    rtol=0,
+                    atol=0,
+                )
+            dw_test = op.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
+        else:
+            dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(
+                op.weight.main_grad,
+                torch.full_like(op.weight.main_grad, 0.5),
+                rtol=0,
+                atol=0,
+            )
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
     @pytest.mark.parametrize("bias", (False, True))
