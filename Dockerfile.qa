@@ -11,16 +11,16 @@ SHELL ["bash", "-c"]
 
 # Remove PyTorch tests if not needed
 RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_pytorch_* \
+    && rm -rf /opt/transformerengine/qa/L?_pytorch_* \
     || [[ "${FRAMEWORK}" =~ pytorch|all ]]
-RUN rm -r /opt/transformerengine/qa/L1_pytorch_distributed_unittest  # TODO Restore
+RUN rm -rf /opt/transformerengine/qa/L1_pytorch_distributed_unittest  # TODO Restore
 
-# Remove PyTorch tests if not needed
+# Remove JAX tests if not needed
 RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_jax_* \
+    && rm -rf /opt/transformerengine/qa/L?_jax_* \
     || [[ "${FRAMEWORK}" =~ jax|all ]]
 
 # Remove PaddlePaddle tests if not needed
 RUN [[ ! "${FRAMEWORK}" =~ paddle|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_paddle_* \
+    && rm -rf /opt/transformerengine/qa/L?_paddle_* \
     || [[ "${FRAMEWORK}" =~ paddle|all ]]
