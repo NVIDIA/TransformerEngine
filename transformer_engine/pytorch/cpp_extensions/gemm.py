@@ -108,7 +108,7 @@ def fp8_gemm(
             )
             args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
-            fn = ub.atomic_gemm_overlap_ag
+            fn = ub.atomic_gemm_overlap_ag_p2p
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
