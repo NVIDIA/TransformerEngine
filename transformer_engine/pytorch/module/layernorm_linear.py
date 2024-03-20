@@ -353,7 +353,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     update_cache=ctx.is_first_microbatch,
                     noop=skip_fp8_weight_update,
                 )
-            else:
+            elif ctx.fp8:
                 weight_t_fp8 = weight_t_fp8._data
 
             if ctx.ub_bulk_dgrad:
@@ -1052,7 +1052,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             warnings.warn("`skip_fp8_weight_update` set!")
             is_first_microbatch = False
 
-        with self.prepare_forward(inp, is_first_microbatch, skip_fp8_weight_update) as inp:
+        with self.prepare_forward(inp, is_first_microbatch) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
 

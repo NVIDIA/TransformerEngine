@@ -590,10 +590,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     update_cache=ctx.is_first_microbatch,
                     noop=skip_fp8_weight_update,
                 )
-            else:
+            elif ctx.fp8:
                 fc1_weight_t_fp8 = fc1_weight_t_fp8._data
                 fc2_weight_t_fp8 = fc2_weight_t_fp8._data
-
 
             activation_func = _act_func(ctx.activation)[1]
 
@@ -1460,11 +1459,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             warnings.warn("`skip_fp8_weight_update` set!")
             is_first_microbatch = False
 
-        with self.prepare_forward(
-            inp, is_first_microbatch,
-            skip_fp8_weight_update=skip_fp8_weight_update,
-            num_gemms=2,
-        ) as inp:
+        with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
             # Fetch the fp8 weights placeholders (for linear/gemm)

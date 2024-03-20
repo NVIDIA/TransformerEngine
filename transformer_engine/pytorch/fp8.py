@@ -6,7 +6,7 @@
 import os
 from contextlib import contextmanager
 from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_extensions as tex
@@ -63,7 +63,7 @@ class FP8GlobalStateManager:
     FP8_PARAMETERS = False
     IS_FIRST_FP8_MODULE = False
     FP8_AUTOCAST_DEPTH = 0
-    global_fp8_buffer = {}
+    global_amax_buffer = {}
     global_amax_history_buffer = {}
     global_scale_buffer = {}
     global_scale_inv_buffer = {}
@@ -87,7 +87,7 @@ class FP8GlobalStateManager:
         cls.FP8_PARAMETERS = False
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_AUTOCAST_DEPTH = 0
-        cls.global_fp8_buffer = {}
+        cls.global_amax_buffer = {}
         cls.global_amax_history_buffer = {}
         cls.global_scale_buffer = {}
         cls.global_scale_inv_buffer = {}
@@ -145,8 +145,8 @@ class FP8GlobalStateManager:
     def split_key_in_buffer(cls, key: str) -> Tuple[bool, bool, str]:
         """Splits buffer key into relevant parts."""
         forward, fp8_weights, autocast_key = key.split("_", 2)
-        forward = True if forward == "forward" else False
-        fp8_weights = True if fp8_weights == "True" else False
+        forward = forward == "forward"
+        fp8_weights = fp8_weights == "True"
         return forward, fp8_weights, autocast_key
 
     @classmethod
@@ -184,7 +184,7 @@ class FP8GlobalStateManager:
             if forward and fp8_weights is not None:
                 autocast_key = cls.get_unique_autocast_key(
                                     fp8_meta["recipe"], fp8_meta["fp8_group"])
-                fp8_weight_set = set([id(w._data) for w in fp8_weights])
+                fp8_weight_set = {id(w._data) for w in fp8_weights}
                 if autocast_key not in cls.autocast_to_fp8_params:
                     cls.autocast_to_fp8_params[autocast_key] = fp8_weight_set
                 else:
@@ -198,15 +198,15 @@ class FP8GlobalStateManager:
                 forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
-            if key not in cls.global_fp8_buffer:
-                cls.global_fp8_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+            if key not in cls.global_amax_buffer:
+                cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
                 cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
                 cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
                 cls.global_scale_inv_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale_inv]
                 cls.global_non_weight_mask_buffer[key] = [
                     fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"]]
             else:
-                cls.global_fp8_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
+                cls.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 cls.global_amax_history_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history)
                 cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
@@ -292,7 +292,7 @@ class FP8GlobalStateManager:
         skip_weight_scale_inv_update: Union[bool, torch.Tensor] = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        for buffer_key in cls.global_fp8_buffer.keys():
+        for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
@@ -303,12 +303,12 @@ class FP8GlobalStateManager:
             # TODO(ksivaman) consider separate weight and activation fp8_tensors.
             if fwd_update and fp8_weights and not fp8_weights_update:
                 continue
-            if len(cls.global_fp8_buffer[buffer_key]) == 0:
+            if len(amax_buffer) == 0:
                 continue
 
             # Retrieve autocast specific args and concat amaxes.
             recipe, group = cls.autocast_arguments[autocast_key]
-            contiguous_amax = torch.cat(cls.global_fp8_buffer[buffer_key])
+            contiguous_amax = torch.cat(amax_buffer)
 
             # Reduction.
             if (recipe.reduce_amax
@@ -333,7 +333,7 @@ class FP8GlobalStateManager:
                 _non_fused_amax_and_scale_update_after_reduction(
                     contiguous_amax,
                     cls.global_amax_history_buffer[buffer_key],
-                    cls.global_fp8_buffer[buffer_key],
+                    amax_buffer,
                     cls.global_scale_buffer[buffer_key],
                     cls.global_scale_inv_buffer[buffer_key],
                     cls.global_non_weight_mask_buffer[buffer_key],
@@ -361,7 +361,10 @@ class FP8GlobalStateManager:
     ):
         """For FP8, each autocast can be uniquely identified by the recipe and fp8 group."""
         # TODO(ksivaman): Handle custom functions in recipe for amax and scale update.
-        return f"{str(recipe)}:{torch.distributed.get_process_group_ranks(group)}"
+        group_key = "na"
+        if torch.distributed.is_initialized():
+            group_key = torch.distributed.get_process_group_ranks(group)
+        return f"{str(recipe)}:{group_key}"
 
     @classmethod
     def fp8_autocast_enter(
@@ -399,11 +402,7 @@ class FP8GlobalStateManager:
             assert fp8_available, reason_for_no_fp8
 
     @classmethod
-    def fp8_autocast_exit(
-        cls,
-        enabled: bool = False,
-        fp8_recipe: Optional[DelayedScaling] = None,
-    ) -> None:
+    def fp8_autocast_exit(cls, enabled: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
         # Reduce only the non-FP8 weight modules here.
@@ -555,7 +554,7 @@ def fp8_autocast(
         yield
     finally:
         FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
-        FP8GlobalStateManager.fp8_autocast_exit(enabled, fp8_recipe)
+        FP8GlobalStateManager.fp8_autocast_exit(enabled)
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:

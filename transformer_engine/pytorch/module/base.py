@@ -8,7 +8,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Generator, Union, Optional, Tuple, Dict, Any, List
+from typing import Generator, Union, Optional, Tuple, List
 from contextlib import contextmanager
 
 import torch
@@ -220,11 +220,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
                 index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
                 buffer_key = f"{fwd_bwd_key}_{autocast_key}" #TODO(ksivaman) fix
-                if buffer_key in FP8GlobalStateManager.global_fp8_buffer:
+                if buffer_key in FP8GlobalStateManager.global_amax_buffer:
                     assert (
                         buffer_key in FP8GlobalStateManager.global_amax_history_buffer
                     ), "TE internal error during amax history change."
-                    FP8GlobalStateManager.global_fp8_buffer[buffer_key][index] = (
+                    FP8GlobalStateManager.global_amax_buffer[buffer_key][index] = (
                         self.fp8_meta[key].amax_history[0])
                     FP8GlobalStateManager.global_amax_history_buffer[buffer_key][index] = (
                         self.fp8_meta[key].amax_history)
@@ -521,7 +521,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
-        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         num_gemms: int = 1,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
