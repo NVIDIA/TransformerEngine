@@ -6,7 +6,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
-from test_fused_attn_with_cp import model_configs
+from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}
 
@@ -17,8 +17,10 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
+        config = model_configs_flash_attn[model]
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+        config = model_configs_fused_attn[model]
 
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv('WORLD_SIZE', '1'))
@@ -39,8 +41,6 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     cp_comm_ranks = range(world_size)
     assert(rank in cp_comm_ranks)
     cp_comm_group = dist.new_group(cp_comm_ranks, backend='nccl')
-
-    config = model_configs[model]
 
     assert config.attn_mask_type in ['causal', 'no_mask'], f"{config.attn_mask_type} is an unsupported attention mask type!"
 
