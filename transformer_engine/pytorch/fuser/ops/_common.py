@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from transformer_engine.pytorch.cpp_extensions import (
@@ -49,11 +51,7 @@ def convert_tensor(
     dtype: Optional[torch.dtype] = None,
     memory_format: torch.memory_format = torch.preserve_format,
 ) -> torch.Tensor | Float8Tensor:
-    """Convert tensor attributes, keeping same data if possible
-
-    Supports Float8Tensor.
-
-    """
+    """Convert tensor attributes, keeping same data if possible"""
 
     # Default kwargs
     if device is None:
@@ -62,6 +60,9 @@ def convert_tensor(
     if dtype is None:
         dtype = tensor.dtype
     dtype = canonicalize_dtype(dtype)
+
+    # Make sure output is detached from autograd graph
+    tensor = tensor.detach()
 
     # Return immediately if tensor already has desired attributes
     if device == tensor.device and dtype == tensor.dtype:
@@ -78,6 +79,62 @@ def convert_tensor(
 
     # Convert standard PyTorch tensor
     return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+
+@torch.no_grad()
+def reshape(
+    tensor: torch.Tensor | Float8Tensor,
+    shape: Iterable[int],
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor | Float8Tensor:
+    """Reshape tensor, keeping same data if possible
+
+    If the input is a Float8Tensor, this function attempts to preserve
+    the cached transpose if available and valid. If a cached transpose
+    is present, it is interpreted as the transpose of a 2D matrix
+    where the width matches the innermost tensor dimension.
+
+    """
+
+    # Make sure tensor is in expected format
+    tensor = convert_tensor(
+        tensor,
+        device=device,
+        dtype=dtype,
+        memory_format=torch.contiguous_format,
+    )
+
+    # Return immediately if tensor already has desired shape
+    shape = list(shape)
+    if len(shape) == tensor.dim():
+        if sum(1 for d in shape if d == -1) > 1:
+            raise ValueError(
+                "Attempted to reshape tensor with "
+                f"shape={tuple(tensor.size())} into shape={tuple(shape)}"
+            )
+        if all(d1 == d2 for d1, d2 in zip(shape, tensor.size()) if d1 != -1):
+            return tensor
+
+    # Reshape FP8 tensor
+    # Note: Preserve cached transpose if possible
+    if is_float8_tensor(tensor):
+        out = Float8Tensor.make_like(
+            tensor,
+            data=tensor._data.view(shape),
+        )
+        if (
+            tensor._transpose is not None
+            and out.dim() >= 1
+            and tensor._transpose.dim() == 2
+            and tensor._transpose.size(0) == out.size(-1)
+            and tensor._transpose.size(1) == math.prod(out.size()[:-1])
+        ):
+            out._transpose = tensor._transpose
+        return out
+
+    # Reshape standard PyTorch tensor
+    return tensor.view(shape)
+
 
 @torch.no_grad()
 def fp8_cast_transpose(

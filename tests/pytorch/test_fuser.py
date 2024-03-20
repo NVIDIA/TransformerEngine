@@ -83,6 +83,7 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
     if test_is_fp8:
         test = Float8Tensor.to_float8(ref)
+        test._transpose = test.reshape(-1, test.size(-1)).transpose()
     else:
         test = ref.to(device=test_device, dtype=test_dtype)
         if test.data_ptr() == ref.data_ptr():
@@ -94,6 +95,7 @@ def make_reference_and_test_tensors(
 
 
 class TestFuserOps:
+    """Tests for individual operations"""
 
     @staticmethod
     def setup_class(cls) -> None:
@@ -114,7 +116,6 @@ class TestFuserOps:
         device: torch.device,
         fp8: bool,
     ) -> None:
-        """Reshape operation"""
 
         # Skip invalid configurations
         if fp8 and not fp8_available:
@@ -183,7 +184,6 @@ class TestFuserOps:
         memory_format: torch.memory_format,
         fp8: bool,
     ) -> None:
-        """Reshape operation"""
         in_shape, out_shape = shapes
 
         # Skip invalid configurations
@@ -248,7 +248,6 @@ class TestFuserOps:
         device: torch.device,
         fp8: bool,
     ) -> None:
-        """Bias operation"""
 
         # Make input and bias shapes consistent
         in_shape = list(in_shape)[:-1] + [size]
@@ -318,6 +317,7 @@ class TestFuserOps:
         fp8_weight: bool,
         fp8_grad_output: bool,
     ) -> None:
+        """GEMM"""
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
@@ -412,6 +412,7 @@ class TestFuserOps:
         fp8_input: bool = False,
         fp8_weight: bool,
     ) -> None:
+        """GEMM + bias"""
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
@@ -505,6 +506,7 @@ class TestFuserOps:
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
 class TestFuserFusions:
+    """Tests for fused operations"""
 
     @staticmethod
     def setup_class(cls) -> None:
@@ -531,6 +533,7 @@ class TestFuserFusions:
         fp8_input: bool,
         fp8_weight: bool,
     ) -> None:
+        """GEMM + bias + activation"""
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape

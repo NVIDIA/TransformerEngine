@@ -30,6 +30,7 @@ from .._common import (
     convert_tensor,
     fp8_cast_transpose,
     is_float8_tensor,
+    reshape,
 )
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -300,19 +301,18 @@ class UnfusedLinear(UnfusedOperation):
 
         # Check input tensor
         input_dims = input.size()
-        if self.weight.size(1) != input_dims[-1]:
+        if len(input_dims) == 0 or self.weight.size(1) != input_dims[-1]:
             raise ValueError(
                 f"Input tensor (shape={tuple(input.size())}) "
                 f"and weight tensor (shape={tuple(self.weight.size())}) "
                 "are not compatible"
             )
-        local_x = convert_tensor(
+        local_x = reshape(
             input,
+            (-1, input_dims[-1]),
             device=self.device,
             dtype=self.dtype,
-            memory_format=torch.contiguous_format,
         )
-        local_x = local_x.view(-1, input_dims[-1])  ### TODO Preserve transpose
         if fp8_enabled and not is_float8_tensor(local_x):
             fp8_meta = self.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -411,11 +411,10 @@ class UnfusedLinear(UnfusedOperation):
         ctx.requires_dgrad = input.requires_grad
 
         # Reshape output tensor
-        if len(input_dims) > 1:
-            y = y.reshape(-1, *input_dims[1:-1], y.size(-1))
-        else:
-            y = y.reshape(-1)
-        return y
+        output_dims = list(input_dims)
+        output_dims[0] = -1
+        output_dims[-1] = y.size(-1)
+        return reshape(y, output_dims)
 
     def op_backward(
         self,
@@ -431,13 +430,12 @@ class UnfusedLinear(UnfusedOperation):
 
         # Check grad output tensor
         dy_async = None
-        dy = convert_tensor(
+        dy = reshape(
             grad_output,
+            (-1, grad_output.size(-1)),
             device=self.device,
             dtype=self.dtype,
-            memory_format=torch.contiguous_format,
         )
-        dy = dy.view(-1, dy.size(-1))  ### TODO Preserve transpose
         if fp8_enabled and not is_float8_tensor(dy):
             fp8_meta = self.get_fp8_meta("grad_output")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
@@ -597,5 +595,5 @@ class UnfusedLinear(UnfusedOperation):
         _wait_async(x_async)
         _wait_async(dx_async)
         if dx is not None:
-            dx = dx.reshape(ctx.input_dims)
+            dx = reshape(dx, ctx.input_dims)
         return dx, [dw]

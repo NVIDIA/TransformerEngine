@@ -31,6 +31,7 @@ from .._common import (
     convert_tensor,
     fp8_cast_transpose,
     is_float8_tensor,
+    reshape,
 )
 
 
@@ -102,19 +103,18 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Check input tensor
         input_dims = input.size()
-        if linear_op.weight.size(1) != input_dims[-1]:
+        if len(input_dims) == 0 or linear_op.weight.size(1) != input_dims[-1]:
             raise ValueError(
                 f"Input tensor (shape={tuple(input.size())}) "
                 f"and weight tensor (shape={tuple(linear_op.weight.size())}) "
                 "are not compatible"
             )
-        local_x = convert_tensor(
+        local_x = reshape(
             input,
+            (-1, input_dims[-1]),
             device=linear_op.device,
             dtype=linear_op.dtype,
-            memory_format=torch.contiguous_format,
         )
-        local_x = local_x.view(-1, input_dims[-1])  ### TODO Preserve transpose
         if fp8_enabled and not is_float8_tensor(local_x):
             fp8_meta = linear_op.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -224,11 +224,10 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.requires_dgrad = input.requires_grad
 
         # Reshape output tensor
-        if len(input_dims) > 1:
-            y = y.reshape(-1, *input_dims[1:-1], y.size(-1))
-        else:
-            y = y.reshape(-1)
-        return y
+        output_dims = list(input_dims)
+        output_dims[0] = -1
+        output_dims[-1] = y.size(-1)
+        return reshape(y, output_dims)
 
 
 def fuse_forward_linear_bias_activation(

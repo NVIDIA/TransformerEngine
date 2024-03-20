@@ -9,7 +9,7 @@ from collections.abc import Iterable
 import torch
 
 from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
-from .._common import convert_tensor
+from .._common import reshape
 
 
 class Reshape(UnfusedOperation):
@@ -35,13 +35,11 @@ class Reshape(UnfusedOperation):
         input: torch.Tensor,
     ) -> torch.Tensor:
         ctx.input_shape = input.size()
-        x = convert_tensor(input, memory_format=torch.contiguous_format)
-        return x.view(self._shape)
+        return reshape(input, self._shape)
 
     def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
-        dy = convert_tensor(grad_output, memory_format=torch.contiguous_format)
-        return dy.view(ctx.input_shape), ()
+        return reshape(grad_output, ctx.input_shape), ()
