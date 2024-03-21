@@ -87,9 +87,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
-  m.def("fused_amax_and_scale_update",
-        &fused_amax_and_scale_update,
-        "Update amax history and FP8 scale/scale_inv");
   m.def("fused_amax_and_scale_update_after_reduction",
         &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction");

@@ -581,24 +581,10 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
-void fused_amax_and_scale_update(const at::Tensor &amax_history,
-                                 const at::Tensor &scale,
-                                 const at::Tensor &scale_inv,
-                                 const at::Tensor &scale_inv_mask,
-                                 const at::Tensor &skip_weight_scale_inv_update,
-                                 at::Tensor updated_amax_history,
-                                 at::Tensor updated_scale,
-                                 at::Tensor updated_scale_inv,
-                                 const std::string& amax_compute_algo,
-                                 transformer_engine::DType fp8_dtype,
-                                 float margin);
-
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
                                                  std::vector<at::Tensor> scale_invs,
-                                                 std::vector<at::Tensor> scale_inv_masks,
-                                                 const at::Tensor &skip_weight_scale_inv_update,
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype,
                                                  float margin);
