@@ -78,6 +78,7 @@ class _Linear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        is_training: bool,
         primary_weights_in_fp8: bool,
         ub_split_rs: bool,
         ub_split_ag: bool,
@@ -312,6 +313,7 @@ class _Linear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
+            ctx.is_training = is_training
 
         # Row Parallel Linear
         if ub_split_rs or ub_atomic_gemm_rs:
@@ -330,7 +332,12 @@ class _Linear(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_Linear"
+            ctx.fp8,
+            ctx.fp8_meta,
+            ctx.tp_group,
+            ctx.tp_size,
+            ctx.is_training,
+            name="_Linear",
         ):
             (
                 inputmat,
@@ -524,6 +531,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -929,6 +937,7 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                self.training,
                 self.primary_weights_in_fp8,
                 self.ub_split_rs,
                 self.ub_split_ag,

@@ -79,6 +79,7 @@ class _LayerNormLinear(torch.autograd.Function):
         return_layernorm_output: bool,
         return_layernorm_output_gathered: bool,
         is_grad_enabled: bool,
+        is_training: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
@@ -298,6 +299,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.is_training = is_training
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -322,7 +324,12 @@ class _LayerNormLinear(torch.autograd.Function):
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
+            ctx.fp8,
+            ctx.fp8_meta,
+            ctx.tp_group,
+            ctx.tp_size,
+            ctx.is_training,
+            name="_LayerNormLinear",
         ):
             (
                 inputmat,
@@ -598,6 +605,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1091,6 +1099,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.return_layernorm_output,
                 self.return_layernorm_output_gathered,
                 torch.is_grad_enabled(),
+                self.training,
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,

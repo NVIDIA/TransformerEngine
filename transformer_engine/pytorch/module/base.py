@@ -69,6 +69,7 @@ def _prepare_backward(
     fp8_meta: Dict[str, Any],
     tp_group: dist_group_type,
     tp_size: int,
+    is_training: bool,
     name: str = ""
 ) -> Generator[None, None, None]:
     """Checks and prep for BWD."""
@@ -79,24 +80,29 @@ def _prepare_backward(
             _amax_reduce_handle_bwd = None
 
         # Update amax and scale; Skip all setup for global amax reduction
-        if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
-            # From previous iteration
-            FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
-            amax_and_scale_update(fp8_meta, False)
-            FP8GlobalStateManager.set_amax_buffer_key_deletion(fp8_meta, forward=False)
+        if is_training:
+            if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
+                # From previous iteration
+                FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
+                amax_and_scale_update(fp8_meta, False)
+                FP8GlobalStateManager.set_amax_buffer_key_deletion(fp8_meta, forward=False)
 
-            # Get new backward key.
-            fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
+                # Get new backward key.
+                fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
-            FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
-        else:
-            amax_and_scale_update(fp8_meta, False)
+                FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+            else:
+                amax_and_scale_update(fp8_meta, False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
 
-    if (fp8 and fp8_meta["recipe"].reduce_amax
-        and get_distributed_world_size(fp8_meta["fp8_group"]) > 1):
+    if (
+        fp8
+        and is_training
+        and fp8_meta["recipe"].reduce_amax
+        and get_distributed_world_size(fp8_meta["fp8_group"]) > 1
+    ):
         if fp8_meta["first_module"]:
             _amax_reduce_handle_bwd = FP8GlobalStateManager.global_amax_reduction(
                 fp8_meta,
@@ -538,11 +544,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
                 if (self.fp8_meta["recipe"].reduce_amax
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
+
+                    # Get reduced amax
+                    async_handle = FP8GlobalStateManager.get_amax_reduce_handle_fwd()
+                    if async_handle is not None:
+                        async_handle.wait()
+                    FP8GlobalStateManager.set_amax_reduce_handle_fwd(None)
                     FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+
+                    # Update scaling factor
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
                     )
+
                     FP8GlobalStateManager.set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+
                 else:
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -554,10 +570,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
-                        # Wait for the prior AMAX reduction to finish
-                        amax_reduce_handle_fwd = FP8GlobalStateManager.get_amax_reduce_handle_fwd()
-                        if amax_reduce_handle_fwd is not None:
-                            amax_reduce_handle_fwd.wait()
                         self.fp8_meta["autocast_id_fwd"] = (
                             FP8GlobalStateManager.new_fp8_context_id())
                         FP8GlobalStateManager.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
