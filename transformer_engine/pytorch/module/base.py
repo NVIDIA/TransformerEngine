@@ -130,12 +130,14 @@ def initialize_ub(
         "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
+    dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
+    layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop":"proj_fprop", "fc1_fprop":"fc2_fprop"}
@@ -227,6 +229,14 @@ def initialize_ub(
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
+
+    if ub_cfgs is not None:
+        for name in dgrad_reduce_scatter_overlap:
+            if name in ub_cfgs and 'method' in ub_cfgs[name] and ub_cfgs[name]['method'] != 'bulk':
+                wgrad_name = name.replace('dgrad','wgrad')
+                assert wgrad_name not in ub_cfgs
+                layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_reduce_scatter_overlap.append(name)
 
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
