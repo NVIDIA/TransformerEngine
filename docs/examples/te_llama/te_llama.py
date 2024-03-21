@@ -56,7 +56,8 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
             normalization="RMSNorm",
             activation="swiglu",
             attn_input_format="bshd",
-            num_gqa_groups=config.num_key_value_heads
+            num_gqa_groups=config.num_key_value_heads,
+            kv_channels=16
         )
         te_rope = RotaryPositionEmbedding(config.hidden_size//config.num_attention_heads)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -123,10 +124,8 @@ class TELlamaForCausalLM:
 
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
-            # replace_params copies parameters relevant only to TransformerEngine
-            replace_params(state_dict, vanilla_model.state_dict(), config)
-            # _load_state_dict_into_model copies parameters other than those in TransformerEngine
-            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            replaces_params = replace_params(state_dict, vanilla_model.state_dict())
+            #_load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
             # Force mem release. Taken from huggingface code
             del state_dict
@@ -143,8 +142,6 @@ def replace_params(hf_state_dict, te_state_dict, config):
         if m is not None:
             all_layer_prefixes.add(m.group())
     
-    
-
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
         # copy if the corresponding layer doesn't exist in HF model
@@ -165,16 +162,8 @@ def replace_params(hf_state_dict, te_state_dict, config):
 
         if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:]
-        
-        # It may happen that gate_proj.weight and up_proj.weight will be in the different files, so we need to
-        # load them separately.
-        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:config.intermediate_size] = \
-                hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data
-
-        if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[config.intermediate_size:] = \
-                hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data
+        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict and 'mlp.up_proj.weight' in hf_state_dict:
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:] = torch.cat((hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data[:], hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data[:]), dim=0)
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
