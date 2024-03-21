@@ -484,9 +484,10 @@ def flash_attn_fwd_out_correction(out, out_per_step, seq_dim,
 @jit_fuser
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Attention with context parallelism"""
-    softmax_lse.exp_()
-    softmax_lse.add_(softmax_lse_per_step.to(torch.double).exp())
-    softmax_lse.log_()
+    max_scale = torch.max(softmax_lse, softmax_lse_per_step)
+    min_scale = torch.min(softmax_lse, softmax_lse_per_step)
+    new_scale = max_scale + torch.log(1 + torch.exp(min_scale - max_scale))
+    softmax_lse.copy_(new_scale)
 
 
 class AttnFuncWithCP(torch.autograd.Function):
