@@ -23,7 +23,7 @@ class HyperParameters:
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
-        self.batch_size = 8
+        self.batch_size = 16
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps=5
@@ -91,6 +91,7 @@ def init_te_llama_model(hyperparams):
     # Init the model
     from te_llama import TELlamaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
+    config._attn_implementation = "flash_attention_2"
     model = TELlamaForCausalLM.from_pretrained_local(
             hyperparams.model_name,
             config=config,
@@ -116,7 +117,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate)
+    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,

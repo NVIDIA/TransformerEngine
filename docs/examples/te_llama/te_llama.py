@@ -57,6 +57,7 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
             activation="swiglu",
             attn_input_format="bshd",
             num_gqa_groups=config.num_key_value_heads,
+            kv_channels=16
         )
         te_rope = RotaryPositionEmbedding(config.hidden_size//config.num_attention_heads)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -121,12 +122,10 @@ class TELlamaForCausalLM:
             assert not isinstance(resolved_archive_file, list)
             resolved_archive_file = [resolved_archive_file]
 
-        error_msgs = []
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
-            replaced_layers = replace_params(state_dict, vanilla_model.state_dict())
-
-            error_msgs += _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            replaces_params = replace_params(state_dict, vanilla_model.state_dict())
+            #_load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
             # Force mem release. Taken from huggingface code
             del state_dict
@@ -142,32 +141,31 @@ def replace_params(hf_state_dict, te_state_dict):
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
-
+    
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
-        # copy if the corresponding layer doesn't exist in TE model
-        if layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight' in te_state_dict:
+        # copy if the corresponding layer doesn't exist in HF model
+        if layer_prefix + 'input_layernorm.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'input_layernorm.weight'].data[:]
 
-        if layer_prefix + 'self_attention.layernorm_qkv.query_weight' in te_state_dict:
+        if layer_prefix + 'self_attn.q_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.query_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.q_proj.weight'].data[:]
 
-        if layer_prefix + 'self_attention.layernorm_qkv.key_weight' in te_state_dict:
+        if layer_prefix + 'self_attn.k_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.key_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.k_proj.weight'].data[:]
 
-        if layer_prefix + 'self_attention.layernorm_qkv.value_weight' in te_state_dict:
+        if layer_prefix + 'self_attn.v_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.value_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.v_proj.weight'].data[:]
 
-        if layer_prefix + 'self_attention.proj.weight' in te_state_dict:
+        if layer_prefix + 'self_attn.o_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'self_attention.proj.weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.o_proj.weight'].data[:]
 
-        if layer_prefix + 'layernorm_mlp.layer_norm_weight' in te_state_dict:
+        if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:]
-
-        if layer_prefix + 'layernorm_mlp.fc1_weight' in te_state_dict:
+        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict and 'mlp.up_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:] = torch.cat((hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data[:], hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data[:]), dim=0)
 
-        if layer_prefix + 'layernorm_mlp.fc2_weight' in te_state_dict:
+        if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
 
     return all_layer_prefixes
