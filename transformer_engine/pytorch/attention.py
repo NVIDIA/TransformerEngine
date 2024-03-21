@@ -58,6 +58,7 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("2.0.6")
+_flash_attn_max_version = packaging.version.Version("2.5.6")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
@@ -482,9 +483,10 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
 @jit_fuser
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Attention with context parallelism"""
-    softmax_lse.exp_()
-    softmax_lse.add_(softmax_lse_per_step.to(torch.double).exp())
-    softmax_lse.log_()
+    max_scale = torch.max(softmax_lse, softmax_lse_per_step)
+    min_scale = torch.min(softmax_lse, softmax_lse_per_step)
+    new_scale = max_scale + torch.log(1 + torch.exp(min_scale - max_scale))
+    softmax_lse.copy_(new_scale)
 
 
 class AttnFuncWithCP(torch.autograd.Function):
@@ -1656,6 +1658,9 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
+        assert (
+            _flash_attn_version <= _flash_attn_max_version
+        ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3170,10 +3175,8 @@ class MultiheadAttention(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
-        ub_split_rs: bool = False,
-        ub_split_ag: bool = False,
-        ub_atomic_gemm_rs: bool = False,
-        ub_atomic_gemm_ag: bool = False,
+        ub_overlap_rs: bool = False,
+        ub_overlap_ag: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
@@ -3260,9 +3263,8 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
-                    ub_split_ag=ub_split_ag,
+                    ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
-                    ub_atomic_gemm_ag=ub_atomic_gemm_ag,
                     ub_name="qkv",
                     **common_gemm_kwargs,
                 )
@@ -3292,9 +3294,8 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
-                    ub_split_ag=ub_split_ag,
+                    ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
-                    ub_atomic_gemm_ag=ub_atomic_gemm_ag,
                     ub_name="qkv",
                     **common_gemm_kwargs,
                 )
@@ -3342,10 +3343,8 @@ class MultiheadAttention(torch.nn.Module):
             bias=bias,
             return_bias=return_bias,
             parallel_mode="row" if set_parallel_mode else None,
-            ub_split_rs=ub_split_rs,
-            ub_split_ag=ub_split_ag,
-            ub_atomic_gemm_rs=ub_atomic_gemm_rs,
-            ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+            ub_overlap_rs=ub_overlap_rs,
+            ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
             **common_gemm_kwargs,
         )
