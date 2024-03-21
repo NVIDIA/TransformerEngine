@@ -11,8 +11,6 @@ from torch._C import _graph_pool_handle
 from .fp8 import (
     fp8_autocast,
     FP8GlobalStateManager,
-    set_fp8_graph_capture_start,
-    set_fp8_graph_capture_end,
     get_default_fp8_recipe,
 )
 from .distributed import _set_cuda_rng_state
@@ -333,11 +331,6 @@ def make_graphed_callables(
     for extensive documentation.
     """
 
-    # Set capture.
-    if enabled:
-        set_fp8_graph_capture_start()
-        assert num_warmup_iters > 0, "Warmup is required for FP8 graph capture."
-
     fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
 
     # Handle single module.
@@ -355,7 +348,8 @@ def make_graphed_callables(
         def forward_func(*args, **kwargs):
             with fp8_autocast(enabled=enabled,
                               calibrating=calibrating,
-                              fp8_recipe=fp8_recipe):
+                              fp8_recipe=fp8_recipe,
+                              _graph=True):
                 outputs = old_forward(*args, **kwargs)
             return outputs
         block.forward = forward_func
@@ -390,5 +384,4 @@ def make_graphed_callables(
     # Restore FP8 state.
     restore_fp8_tensors(modules, saved_fp8_tensors)
 
-    set_fp8_graph_capture_end()
     return graphed_callables

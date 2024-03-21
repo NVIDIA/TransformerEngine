@@ -18,7 +18,6 @@ from .jit import jit_fuser
 
 
 __all__ = ["fp8_autocast", "fp8_model_init"]
-_IN_FP8_CUDA_GRAPH_CAPTURE = False
 
 
 def check_fp8_support() -> Tuple[bool, str]:
@@ -73,6 +72,7 @@ class FP8GlobalStateManager:
     FP8_DISTRIBUTED_GROUP = None
     FP8_PARAMETERS = False
     IS_FIRST_FP8_MODULE = False
+    FP8_GRAPH_CAPTURING = False
     FP8_AUTOCAST_DEPTH = 0
     global_amax_buffer = {}
     global_amax_history_buffer = {}
@@ -96,6 +96,7 @@ class FP8GlobalStateManager:
         cls.FP8_DISTRIBUTED_GROUP = None
         cls.FP8_PARAMETERS = False
         cls.IS_FIRST_FP8_MODULE = False
+        cls.FP8_GRAPH_CAPTURING = False
         cls.FP8_AUTOCAST_DEPTH = 0
         cls.global_amax_buffer = {}
         cls.global_amax_history_buffer = {}
@@ -236,6 +237,11 @@ class FP8GlobalStateManager:
         return cls.FP8_PARAMETERS
 
     @classmethod
+    def fp8_graph_capturing(cls) -> bool:
+        """Is CUDA graph capture under way?"""
+        return cls.FP8_GRAPH_CAPTURING or torch.cuda.is_current_stream_capturing()
+
+    @classmethod
     def is_first_fp8_module(cls):
         """Returns `True` only the first time when called multiple
         times from within the same `fp8_autocast` context.
@@ -262,7 +268,8 @@ class FP8GlobalStateManager:
             cls.FP8_CALIBRATION,
             cls.FP8_RECIPE,
             cls.FP8_DISTRIBUTED_GROUP,
-            cls.IS_FIRST_FP8_MODULE)
+            cls.IS_FIRST_FP8_MODULE,
+            cls.FP8_GRAPH_CAPTURING)
 
     @classmethod
     def set_fp8_autocast_state(
@@ -274,7 +281,8 @@ class FP8GlobalStateManager:
          cls.FP8_CALIBRATION,
          cls.FP8_RECIPE,
          cls.FP8_DISTRIBUTED_GROUP,
-         cls.IS_FIRST_FP8_MODULE) = fp8_state
+         cls.IS_FIRST_FP8_MODULE,
+         cls.FP8_GRAPH_CAPTURING) = fp8_state
 
     @staticmethod
     def reduce_tensor_across_group_op_max(
@@ -376,6 +384,7 @@ class FP8GlobalStateManager:
         calibrating: bool = False,
         fp8_recipe: Optional[DelayedScaling] = None,
         fp8_group: Optional[dist_group_type] = None,
+        _graph: bool = False,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
 
@@ -383,8 +392,7 @@ class FP8GlobalStateManager:
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         cls.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
 
-        if (enabled and cls.FP8_AUTOCAST_DEPTH == 0
-            and not in_fp8_graph_capture_mode()):
+        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph:
             if not cls.bwd_amax_update_hook_registered and len(cls.multi_grad_hook_tensors) > 0:
                 # This hook does not fire for graphed modules.
                 torch.autograd.graph.register_multi_grad_hook(
@@ -395,6 +403,7 @@ class FP8GlobalStateManager:
         cls.FP8_CALIBRATION = calibrating
         cls.FP8_RECIPE = fp8_recipe
         cls.FP8_DISTRIBUTED_GROUP = fp8_group
+        cls.FP8_GRAPH_CAPTURING = _graph
 
         if cls.FP8_AUTOCAST_DEPTH == 0:
             cls.IS_FIRST_FP8_MODULE = True
@@ -405,14 +414,13 @@ class FP8GlobalStateManager:
             assert fp8_available, reason_for_no_fp8
 
     @classmethod
-    def fp8_autocast_exit(cls, enabled: bool) -> None:
+    def fp8_autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if (enabled and cls.FP8_AUTOCAST_DEPTH == 0
-            and not in_fp8_graph_capture_mode()):
+        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph:
             cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
 
     @classmethod
@@ -510,6 +518,7 @@ def fp8_autocast(
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_group: Optional[dist_group_type] = -100, #None,
+    _graph: bool = False,
 ) -> None:
     """
     Context manager for FP8 usage.
@@ -553,11 +562,12 @@ def fp8_autocast(
         FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
                                                  calibrating=calibrating,
                                                  fp8_recipe=fp8_recipe,
-                                                 fp8_group=fp8_group)
+                                                 fp8_group=fp8_group,
+                                                 _graph=_graph)
         yield
     finally:
         FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
-        FP8GlobalStateManager.fp8_autocast_exit(enabled)
+        FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
@@ -660,20 +670,3 @@ def split_and_copy(
     """Split `buffer` by `chunk_sizes` and copy into `outputs`."""
     splits = buffer.split(chunk_sizes)
     torch._foreach_copy_(outputs, splits)
-
-
-def set_fp8_graph_capture_start():
-    """Being capture."""
-    global _IN_FP8_CUDA_GRAPH_CAPTURE
-    _IN_FP8_CUDA_GRAPH_CAPTURE = True
-
-
-def set_fp8_graph_capture_end():
-    """End capture."""
-    global _IN_FP8_CUDA_GRAPH_CAPTURE
-    _IN_FP8_CUDA_GRAPH_CAPTURE = False
-
-
-def in_fp8_graph_capture_mode():
-    """Is cuda graph being captured."""
-    return _IN_FP8_CUDA_GRAPH_CAPTURE

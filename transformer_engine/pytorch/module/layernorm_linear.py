@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager, in_fp8_graph_capture_mode
+from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
     get_default_init_method,
@@ -1047,7 +1047,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if skip_fp8_weight_update is not None:
             assert (
-                in_fp8_graph_capture_mode()
+                FP8GlobalStateManager.fp8_graph_capturing()
             ), "`skip_fp8_weight_update` must only be set during cuda graph capture."
             warnings.warn("`skip_fp8_weight_update` set!")
             is_first_microbatch = False

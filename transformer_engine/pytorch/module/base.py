@@ -21,7 +21,6 @@ from ..fp8 import (
     get_default_fp8_recipe,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
-    in_fp8_graph_capture_mode,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -538,7 +537,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 "Amax reduction across tensor parallel group is " \
                 "necessary when using sequence parallelism with FP8."
 
-            if self.fp8 and not in_fp8_graph_capture_mode():
+            if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                     self.fp8_meta, fp8_weights=self.get_fp8_params())
 
