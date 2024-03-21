@@ -240,6 +240,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.fsdp_wrapped = False
+        self.fsdp_group = None
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""

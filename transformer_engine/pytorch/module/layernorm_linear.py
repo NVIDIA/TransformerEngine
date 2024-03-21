@@ -38,6 +38,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
@@ -89,6 +91,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
         ub_name: str,
+        fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -174,6 +177,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8 = weight
                 weight_t_fp8 = None
             elif update_fp8_weights:
+                # Gather Fp8 weight buffers if needed
+                if fsdp_group is not None and weight_fp8._data.shape != weight.data.shape:
+                    _fsdp_gather_tensors(fsdp_group, [weight.data.shape], weight_fp8)
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
                     data=weight_fp8._data,
@@ -183,6 +189,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 if (is_grad_enabled
                     or (is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase())):
+                    # Gather Fp8 transposed-weight buffers if needed
+                    weight_t_fp8_shape = tuple(reversed(weight_t_fp8._data.shape))
+                    if (fsdp_group is not None
+                        and weight_t_fp8._data.shape != weight_t_fp8_shape):
+                        _fsdp_gather_tensors(fsdp_group,
+                                             [weight_t_fp8_shape],
+                                             weight_t_fp8)
                     tex.fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -263,6 +276,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                mu,
+                rsigma,
+                weight_t_fp8,
+                ln_out
+            )
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
@@ -272,7 +295,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
                 ln_out,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
             )
 
             ctx.activation_dtype = activation_dtype
@@ -308,6 +331,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
 
+        # Scatter Fp8 weight buffers
+        _fsdp_scatter_tensors(fsdp_group, weight_fp8, weight_fp8)
+
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp.shape)
@@ -335,6 +361,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Gather intermediate/activation tensors if needed
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                mu,
+                rsigma,
+                weight_t_fp8,
+                ln_out
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -565,6 +601,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
+            clear_tensor_data(mu)
+            clear_tensor_data(rsigma)
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -590,6 +628,9 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
+        # Scatter fp8 transposed-weight buffers
+        _fsdp_scatter_tensors(ctx.fsdp_group, weight_t_fp8)
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -598,6 +639,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1101,6 +1143,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
                 self.ub_name,
+                self.fsdp_group,
             )
             out = fwd_fn(*args)
 
