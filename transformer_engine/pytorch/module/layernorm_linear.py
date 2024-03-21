@@ -159,7 +159,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if return_layernorm_output:
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
-                if ub_split_ag or ub_atomic_gemm_ag:
+                if ub_overlap_ag:
                     ln_out_fp8 = ub_obj_lnout.get_ubuf_output(0)
                     tex.cast_to_fp8(
                         ln_out,
