@@ -102,7 +102,7 @@ def init_te_llama_model(hyperparams):
 
     return model
 
-def wrap_with_accelerator(model, hyperparams):
+def wrap_with_accelerator(model, hyperparams, fused_optizer=False):
     # Create FP8 kwarg handler if required
     fp8_kwarg_handler = [FP8RecipeKwargs(backend="te")] if hyperparams.mixed_precision == "fp8" else None
 
@@ -117,7 +117,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
+    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=fused_optizer)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,

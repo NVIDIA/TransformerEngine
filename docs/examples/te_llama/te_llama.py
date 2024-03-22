@@ -56,8 +56,7 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
             normalization="RMSNorm",
             activation="swiglu",
             attn_input_format="bshd",
-            num_gqa_groups=config.num_key_value_heads,
-            kv_channels=16
+            num_gqa_groups=config.num_key_value_heads
         )
         te_rope = RotaryPositionEmbedding(config.hidden_size//config.num_attention_heads)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
