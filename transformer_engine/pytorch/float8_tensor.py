@@ -102,6 +102,7 @@ class _ToFloat8Func(torch.autograd.Function):
             if scale is None:
                 scale = fp8_meta[fp8_meta_key].scale[fp8_meta_index]
             if amax is None:
+
                 amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
             if scale_inv is None:
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
@@ -435,6 +436,23 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
+    def contiguous(
+        self,
+        *,
+        memory_format: torch.memory_format = torch.contiguous_format,
+    ) -> Float8Tensor:
+        """Returns tensor with data in provided memory format
+
+        Returns `self` if data is already in correct memory format.
+
+        """
+        if self._data.is_contiguous(memory_format=memory_format):
+            return self
+        return _IdentityFunc.apply(
+            self,
+            {"data": self._data.detach().contiguous(memory_format=memory_format)},
+        )
+
     def transpose(
         self,
         dim0: int = 0,
@@ -442,8 +460,7 @@ class Float8Tensor(torch.Tensor):
         *,
         update_cache: str | bool = "reuse_only",
     ) -> torch.Tensor:
-        """
-        Swap tensor dimensions
+        """Swap tensor dimensions
 
         For basic 2D matrix transposes, an optimized transpose kernel
         is applied and a Float8Tensor is returned.
@@ -666,6 +683,22 @@ class Float8Tensor(torch.Tensor):
                 fp8_attrs=args[0]._fp8_attrs,
             )
 
+        # View op
+        if func == aten.view.default:
+            tensor = args[0]
+            data = tensor._data
+            data_view = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(
+                tensor,
+                data=data_view,
+                fp8_attrs=tensor._fp8_attrs,
+            )
+
         def maybe_unwrap(t):
             if isinstance(t, Float8Tensor):
                 return t.from_float8()
@@ -768,3 +801,6 @@ class Float8Tensor(torch.Tensor):
 
     # Do not force the Float8Tensor type on the returned tensor
     __torch_function__ = torch._C._disabled_torch_function_impl
+
+    # Class attribute to check for Float8Tensor
+    _is_float8_tensor: bool = True
