@@ -33,10 +33,7 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
 )
 import transformer_engine.pytorch.fp8 as fp8
-from transformer_engine.pytorch.module.base import (
-    TransformerEngineBaseModule,
-    _prepare_backward,
-)
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     init_method_normal,
@@ -1188,8 +1185,7 @@ class _dpa_fp8(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-
-        with _prepare_backward(True, ctx.fp8_meta, None, 1, name="_DPA"):
+        with torch.cuda.nvtx.range("_DPA"):
             (
                 inputmat_t,
                 qkv_weight_t_fp8,
