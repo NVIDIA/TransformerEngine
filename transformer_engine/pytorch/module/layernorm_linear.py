@@ -947,7 +947,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
         # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
-        self.dummy_tensor = torch.zeros(1, device="cuda", requires_grad=True)
+        self.dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
         FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
 
     def reset_layer_norm_parameters(self) -> None:

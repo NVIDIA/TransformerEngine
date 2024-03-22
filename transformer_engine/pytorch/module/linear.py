@@ -811,7 +811,7 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = False
 
         # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
-        self.dummy_tensor = torch.zeros(1, device="cuda", requires_grad=True)
+        self.dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
         FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
 
     def reset_parameters(self, defer_init=False):

@@ -380,10 +380,10 @@ class TorchGPT(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b = self.causal_attn(a, attn_mask)
+        b = self.causal_attn(a, attention_mask)
         if self.parallel_attention_mlp:
             n = self.ln_mlp(x)
             x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
@@ -690,7 +690,7 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    out = block(inp_hidden_states, inp_attn_mask)
+    out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
     loss.backward()
 
