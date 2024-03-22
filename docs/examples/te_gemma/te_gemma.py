@@ -56,8 +56,8 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             normalization="RMSNorm",
             activation="geglu",
             attn_input_format="bshd",
-            num_gqa_groups=2,
-            kv_channels=1000000000000000
+            num_gqa_groups=config.num_key_value_heads,
+            attention_hidden_size=4096
         )
         te_rope = RotaryPositionEmbedding(256)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -140,12 +140,6 @@ def replace_params(hf_state_dict, te_state_dict):
         if m is not None:
             all_layer_prefixes.add(m.group())
     
-    print('-' * 50)
-    [(print(x, " ", te_state_dict[x].shape if type(te_state_dict[x]) is torch.Tensor else " ") if x.startswith(list(all_layer_prefixes)[1]) else "") for x in te_state_dict.keys()]
-    
-    print('-' * 50)
-    [(print(x, " ", hf_state_dict[x].shape if type(hf_state_dict[x]) is torch.Tensor else " ") if x.startswith(list(all_layer_prefixes)[1]) else "") for x in hf_state_dict.keys()]
-   
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
         # copy if the corresponding layer doesn't exist in HF model
