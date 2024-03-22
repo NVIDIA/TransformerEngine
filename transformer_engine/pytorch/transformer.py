@@ -128,8 +128,8 @@ class TransformerLayer(torch.nn.Module):
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
                `encoder` option.
-    kv_channels: int, default = `None`
-                number of key-value channels. defaults to
+    attention_hidden_size: int, default = `None`
+                number of channels of queue/key/value. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
                         default = `causal`
@@ -236,7 +236,7 @@ class TransformerLayer(torch.nn.Module):
         init_method: Optional[Callable] = None,
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
-        kv_channels: Optional[int] = None,
+        attention_hidden_size: Optional[int] = None,
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
@@ -315,10 +315,6 @@ class TransformerLayer(torch.nn.Module):
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
 
-        self.kv_channels = (
-            kv_channels if kv_channels else (hidden_size // num_attention_heads)
-        )
-
         if init_method is None:
             init_method = get_default_init_method()
         if output_layer_init_method is None:
@@ -335,7 +331,7 @@ class TransformerLayer(torch.nn.Module):
         attention_args = (
             hidden_size,
             num_attention_heads,
-            self.kv_channels,
+            attention_hidden_size,
             attention_dropout,
             layernorm_epsilon,
             init_method,
