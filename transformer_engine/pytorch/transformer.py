@@ -259,10 +259,8 @@ class TransformerLayer(torch.nn.Module):
         ub_tp_comm_overlap: bool = False,
         ub_bulk_wgrad: bool = True,
         ub_bulk_dgrad: bool = True,
-        ub_split_ag: bool = True,
-        ub_split_rs: bool = True,
-        ub_atomic_gemm_ag: bool = False,
-        ub_atomic_gemm_rs: bool = False,
+        ub_overlap_ag: bool = True,
+        ub_overlap_rs: bool = True,
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
@@ -282,21 +280,8 @@ class TransformerLayer(torch.nn.Module):
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
-        ub_split_ag = ub_tp_comm_overlap and ub_split_ag
-        ub_split_rs = ub_tp_comm_overlap and ub_split_rs
-        ub_atomic_gemm_rs = ub_tp_comm_overlap and ub_atomic_gemm_rs
-        assert (
-            not (ub_split_rs and ub_atomic_gemm_rs)
-        ), "Only one type of RS overlap ub_split_rs/ub_atomic_gemm_rs should be enabled."
-        ub_atomic_gemm_ag = ub_tp_comm_overlap and ub_atomic_gemm_ag
-        assert (
-            not (ub_split_ag and ub_atomic_gemm_ag)
-        ), "Only one type of AG overlap ub_split_ag/ub_atomic_gemm_ag should be enabled."
-
-        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
-            warnings.warn(
-                "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
-            )
+        ub_overlap_ag = ub_tp_comm_overlap and ub_overlap_ag
+        ub_overlap_rs = ub_tp_comm_overlap and ub_overlap_rs
 
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
@@ -370,10 +355,8 @@ class TransformerLayer(torch.nn.Module):
             "qkv_weight_interleaved" : qkv_weight_interleaved,
             "ub_bulk_wgrad" : ub_bulk_wgrad,
             "ub_bulk_dgrad" : ub_bulk_dgrad,
-            "ub_split_ag" : ub_split_ag,
-            "ub_split_rs" : ub_split_rs,
-            "ub_atomic_gemm_rs" : ub_atomic_gemm_rs,
-            "ub_atomic_gemm_ag" : ub_atomic_gemm_ag,
+            "ub_overlap_ag" : ub_overlap_ag,
+            "ub_overlap_rs" : ub_overlap_rs,
             "qkv_format" : self.attn_input_format,
         }
 
@@ -427,10 +410,8 @@ class TransformerLayer(torch.nn.Module):
             zero_centered_gamma=zero_centered_gamma,
             ub_bulk_wgrad=ub_bulk_wgrad,
             ub_bulk_dgrad=ub_bulk_dgrad,
-            ub_split_rs=ub_split_rs,
-            ub_split_ag=ub_split_ag,
-            ub_atomic_gemm_rs=ub_atomic_gemm_rs,
-            ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+            ub_overlap_rs=ub_overlap_rs,
+            ub_overlap_ag=ub_overlap_ag,
             activation=activation,
             normalization=normalization,
             device=device,
