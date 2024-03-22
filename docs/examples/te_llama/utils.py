@@ -23,7 +23,7 @@ class HyperParameters:
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
-        self.batch_size = 16
+        self.batch_size = 8
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps=5
