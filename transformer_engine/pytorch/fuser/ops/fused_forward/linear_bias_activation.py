@@ -99,7 +99,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             raise NotImplementedError("Activations are not yet supported")  ### TODO Implement
 
         # Check if FP8 is enabled
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
 
         # Check input tensor
         input_dims = input.size()
@@ -115,7 +115,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             device=linear_op.device,
             dtype=linear_op.dtype,
         )
-        if fp8_enabled and not is_float8_tensor(local_x):
+        if with_fp8_compute and not is_float8_tensor(local_x):
             fp8_meta = linear_op.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             with_cast_transpose = linear_op.weight.requires_grad
@@ -136,7 +136,7 @@ class ForwardLinearBiasActivation(FusedOperation):
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
-        elif not fp8_enabled and is_float8_tensor(local_x):
+        elif not with_fp8_compute and is_float8_tensor(local_x):
             local_x = local_x.from_float8()
         x = local_x
         x_async = None
@@ -158,7 +158,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             dtype=linear_op.dtype,
             memory_format=torch.contiguous_format,
         )
-        if fp8_enabled and not is_float8_tensor(w):
+        if with_fp8_compute and not is_float8_tensor(w):
             fp8_meta = linear_op.get_fp8_meta("param")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             w = Float8Tensor.to_float8(
@@ -167,7 +167,7 @@ class ForwardLinearBiasActivation(FusedOperation):
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
             )
-        elif not fp8_enabled and is_float8_tensor(w):
+        elif not with_fp8_compute and is_float8_tensor(w):
             w = w.from_float8()
 
         # Check bias tensor
@@ -188,7 +188,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         )
         if x_async is not None:
             x_async.wait()
-        if fp8_enabled:
+        if with_fp8_compute:
             fp8_gemm(
                 w._data,
                 w._scale_inv,
@@ -219,7 +219,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.save_for_backward(
             local_x,
         )
-        linear_op_ctx.fp8_enabled = fp8_enabled
+        linear_op_ctx.with_fp8_compute = with_fp8_compute
         linear_op_ctx.input_dims = input_dims
         linear_op_ctx.requires_dgrad = input.requires_grad
 

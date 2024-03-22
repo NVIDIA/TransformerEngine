@@ -307,7 +307,13 @@ class UnfusedLinear(UnfusedOperation):
     ) -> torch.Tensor:
 
         # Check if FP8 is enabled
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
+        with_fp8_output = (
+            with_fp8_compute
+            and self.tensor_parallel_mode != "row"
+            and ctx.next_op is not None
+            and ctx.next_op.num_fp8_scales("input") > 0
+        )
 
         # Check input tensor
         input_dims = input.size()
@@ -323,7 +329,7 @@ class UnfusedLinear(UnfusedOperation):
             device=self.device,
             dtype=self.dtype,
         )
-        if fp8_enabled and not is_float8_tensor(local_x):
+        if with_fp8_compute and not is_float8_tensor(local_x):
             fp8_meta = self.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             with_cast_transpose = self.weight.requires_grad
@@ -344,7 +350,7 @@ class UnfusedLinear(UnfusedOperation):
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
-        elif not fp8_enabled and is_float8_tensor(local_x):
+        elif not with_fp8_compute and is_float8_tensor(local_x):
             local_x = local_x.from_float8()
         x = local_x
         x_async = None
@@ -363,7 +369,7 @@ class UnfusedLinear(UnfusedOperation):
             dtype=self.dtype,
             memory_format=torch.contiguous_format,
         )
-        if fp8_enabled and not is_float8_tensor(w):
+        if with_fp8_compute and not is_float8_tensor(w):
             fp8_meta = self.get_fp8_meta("param")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             w = Float8Tensor.to_float8(
@@ -372,17 +378,50 @@ class UnfusedLinear(UnfusedOperation):
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
             )
-        elif not fp8_enabled and is_float8_tensor(w):
+        elif not with_fp8_compute and is_float8_tensor(w):
             w = w.from_float8()
 
+        # Construct output tensor
+        y = None
+        if with_fp8_output:
+            fp8_meta = ctx.next_op.get_fp8_meta("input")
+            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            data = torch.empty(
+                (x.size(0), w.size(0)),
+                dtype=torch.uint8,
+                device=self.device,
+            )
+            y = Float8Tensor(
+                data=data,
+                fp8_meta=fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+                dtype=self.dtype,
+            )
+        else:
+            y = torch.empty(
+                (x.size(0), w.size(0)),
+                dtype=self.dtype,
+                device=self.device,
+            )
+
         # Perform GEMM
-        y = torch.empty(
-            (x.size(0), w.size(0)),
-            dtype=self.dtype,
-            device=self.device,
-        )
         x_async = _wait_async(x_async)
-        if fp8_enabled:
+        if with_fp8_compute:
+            kwargs = dict(out=y)
+            if with_fp8_output:
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                    forward=y._fp8_meta_forward,
+                )
+                kwargs.update(
+                    dict(
+                        out=y._data,
+                        out_index=y._fp8_meta_index,
+                        fp8_meta_tensor=y._fp8_meta[fp8_meta_key],
+                        D_dtype=y._fp8_dtype,
+                    )
+                )
             fp8_gemm(
                 w._data,
                 w._scale_inv,
@@ -394,7 +433,7 @@ class UnfusedLinear(UnfusedOperation):
                 x._fp8_dtype,
                 y.dtype,
                 get_workspace(),
-                out=y,
+                **kwargs,
             )
         else:
             gemm(
@@ -416,7 +455,7 @@ class UnfusedLinear(UnfusedOperation):
         ctx.save_for_backward(
             local_x,
         )
-        ctx.fp8_enabled = fp8_enabled
+        ctx.with_fp8_compute = with_fp8_compute
         ctx.input_dims = input_dims
         ctx.requires_dgrad = input.requires_grad
 
@@ -432,11 +471,15 @@ class UnfusedLinear(UnfusedOperation):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
-        # Load state from forward pass
-        (
-            local_x,
-        ) = ctx.saved_tensors
-        fp8_enabled = ctx.fp8_enabled
+        # Check if FP8 is enabled
+        with_fp8_compute = ctx.with_fp8_compute
+        with_fp8_grad_input = (
+            with_fp8_compute
+            and ctx.requires_dgrad
+            and self.tensor_parallel_mode != "column"
+            and ctx.prev_op is not None
+            and ctx.prev_op.num_fp8_scales("grad_output") > 0
+        )
 
         # Check grad output tensor
         dy_async = None
@@ -446,7 +489,7 @@ class UnfusedLinear(UnfusedOperation):
             device=self.device,
             dtype=self.dtype,
         )
-        if fp8_enabled and not is_float8_tensor(dy):
+        if with_fp8_compute and not is_float8_tensor(dy):
             fp8_meta = self.get_fp8_meta("grad_output")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
             with_cast_transpose = self.weight.requires_grad
@@ -468,7 +511,7 @@ class UnfusedLinear(UnfusedOperation):
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
-        elif not fp8_enabled and is_float8_tensor(dy):
+        elif not with_fp8_compute and is_float8_tensor(dy):
             dy = dy.from_float8()
         if self.tensor_parallel_mode == "row" and self.sequence_parallel:
             dy, dy_async = gather_along_first_dim(
@@ -478,7 +521,8 @@ class UnfusedLinear(UnfusedOperation):
             )
 
         # Gather sequence-parallel input if needed
-        x = local_x
+        x_local = ctx.saved_tensors[0]
+        x = x_local
         x_async = None
         if (
             self.weight.requires_grad
@@ -504,7 +548,7 @@ class UnfusedLinear(UnfusedOperation):
                 dtype=self.dtype,
                 memory_format=torch.contiguous_format,
             )
-            if fp8_enabled and not is_float8_tensor(w):
+            if with_fp8_compute and not is_float8_tensor(w):
                 fp8_meta = self.get_fp8_meta("param")
                 fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 w = fp8_cast_transpose(
@@ -514,17 +558,49 @@ class UnfusedLinear(UnfusedOperation):
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
-            elif not fp8_enabled and is_float8_tensor(w):
+            elif not with_fp8_compute and is_float8_tensor(w):
                 w = w.from_float8()
 
+            # Construct grad input tensor
+            if with_fp8_grad_input:
+                fp8_meta = ctx.prev_op.get_fp8_meta("grad_output")
+                fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
+                data = torch.empty(
+                    (dy.size(0), self.weight.size(1)),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+                dx = Float8Tensor(
+                    data=data,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    dtype=self.dtype,
+                )
+            else:
+                dx = torch.empty(
+                    (dy.size(0), self.weight.size(1)),
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+
             # Perform dgrad GEMM
-            dx = torch.empty(
-                (dy.size(0), self.weight.size(1)),
-                dtype=self.dtype,
-                device=self.device,
-            )
             dy_async = _wait_async(dy_async)
-            if fp8_enabled:
+            if with_fp8_compute:
+                kwargs = dict(out=dx)
+                if with_fp8_grad_input:
+                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                        forward=dx._fp8_meta_forward,
+                    )
+                    kwargs.update(
+                        dict(
+                            out=dx._data,
+                            out_index=dx._fp8_meta_index,
+                            fp8_meta_tensor=dx._fp8_meta[fp8_meta_key],
+                            D_dtype=dx._fp8_dtype,
+                        )
+                    )
                 fp8_gemm(
                     w.transpose()._data,
                     w._scale_inv,
@@ -536,7 +612,7 @@ class UnfusedLinear(UnfusedOperation):
                     dy._fp8_dtype,
                     dx.dtype,
                     get_workspace(),
-                    out=dx,
+                    **kwargs,
                 )
             else:
                 gemm(
@@ -583,7 +659,7 @@ class UnfusedLinear(UnfusedOperation):
                 )
             dy_async = _wait_async(dy_async)
             x_async = _wait_async(x_async)
-            if fp8_enabled:
+            if with_fp8_compute:
                 fp8_gemm(
                     x.transpose()._data,
                     x._scale_inv,

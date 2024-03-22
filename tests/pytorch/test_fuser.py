@@ -657,3 +657,85 @@ class TestFuserFusions:
         if bias:
             db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_fp8_linear(
+        self,
+        *,
+        in_shape: Iterable[int] = (16, 16),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Adjacent linear ops with FP8 enabled"""
+
+        # Make input and weight shapes consistent
+        in_shape = tuple(in_shape)
+        weight_shape = (in_shape[-1], in_shape[-1])
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=True,
+        )
+        w0_ref, w0_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=True,
+        )
+        w1_ref, w1_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=True,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.linear(x_ref, w0_ref)
+        y_ref = torch.nn.functional.linear(y_ref, w1_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusable operations
+        with te.fp8_model_init(enabled=True):
+            model = te_fuser.Sequential(
+                te_fuser.ops.UnfusedLinear(
+                    in_shape[-1],
+                    in_shape[-1],
+                    device=device,
+                    dtype=dtype,
+                ),
+                te_fuser.ops.UnfusedLinear(
+                    in_shape[-1],
+                    in_shape[-1],
+                    device=device,
+                    dtype=dtype,
+                ),
+            )
+        with torch.no_grad():
+            model[0].weight.copy_(w0_test)
+            model[1].weight.copy_(w1_test)
+            del w0_test, w1_test
+        with te.fp8_autocast(enabled=True):
+            y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(model[0].weight._fp8_dtype)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw0_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+        dw1_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw0_test, w0_ref.grad, **tols)
+        torch.testing.assert_close(dw1_test, w1_ref.grad, **tols)
