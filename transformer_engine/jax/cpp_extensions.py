@@ -453,9 +453,21 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
                 f"and hurt performance."
             )
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+        if b_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter beta " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+
+
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
-        b_sharding = NamedSharding(mesh, PartitionSpec(*b_spec))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
+        b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
 
@@ -628,8 +640,15 @@ class LayerNormBwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         g_b_spec = get_padded_spec(arg_infos[4])
+        if g_b_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
+                f"of gamma and beta of Layernorm " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         return dx_sharding, dgamma_sharding, dbeta_sharding
 
     @staticmethod
@@ -643,12 +662,19 @@ class LayerNormBwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         g_b_spec = get_padded_spec(arg_infos[4])
+        if g_b_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
+                f"of gamma and beta of Layernorm " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
         x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
-        arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(*g_b_spec)))
+        arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, mu, rsigma, gamma):
             local_dx, local_dgamma, local_dbeta = \
@@ -828,8 +854,14 @@ class RmsNormFwdPrimitive(BasePrimitive):
                 f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
                 f"and hurt performance."
             )
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{RmsNormFwdPrimitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (x_sharding, g_sharding)
@@ -982,8 +1014,13 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         g_spec = get_padded_spec(arg_infos[3])
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
         return dx_sharding, dgamma_sharding
 
     @staticmethod
@@ -997,12 +1034,17 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         g_spec = get_padded_spec(arg_infos[3])
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding
         x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
-        arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(*g_spec)))
+        arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, rsigma, gamma):
             local_dx, local_dgamma = \
@@ -4336,15 +4378,27 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
     def partition(out_dtype, zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[0])
+        g_spec = get_padded_spec(arg_infos[1])
+        b_spec = get_padded_spec(arg_infos[2])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
+                f"Does not support to shard hidden dim in {LayerNormFwdFp8Primitive.name}! " \
                 f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
                 f"and hurt performance."
             )
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
+        if b_spec[-1] is not None:
+            warnings.warn(
+                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter beta " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        b_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
+        b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(
             mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
@@ -4568,14 +4622,20 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
     def partition(out_dtype, epsilon, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[0])
+        g_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
                 f"Does not support to shard hidden dim in {RmsNormFwdFp8Primitive.name}! " \
                 f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
                 f"and hurt performance."
             )
+        if g_spec[-1] is not None:
+            warnings.warn(
+                f"{RmsNormFwdFp8Primitive.name} does not support sharding of parameter gamma " \
+                f"Enforcing no sharding of parameters hidden dim! " \
+            )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        g_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))

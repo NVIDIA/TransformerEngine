@@ -26,7 +26,9 @@ class HyperParameters:
         self.batch_size = 8
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
+        self.num_warmup_steps=5
         self.num_training_steps=10
+        
 
 hyperparams = HyperParameters()
 
@@ -132,11 +134,9 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     optimizer.zero_grad()
     train_dataloader = enumerate(train_dataloader)
 
-    time_vals = []
-
-    for _ in range(hyperparams.num_training_steps):
+    # Warmup iters
+    for _ in range(hyperparams.num_warmup_steps):
         step, batch = next(train_dataloader)
-        start_time = time.time()
         with accelerator.accumulate(model):
             outputs = model(**batch)
             loss = outputs.loss
@@ -146,15 +146,28 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
             lr_scheduler.step()
             optimizer.zero_grad()
 
-        end_time = time.time()
-        total_time = end_time - start_time
-        time_vals.append(total_time)
+    # Get the timers ready
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
 
+    start.record()
+    # Training iters
+    for _ in range(hyperparams.num_training_steps):
+        step, batch = next(train_dataloader)
+        with accelerator.accumulate(model):
+            outputs = model(**batch)
+            loss = outputs.loss
+            total_loss += loss.detach().float()
+            accelerator.backward(loss)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+    torch.cuda.synchronize()
+    end.record()
     accelerator.end_training()
 
-    # ignore the first couple of time vals
-    time_vals = time_vals[2:]
-    print(f"{hyperparams.num_training_steps} finetuning steps complete!\nAverage time taken per step: {(sum(time_vals)/len(time_vals)) * 1000:.0f} milliseconds")
+    print(f"{hyperparams.num_training_steps} finetuning steps complete!\nAverage time taken per step: {(start.elapsed_time(end)/hyperparams.num_training_steps):.0f} milliseconds")
 
 def restart_jupyter_notebook():
     # Try restarting the Jupyter kernel
