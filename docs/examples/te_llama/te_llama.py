@@ -123,8 +123,8 @@ class TELlamaForCausalLM:
 
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
-            replaces_params = replace_params(state_dict, vanilla_model.state_dict())
-            #_load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            replace_params(state_dict, vanilla_model.state_dict())
+            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
             # Force mem release. Taken from huggingface code
             del state_dict
