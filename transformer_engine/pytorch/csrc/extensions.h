@@ -605,3 +605,65 @@ size_t get_cudnn_version();
 bool userbuf_comm_available();
 
 void placeholder();
+
+
+/***************************************************************************************************
+ * Support THD format in Context Parallel
+ **************************************************************************************************/
+
+void thd_lse_correction(at::Tensor &lse,
+                        const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens,
+                        int total_tokens
+);
+
+at::Tensor thd_get_half_lse(const at::Tensor &lse,
+                            const at::Tensor &cu_seqlens,
+                            int total_tokens
+);
+
+void thd_out_correction(at::Tensor &out,
+                        const at::Tensor &out_per_step,
+                        const at::Tensor &lse,
+                        const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens
+);
+
+void thd_out_correction_half(at::Tensor &out,
+                             const at::Tensor &out_per_step,
+                             const at::Tensor &lse,
+                             const at::Tensor &lse_per_step,
+                             const at::Tensor &cu_seqlens
+);
+
+at::Tensor thd_get_half_tensor(const at::Tensor &tensor,
+                               const at::Tensor &cu_seqlens,
+                               int seq_dim,
+                               int half_idx
+);
+
+void thd_copy_half(at::Tensor &whole,
+                   const at::Tensor &half,
+                   const at::Tensor &cu_seqlens,
+                   int seq_dim,
+                   int half_idx
+);
+
+void thd_add_half(at::Tensor &whole,
+                  const at::Tensor &half,
+                  const at::Tensor &cu_seqlens,
+                  int seq_dim,
+                  int half_idx
+);
+
+void thd_copy_add(at::Tensor &t1,
+                  const at::Tensor &t2,
+                  const at::Tensor &cu_seqlens,
+                  int seq_dim
+);
+
+void thd_add_copy(at::Tensor &t1,
+                  const at::Tensor &t2,
+                  const at::Tensor &cu_seqlens,
+                  int seq_dim
+);
