@@ -200,6 +200,7 @@ class FP8GlobalStateManager:
         if index_in_buffer in fp8_meta:
             return
 
+        fp8_meta[index_in_buffer] = []
         for forward in (True, False):
             # This algorithm creates a two-way map with `autocast_to_fp8_params` and
             # `fp8_param_to_autocast`. This is used for keeping track of FP8 weights
@@ -233,7 +234,8 @@ class FP8GlobalStateManager:
                     fp8_meta[fp8_meta_tensor_key].amax_history)
                 cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
                 cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
-            fp8_meta[index_in_buffer] = (len(cls.global_amax_buffer[key]) - 1, key)
+            fp8_meta[index_in_buffer].append(len(cls.global_amax_buffer[key]) - 1)
+            fp8_meta[index_in_buffer].append(key)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:

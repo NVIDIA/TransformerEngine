@@ -227,36 +227,35 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if fwd is None:
             fp8_meta_tensor_keys = ("scaling_fwd", "scaling_bwd")
-            fwd_bwd_keys = ("forward", "backward")
         else:
             fp8_meta_tensor_keys = ("scaling_fwd" if fwd else "scaling_bwd",)
-            fwd_bwd_keys = ("forward" if fwd else "backward",)
 
-        for key, fwd_bwd_key in zip(fp8_meta_tensor_keys, fwd_bwd_keys):
-            curr_len = self.fp8_meta[key].amax_history.shape[0]
+        for meta_key in fp8_meta_tensor_keys:
+            curr_len = self.fp8_meta[meta_key].amax_history.shape[0]
             if length == curr_len:
                 continue
             if length < curr_len:
-                self.fp8_meta[key].amax_history = self.fp8_meta[key].amax_history[: length].clone()
+                self.fp8_meta[meta_key].amax_history = (
+                    self.fp8_meta[meta_key].amax_history[: length].clone())
             elif length > curr_len:
                 extra_rows = length - curr_len
-                self.fp8_meta[key].amax_history = F.pad(
-                    self.fp8_meta[key].amax_history, pad=(0, 0, 0, extra_rows)
+                self.fp8_meta[meta_key].amax_history = F.pad(
+                    self.fp8_meta[meta_key].amax_history, pad=(0, 0, 0, extra_rows)
                 )
 
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
-                index, autocast_key = self.fp8_meta[FP8GlobalStateManager.get_buffer_info()]
-                buffer_key = f"{fwd_bwd_key}_{autocast_key}" #TODO(ksivaman) fix
-                if buffer_key in FP8GlobalStateManager.global_amax_buffer:
-                    assert (
-                        buffer_key in FP8GlobalStateManager.global_amax_history_buffer
-                    ), "TE internal error during amax history change."
-                    FP8GlobalStateManager.global_amax_buffer[buffer_key][index] = (
-                        self.fp8_meta[key].amax_history[0])
-                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][index] = (
-                        self.fp8_meta[key].amax_history)
-
+                fwd_pos, fwd_key, bwd_pos, bwd_key = (
+                    self.fp8_meta[FP8GlobalStateManager.get_buffer_info()])
+                for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
+                    if buffer_key in FP8GlobalStateManager.global_amax_buffer:
+                        assert (
+                            buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                        ), "TE internal error during amax history change."
+                        FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = (
+                            self.fp8_meta[meta_key].amax_history[0])
+                        FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
+                            self.fp8_meta[meta_key].amax_history)
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -264,11 +263,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
-            # When loading a checkpoint and using cuda graphs, we'll simply
-            # disallow changing the amax_history size since that involves
-            # moving to fresh memory loc and thus the global buffer memory
-            # and the local module fp8 tensor pointers will go out of
-            # sync. TODO(ksivaman); catch this case and exit gracefully.
             self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
             return
 
