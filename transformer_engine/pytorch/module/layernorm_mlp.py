@@ -590,7 +590,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_t_fp8 = fc2_weight._transpose(
                     cache=ctx.is_first_microbatch is not None,
                     update_cache=ctx.is_first_microbatch,
-                    noop=skip_fp8_weight_update,
+                    noop_tensor=skip_fp8_weight_update,
                 )
             elif ctx.fp8:
                 fc1_weight_t_fp8 = fc1_weight_t_fp8._data

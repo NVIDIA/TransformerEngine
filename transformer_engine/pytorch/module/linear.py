@@ -358,7 +358,7 @@ class _Linear(torch.autograd.Function):
                 weight_t_fp8 = weight._transpose(
                     cache=ctx.is_first_microbatch is not None,
                     update_cache=ctx.is_first_microbatch,
-                    noop=skip_fp8_weight_update,
+                    noop_tensor=skip_fp8_weight_update,
                 )
             elif ctx.fp8:
                 weight_t_fp8 = weight_t_fp8._data
