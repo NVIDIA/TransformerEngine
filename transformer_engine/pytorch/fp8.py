@@ -384,12 +384,11 @@ class FP8GlobalStateManager:
         recipe: Optional[DelayedScaling] = None,
         group: Optional[dist_group_type] = None,
     ):
-        """For FP8, each autocast can be uniquely identified by the recipe and fp8 group."""
-        # TODO(ksivaman): Handle custom functions in recipe for amax and scale update.
-        group_key = "na"
-        if torch.distributed.is_initialized():
-            group_key = torch.distributed.get_process_group_ranks(group)
-        return f"{str(recipe)}:{group_key}"
+        """
+        For FP8, each autocast can be uniquely identified by the recipe and fp8 group.
+        Safely using `hash` as we never cross checkpoint boundaries.
+        """
+        return f"{str(recipe)}:{hash(group)}"
 
     @classmethod
     def fp8_autocast_enter(

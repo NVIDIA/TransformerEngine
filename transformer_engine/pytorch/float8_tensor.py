@@ -559,7 +559,7 @@ class Float8Tensor(torch.Tensor):
                 # Directly copy FP8 data if possible
                 if dst._fp8_dtype == src._fp8_dtype:
                     dst._data.copy_(src._data)
-                    dst._scale_inv.copy_(src._scale_inv.detach().clone())
+                    dst._scale_inv.copy_(src._scale_inv.detach())
                     if dst._fp8_meta is not None:
                         if src._fp8_meta is None:
                             src_min, src_max = src.from_float8().aminmax()
@@ -603,7 +603,7 @@ class Float8Tensor(torch.Tensor):
                     fp8_meta_index = dst._fp8_meta_index
                     scale = dst._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
                     amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-                    dst._scale_inv.copy_(scale.detach().reciprocal())
+                    torch.reciprocal(scale.detach(), out=dst._scale_inv)
 
                 # Cast to FP8
                 if not dst._data.is_contiguous():
@@ -618,7 +618,6 @@ class Float8Tensor(torch.Tensor):
                 )
 
                 # This branch is where the FP8 parameters are updated in-place during optimization.
-                # TODO(ksivaman): Are there any other edge cases/paths or scenarios I'm missing?
                 # Handle forward amax reduction.
                 post_optimizer_step_fwd_amax_reduction(dst)
             else:

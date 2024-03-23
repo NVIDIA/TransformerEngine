@@ -136,10 +136,10 @@ class DelayedScaling:
 
     def __repr__(self) -> str:
         return (
-            f"margin={self.margin}__"
-            f"interval={self.interval}__"
-            f"format={str(self.fp8_format).split('.')[1]}__"
-            f"amax_history_len={self.amax_history_len}__"
-            f"wgrad_override={self.override_linear_precision.wgrad}__"
+            f"margin={self.margin}, "
+            f"interval={self.interval}, "
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"amax_history_len={self.amax_history_len}, "
+            f"wgrad_override={self.override_linear_precision.wgrad}, "
             f"reduce_amax={self.reduce_amax}"
         )
