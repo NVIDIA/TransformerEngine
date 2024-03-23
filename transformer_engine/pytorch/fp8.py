@@ -531,7 +531,7 @@ def fp8_autocast(
     enabled: bool = True,
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
-    fp8_group: Optional[dist_group_type] = -100, #None,
+    fp8_group: Optional[dist_group_type] = None,
     _graph: bool = False,
 ) -> None:
     """

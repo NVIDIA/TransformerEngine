@@ -2405,7 +2405,7 @@ class DotProductAttention(torch.nn.Module):
         assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
 
-        if True: #sequence_parallel or get_rng_state_tracker is None:
+        if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
         else:
             attention_dropout_ctx = get_rng_state_tracker().fork
