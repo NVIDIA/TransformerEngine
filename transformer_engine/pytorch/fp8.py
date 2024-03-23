@@ -86,6 +86,7 @@ class FP8GlobalStateManager:
     autocast_arguments = {}
     autocast_to_fp8_params = {}
     fp8_param_to_autocast = {}
+    skip_fp8_weight_update_tensor = None
 
     @classmethod
     def reset(cls) -> None:
@@ -110,6 +111,19 @@ class FP8GlobalStateManager:
         cls.autocast_arguments = {}
         cls.autocast_to_fp8_params = {}
         cls.fp8_param_to_autocast = {}
+        cls.skip_fp8_weight_update_tensor = None
+
+    @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+        """`skip_fp8_weight_update_tensor` inplace setter."""
+        if cls.skip_fp8_weight_update_tensor is None:
+            cls.skip_fp8_weight_update_tensor = torch.empty(1, device="cuda")
+        cls.skip_fp8_weight_update_tensor.copy_(skip)
+
+    @classmethod
+    def get_skip_fp8_weight_update_tensor(cls) -> None:
+        """`skip_fp8_weight_update_tensor` getter."""
+        return cls.skip_fp8_weight_update_tensor
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:

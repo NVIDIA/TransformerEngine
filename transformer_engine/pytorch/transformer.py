@@ -507,7 +507,6 @@ class TransformerLayer(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
@@ -623,7 +622,6 @@ class TransformerLayer(torch.nn.Module):
         # Self attention.
         self_attention_outputs = self.self_attention(
             hidden_states,
-            skip_fp8_weight_update=skip_fp8_weight_update,
             attention_mask=attention_mask,
             attn_mask_type=self_attn_mask_type,
             window_size=window_size,
@@ -652,7 +650,6 @@ class TransformerLayer(torch.nn.Module):
         if self.layer_type == "decoder":
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
-                skip_fp8_weight_update=skip_fp8_weight_update,
                 attention_mask=enc_dec_attn_mask,
                 window_size=window_size,
                 encoder_output=encoder_output,
@@ -674,7 +671,6 @@ class TransformerLayer(torch.nn.Module):
         # MLP.
         mlp_outputs = self.layernorm_mlp(
             hidden_states,
-            skip_fp8_weight_update=skip_fp8_weight_update,
             is_first_microbatch=is_first_microbatch,
         )
         if self.apply_residual_connection_post_layernorm:

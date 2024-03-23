@@ -54,11 +54,7 @@ def _make_graphed_callables(
     flatten_sample_args = []
 
     if fp8_weight_caching:
-        modified_sample_args = []
-        for args in sample_args:
-            args += (torch.empty(1, device="cuda"),)
-            modified_sample_args.append(args)
-        sample_args = modified_sample_args
+        FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
 
     for c, args in zip(callables, sample_args):
         if isinstance(c, torch.nn.Module):
@@ -236,8 +232,9 @@ def _make_graphed_callables(
                     ("is_first_microbatch" in user_kwargs
                      and isinstance(user_kwargs["is_first_microbatch"], bool))
                 ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
-                f = torch.zeros if user_kwargs["is_first_microbatch"] else torch.ones
-                user_args += (f(1, device="cuda"),)
+
+                FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(
+                    not user_kwargs["is_first_microbatch"])
 
             flatten_user_args, _ = _tree_flatten(user_args)
             out = Graphed.apply(*(tuple(flatten_user_args) + module_params))

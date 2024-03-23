@@ -276,7 +276,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
-                skip_fp8_weight_update,
+                skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -1009,7 +1009,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def forward(
         self,
         inp: torch.Tensor,
-        skip_fp8_weight_update: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -1034,11 +1033,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
+        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         if skip_fp8_weight_update is not None:
-            assert (
-                FP8GlobalStateManager.fp8_graph_capturing()
-            ), "`skip_fp8_weight_update` must only be set during cuda graph capture."
-            warnings.warn("`skip_fp8_weight_update` set!")
             is_first_microbatch = False
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
