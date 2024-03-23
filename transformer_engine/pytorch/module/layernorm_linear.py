@@ -346,7 +346,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.primary_weights_in_fp8:
-                weight_t_fp8 = weight.transpose(
+                weight_t_fp8 = weight._transpose(
                     cache=ctx.is_first_microbatch is not None,
                     update_cache=ctx.is_first_microbatch,
                     noop=skip_fp8_weight_update,

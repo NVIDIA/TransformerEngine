@@ -462,27 +462,18 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
-    def transpose(
+    def _transpose(
         self,
-        dim0: int = 0,
-        dim1: int = 1,
         *,
         cache: bool = False,
         update_cache: bool = True,
-        noop: Optional[torch.Tensor] = None,
+        noop_tensor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Swap tensor dimensions
-
-        For basic 2D matrix transposes, an optimized transpose kernel
-        is applied and a Float8Tensor is returned.
+        2D transpose with caching support.
 
         Parameters
         ----------
-        dim0: int, default = 0
-              The first dimension to be transposed
-        dim1: int, default = 1
-              The second dimension to be transposed
         cache: bool, default = `False`
                If `False`, transpose is calculated and returned.
                If `True`, the transpose value is cached and can
@@ -493,24 +484,12 @@ class Float8Tensor(torch.Tensor):
                       If `True`, the tranpose is recomputed and cached.
                       If `False`, cached transpose is returned.
         """
-
-        # Handle non-2D transposes
-        if -self.dim() <= dim0 < 0:
-            dim0 += self.dim()
-        if -self.dim() <= dim1 < 0:
-            dim1 += self.dim()
-        if self.dim() != 2 or dim0 == dim1:
-            if cache:
-                raise ValueError(
-                    "Transpose caching is only supported for basic 2D transposes "
-                    f"(ndims={self.dim()}, dim0={dim0}, dim1={dim1})"
-                )
-            return super().transpose(dim0, dim1)
+        assert self.dim() != 2, f"{self.dim()}-D transpose not supported."
 
         if not cache:
             return tex.fp8_transpose(self._data, self._fp8_dtype)
 
-        if not update_cache and noop is None:
+        if not update_cache and noop_tensor is None:
             assert self._data_transpose is not None, "Tranpose cache is empty."
             return self._data_transpose
 
@@ -518,10 +497,11 @@ class Float8Tensor(torch.Tensor):
             # This branch is only run once since we never reset the cache.
             # For graphed case this will be initialized during 1st warmup.
             self._data_transpose = tex.fp8_transpose(self._data, self._fp8_dtype)
-        elif noop is None:
+        elif noop_tensor is None:
             tex.fp8_transpose_noalloc(self._data, self._data_transpose, self._fp8_dtype)
         else:
-            tex.fp8_transpose_noalloc_noop(self._data, self._data_transpose, noop, self._fp8_dtype)
+            tex.fp8_transpose_noalloc_noop(
+                self._data, self._data_transpose, noop_tensor, self._fp8_dtype)
 
         return self._data_transpose
 
