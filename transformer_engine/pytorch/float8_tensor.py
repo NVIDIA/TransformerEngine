@@ -484,7 +484,7 @@ class Float8Tensor(torch.Tensor):
                       If `True`, the tranpose is recomputed and cached.
                       If `False`, cached transpose is returned.
         """
-        assert self.dim() != 2, f"{self.dim()}-D transpose not supported."
+        assert self.dim() == 2, f"{self.dim()}-D transpose not supported."
 
         if not cache:
             return tex.fp8_transpose(self._data, self._fp8_dtype)
