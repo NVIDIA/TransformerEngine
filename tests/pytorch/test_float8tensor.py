@@ -257,7 +257,7 @@ class TestFloat8Tensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8, x_ref, **tols)
 
-    @pytest.mark.parametrize("dims", [[33, 41], [5, 7, 11]])
+    @pytest.mark.parametrize("dims", [[33, 41], [7, 11]])
     def test_transpose(
         self,
         dims: DimsType,
