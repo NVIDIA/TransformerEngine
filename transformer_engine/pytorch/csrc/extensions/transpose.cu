@@ -54,6 +54,9 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                 grad_output.size(0),
                                 DType::kByte);
 
+  if (M == 0 || N == 0)
+    return {grad_bias, grad_output_cast, grad_output_transpose};
+
   auto input_cu             = makeTransformerEngineTensor(grad_output);
   auto cast_output_cu       = makeTransformerEngineTensor(grad_output_cast.data_ptr(), {M, N},
                                                           otype, amax.data_ptr(), scale.data_ptr(),
