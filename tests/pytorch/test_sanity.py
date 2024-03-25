@@ -148,7 +148,7 @@ def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
     g = torch.cuda.CUDAGraph()
     optimizer.zero_grad(set_to_none=True)
     with torch.cuda.graph(g):
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe, _graph=True):
             static_output = block(static_input)
         static_loss = loss_fn(static_output, static_target)
         static_loss.backward()
