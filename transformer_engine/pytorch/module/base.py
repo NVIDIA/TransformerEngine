@@ -182,7 +182,7 @@ def initialize_ub(
         if atomic_gemm and method == "ring_exchange" and name in ag_rs_pairs:
             layers_atomic_ring_exchange += [name, ag_rs_pairs[name]]
         if name in rs_ag_pairs:
-            assert_massage = (
+            assert_message = (
                 f"At {name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM chunk "
                 "outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
                 "GEMM-RS overlaps forming a TP block (e.g., qkv_fprop and proj_fprop) uses "
@@ -190,10 +190,10 @@ def initialize_ub(
                 "for functionality."
             )
             if name in layers_atomic_ring_exchange:
-                assert atomic_gemm and method == "ring_exchange", assert_massage
+                assert atomic_gemm and method == "ring_exchange", assert_message
             else:
                 if atomic_gemm and method == "ring_exchange":
-                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_massage
+                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
         sample_buffer = torch.empty(
             shape,

@@ -738,7 +738,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       assert(B_copy.numel() == _ubufs[_self_chunk_id].numel());
       assert(B_copy.element_size() == _ubufs[_self_chunk_id].element_size());
       CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_self_chunk_id].data_ptr(),
-                                 _ubufs[_self_chunk_id].numel() * _ubufs[_self_chunk_id].element_size(),
+                                 _ubufs[_self_chunk_id].numel() *
+                                 _ubufs[_self_chunk_id].element_size(),
                                  cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
       CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
@@ -754,8 +755,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       src_ptr,
       n_chunk * m * D.element_size(),
       cudaMemcpyDeviceToDevice,
-      (cudaStream_t) stream_main)
-    );
+      (cudaStream_t) stream_main));
     // Return the last N rows of D_buffer
     torch::Tensor D_return = D_buffer.narrow(0, n_chunk, n);
     return D_return;
@@ -1019,9 +1019,17 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Reduce GEMM output chunks
     char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].data_ptr());
-    torch::Tensor reduce_buf = torch::from_blob(
-      reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
-    torch::sum_out(rs_output, reduce_buf, 0);
+    if (_ubuf.element_size() == 1 && rs_output.element_size() == 2) {
+      assert(_ubuf_scale_inv_initialized);
+      float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+      char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
+      reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
+                             _tp_size, _ubufs[0].numel(), (cudaStream_t) stream_main);
+    } else {
+      torch::Tensor reduce_buf = torch::from_blob(
+        reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
+      torch::sum_out(rs_output, reduce_buf, 0);
+    }
   }
 
   /*
