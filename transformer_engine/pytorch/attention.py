@@ -2216,6 +2216,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 v_fp8 = ext.cast_to_fp8(v,
                     fp8_meta["scaling_fwd"],
                     META_QKV, fp8_dtype_forward).view(v.shape)
+            if _NVTE_DEBUG:
+                print('fwd FP8')
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q_fp8, k_fp8, v_fp8, fp8_dtype_forward, fused_attention_backend, attn_bias,
@@ -2235,6 +2237,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
+            if _NVTE_DEBUG:
+                print('fwd non FP8')
             out, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2252,7 +2256,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     tensor.activation_offloading = True
 
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
-        ctx.fp8 = fp8
+        ctx.fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "0")) and fp8
         ctx.fp8_meta = fp8_meta
         ctx.tp_size = tp_size
         ctx.tp_group = tp_group
@@ -2266,7 +2270,8 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
-        ctx.fused_attention_backend = fused_attention_backend
+        ctx.fused_attention_backend = \
+            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
@@ -2306,6 +2311,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out.view(-1, d_out.shape[-2] * d_out.shape[-1]),
                         ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                         ).view(d_out.shape)
+                    if _NVTE_DEBUG:
+                        print('bwd FP8')
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
@@ -2362,6 +2369,8 @@ class FusedAttnFunc(torch.autograd.Function):
                             ctx.fp8_meta["scaling_bwd"], META_DQKV,
                             fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                 else:
+                    if _NVTE_DEBUG:
+                        print('bwd non FP8')
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, k, v, out, d_out,

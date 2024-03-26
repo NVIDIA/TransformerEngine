@@ -1060,7 +1060,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.1 * torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
-    with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+    with fp8_autocast(enabled=fp8_dpa, fp8_recipe=fp8_recipe):
         out = dpa(inp[0], inp[1], inp[2],
             qkv_format=qkv_format,
             cu_seqlens_q=cu_seqlens_q,
