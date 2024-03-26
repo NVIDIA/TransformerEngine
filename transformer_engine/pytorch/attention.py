@@ -3696,7 +3696,8 @@ class MultiheadAttention(torch.nn.Module):
         # ===================
 
         projection_output = self.proj(
-            context_layer, is_first_microbatch=is_first_microbatch
+            context_layer,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.return_bias:

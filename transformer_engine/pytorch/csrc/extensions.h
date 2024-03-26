@@ -223,6 +223,17 @@ void fused_cast_transpose(at::Tensor input,
 );
 
 
+void fused_cast_transpose_noop(at::Tensor input,
+                               at::Tensor noop,
+                               at::Tensor scale,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               at::Tensor input_cast,
+                               at::Tensor input_transpose,
+                               transformer_engine::DType otype
+);
+
+
 std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,
@@ -261,6 +272,17 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
 
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
+);
+
+void fp8_transpose_noalloc(at::Tensor input,
+                           at::Tensor output,
+                           transformer_engine::DType otype
+);
+
+void fp8_transpose_noalloc_noop(at::Tensor input,
+                                at::Tensor output,
+                                at::Tensor noop,
+                                transformer_engine::DType otype
 );
 
 /***************************************************************************************************
@@ -349,7 +371,11 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
                                       const int sm_margin,
-                                      const bool zero_centered_gamma
+                                      const bool zero_centered_gamma,
+                                      const c10::optional<at::Tensor> cached_workspace,
+                                      const c10::optional<at::Tensor> cached_barrier,
+                                      const c10::optional<at::Tensor> cached_dgamma_part,
+                                      const c10::optional<at::Tensor> cached_dbeta_part
 );
 
 
@@ -362,7 +388,9 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
                                           const int sm_margin,
-                                          const bool zero_centered_gamma
+                                          const bool zero_centered_gamma,
+                                          const c10::optional<at::Tensor> cached_workspace,
+                                          const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -375,7 +403,9 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                   at::Tensor scale_inv,
                                                   transformer_engine::DType otype,
                                                   const int sm_margin,
-                                                  const bool zero_centered_gamma
+                                                  const bool zero_centered_gamma,
+                                                  const c10::optional<at::Tensor> cached_workspace,
+                                                  const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
@@ -394,16 +424,20 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &bias,
                                       float eps,
                                       const int sm_margin,
-                                      const bool zero_centered_gamma
+                                      const bool zero_centered_gamma,
+                                      const c10::optional<at::Tensor> cached_workspace,
+                                      const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input,
-                                      const at::Tensor &weight,
-                                      const at::Tensor &bias,
-                                      at::Tensor ln_out,
-                                      float eps,
-                                      const int sm_margin,
-                                      const bool zero_centered_gamma
+                                              const at::Tensor &weight,
+                                              const at::Tensor &bias,
+                                              at::Tensor ln_out,
+                                              float eps,
+                                              const int sm_margin,
+                                              const bool zero_centered_gamma,
+                                              const c10::optional<at::Tensor> cached_workspace,
+                                              const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor layernorm_fwd_inf(const at::Tensor &input,
@@ -422,7 +456,10 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
                                     const at::Tensor &rsigma,
                                     const at::Tensor &gamma,
                                     const int sm_margin,
-                                    const bool zero_centered_gamma
+                                    const bool zero_centered_gamma,
+                                    const c10::optional<at::Tensor> cached_workspace,
+                                    const c10::optional<at::Tensor> cached_barrier,
+                                    const c10::optional<at::Tensor> cached_dgamma_part
 );
 
 
@@ -434,7 +471,9 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
                                         at::Tensor scale_inv,
                                         transformer_engine::DType otype,
                                         const int sm_margin,
-                                        const bool zero_centered_gamma
+                                        const bool zero_centered_gamma,
+                                        const c10::optional<at::Tensor> cached_workspace,
+                                        const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -446,7 +485,9 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 at::Tensor scale_inv,
                                                 transformer_engine::DType otype,
                                                 const int sm_margin,
-                                                const bool zero_centered_gamma
+                                                const bool zero_centered_gamma,
+                                                const c10::optional<at::Tensor> cached_workspace,
+                                                const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
@@ -463,15 +504,19 @@ std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input,
                                     const at::Tensor &weight,
                                     float eps,
                                     const int sm_margin,
-                                    const bool zero_centered_gamma
+                                    const bool zero_centered_gamma,
+                                    const c10::optional<at::Tensor> cached_workspace,
+                                    const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
-                                    const at::Tensor &weight,
-                                    at::Tensor ln_out,
-                                    float eps,
-                                    const int sm_margin,
-                                    const bool zero_centered_gamma
+                                            const at::Tensor &weight,
+                                            at::Tensor ln_out,
+                                            float eps,
+                                            const int sm_margin,
+                                            const bool zero_centered_gamma,
+                                            const c10::optional<at::Tensor> cached_workspace,
+                                            const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,
@@ -559,16 +604,13 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
-void fused_amax_and_scale_update(const at::Tensor &amax_history,
-                                 const at::Tensor &scale,
-                                 const at::Tensor &scale_inv,
-                                 const at::Tensor &scale_inv_mask,
-                                 at::Tensor updated_amax_history,
-                                 at::Tensor updated_scale,
-                                 at::Tensor updated_scale_inv,
-                                 const std::string& amax_compute_algo,
-                                 transformer_engine::DType fp8_dtype,
-                                 float margin);
+void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
+                                                 std::vector<at::Tensor> amax_histories,
+                                                 std::vector<at::Tensor> scales,
+                                                 std::vector<at::Tensor> scale_invs,
+                                                 const std::string &amax_compute_algo,
+                                                 transformer_engine::DType fp8_dtype,
+                                                 float margin);
 
 /***************************************************************************************************
  * Rotary positional embedding
