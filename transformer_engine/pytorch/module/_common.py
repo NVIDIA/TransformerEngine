@@ -9,23 +9,25 @@ from dataclasses import dataclass
 
 import torch
 
-from .. import cpp_extensions as tex
+import transformer_engine_extensions as tex
+from .. import cpp_extensions as cppex
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
+
 
 def _get_normalization_func(normalization: str,
                             fp8_output: bool,
                             is_grad_enabled: bool,
                             forward: bool):
     fwd_normalization_funcs = {
-            ('LayerNorm', True, True):   tex.layernorm_fwd_fp8,
-            ('LayerNorm', True, False):  tex.layernorm_fwd_fp8_inf,
+            ('LayerNorm', True, True):   cppex.layernorm_fwd_fp8,
+            ('LayerNorm', True, False):  cppex.layernorm_fwd_fp8_inf,
             ('LayerNorm', False, True):  tex.layernorm_fwd_noalloc,
-            ('LayerNorm', False, False): tex.layernorm_fwd_inf,
-            ('RMSNorm', True, True):     tex.rmsnorm_fwd_fp8,
-            ('RMSNorm', True, False):    tex.rmsnorm_fwd_fp8_inf,
+            ('LayerNorm', False, False): cppex.layernorm_fwd_inf,
+            ('RMSNorm', True, True):     cppex.rmsnorm_fwd_fp8,
+            ('RMSNorm', True, False):    cppex.rmsnorm_fwd_fp8_inf,
             ('RMSNorm', False, True):    tex.rmsnorm_fwd_noalloc,
-            ('RMSNorm', False, False):   tex.rmsnorm_fwd_inf,
+            ('RMSNorm', False, False):   cppex.rmsnorm_fwd_inf,
     }
     bwd_normalization_funcs = {
             'LayerNorm':  tex.layernorm_bwd,
@@ -37,6 +39,7 @@ def _get_normalization_func(normalization: str,
     assert not fp8_output, "FP8 output is not supported in backward normalization!"
     assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
     return bwd_normalization_funcs[normalization]
+
 
 def _apply_normalization(inputmat:torch.Tensor,
                          ln_out: torch.Tensor,
@@ -82,13 +85,16 @@ def _apply_normalization(inputmat:torch.Tensor,
             ), None, None
     else:
         if is_grad_enabled:
+            # This path calls tex lib directly, bypassing `cpp_extension.py`.
+            conf, (workspace, barrier) = cppex.get_norm_workspace_and_barrier(inputmat, ln_weight, False)
             output = normalization_func(
                 *inputs, ln_out, eps,
                 fwd_ln_sm_margin, zero_centered_gamma
             )
+            cppex.set_norm_workspace_and_barrier(conf, workspace, barrier)
         else:
             return normalization_func(
-                    *inputs, eps, zero_centered_gamma
+                *inputs, eps, zero_centered_gamma
             ), None, None
     if normalization == "RMSNorm":
         output = (ln_out, None, output[1])

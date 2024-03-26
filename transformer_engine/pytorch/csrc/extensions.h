@@ -371,7 +371,11 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
                                       const int sm_margin,
-                                      const bool zero_centered_gamma
+                                      const bool zero_centered_gamma,
+                                      const c10::optional<at::Tensor> cached_workspace,
+                                      const c10::optional<at::Tensor> cached_barrier,
+                                      const c10::optional<at::Tensor> cached_dgamma_part,
+                                      const c10::optional<at::Tensor> cached_dbeta_part
 );
 
 
@@ -384,7 +388,9 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
                                           const int sm_margin,
-                                          const bool zero_centered_gamma
+                                          const bool zero_centered_gamma,
+                                          const c10::optional<at::Tensor> cached_workspace,
+                                          const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -397,7 +403,9 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                   at::Tensor scale_inv,
                                                   transformer_engine::DType otype,
                                                   const int sm_margin,
-                                                  const bool zero_centered_gamma
+                                                  const bool zero_centered_gamma,
+                                                  const c10::optional<at::Tensor> cached_workspace,
+                                                  const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
@@ -416,16 +424,20 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &bias,
                                       float eps,
                                       const int sm_margin,
-                                      const bool zero_centered_gamma
+                                      const bool zero_centered_gamma,
+                                      const c10::optional<at::Tensor> cached_workspace,
+                                      const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input,
-                                      const at::Tensor &weight,
-                                      const at::Tensor &bias,
-                                      at::Tensor ln_out,
-                                      float eps,
-                                      const int sm_margin,
-                                      const bool zero_centered_gamma
+                                              const at::Tensor &weight,
+                                              const at::Tensor &bias,
+                                              at::Tensor ln_out,
+                                              float eps,
+                                              const int sm_margin,
+                                              const bool zero_centered_gamma,
+                                              const c10::optional<at::Tensor> cached_workspace,
+                                              const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor layernorm_fwd_inf(const at::Tensor &input,
@@ -444,7 +456,10 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
                                     const at::Tensor &rsigma,
                                     const at::Tensor &gamma,
                                     const int sm_margin,
-                                    const bool zero_centered_gamma
+                                    const bool zero_centered_gamma,
+                                    const c10::optional<at::Tensor> cached_workspace,
+                                    const c10::optional<at::Tensor> cached_barrier,
+                                    const c10::optional<at::Tensor> cached_dgamma_part
 );
 
 
@@ -456,7 +471,9 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
                                         at::Tensor scale_inv,
                                         transformer_engine::DType otype,
                                         const int sm_margin,
-                                        const bool zero_centered_gamma
+                                        const bool zero_centered_gamma,
+                                        const c10::optional<at::Tensor> cached_workspace,
+                                        const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -468,7 +485,9 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 at::Tensor scale_inv,
                                                 transformer_engine::DType otype,
                                                 const int sm_margin,
-                                                const bool zero_centered_gamma
+                                                const bool zero_centered_gamma,
+                                                const c10::optional<at::Tensor> cached_workspace,
+                                                const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
@@ -485,15 +504,19 @@ std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input,
                                     const at::Tensor &weight,
                                     float eps,
                                     const int sm_margin,
-                                    const bool zero_centered_gamma
+                                    const bool zero_centered_gamma,
+                                    const c10::optional<at::Tensor> cached_workspace,
+                                    const c10::optional<at::Tensor> cached_barrier
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
-                                    const at::Tensor &weight,
-                                    at::Tensor ln_out,
-                                    float eps,
-                                    const int sm_margin,
-                                    const bool zero_centered_gamma
+                                            const at::Tensor &weight,
+                                            at::Tensor ln_out,
+                                            float eps,
+                                            const int sm_margin,
+                                            const bool zero_centered_gamma,
+                                            const c10::optional<at::Tensor> cached_workspace,
+                                            const c10::optional<at::Tensor> cached_barrier
 );
 
 at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,

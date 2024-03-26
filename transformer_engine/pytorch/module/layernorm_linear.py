@@ -579,14 +579,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
-                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                dgrad, dgamma, dbeta, _, _, _, _ = tex.layernorm_bwd(
                     dgrad, inputmat, mu, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma,
+                    None, None, None, None,
                 )
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                dgrad, dgamma, _, _, _ = tex.rmsnorm_bwd(
                     dgrad, inputmat, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma,
+                    None, None, None,
                 )
                 dbeta = None
 

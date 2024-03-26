@@ -15,7 +15,9 @@ import transformer_engine_extensions as tex
 from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
- )
+    get_norm_workspace_and_barrier,
+    set_norm_workspace_and_barrier,
+)
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
@@ -50,8 +52,11 @@ class _LayerNorm(torch.autograd.Function):
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if is_grad_enabled:
-            ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
-                ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
+            conf, (workspace, barrier) = get_norm_workspace_and_barrier(inputmat, ln_weight, False)
+            ln_out, mu, rsigma, _, _ = tex.layernorm_fwd(
+                inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin,
+                zero_centered_gamma, workspace, barrier)
+            set_norm_workspace_and_barrier(conf, workspace, barrier)
             ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
@@ -68,7 +73,7 @@ class _LayerNorm(torch.autograd.Function):
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)
-        dxmat, dgamma, dbeta = tex.layernorm_bwd(
+        dxmat, dgamma, dbeta, _, _, _, _ = tex.layernorm_bwd(
             d_ln_out, inputmat, mu, rsigma, ln_weight,
             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )

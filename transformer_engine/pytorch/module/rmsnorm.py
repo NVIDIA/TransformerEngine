@@ -11,8 +11,13 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
+import transformer_engine_extensions as tex
 from .base import TransformerEngineBaseModule
-from .. import cpp_extensions as tex
+from ..cpp_extensions import (
+    rmsnorm_fwd_inf,
+    get_norm_workspace_and_barrier,
+    set_norm_workspace_and_barrier,
+)
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
@@ -46,17 +51,19 @@ class _RMSNorm(torch.autograd.Function):
         rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
 
         if is_grad_enabled:
-            rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
-                                                  eps, fwd_rmsnorm_sm_margin,
-                                                  zero_centered_gamma)
+            conf, (workspace, barrier) = (
+                get_norm_workspace_and_barrier(inputmat, rmsnorm_weight, False))
+            rmsnorm_out, rsigma, _, _ = tex.rmsnorm_fwd(
+                inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin,
+                zero_centered_gamma, workspace, barrier)
+            set_norm_workspace_and_barrier(conf, workspace, barrier)
             ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
-            rmsnorm_out = tex.rmsnorm_fwd_inf(inputmat, rmsnorm_weight,
-                                              eps,
-                                              zero_centered_gamma)
+            rmsnorm_out = rmsnorm_fwd_inf(
+                inputmat, rmsnorm_weight, eps, zero_centered_gamma)
         return rmsnorm_out.view_as(inp)
 
     @staticmethod
@@ -66,7 +73,7 @@ class _RMSNorm(torch.autograd.Function):
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
-        dxmat, dgamma = tex.rmsnorm_bwd(
+        dxmat, dgamma, _, _, _ = tex.rmsnorm_bwd(
             d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
             ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
         )

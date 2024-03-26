@@ -13,7 +13,37 @@ __all__ = ['layernorm_fwd_fp8',
            'layernorm_fwd_inf',
            'rmsnorm_fwd_fp8',
            'rmsnorm_fwd_fp8_inf',
-           'rmsnorm_fwd_inf']
+           'rmsnorm_fwd_inf',
+           'get_norm_workspace_and_barrier',
+           'set_norm_workspace_and_barrier']
+
+
+_norm_scratch_spaces = {}
+
+
+def get_norm_key(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> str:
+    """Get unique key for workspace/barrier config."""
+    return f"{inp.shape}_{inp.dtype}_{weight.shape}_{weight.dtype}_{fp8}"
+
+
+def get_norm_workspace_and_barrier(
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    fp8: bool,
+) -> Tuple[Union[torch.Tensor, None], Union[torch.Tensor, None]]:
+    """Get workspace and barrier for config."""
+    key = get_norm_key(inp, weight, fp8)
+    return key, _norm_scratch_spaces.get(key, (None, None))
+
+
+def set_norm_workspace_and_barrier(
+    key: str,
+    workspace: torch.Tensor,
+    barrier: torch.Tensor,
+) -> None:
+    """Set workspace and barrier for config."""
+    if key not in _norm_scratch_spaces:
+        _norm_scratch_spaces[key] = (workspace, barrier)
 
 
 def layernorm_fwd_fp8(
@@ -29,8 +59,9 @@ def layernorm_fwd_fp8(
     ln_out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm with FP8 output"""
+    conf, (workspace, barrier) = get_norm_workspace_and_barrier(inp, weight, True)
     if ln_out is not None:
-        return tex.layernorm_fwd_fp8_noalloc(
+        out, mu, rsigma, workspace, barrier = tex.layernorm_fwd_fp8_noalloc(
             inp,
             weight,
             bias,
@@ -41,21 +72,27 @@ def layernorm_fwd_fp8(
             fp8_meta_tensor.scale_inv[fp8_tensor],
             otype,
             sm_margin,
-            zero_centered_gamma
+            zero_centered_gamma,
+            workspace,
+            barrier,
         )
-
-    return tex.layernorm_fwd_fp8(
-        inp,
-        weight,
-        bias,
-        eps,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
-        otype,
-        sm_margin,
-        zero_centered_gamma
-    )
+    else:
+        out, mu, rsigma, workspace, barrier = tex.layernorm_fwd_fp8(
+            inp,
+            weight,
+            bias,
+            eps,
+            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+            sm_margin,
+            zero_centered_gamma,
+            workspace,
+            barrier,
+        )
+    set_norm_workspace_and_barrier(conf, workspace, barrier)
+    return out, mu, rsigma
 
 
 def layernorm_fwd_fp8_inf(
@@ -103,6 +140,7 @@ def layernorm_fwd_inf(
         zero_centered_gamma,
     )
 
+
 def rmsnorm_fwd_fp8(
     inp: torch.Tensor,
     weight: torch.Tensor,
@@ -115,8 +153,9 @@ def rmsnorm_fwd_fp8(
     rmsnorm_out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """RMSNorm with FP8 output"""
+    conf, (workspace, barrier) = get_norm_workspace_and_barrier(inp, weight, True)
     if rmsnorm_out is not None:
-        return tex.rmsnorm_fwd_fp8_noalloc(
+        out, rsigma, workspace, barrier = tex.rmsnorm_fwd_fp8_noalloc(
             inp,
             weight,
             eps,
@@ -128,18 +167,20 @@ def rmsnorm_fwd_fp8(
             sm_margin,
             zero_centered_gamma
         )
-
-    return tex.rmsnorm_fwd_fp8(
-        inp,
-        weight,
-        eps,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
-        otype,
-        sm_margin,
-        zero_centered_gamma
-    )
+    else:
+        out, rsigma, workspace, barrier = tex.rmsnorm_fwd_fp8(
+            inp,
+            weight,
+            eps,
+            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+            sm_margin,
+            zero_centered_gamma
+        )
+    set_norm_workspace_and_barrier(conf, workspace, barrier)
+    return out, rsigma
 
 
 def rmsnorm_fwd_fp8_inf(
