@@ -53,7 +53,7 @@ class _RMSNorm(torch.autograd.Function):
         if is_grad_enabled:
             conf, (workspace, barrier) = (
                 get_norm_workspace_and_barrier(inputmat, rmsnorm_weight, False))
-            rmsnorm_out, rsigma, _, _ = tex.rmsnorm_fwd(
+            rmsnorm_out, rsigma, workspace, barrier = tex.rmsnorm_fwd(
                 inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin,
                 zero_centered_gamma, workspace, barrier)
             set_norm_workspace_and_barrier(conf, workspace, barrier)
@@ -75,7 +75,8 @@ class _RMSNorm(torch.autograd.Function):
         d_rmsnorm_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, _, _, _ = tex.rmsnorm_bwd(
             d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
-            ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
+            ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma,
+            None, None, None,
         )
         return (
             dxmat.view(ctx.inp_shape),

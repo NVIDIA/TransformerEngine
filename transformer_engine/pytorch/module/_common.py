@@ -86,12 +86,14 @@ def _apply_normalization(inputmat:torch.Tensor,
     else:
         if is_grad_enabled:
             # This path calls tex lib directly, bypassing `cpp_extension.py`.
-            conf, (workspace, barrier) = cppex.get_norm_workspace_and_barrier(inputmat, ln_weight, False)
+            conf, (workspace, barrier) = (
+                cppex.get_norm_workspace_and_barrier(inputmat, ln_weight, False))
             output = normalization_func(
                 *inputs, ln_out, eps,
-                fwd_ln_sm_margin, zero_centered_gamma
+                fwd_ln_sm_margin, zero_centered_gamma,
+                workspace, barrier,
             )
-            cppex.set_norm_workspace_and_barrier(conf, workspace, barrier)
+            cppex.set_norm_workspace_and_barrier(conf, output[-2], output[-1])
         else:
             return normalization_func(
                 *inputs, eps, zero_centered_gamma

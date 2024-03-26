@@ -53,7 +53,7 @@ class _LayerNorm(torch.autograd.Function):
 
         if is_grad_enabled:
             conf, (workspace, barrier) = get_norm_workspace_and_barrier(inputmat, ln_weight, False)
-            ln_out, mu, rsigma, _, _ = tex.layernorm_fwd(
+            ln_out, mu, rsigma, workspace, barrier = tex.layernorm_fwd(
                 inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin,
                 zero_centered_gamma, workspace, barrier)
             set_norm_workspace_and_barrier(conf, workspace, barrier)
@@ -75,7 +75,8 @@ class _LayerNorm(torch.autograd.Function):
         d_ln_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, dbeta, _, _, _, _ = tex.layernorm_bwd(
             d_ln_out, inputmat, mu, rsigma, ln_weight,
-            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma,
+            None, None, None, None,
         )
         return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None
 
