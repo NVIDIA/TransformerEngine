@@ -127,7 +127,6 @@ class _Linear(torch.autograd.Function):
             inputmat_total, _ = gather_along_first_dim(inputmat, tp_group)
         else:
             inputmat_total = inputmat
-
         if fp8:
             bias_dtype = (
                 torch.bfloat16
@@ -542,6 +541,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -561,6 +561,10 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    get_rng_state_tracker : Callable, default = `None`
+                 used to get the random number generator state tracker for initilizeing weights.
+    rng_tracker_name : str, default = `None`
+                 the param passed to get_rng_state_tracker to get the specific rng tracker.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
                       Configuration for splitting the weight and bias tensors along dim 0 into
                       multiple PyTorch parameters. If a list or tuple of strings is provided,
@@ -620,6 +624,7 @@ class Linear(TransformerEngineBaseModule):
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
+        rng_tracker_name: Optional[str] = None,
         init_method: Optional[Callable] = None,
         bias: bool = True,
         return_bias: bool = False,
@@ -650,6 +655,8 @@ class Linear(TransformerEngineBaseModule):
             ), "Userbuffer communication backend not available."
         self.ub_name = ub_name
         self.get_rng_state_tracker = get_rng_state_tracker
+        self.rng_tracker_name = rng_tracker_name
+
         if device == 'meta':
             assert parameters_split is None, ("Cannot split module parameters "
                                               "on 'meta' device.")

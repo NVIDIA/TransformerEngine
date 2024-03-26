@@ -22,25 +22,27 @@ def cast_to_fp8(
     """Cast input to FP8"""
 
     if out is not None:
-        torch.ops.tex_ts.cast_to_fp8_noalloc_ts(
+        if inp.nelement() > 0:
+            torch.ops.tex_ts.cast_to_fp8_noalloc_ts(
+                inp,
+                fp8_meta_tensor.scale,
+                out,
+                fp8_meta_tensor.amax_history,
+                fp8_meta_tensor.scale_inv,
+                fp8_tensor,
+                otype
+            )
+        return None
+    if inp.nelement() > 0:
+        return torch.ops.tex_ts.cast_to_fp8_ts(
             inp,
             fp8_meta_tensor.scale,
-            out,
             fp8_meta_tensor.amax_history,
             fp8_meta_tensor.scale_inv,
             fp8_tensor,
-            otype
+            otype,
         )
-        return None
-    return torch.ops.tex_ts.cast_to_fp8_ts(
-        inp,
-        fp8_meta_tensor.scale,
-        fp8_meta_tensor.amax_history,
-        fp8_meta_tensor.scale_inv,
-        fp8_tensor,
-        otype,
-    )
-
+    return inp
 
 def cast_from_fp8(
     inp: torch.Tensor,
