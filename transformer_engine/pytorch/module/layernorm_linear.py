@@ -285,7 +285,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
-                ln_out,
+                ln_out if weight.requires_grad else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
 
@@ -364,7 +364,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
                     ctx.ub_bulk_dgrad = False
-            if ctx.ub_bulk_dgrad:
+            if weight.requires_grad and ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub(ctx.ub_name+"_dgrad")
@@ -462,7 +462,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
                     ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
-            if ctx.ub_bulk_dgrad:
+            if weight.requires_grad and ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
 
             # Overlap dgrad-RS/AR with wgrad
