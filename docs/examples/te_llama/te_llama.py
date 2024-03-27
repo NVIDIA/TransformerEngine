@@ -123,7 +123,9 @@ class TELlamaForCausalLM:
 
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
+            # replace_params copies parameters relevant only to TransformerEngine
             replace_params(state_dict, vanilla_model.state_dict())
+            # _load_state_dict_into_model copies parameters other than those in TransformerEngine
             _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
             # Force mem release. Taken from huggingface code
@@ -164,6 +166,8 @@ def replace_params(hf_state_dict, te_state_dict, config):
         if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:]
         
+        # It may happen that gate_proj.weight and up_proj.weight will be in the different files, so we need to
+        # load them separately.
         if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE] = \
                 hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data
