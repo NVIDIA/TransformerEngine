@@ -95,7 +95,7 @@ class TELlamaForCausalLM:
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
-        vanilla_model = cls(config).to(kwargs['torch_dtype'])
+        vanilla_model = cls(config)
         is_local = os.path.isdir(pretrained_model_name_or_path)
         subfolder = ""
         variant = None
@@ -140,6 +140,8 @@ def replace_params(hf_state_dict, te_state_dict, config):
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
+    
+    GATE_PROJ_SIZE = 11008
 
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
@@ -161,8 +163,14 @@ def replace_params(hf_state_dict, te_state_dict, config):
 
         if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:]
-        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict and 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:] = torch.cat((hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data[:], hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data[:]), dim=0)
+        
+        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE] = \
+                hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data
+
+        if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[GATE_PROJ_SIZE:] = \
+                hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
