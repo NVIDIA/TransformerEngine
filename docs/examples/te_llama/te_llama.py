@@ -95,7 +95,7 @@ class TELlamaForCausalLM:
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
-        vanilla_model = cls(config)
+        vanilla_model = cls(config).to(kwargs['torch_dtype'])
         is_local = os.path.isdir(pretrained_model_name_or_path)
         subfolder = ""
         variant = None
