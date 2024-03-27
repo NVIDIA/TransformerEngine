@@ -582,15 +582,15 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Primary weights are in FP8.
             if ctx.primary_weights_in_fp8:
-                fc1_weight_t_fp8 = fc1_weight._transpose(
-                    cache=ctx.is_first_microbatch is not None,
-                    update_cache=ctx.is_first_microbatch,
-                    noop_tensor=skip_fp8_weight_update,
+                fc1_weight_t_fp8 = fc1_weight._data_transpose(
+                    force_compute=ctx.is_first_microbatch,
+                    fill_cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
                 )
-                fc2_weight_t_fp8 = fc2_weight._transpose(
-                    cache=ctx.is_first_microbatch is not None,
-                    update_cache=ctx.is_first_microbatch,
-                    noop_tensor=skip_fp8_weight_update,
+                fc2_weight_t_fp8 = fc2_weight._data_transpose(
+                    force_compute=ctx.is_first_microbatch,
+                    fill_cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
                 )
             elif ctx.fp8:
                 fc1_weight_t_fp8 = fc1_weight_t_fp8._data

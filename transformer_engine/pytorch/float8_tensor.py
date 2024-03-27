@@ -335,7 +335,8 @@ class Float8Tensor(torch.Tensor):
         self._fp8_dtype: tex.DType = fp8_dtype
 
         # Cached transpose
-        self._data_transpose: Optional[Float8Tensor] = None
+        self._data_transpose_cache: Optional[torch.Tensor] = None
+        self._data_transpose_cache_is_stale: bool = False
 
         # FP8 scale-inverse
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
@@ -462,48 +463,81 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
-    def _transpose(
+    def _data_transpose(
         self,
         *,
-        cache: bool = False,
-        update_cache: bool = True,
-        noop_tensor: Optional[torch.Tensor] = None,
+        force_compute: bool = False,
+        fill_cache: bool = False,
+        noop_flag: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        2D transpose with caching support.
+        Transpose of FP8 data.
+
+        The tensor is interpreted as a 2D matrix: the last dimension
+        is the width and all other dimensions are flattened into the
+        height. The returned tensor contains raw FP8 data in a uint8
+        tensor.
+
+        If the cache has been filled (by calling this function with
+        `fill_cache=True` or by setting the `_data_transpose_cache`
+        attribute), then this function will return the cached tensor
+        (possibly after updating values).
 
         Parameters
         ----------
-        cache: bool, default = `False`
-               If `False`, transpose is calculated and returned.
-               If `True`, the transpose value is cached and can
-               be reused without recomputation by setting the
-               `update_cache` argument to `False`.
-        update_cache: bool, default = `True`
-                      Only used if argument `cache` is `True`, ignored otherwise.
-                      If `True`, the tranpose is recomputed and cached.
-                      If `False`, cached transpose is returned.
+        force_compute: bool, default = `False`
+                       Force computation of transpose. Otherwise use
+                       cached values, if possible.
+        fill_cache: bool, default = `False`
+                    Cache output tensor for future function calls.
+        noop_flag: torch.Tensor, optional
+                   float32 flag indicating whether to avoid updating
+                   cached values, if possible.
+
         """
-        assert self.dim() == 2, f"{self.dim()}-D transpose not supported."
 
-        if not cache:
-            return tex.fp8_transpose(self._data, self._fp8_dtype)
+        # Need to compute transpose if cache is invalid
+        need_compute = force_compute
+        if self._data_transpose_cache is None:
+            need_compute = True
+        elif self._data_transpose_cache_is_stale:
+            need_compute = True
 
-        if not update_cache and noop_tensor is None:
-            assert self._data_transpose is not None, "Tranpose cache is empty."
-            return self._data_transpose
+        # Need to apply transpose kernel if noop flag is applied
+        if noop_flag is not None:
+            need_compute = True
 
-        if self._data_transpose is None:
-            # This branch is only run once since we never reset the cache.
-            # For graphed case this will be initialized during 1st warmup.
-            self._data_transpose = tex.fp8_transpose(self._data, self._fp8_dtype)
-        elif noop_tensor is None:
-            tex.fp8_transpose_noalloc(self._data, self._data_transpose, self._fp8_dtype)
+        # Return cached transpose if possible
+        if not need_compute:
+            return self._data_transpose_cache
+
+        # Allocate output if needed
+        data = self._data.contiguous().reshape(-1, self.size(-1))
+        out = self._data_transpose_cache
+        if out is None:
+            out = torch.empty(
+                (data.size(1), data.size(0)),
+                dtype=torch.uint8,
+                device=data.device,
+            )
+            noop_flag = None
         else:
-            tex.fp8_transpose_noalloc_noop(
-                self._data, self._data_transpose, noop_tensor, self._fp8_dtype)
+            self._data_transpose_cache_is_stale = False
 
-        return self._data_transpose
+        # Apply transpose kernel
+        fp8_dtype = self._fp8_dtype
+        if noop_flag is None:
+            tex.fp8_transpose_noalloc(data, out, fp8_dtype)
+        else:
+            noop_flag = noop_flag.to(dtype=torch.float32, device=data.device)
+            tex.fp8_transpose_noalloc_noop(data, out, noop_flag, fp8_dtype)
+
+        # Fill cache if needed
+        if fill_cache:
+            self._data_transpose_cache = out
+            self._data_transpose_cache_is_stale = False
+
+        return out
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
@@ -514,7 +548,8 @@ class Float8Tensor(torch.Tensor):
         the tensor.
 
         """
-        assert self._fp8_meta is not None, "FP8 meta tensors not found."
+        if self._fp8_meta is None:
+            return
         fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
             forward=self._fp8_meta_forward,
         )
@@ -532,6 +567,14 @@ class Float8Tensor(torch.Tensor):
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
         )
+
+    def _reset_caches(self) -> None:
+        """Reset cached values
+
+        Should be called after any in-place operation.
+
+        """
+        self._data_transpose_cache_is_stale = True
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -625,6 +668,9 @@ class Float8Tensor(torch.Tensor):
                 # Invalid case
                 raise RuntimeError("Using Float8Tensor copy logic, but no Float8Tensor found")
 
+            # Nothing to return for in-place ops
+            if dst_is_fp8:
+                dst._reset_caches()
             return None
 
         # Slice op
@@ -669,6 +715,7 @@ class Float8Tensor(torch.Tensor):
                 schema_arg.alias_info.is_write
             ):
                 arg.copy_(new_arg)
+                arg._reset_caches()
 
         # In-place op
         if func._schema.is_mutable:
@@ -746,7 +793,10 @@ class Float8Tensor(torch.Tensor):
     _fp8_meta_forward = property(**_make_fp8_attr_property_funcs("fp8_meta_forward"))
     _fp8_meta_index = property(**_make_fp8_attr_property_funcs("fp8_meta_index"))
     _fp8_dtype = property(**_make_fp8_attr_property_funcs("dtype"))
-    _data_transpose = property(**_make_fp8_attr_property_funcs("transpose"))
+    _data_transpose_cache = property(**_make_fp8_attr_property_funcs("data_transpose_cache"))
+    _data_transpose_cache_is_stale = property(
+        **_make_fp8_attr_property_funcs("data_transpose_cache_is_stale")
+    )
     _scale_inv = property(**_make_fp8_attr_property_funcs("scale_inv"))
 
     # Do not force the Float8Tensor type on the returned tensor
