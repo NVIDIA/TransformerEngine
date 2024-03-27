@@ -140,7 +140,7 @@ def replace_params(hf_state_dict, te_state_dict, config):
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
-    
+
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
         # copy if the corresponding layer doesn't exist in HF model
@@ -166,5 +166,4 @@ def replace_params(hf_state_dict, te_state_dict, config):
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
-
     return all_layer_prefixes
