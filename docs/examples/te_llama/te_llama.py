@@ -166,4 +166,5 @@ def replace_params(hf_state_dict, te_state_dict, config):
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
+
     return all_layer_prefixes
