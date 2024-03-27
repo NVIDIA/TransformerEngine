@@ -49,10 +49,6 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
-    dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
-    dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
-    dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
     dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
     dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
     return dict;
@@ -72,10 +68,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_dgelu_dbias_ct_workspace_sizes", &GetDGeluDBiasCastTransposeWorkspaceSizes);
     m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
-    m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);
-    m.def("get_self_fused_attn_bwd_workspace_sizes", &GetSelfFusedAttnBackwardWorkspaceSizes);
-    m.def("get_cross_fused_attn_fwd_workspace_sizes", &GetCrossFusedAttnForwardWorkspaceSizes);
-    m.def("get_cross_fused_attn_bwd_workspace_sizes", &GetCrossFusedAttnBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
     m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
 

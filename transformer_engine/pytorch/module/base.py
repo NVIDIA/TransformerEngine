@@ -135,13 +135,14 @@ def initialize_ub(
         "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
     ]
     if bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
-        fp8_buf.append ("proj_fprop")
+        fp8_buf += ["proj_fprop", "fc2_fprop"]
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
+    layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
 
     def get_method(name):
         for method, names in methods.items():
@@ -157,7 +158,28 @@ def initialize_ub(
         set_sm_margin: int = 0,
         num_splits: int = 4,
         aggregate: int = 0,
+        atomic_gemm: int = 0,
+        is_reduce_scatter: int = 0,
     ) -> None:
+        if atomic_gemm:
+            warnings.warn(
+                "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
+            )
+            assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
+            if is_reduce_scatter and method == "ring_exchange":
+                raise ValueError(
+                    "Atomic GEMM is not supported for ReduceScatter with `ring_exchange` method."
+                )
+            if method == 'bulk':
+                warnings.warn(
+                    "Atoimic GEMM not is supported for a bulk overlap."
+                    "Defaulting to `atomic_gemm=False`."
+                )
+                atomic_gemm = 0
+        if not is_reduce_scatter and method == 'pipeline':
+            raise ValueError(
+                "`pipeline` overlap method is not supported for AllGather."
+            )
         sample_buffer = torch.empty(
             shape,
             dtype=torch.uint8 if (use_fp8 and name in fp8_buf) else dtype,
@@ -172,6 +194,8 @@ def initialize_ub(
                     set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    is_reduce_scatter,      # overlap with reduce scatter
+                    atomic_gemm,            # use a single GEMM with atomic-counters
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:
@@ -184,6 +208,7 @@ def initialize_ub(
                     num_splits,             # Number of communication splits
                     set_sm_margin,          # Set SM margin
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    atomic_gemm,            # use a single GEMM with atomic-counters
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
@@ -197,6 +222,8 @@ def initialize_ub(
             num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
             set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
             aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
+            atomic_gemm = ub_cfg["atomic_gemm"] if "atomic_gemm" in ub_cfg else 0
+            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
             add_ub(
                 name,
                 method,
@@ -204,7 +231,9 @@ def initialize_ub(
                 cga_size,
                 set_sm_margin,
                 num_splits,
-                aggregate
+                aggregate,
+                atomic_gemm,
+                is_reduce_scatter,
             )
         else:
             method = get_method(name)
@@ -644,12 +673,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output_mat = grad_output.view((-1, grad_output.shape[-1]))
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
-        if gather_grad_output:
-            ub_overlap_ag = ctx.ub_split_ag or ctx.ub_atomic_gemm_ag
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8:
             if gather_grad_output:
-                if not ub_overlap_ag:
+                if not ctx.ub_overlap_ag:
                     grad_output_mat, _ = gather_along_first_dim(
                         grad_output_mat, ctx.tp_group
                     )
@@ -668,7 +695,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and ctx.fp8_meta["recipe"].override_linear_precision.wgrad
         ):
             assert (
-                not ub_overlap_ag
+                not ctx.ub_overlap_ag
             ), "override_linear_precision.wgrad not supported with UB AG overlap"
             grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
         # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
@@ -677,7 +704,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output_mat.sum(dim=0)
             else:
                 grad_bias = None
-            if ub_overlap_ag:
+            if ctx.ub_overlap_ag:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
@@ -688,7 +715,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype_backward,
                 out=grad_output_c,
             )
-            if not ub_overlap_ag:
+            if not ctx.ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
             else:
