@@ -120,16 +120,6 @@ def get_all_mesh_axes():
     return mesh.axis_names
 
 
-def get_padded_spec(spec, ndim):
-    """
-    Get padded spec for partitioning from arguments' information
-    """
-    if spec is None:
-        return (None,) * ndim
-    assert len(spec) <= ndim
-    return spec + (None,) * (ndim - len(spec))
-
-
 def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
     """
     A wrapper function to invoke lax.p* operations, like psum.
