@@ -77,6 +77,7 @@ def init_baseline_model(hyperparams):
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     # make sure to use flash_attention to do iso comparison with TELlamaModel
     config._attn_implementation = "flash_attention_2"
+    config.gate_proj_size = 11008
     model = AutoModelForCausalLM.from_pretrained(
         hyperparams.model_name,
         config=config,
@@ -92,6 +93,7 @@ def init_te_llama_model(hyperparams):
     from te_llama import TELlamaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
+    config.gate_proj_size = 11008
     model = TELlamaForCausalLM.from_pretrained_local(
             hyperparams.model_name,
             config=config,

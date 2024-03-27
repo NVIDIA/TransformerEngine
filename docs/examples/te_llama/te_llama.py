@@ -124,7 +124,7 @@ class TELlamaForCausalLM:
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
             # replace_params copies parameters relevant only to TransformerEngine
-            replace_params(state_dict, vanilla_model.state_dict())
+            replace_params(state_dict, vanilla_model.state_dict(), config)
             # _load_state_dict_into_model copies parameters other than those in TransformerEngine
             _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
@@ -143,7 +143,7 @@ def replace_params(hf_state_dict, te_state_dict, config):
         if m is not None:
             all_layer_prefixes.add(m.group())
     
-    GATE_PROJ_SIZE = 11008
+    
 
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
@@ -169,11 +169,11 @@ def replace_params(hf_state_dict, te_state_dict, config):
         # It may happen that gate_proj.weight and up_proj.weight will be in the different files, so we need to
         # load them separately.
         if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE] = \
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:config.gate_proj_size] = \
                 hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data
 
         if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[GATE_PROJ_SIZE:] = \
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[config.gate_proj_size:] = \
                 hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
