@@ -76,6 +76,10 @@ Kernel::~Kernel() {
           != CUDA_SUCCESS) {
         continue;
       }
+      if (cuda_driver::call("cuCtxSetCurrent", context)
+          != CUDA_SUCCESS) {
+        continue;
+      }
       cuda_driver::call("cuModuleUnload", modules_[device_id]);
       cuda_driver::call("cuDevicePrimaryCtxRelease", device);
     }
@@ -109,6 +113,7 @@ CUfunction Kernel::get_function(int device_id) {
     CUcontext context;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
 
     // Load function into driver context
     NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx,
