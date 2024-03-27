@@ -7,6 +7,11 @@ import re
 import gc
 from contextlib import contextmanager
 
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+
+from transformers.generation import *
+from transformers.generation.utils import *
+
 import torch
 from torch import nn
 
@@ -96,7 +101,7 @@ class TEGemmaForCausalLM:
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
-        vanilla_model = cls(config).to(kwargs['torch_dtype'])
+        vanilla_model = cls(config)
         is_local = os.path.isdir(pretrained_model_name_or_path)
         subfolder = ""
         variant = None
@@ -108,7 +113,6 @@ class TEGemmaForCausalLM:
                     pretrained_model_name_or_path, subfolder, _add_variant("model.safetensors.index.json", variant)
                 )
                 is_sharded = True
-        print(archive_file)
 
         resolved_archive_file, sharded_metadata = get_checkpoint_shard_files(
                 pretrained_model_name_or_path,
@@ -122,14 +126,15 @@ class TEGemmaForCausalLM:
 
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
-            replaces_params = replace_params(state_dict, vanilla_model.state_dict())
-            #_load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            replace_params(state_dict, vanilla_model.state_dict())
+            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
 
             # Force mem release. Taken from huggingface code
             del state_dict
             gc.collect()
 
         return vanilla_model
+
 
 def replace_params(hf_state_dict, te_state_dict):
     # collect all layer prefixes to update
@@ -139,32 +144,37 @@ def replace_params(hf_state_dict, te_state_dict):
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
+
+    GATE_PROJ_SIZE=24576
     
     for layer_prefix in all_layer_prefixes:
         # When loading weights into models with less number of layers, skip the
         # copy if the corresponding layer doesn't exist in HF model
         if layer_prefix + 'input_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'input_layernorm.weight'].data[:]
-
+            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].copy_(1 + hf_state_dict[layer_prefix + 'input_layernorm.weight'])
+            
         if layer_prefix + 'self_attn.q_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.query_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.q_proj.weight'].data[:]
+            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.query_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.q_proj.weight'])
 
         if layer_prefix + 'self_attn.k_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.key_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.k_proj.weight'].data[:]
+            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.key_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.k_proj.weight'])
 
         if layer_prefix + 'self_attn.v_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.value_weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.v_proj.weight'].data[:]
+            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.value_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.v_proj.weight'])
 
         if layer_prefix + 'self_attn.o_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.proj.weight'].data[:] = hf_state_dict[layer_prefix + 'self_attn.o_proj.weight'].data[:]
+            te_state_dict[layer_prefix + 'self_attention.proj.weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.o_proj.weight'])
 
         if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:]
+            te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].data[:] = hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'].data[:] + 1
         
-        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict and 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:] = torch.cat((hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data[:], hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data[:]), dim=0)
+        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE] = hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data[:]
+
+        if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[GATE_PROJ_SIZE:] = hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data[:]
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].data[:] = hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:]
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].copy_(hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:])
 
     return all_layer_prefixes
