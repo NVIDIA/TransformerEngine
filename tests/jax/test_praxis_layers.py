@@ -730,8 +730,13 @@ class TestDotProductAttn(TestLayer):
     def input_getter(self, shape, dtype):
         key = jax.random.PRNGKey(seed=1234)
         q_key, k_key, v_key = jax.random.split(key, 3)
-        return list(map(partial(jax.random.normal, shape=shape, dtype=dtype),
-                        [q_key, k_key, v_key]))
+        b, s, *_ = shape
+        if self.attrs[DotProductAttnAttr.TRANSPOSE_BS]:
+            b, s = s, b
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, k_key, v_key]), mask
+        ]
 
     def get_layer_name(self):
         return 'dot_product_attn'
@@ -765,6 +770,7 @@ class TestDotProductAttn(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', DotProductAttnAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -853,9 +859,11 @@ class MultiHeadAttnAttr:
 class TestMultiHeadAttn(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        s, b, *_ = shape
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [*map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask]
 
     def get_layer_name(self):
         return 'multi_head_attn'
@@ -1183,9 +1191,15 @@ class TransformerLayerAttr:
 class TestTransformer(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        b, s, *_ = shape
+        if self.attrs[TransformerLayerAttr.TRANSPOSE_BS]:
+            b, s = s, b
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask, mask
+        ]
 
     def get_layer_name(self):
         return 'transformerlayer'
@@ -1277,6 +1291,7 @@ class TestTransformer(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', TransformerLayerAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -1292,7 +1307,7 @@ class TestTransformer(TestLayer):
                                   fp8_format,
                                   rtol=1e-05,
                                   atol=1e-08):
-
+        self.attrs = attrs
         ds = DelayedScaling(fp8_format=fp8_format)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
