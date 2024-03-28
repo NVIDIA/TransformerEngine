@@ -532,7 +532,7 @@ def checkpoint(
     # Ensure backward compatibility.
     if not only_tensor_args:
         warnings.warn(
-            "Passing non-tensor non-keyword arguments in deprecated and support will be removed in "
+            "Passing non-tensor non-keyword arguments is deprecated and support will be removed in "
             "future releases of TransformerEngine. `distribute_saved_activations`, `tp_group`, and "
             "`get_rng_state_tracker` must be passed as keyword arguments to `checkpoint`.",
             DeprecationWarning, stacklevel=2,
@@ -547,7 +547,7 @@ def checkpoint(
                 isinstance(arg, None | torch.Tensor)
             ), f"Expected tensor argument, found {type(arg)}."
 
-        distribute_saved_activations, get_rng_state_tracker, tp_group = args[:3]
+        distribute_saved_activations, get_rng_state_tracker, tp_group = args[:3] # pylint: disable=unbalanced-tuple-unpacking
         args = args[3:]
 
     # Trigger the native PyTorch checkpoint if:
