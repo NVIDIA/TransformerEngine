@@ -146,6 +146,7 @@ struct communicator {
                  // or force MNNVL
   int *send_id, *recv_id;
   int mydev;
+  unsigned long long ub_timeout;
 };
 typedef struct communicator communicator;
 
@@ -184,6 +185,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
    SHARP and NSO/MNNVL)
 */
 
+#if 0
 void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream = 0);
 // for DP distributed optimizer, only nonSHARP multinode is implemented & calls must come in pairs
@@ -195,12 +197,15 @@ void reducescatter_userbuff_inplace(const int handler, const int offset, const i
 
 void allreduce2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream = 0);
+#endif
 // for TP-parallelism, only single node is implemented
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream = 0);
+#if 0
 void allgather2_userbuff_inplace_sliced(const int handler, const int offset, const int elements,
                                         communicator *comm, const int slice_id, const int nslices,
                                         cudaStream_t stream = 0);
+#endif
 /*
 each Rank input is
 allgather2_userbuff_inplace: offset+myrank*elements

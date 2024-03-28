@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include <unistd.h>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -21,7 +22,6 @@
 #include "userbuffers.h"
 
 #define MAX_THREADS 1024
-#define TIMEOUT 200000000000ull
 
 #define CUDACHECK(cmd)                                                                             \
   do {                                                                                             \
@@ -55,14 +55,30 @@
 // If we expect that producer will be 2B+ messages behind consumer
 #define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
 
+// Strip the path from a full filename
+#define FILENAME(file) ({ \
+    const char* filename = file; \
+    const char* basename = filename; \
+    for (const char* ptr = filename; *ptr != '\0'; ptr++) { \
+        if (*ptr == '/' || *ptr == '\\') { \
+            basename = ptr + 1; \
+        } \
+    } \
+    basename; \
+})
+
 // Printf to provide enough information so it is easier to attribute failures
-#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__), __FUNCTION__, __LINE__, __VA_ARGS__)
+
+// Report and error on timeout
+#define CHECK_TIMEOUT(t, timeout) ((clock64() - (t)) > timeout)
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rw(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
-                                        const int numlines, void **commbuff, const int handleridx) {
+                                        const int numlines, void **commbuff, const int handleridx,
+                                        const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -82,7 +98,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("Allreduce reduce-scatter: SM %d [%d]: expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id, *flag);
         break;
       }
@@ -135,7 +151,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("Allreduce Gather: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -150,7 +166,8 @@ template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
-                                        const int numlines, void **commbuff, const int handleridx) {
+                                        const int numlines, void **commbuff, const int handleridx,
+                                        const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -169,7 +186,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("Allreduce reduce-scatter:SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -218,7 +235,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (CHECK_TIMEOUT(s, 2ull * ub_timeout)) {
         UB_PRINT("Allreduce gather: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -261,7 +278,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr_rs(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx) {
+                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -280,7 +297,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("Reduce-scatter: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -336,7 +353,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                const int gpustep, const int mylineoffset,
                                                const int totallines, const int rowlines,
                                                const int skiplines, void **commbuff,
-                                               const int handleridx, void *outbuf) {
+                                               const int handleridx, void *outbuf,
+                                               const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -355,7 +373,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("Reduce-scatter: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -757,6 +775,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 }  // fp16 inplace allgather kernel (Hopper) MC
 
 #else
+#if 0
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
@@ -781,12 +800,13 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, float4 *mc_ptr) {}
 #endif
+#endif
 
 template <int RANKS, typename fp8type>
 __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8(
     const int op, const int flagoffset, const int firstrank, const int myrank, const int gpustep,
     const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
-    void **commbuff, const int handleridx, void *outbuf, float *scale) {
+    void **commbuff, const int handleridx, void *outbuf, float *scale, const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -807,7 +827,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
                threadIdx.x, reduce_id, *flag);
         break;
@@ -865,7 +885,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int op, const int flagoffset, const int firstrank, const int myrank,
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines_out, const int skiplines_in, void **commbuff, const int handleridx,
-        void *outbuf, float *scale, void *counters, const int numchunks, const int atomicindex) {
+        void *outbuf, float *scale, void *counters, const int numchunks, const int atomicindex,
+        const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -895,7 +916,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
       userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
       clock_t s = clock64();
       while (CHECK_IDS(*flag, reduce_id)) {
-        if (clock64() - s > TIMEOUT) {
+        if (CHECK_TIMEOUT(s, ub_timeout)) {
           UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
                  threadIdx.x, reduce_id, *flag);
           break;
@@ -962,7 +983,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                       const int gpustep, const int mylineoffset,
                                                       const int totallines, const int rowlines,
                                                       const int skiplines, void **commbuff,
-                                                      const int handleridx, void *outbuf) {
+                                                      const int handleridx, void *outbuf,
+                                                      const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -982,7 +1004,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
                threadIdx.x, reduce_id, *flag);
         break;
@@ -1138,7 +1160,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int op, const int flagoffset, const int firstrank, const int myrank,
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines, const int numchunks, void **commbuff, const int handleridx,
-        void *outbuf, void *counters) {
+        void *outbuf, void *counters, const unsigned long long ub_timeout) {
   if (counters) {
     if (threadIdx.x == 0) {
       // spin-lock on counter from producer
@@ -1178,7 +1200,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
                threadIdx.x, reduce_id, *flag);
         break;
@@ -1235,7 +1257,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int op, const int flagoffset, const int firstrank, const int myrank,
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines, const int numchunks, void **commbuff, const int handleridx,
-        void *outbuf, void *counters) {
+        void *outbuf, void *counters, const unsigned long long ub_timeout) {
   for (int chunk_i = 0; chunk_i < numchunks; chunk_i++) {
     if (counters) {
       if (threadIdx.x == 0) {
@@ -1277,7 +1299,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
       userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
       clock_t s = clock64();
       while (CHECK_IDS(*flag, reduce_id)) {
-        if (clock64() - s > TIMEOUT) {
+        if (CHECK_TIMEOUT(s, ub_timeout)) {
           UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
                  threadIdx.x, reduce_id, *flag);
           break;
@@ -1333,7 +1355,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr_ag(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx) {
+                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1396,7 +1418,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (CHECK_TIMEOUT(s, 2ull * ub_timeout)) {
         UB_PRINT("Allgather: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -1410,7 +1432,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rw_ag(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx) {
+                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1493,7 +1515,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (CHECK_TIMEOUT(s, 2ull * ub_timeout)) {
         UB_PRINT("Allgather: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                *flag);
         break;
@@ -1502,6 +1524,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }  // fp16 inplace allgather kernel (Volta,Hopper)
 
+#if 0
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op, const int flagoffset,
@@ -1664,7 +1687,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }  // block loop for NVLINK-ALLGATHER
   }    // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
+#endif
 
+#if 0
 // threadfence and SMs sync to SM0
 #define SMBAR(offset, block)                                                                       \
   asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));                                              \
@@ -1680,7 +1705,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }                                                                                                \
   if (blockIdx.x == 0)                                                                             \
     asm volatile("bar.sync 15, %0;" ::"r"(32));
+#endif 
 
+#if 0
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2(
     const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
@@ -1894,14 +1921,16 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     }    // RANKS!=1
   }      // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
+#endif
 
+#if 0
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2_rs(
     const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
     const int commbufoffset, const int flagoffset, const int firstrank, const int myrank,
     const int gpustep, const int lineoffset, const int numlines, void **commbuff,
     const int handleridx, const int peerblocklines, int *hostflags, int *gpuflag,
-    const int numblocks) {
+    const int numblocks, const unsigned long long ub_timeout) {
   const int basecounter = gpuflag[NVTE_GF_STATE + op];
   if (threadIdx.x < 32) {
     int *flagptr;
@@ -2034,7 +2063,9 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     }  // nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
   }    // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
+#endif
 
+#if 0
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(
     const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
@@ -2144,7 +2175,9 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     }    // RANKS!=1
   }      // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
+#endif
 
+#if 0
 __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostflags, int *gpuflag,
                                                       int numblocks) {
   const int basecounter = gpuflag[NVTE_GF_STATE + op] + numblocks;
@@ -2153,7 +2186,9 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
   while (((volatile int *)gpuflag)[NVTE_GF_IBSHARPDONE] < basecounter) {
   }
 }
+#endif 
 
+#if 0
 #define callranks_block(x)                                                                         \
   if (comm->ar_nvsize == x)                                                                        \
     userbuffers_fp16_sum_inplace_gpu_rr_blocked<x><<<sms, warps * 32, 0, stream>>>(                \
@@ -2161,8 +2196,10 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
         handler * comm->nvsize, blocksize / sizeof(int4) / comm->ar_nvsize,                        \
         reinterpret_cast<int *>(comm->hostflags), comm->flags,                                     \
-        (elements * 2 + blocksize - 1) / blocksize);
+        (elements * 2 + blocksize - 1) / blocksize, comm->ub_timeout);
+#endif
 
+#if 0
 #define callranks2_block(x)                                                                        \
   if (ar_nvsize == x) {                                                                            \
     int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
@@ -2182,9 +2219,11 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step,          \
         offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
         handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks);                         \
+        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks, comm->ub_timeout);       \
   }
+#endif
 
+#if 0
 #define callranks2_block_rs(x)                                                                     \
   if (ar_nvsize == x) {                                                                            \
     int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
@@ -2204,9 +2243,11 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step,          \
         offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
         handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks);                         \
+        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks, comm->ub_timeout);       \
   }
+#endif 
 
+#if 0
 #define callranks2_block_ag(x)                                                                     \
   if (ar_nvsize == x) {                                                                            \
     int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
@@ -2228,6 +2269,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
         reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks);                         \
   }
+#endif
 
 #define callranks(x)                                                                               \
   if (ar_nvsize == x) {                                                                            \
@@ -2239,11 +2281,12 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         arg7 = elements / 8;                                                                       \
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
+    int arg10 = comm->ub_timeout;                                                                  \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
-                          reinterpret_cast<void *>(&arg9)};                                        \
+                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr<x>      \
@@ -2251,6 +2294,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
         kernelArgs));                                                                              \
   }
 
+#if 0 // Pasha
 #define callranksMC(x)                                                                             \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2270,6 +2314,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc<x>), kernelArgs));      \
   }
+#endif
 
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                                  \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                                     \
@@ -2282,6 +2327,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
   cfg.attrs = attribute_ub;                                                                        \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
 
+#if 0
 int allreduce_userbuff_inplace_gpu(const int handler, const int offset, const int elements,
                                    const int blocksize, communicator *comm, cudaStream_t stream) {
   // schedule GPU kernel only
@@ -2307,7 +2353,9 @@ int allreduce_userbuff_inplace_gpu(const int handler, const int offset, const in
   }
   return sms;
 }
+#endif
 
+#if 0
 int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
                                     const int elements, const int blocksize, communicator *comm,
                                     cudaStream_t stream, int op) {
@@ -2335,6 +2383,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
   }
   return sms;
 }
+#endif
 
 #define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
@@ -2346,11 +2395,12 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         arg6 = offset / 8 + (comm->use_rr_kernel ? 0 : arg4 * arg7);                               \
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
+    unsigned long long  arg10 = comm->ub_timeout;                                                  \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
-                          reinterpret_cast<void *>(&arg9)};                                        \
+                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>   \
@@ -2358,6 +2408,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         kernelArgs));                                                                              \
   }
 
+#if 0
 #define callranks_agMC(x)                                                                          \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2377,6 +2428,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_ag<x>), kernelArgs));   \
   }
+#endif
 
 #define callranks_rs(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
@@ -2388,15 +2440,17 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         arg6 = offset / 8 + arg4 * arg7;                                                           \
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
+    unsigned long long arg10 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
-                          reinterpret_cast<void *>(&arg9)};                                        \
+                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>), kernelArgs));   \
   }
 
+#if 0
 #define callranks_rsMC(x)                                                                          \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2416,6 +2470,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs<x>), kernelArgs));   \
   }
+#endif
 
 #define callranks_rs_oop(x)                                                                        \
   if (ar_nvsize == x) {                                                                            \
@@ -2428,12 +2483,14 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
+    unsigned long long arg13 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
                           reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
-                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12)};     \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
+                          reinterpret_cast<void *>(&arg13)};                                       \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>),             \
         kernelArgs));                                                                              \
@@ -2451,19 +2508,21 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
     float *arg13 = scale;                                                                          \
+    unsigned long long arg14 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
                           reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
-                          reinterpret_cast<void *>(&arg13)};                                       \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)};     \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8<x, fp8type>),      \
         kernelArgs));                                                                              \
   }
 
+#if 0
 #define callranks_rs_oopMC(x)                                                                      \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2487,6 +2546,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs_oop<x>),             \
         kernelArgs));                                                                              \
   }
+#endif
 
 #define callranks_rs_oop_atomic_fp8(x)                                                             \
   if (ar_nvsize == x) {                                                                            \
@@ -2503,6 +2563,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     float *arg14 = scale;                                                                          \
     void *arg15 = counters;                                                                        \
     int arg16 = numchunks, arg17 = atomicindex;                                                    \
+    unsigned long long arg18 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -2511,7 +2572,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
                           reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),      \
-                          reinterpret_cast<void *>(&arg17)};                                       \
+                          reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)};     \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(                                                                  \
@@ -2530,12 +2591,14 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
+    unsigned long long arg13 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
                           reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
-                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12)};     \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
+                          reinterpret_cast<void *>(&arg13)};                                       \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride<x>),      \
         kernelArgs));                                                                              \
@@ -2583,13 +2646,15 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     int arg12 = handler * comm->nvsize;                                                            \
     void *arg13 = output;                                                                          \
     void *arg14 = counters;                                                                        \
+    unsigned long long arg15 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
                           reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
-                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)};     \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
+                          reinterpret_cast<void *>(&arg15)};                                       \
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic<x>),     \
@@ -2608,13 +2673,15 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     int arg12 = handler * comm->nvsize;                                                            \
     void *arg13 = output;                                                                          \
     void *arg14 = counters;                                                                        \
+    unsigned long long arg15 = comm->ub_timeout;                                                   \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
                           reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
-                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)};     \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
+                          reinterpret_cast<void *>(&arg15)};                                       \
     CUDACHECK(                                                                                     \
         cudaLaunchKernelExC(&cfg,                                                                  \
                             reinterpret_cast<void *>(                                              \
@@ -2622,6 +2689,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
                             kernelArgs));                                                          \
   }
 
+#if 0
 int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
                                         const int elements, const int blocksize, communicator *comm,
                                         cudaStream_t stream, int op) {
@@ -2651,6 +2719,7 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
   }
   return sms;
 }
+#endif
 
 void reducescatter2_userbuff_strided(void *output, const int handler, const int offset,
                                      const int rowelements, const int colelements,
@@ -2770,6 +2839,7 @@ void reducescatter2_userbuff_strided_atomic_fp8(void *output, float *scale, cons
       output, scale, handler, offset, rowelements, colelements, strideelements_out,
       strideelements_in, 1, numchunks, counters /*nullptr*/, comm, stream);
 }
+
 template <typename fp8type>
 void reducescatter2_userbuff_strided_multiatomic_fp8(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
@@ -2818,6 +2888,7 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
   //}
 }
 
+#if 0
 int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
                                     const int elements, const int blocksize, communicator *comm,
                                     cudaStream_t stream, int op) {
@@ -2847,6 +2918,7 @@ int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
   }
   return sms;
 }
+#endif 
 
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream) {
@@ -2989,6 +3061,7 @@ template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream = 0);
 
+#if 0
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pullsendrecv(int myrank, int peer, int *recv_id, int *send_flagptr,
                               int *recv_flagptr, int4 *srcptr, int4 *dstptr, const int lines) {
@@ -3035,6 +3108,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   for (int line = end_aligned; line < end_elem; line += blockDim.x * gridDim.x)
     dstptr[line] = srcptr[line];
 }
+#endif
 
 __global__ void kuserbuffers_pullsend(int myrank, int peer, int *send_id, int *flagptr) {
   atomicAdd_system(flagptr, 1);
@@ -3055,7 +3129,7 @@ __global__ void kuserbuffers_dummy(void) {}
 
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pullrecv(int myrank, int peer, int *recv_id, int *flagptr, int4 *srcptr,
-                          int4 *dstptr, const int lines) {
+                          int4 *dstptr, const int lines, unsigned long long ub_timeout) {
 #define UNROLLCOPY 8
   const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
   const int end_elem = lines;
@@ -3067,7 +3141,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)flagptr;
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("pullrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
         break;
       }
@@ -3127,7 +3201,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }
 
-__global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *flagptr, int adder) {
+__global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *flagptr, int adder, unsigned long long ub_timeout) {
   const int signal_id = (*recv_id) + adder;
   *recv_id = signal_id;
   volatile int *flag = (volatile int *)flagptr;
@@ -3135,7 +3209,7 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
     return;
   clock_t s = clock64();
   while (CHECK_IDS(*flag, signal_id)) {
-    if (clock64() - s > TIMEOUT) {
+    if (CHECK_TIMEOUT(s, ub_timeout)) {
       UB_PRINT("pushrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
       return;
     }
@@ -3145,7 +3219,7 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                               const int lines, int myrank, int peer, int *recv_id,
-                              int *recv_flagptr, int adder) {
+                              int *recv_flagptr, int adder, unsigned long long ub_timeout) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
     const int end_elem = lines;
@@ -3186,7 +3260,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
       return;
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("pushsendrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
         return;
       }
@@ -3197,7 +3271,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv_atomic(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                                      const int lines, int myrank, int peer, int *recv_id,
-                                     int *recv_flagptr, int adder, void *counters) {
+                                     int *recv_flagptr, int adder, void *counters, unsigned long long ub_timeout) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
     const int end_elem = lines;
@@ -3237,7 +3311,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     // if(*flag>=signal_id) return;
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("pushsendrecv atomic [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id,
                *flag); /*return;*/
       }
@@ -3256,7 +3330,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                           int4 *dstptr, const int lines, int myrank, int peer,
                                           int *recv_id, int *recv_flagptr, int adder,
                                           void *counters, int nchunks, int send_stride,
-                                          int recv_stride, bool shuffle) {
+                                          int recv_stride, bool shuffle, unsigned long long ub_timeout) {
   for (int chunk_i = 0; chunk_i < nchunks - 1; chunk_i++) {
     int send_chunk_id = shuffle ? chunk_i : (nchunks + myrank - chunk_i) % nchunks;
     int recv_chunk_id = shuffle ? chunk_i + 1 : (nchunks + myrank - chunk_i - 1) % nchunks;
@@ -3304,7 +3378,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
       // if(*flag>=signal_id) return;
       clock_t s = clock64();
       while (CHECK_IDS(*flag, signal_id)) {
-        if (clock64() - s > TIMEOUT) {
+        if (CHECK_TIMEOUT(s, ub_timeout)) {
           UB_PRINT("pushsendrecv multiatomic [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id,
                     *flag); /*return;*/
         }
@@ -3427,11 +3501,13 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   int *arg8 = &comm->recv_id[recv_peer * NVTE_MAX_REGIONS + dsthandler];
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
+  unsigned long long arg11 = comm->ub_timeout;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
                         reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
-                        reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};
+                        reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
+                        reinterpret_cast<void *>(&arg11)};
   CUDACHECK(
       cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
   //}
@@ -3473,12 +3549,13 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
   void *arg11 = counters;
+  int arg12 = comm->ub_timeout;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
                         reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
                         reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
-                        reinterpret_cast<void *>(&arg11)};
+                        reinterpret_cast<void *>(&arg12)};
   CUDACHECK(cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic),
                                 kernelArgs));
 }
@@ -3518,6 +3595,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   int arg13 = send_stride;
   int arg14 = recv_stride;
   bool arg15 = shuffle;
+  unsigned long long arg16 = comm->ub_timeout;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),
@@ -3525,11 +3603,12 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                         reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
-                        reinterpret_cast<void *>(&arg15)};
+                        reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
   CUDACHECK(cudaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
 }
 
+#if 0
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_alltoall(void **baseflagptrs, int flagoffset, int4 *basesrcptr, void **dstptrs,
                           size_t dstoffset, const int lines, const int myrank) {
@@ -3569,7 +3648,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
     atomicAdd(flagptr, 1);
   }
 }
+#endif
 
+#if 0
 void userbuffers_alltoall_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                                const size_t dstoffset, const size_t bytes, communicator *comm,
                                cudaStream_t stream) {
@@ -3593,6 +3674,7 @@ void userbuffers_alltoall_send(const int srchandler, const size_t srcoffset, con
         &(comm->flags[NVTE_GF_STATE + userbuffers_alltoall]),
         comm->hostflags + userbuffers_alltoall);
 }
+#endif
 
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
@@ -3613,7 +3695,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->myrank, peer, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
         reinterpret_cast<int *>(flagptr), reinterpret_cast<int4 *>(srcptr),
-        reinterpret_cast<int4 *>(dstptr), signalonly ? 0 : bytes / 16);
+        reinterpret_cast<int4 *>(dstptr), signalonly ? 0 : bytes / 16,
+        comm->ub_timeout);
     if (!signalonly)
       kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
     if (comm->use_ce) {
@@ -3622,10 +3705,12 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
         comm->myrank, peer, &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
-        reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms);
+        reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms,
+        comm->ub_timeout);
   }
 }
 
+#if 0
 void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream) {
   void *flagptr =
       (comm->mem_ptr[0]) +
@@ -3636,6 +3721,7 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream) {
   kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(comm->myrank, -1, reinterpret_cast<int *>(flagptr + 4),
                                              reinterpret_cast<int *>(flagptr), comm->nranks - 1);
 }
+#endif
 
 // producer
 static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
