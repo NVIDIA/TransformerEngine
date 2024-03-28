@@ -44,6 +44,8 @@ def fp8_gemm(
         assert fp8_meta_tensor is not None and out_index is not None
     assert_dim_for_fp8_exec(A)
     assert_dim_for_fp8_exec(B)
+    assert A.dtype == torch.uint8
+    assert B.dtype == torch.uint8
 
     if out is None:
         out = torch.empty(

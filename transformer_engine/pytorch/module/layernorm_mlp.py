@@ -187,12 +187,27 @@ class _LayerNormMLP(torch.autograd.Function):
         if return_layernorm_output:
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
-                ln_out = tex.cast_to_fp8(
-                    ln_out,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
+                if ub_overlap_ag:
+                    ln_out = tex.cast_to_fp8(
+                        ln_out,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
+                else:
+                    ln_out_total = tex.cast_to_fp8(
+                        ln_out_total,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
+                    if ln_out_gathered:
+                        rank = torch.distributed.get_rank(tp_group)
+                        slice_start = rank * ln_out.size(0)
+                        slice_end = (rank + 1) * ln_out.size(0)
+                        ln_out = ln_out_total[slice_start:slice_end, ...]
+                    else:
+                        ln_out = ln_out_total
 
         if fp8:
             bias_dtype = (
