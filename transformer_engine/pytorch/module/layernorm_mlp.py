@@ -109,6 +109,7 @@ class _LayerNormMLP(torch.autograd.Function):
         bias_gelu_nvfusion: bool,
         set_parallel_mode: bool,
         is_grad_enabled: bool,
+        is_training: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
@@ -187,12 +188,27 @@ class _LayerNormMLP(torch.autograd.Function):
         if return_layernorm_output:
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
-                ln_out = tex.cast_to_fp8(
-                    ln_out,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
+                if ub_overlap_ag:
+                    ln_out = tex.cast_to_fp8(
+                        ln_out,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
+                else:
+                    ln_out_total = tex.cast_to_fp8(
+                        ln_out_total,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
+                    if ln_out_gathered:
+                        rank = torch.distributed.get_rank(tp_group)
+                        slice_start = rank * ln_out.size(0)
+                        slice_end = (rank + 1) * ln_out.size(0)
+                        ln_out = ln_out_total[slice_start:slice_end, ...]
+                    else:
+                        ln_out = ln_out_total
 
         if fp8:
             bias_dtype = (
@@ -521,6 +537,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_overlap_ag = ub_overlap_ag
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.is_training = is_training
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -547,7 +564,12 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormMLP"
+            ctx.fp8,
+            ctx.fp8_meta,
+            ctx.tp_group,
+            ctx.tp_size,
+            ctx.is_training,
+            name="_LayerNormMLP",
         ):
             (
                 inputmat,
@@ -1072,6 +1094,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1469,6 +1492,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.bias_gelu_nvfusion,
                 self.set_parallel_mode,
                 torch.is_grad_enabled(),
+                self.training,
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,

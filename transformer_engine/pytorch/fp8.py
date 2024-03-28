@@ -178,6 +178,11 @@ class FP8GlobalStateManager:
         return cls.amax_reduce_handle_fwd
 
     @classmethod
+    def set_amax_reduce_handle_fwd(cls, async_handle: Optional[torch.distributed.Work]) -> None:
+        """Return AMAX reduction wait handle of forward prop."""
+        cls.amax_reduce_handle_fwd = async_handle
+
+    @classmethod
     def setup_amax_forward_global_reduce_func(cls, f: Callable) -> None:
         """Sets up the function to call during autocast exit."""
         cls.amax_forward_global_reduce_func = f
@@ -407,6 +412,9 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
         if cls.FP8_AUTOCAST_DEPTH == 0:
+            if cls.amax_reduce_handle_fwd is not None:
+                cls.amax_reduce_handle_fwd.wait()
+                cls.amax_reduce_handle_fwd = None
             if callable(cls.amax_forward_global_reduce_func):
                 cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
             cls.delete_key_from_amax_buffer(forward=True)
