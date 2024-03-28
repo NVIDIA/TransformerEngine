@@ -169,11 +169,11 @@ def replace_params(hf_state_dict, te_state_dict, config):
         # It may happen that gate_proj.weight and up_proj.weight will be in the different files, so we need to
         # load them separately.
         if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:config.gate_proj_size] = \
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:config.intermediate_size] = \
                 hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'].data
 
         if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[config.gate_proj_size:] = \
+            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[config.intermediate_size:] = \
                 hf_state_dict[layer_prefix + 'mlp.up_proj.weight'].data
 
         if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
