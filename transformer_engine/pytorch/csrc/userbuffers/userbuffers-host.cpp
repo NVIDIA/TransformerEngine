@@ -109,8 +109,14 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   for (int i = 0; i < userbuffers_op_types; i++)
     (*comm)->active_req[i].active = -1;
 
-  // Number of cycles to wait: ~100 sec
-  (*comm)->ub_timeout = getenv("UB_TIMEOUT") ? atoll(getenv("UB_TIMEOUT")) : 200000000000ull;
+  int device_clock    = 0;
+  int sec_timeout     = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110; // 110 sec wait time by default
+  CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+  (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
+  if ((*comm)->myrank == 0) {
+    printf("UB_TIMEOUT is set to %d sec, %llu cycles, freq: %dkhz\n",
+            sec_timeout, (*comm)->ub_timeout, device_clock);
+  }
 
   int ret = 0;
   // split communicator
