@@ -91,6 +91,7 @@ def init_te_llama_model(hyperparams):
     # Init the model
     from te_llama import TELlamaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
+    config._attn_implementation = "flash_attention_2"
     model = TELlamaForCausalLM.from_pretrained_local(
             hyperparams.model_name,
             config=config,
