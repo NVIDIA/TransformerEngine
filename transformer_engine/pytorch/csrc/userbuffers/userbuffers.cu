@@ -3128,7 +3128,7 @@ __global__ void kuserbuffers_proxysend(int *id, int *hostflag) {
 __global__ void kuserbuffers_dummy(void) {}
 
 __global__ void __launch_bounds__(MAX_THREADS)
-    kuserbuffers_pullrecv(int myrank, int peer, int *recv_id, int *flagptr, int4 *srcptr,
+    kuserbuffers_pullrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr, int4 *srcptr,
                           int4 *dstptr, const int lines, unsigned long long ub_timeout) {
 #define UNROLLCOPY 8
   const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
@@ -3142,7 +3142,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pullrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
+        UB_PRINT("pullrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d, observed %d",
+                  myrank, peer, nvrank, nvpeer, signal_id, *flag);
         break;
       }
     }
@@ -3201,7 +3202,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }
 
-__global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *flagptr, int adder, unsigned long long ub_timeout) {
+__global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr, int adder, unsigned long long ub_timeout) {
   const int signal_id = (*recv_id) + adder;
   *recv_id = signal_id;
   volatile int *flag = (volatile int *)flagptr;
@@ -3210,7 +3211,8 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
   clock_t s = clock64();
   while (CHECK_IDS(*flag, signal_id)) {
     if (CHECK_TIMEOUT(s, ub_timeout)) {
-      UB_PRINT("pushrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
+      UB_PRINT("pushrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d] : expected %d, observed %d",
+                myrank, peer, nvrank, nvpeer, signal_id, *flag);
       return;
     }
   }
@@ -3219,7 +3221,8 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                               const int lines, int myrank, int peer, int *recv_id,
-                              int *recv_flagptr, int adder, unsigned long long ub_timeout) {
+                              int *recv_flagptr, int adder, unsigned long long ub_timeout,
+                              int nv_myrank, int nv_peer) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
     const int end_elem = lines;
@@ -3261,7 +3264,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pushsendrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id, *flag);
+        UB_PRINT("pushsendrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d, observed %d",
+                  myrank, peer, nv_myrank, nv_peer, signal_id, *flag);
         return;
       }
     }
@@ -3271,7 +3275,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv_atomic(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                                      const int lines, int myrank, int peer, int *recv_id,
-                                     int *recv_flagptr, int adder, void *counters, unsigned long long ub_timeout) {
+                                     int *recv_flagptr, int adder, void *counters, unsigned long long ub_timeout,
+                                     int nv_myrank, int nv_peer) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
     const int end_elem = lines;
@@ -3312,8 +3317,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pushsendrecv atomic [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id,
-               *flag); /*return;*/
+        UB_PRINT("pushsendrecv atomic [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d, observed %d",
+                  myrank, peer, nv_myrank, nv_peer, signal_id, *flag); /*return;*/
       }
     }
 
@@ -3330,7 +3335,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                           int4 *dstptr, const int lines, int myrank, int peer,
                                           int *recv_id, int *recv_flagptr, int adder,
                                           void *counters, int nchunks, int send_stride,
-                                          int recv_stride, bool shuffle, unsigned long long ub_timeout) {
+                                          int recv_stride, bool shuffle, unsigned long long ub_timeout,
+                                          int nv_myrank, int nv_peer) {
   for (int chunk_i = 0; chunk_i < nchunks - 1; chunk_i++) {
     int send_chunk_id = shuffle ? chunk_i : (nchunks + myrank - chunk_i) % nchunks;
     int recv_chunk_id = shuffle ? chunk_i + 1 : (nchunks + myrank - chunk_i - 1) % nchunks;
@@ -3379,8 +3385,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
       clock_t s = clock64();
       while (CHECK_IDS(*flag, signal_id)) {
         if (CHECK_TIMEOUT(s, ub_timeout)) {
-          UB_PRINT("pushsendrecv multiatomic [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id,
-                    *flag); /*return;*/
+          UB_PRINT("pushsendrecv multiatomic [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d, observed %d",
+                    myrank, peer, nv_myrank, nv_peer, signal_id, *flag); /*return;*/
         }
       }
     }
@@ -3502,12 +3508,15 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
   unsigned long long arg11 = comm->ub_timeout;
+  int arg12 = send_peerlocal;
+  int arg13 = recv_peerlocal;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
                         reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
                         reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
-                        reinterpret_cast<void *>(&arg11)};
+                        reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
+                        reinterpret_cast<void *>(&arg13)};
   CUDACHECK(
       cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
   //}
@@ -3550,12 +3559,15 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   int arg10 = signalonly ? 1 : comm->sms;
   void *arg11 = counters;
   int arg12 = comm->ub_timeout;
+  int arg13 = send_peerlocal;
+  int arg14 = recv_peerlocal;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
                         reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
                         reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
-                        reinterpret_cast<void *>(&arg12)};
+                        reinterpret_cast<void *>(&arg12), reinterpret_cast<void *>(&arg13),
+                        reinterpret_cast<void *>(&arg14)};
   CUDACHECK(cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic),
                                 kernelArgs));
 }
@@ -3596,6 +3608,8 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   int arg14 = recv_stride;
   bool arg15 = shuffle;
   unsigned long long arg16 = comm->ub_timeout;
+  int arg17 = send_peerlocal;
+  int arg18 = recv_peerlocal;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),
@@ -3603,7 +3617,8 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                         reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
-                        reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
+                        reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),
+                        reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)};
   CUDACHECK(cudaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
 }
@@ -3693,7 +3708,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     void *srcptr = (comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
-        comm->myrank, peer, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
+        comm->myrank, peer, comm->nvrank, peerlocal, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
         reinterpret_cast<int *>(flagptr), reinterpret_cast<int4 *>(srcptr),
         reinterpret_cast<int4 *>(dstptr), signalonly ? 0 : bytes / 16,
         comm->ub_timeout);
@@ -3704,7 +3719,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
-        comm->myrank, peer, &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
+        comm->myrank, peer, comm->nvrank, peerlocal, &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
         reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms,
         comm->ub_timeout);
   }
