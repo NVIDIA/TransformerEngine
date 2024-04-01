@@ -52,7 +52,7 @@
   }
 
 // Return true if producer > consumer, otherwise false while preventing integer overflow
-// If we expect that produce will be 2B+ messages behind consumer
+// If we expect that producer will be 2B+ messages behind consumer
 #define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
 
 template <int RANKS>
