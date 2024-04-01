@@ -600,9 +600,9 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
+                if tp_world_size == 1 or not fc1_weight.requires_grad:
                     ctx.ub_bulk_dgrad = False
-            if fc1_weight.requires_grad and ctx.ub_bulk_dgrad:
+            if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub("fc1_dgrad")
@@ -877,7 +877,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
 
-            if fc1_weight.requires_grad and ctx.ub_bulk_dgrad:
+            if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             # Overlap dgrad-RS/AR with wgrad
             if ctx.set_parallel_mode and ctx.sequence_parallel:
