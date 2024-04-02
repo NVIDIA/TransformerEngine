@@ -10,6 +10,8 @@ import jax.numpy as jnp
 from utils import assert_allclose
 from transformer_engine.jax.flax.module import _apply_low_rank_adaptation
 from transformer_engine.jax.flax.module import _normalize_axes
+from transformer_engine.jax.flax.transformer import LoRAScope
+from transformer_engine.jax.flax.transformer import _canonicalize_lora_scope
 
 
 class TestLoRA:
@@ -46,3 +48,21 @@ class TestLoRA:
         out_ref = TestLoRA.reference(x, la, lb, pattern, scale_ref)
 
         assert_allclose(out_target, out_ref, dtype=dtype)
+
+    @pytest.mark.parametrize('scope_ref_assert',
+                             [('none', LoRAScope(False, False, False), False),
+                              ('all', LoRAScope(True, True, True), False),
+                              ('qkv_proj', LoRAScope(True, False, False), False),
+                              ('output_proj', LoRAScope(False, True, False), False),
+                              ('mlp', LoRAScope(False, False, True), False),
+                              ('exclude_qkv_proj', LoRAScope(False, True, True), False),
+                              ('exclude_output_proj', LoRAScope(True, False, True), False),
+                              ('exclude_mlp', LoRAScope(True, True, False), False),
+                              ('messing_up', LoRAScope(), True)])
+    def test_lora_scope_generator(self, scope_ref_assert):
+        scope, reference, need_assert = scope_ref_assert
+        try:
+            lora_scope = _canonicalize_lora_scope(scope)
+            assert lora_scope == reference
+        except AssertionError as ae:
+            assert need_assert, f"{ae.args}"
