@@ -207,6 +207,8 @@ FP8 has been tested extensively across different model architectures and configu
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | T5-11B     |  JAX/T5x         | Available on request                                                                                    |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
+| MPT-13B    |  Mosaic Composer | https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8         |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
 | GPT-22B    |  NeMo Framework  | Available on request                                                                                    |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
