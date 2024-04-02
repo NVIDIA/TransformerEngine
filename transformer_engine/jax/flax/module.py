@@ -104,7 +104,7 @@ def _combine_biases(*masks: List[Array]):
     return mask
 
 
-def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel):
+def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel, alpha):
     """Low Rank Adaptation Implementation"""
 
     assert len(axis) <= 5
@@ -112,6 +112,10 @@ def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel):
     assert len(features) <= 5
     hidden_out_names = 'nopqr'[:len(features)]
     rank_name = 's'
+
+    assert lora_a_kernel.shape[-1] == lora_b_kernel.shape[-2]
+    rank = lora_a_kernel.shape[-1]
+    scaling = alpha / rank if alpha is not None else 1.0
 
     x_einsum_express = f"...{hidden_in_names}"
     lora_a_einsum_express = f"{hidden_in_names}{hidden_out_names[:-1]}{rank_name}"
@@ -121,6 +125,7 @@ def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel):
                            f"->{output_einsum_express}"
 
     output = jnp.einsum(final_einsum_express, x, lora_a_kernel, lora_b_kernel)
+    output = output * scaling
     return output
 
 
@@ -377,9 +382,12 @@ class DenseGeneral(TransformerEngineBase):
         only used when :attr:`use_bias=True`.
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each linear layer.
-    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
 
@@ -401,6 +409,7 @@ class DenseGeneral(TransformerEngineBase):
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
@@ -487,7 +496,8 @@ class DenseGeneral(TransformerEngineBase):
                                                             axes=None)
             lora_b_kernel = lora_b_kernel.astype(self.dtype)
 
-            y += _apply_low_rank_adaptation(inputs, axis, features, lora_a_kernel, lora_b_kernel)
+            y += _apply_low_rank_adaptation(inputs, axis, features, lora_a_kernel, lora_b_kernel,
+                                            self.low_rank_adaptation_alpha)
 
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
@@ -554,9 +564,12 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         If set False, return None as the second tensor in outputs.
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each linear layer.
-    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
@@ -598,6 +611,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     return_layernorm_output: bool = True
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -728,7 +742,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                                             axes=None)
             lora_b_kernel = lora_b_kernel.astype(self.dtype)
 
-            z += _apply_low_rank_adaptation(y, axis, features, lora_a_kernel, lora_b_kernel)
+            z += _apply_low_rank_adaptation(y, axis, features, lora_a_kernel, lora_b_kernel,
+                                            self.low_rank_adaptation_alpha)
 
         bias = None
         if self.use_bias:
@@ -827,9 +842,12 @@ class LayerNormMLP(TransformerEngineBase):
         Dimensions that will share the same dropout mask for hidden
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each linear layer.
-    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`.
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
@@ -878,6 +896,7 @@ class LayerNormMLP(TransformerEngineBase):
     intermediate_hidden_dropout_dims: Sequence[int] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -1112,7 +1131,7 @@ class LayerNormMLP(TransformerEngineBase):
                 wi_lora_b_kernel = wi_lora_b_kernel.astype(self.dtype)
 
                 x += _apply_low_rank_adaptation(y, axis, intermediate_dim, wi_lora_a_kernel,
-                                                wi_lora_b_kernel)
+                                                wi_lora_b_kernel, self.low_rank_adaptation_alpha)
 
             bias = None
             if self.use_bias:
@@ -1175,7 +1194,7 @@ class LayerNormMLP(TransformerEngineBase):
                 wo_lora_b_kernel = wo_lora_b_kernel.astype(self.dtype)
 
                 out += _apply_low_rank_adaptation(z, axis, hidden_size_tuple, wo_lora_a_kernel,
-                                                  wo_lora_b_kernel)
+                                                  wo_lora_b_kernel, self.low_rank_adaptation_alpha)
 
             bias = None
             if self.use_bias:

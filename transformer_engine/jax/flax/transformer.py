@@ -725,9 +725,12 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each linear layer.
-    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
@@ -784,6 +787,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_group_method: str = 'consecutive'
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
@@ -941,6 +945,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     bias_axes=(W_JOINED_AXES, W_TP_AXES),
                     enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                    low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
                     name='qkv',
@@ -965,6 +970,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     bias_axes=(W_TP_AXES,),
                     enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                    low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     dtype=self.dtype,
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
@@ -985,6 +991,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                        bias_axes=(W_JOINED_AXES, W_TP_AXES),
                                        enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                                        low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                                       low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, 'combined_kv_proj')
@@ -1001,6 +1008,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 bias_axes=(W_TP_AXES,),
                 enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype)
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=self.input_layernorm,
@@ -1019,6 +1027,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 bias_axes=(W_TP_AXES,),
                 enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
@@ -1161,6 +1170,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                            bias_axes=(W_NO_SHARD_AXES,),
                            enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                           low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                            dtype=self.dtype,
                            name='out')(x)
         out = checkpoint_name(out, 'out_proj')
@@ -1400,9 +1410,12 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each linear layer.
-    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
 
@@ -1460,6 +1473,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     rotary_pos_emb_group_method: str = 'consecutive'
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -1607,6 +1621,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
             enable_low_rank_adaptation=self.enable_low_rank_adaptation,
             low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             fuse_qkv_params=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
@@ -1676,6 +1691,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                 enable_low_rank_adaptation=self.enable_low_rank_adaptation,
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,
@@ -1729,6 +1745,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             bias_axes_2=(W_NO_SHARD_AXES,),
             enable_low_rank_adaptation=self.enable_low_rank_adaptation,
             low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             layernorm_input_axes=(*generate_batch_seqlen_logical_axes(), HIDDEN_AXES),
             dot_1_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES),
             dot_2_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_TP_AXES),
