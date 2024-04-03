@@ -45,6 +45,7 @@ _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _amax_reduce_handle_bwd = None
+layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
