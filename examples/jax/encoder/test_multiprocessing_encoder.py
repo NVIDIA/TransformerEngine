@@ -315,8 +315,7 @@ def train_and_evaluate(args):
 
     jax.distributed.initialize(coordinator_address=args.coordinator_address,
                                num_processes=args.num_process,
-                               process_id=args.process_id,
-                               local_device_ids=args.process_id)
+                               process_id=args.process_id)
     assert jax.local_device_count() == 1, "1 GPU per process"
 
     num_gpu_tp = 2
