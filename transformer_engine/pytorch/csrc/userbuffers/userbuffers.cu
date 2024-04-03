@@ -3671,6 +3671,20 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
   }
 }
 
+// consumer_batch
+static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i, int num_chunks) {
+  // Wait for producer to change the val to 0, which signal producer ready
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    int old_val;
+    for (int i = first_chunk_i; i < num_chunks; i++) {
+      while (0 != (old_val = atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
+      }
+      ((unsigned int *)atomic_ptr)[i] = 1;
+      asm volatile("fence.sc.gpu;\n");
+    }
+  }
+}
+
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
@@ -3681,6 +3695,12 @@ void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
   consumer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
+}
+
+void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream) {
+  dim3 block(1);
+  dim3 grid(1);
+  consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
 }
 
 template <typename fp8type>

@@ -45,6 +45,7 @@ _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _amax_reduce_handle_bwd = None
+layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -138,6 +139,12 @@ def initialize_ub(
     }
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
 
+    # AG-RS overlap pairs of layers forming a tensor-parallel block
+    ag_rs_pairs = {"qkv_fprop":"proj_fprop", "fc1_fprop":"fc2_fprop"}
+    rs_ag_pairs = {v : k for k, v in ag_rs_pairs.items()}
+    global layers_atomic_ring_exchange
+    layers_atomic_ring_exchange = []
+
     def get_method(name):
         for method, names in methods.items():
             if name in names:
@@ -160,20 +167,35 @@ def initialize_ub(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if is_reduce_scatter and method == "ring_exchange":
-                raise ValueError(
-                    "Atomic GEMM is not supported for ReduceScatter with `ring_exchange` method."
-                )
             if method == 'bulk':
                 warnings.warn(
-                    "Atoimic GEMM not is supported for a bulk overlap."
+                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
                 atomic_gemm = 0
         if not is_reduce_scatter and method == 'pipeline':
             raise ValueError(
-                "`pipeline` overlap method is not supported for AllGather."
+                f"At {name}, `pipeline` overlap method is not supported for AllGather."
             )
+        # Check if both AG and RS overlaps use `atomic GEMM`` + `p2p ring-exchange`.
+        # Using atomic GEMM + p2p ring-exchange in only one of the pair breaks functionality.
+        global layers_atomic_ring_exchange
+        if atomic_gemm and method == "ring_exchange" and name in ag_rs_pairs:
+            layers_atomic_ring_exchange += [name, ag_rs_pairs[name]]
+        if name in rs_ag_pairs:
+            assert_message = (
+                f"At {name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM chunk "
+                "outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
+                "GEMM-RS overlaps forming a TP block (e.g., qkv_fprop and proj_fprop) uses "
+                "`atomic gemm` and `ring_exhcnage`, its pair must use the same overlap config "
+                "for functionality."
+            )
+            if name in layers_atomic_ring_exchange:
+                assert atomic_gemm and method == "ring_exchange", assert_message
+            else:
+                if atomic_gemm and method == "ring_exchange":
+                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+
         sample_buffer = torch.empty(
             shape,
             dtype=torch.uint8 if (use_fp8 and name in fp8_buf) else dtype,
@@ -213,7 +235,7 @@ def initialize_ub(
             method = ub_cfg["method"] if "method" in ub_cfg else get_method(name)
             num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
             cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
-            num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
+            num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 4
             set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
             aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
             atomic_gemm = ub_cfg["atomic_gemm"] if "atomic_gemm" in ub_cfg else 0
