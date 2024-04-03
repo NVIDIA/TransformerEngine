@@ -498,9 +498,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight,
                 mu,
                 rsigma,
-                ln_out,
+                ln_out if fc1_weight.requires_grad else None,
                 fc1_out,
-                gelu_out,
+                gelu_out if fc2_weight.requires_grad else None,
                 fc1_weight,
                 fc1_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc1_weight_t_fp8,
@@ -600,7 +600,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
+                if tp_world_size == 1 or not fc1_weight.requires_grad:
                     ctx.ub_bulk_dgrad = False
             if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
