@@ -11,7 +11,7 @@ Transformer Engine
 `Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `FP8 Convergence <#fp8-convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
 
 Latest News
------------
+===========
 
 * [03/2024] `Turbocharged Training: Optimizing the Databricks Mosaic AI stack with FP8 <https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8>`_
 * [03/2024] `FP8 Training Support in SageMaker Model Parallelism Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-release-notes.html>`_
@@ -56,7 +56,7 @@ Modules provided by TE internally maintain scaling factors and other values need
 simplifying mixed precision training for users.
 
 Highlights
-----------
+==========
 
 * Easy-to-use modules for building Transformer layers with FP8 support
 * Optimizations (e.g. fused kernels) for Transformer models
@@ -64,7 +64,7 @@ Highlights
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
---------
+========
 
 PyTorch
 ^^^^^^^
