@@ -19,6 +19,7 @@ endif()
 message(STATUS "Found GDRCopy: ${GDRCOPY_LIBRARY}")
 target_link_libraries(transformer_engine_userbuffers PUBLIC
                       CUDA::cudart
+                      CUDA::cuda_driver
                       MPI::MPI_CXX
                       ${GDRCOPY_LIBRARY})
 target_include_directories(transformer_engine_userbuffers PRIVATE
