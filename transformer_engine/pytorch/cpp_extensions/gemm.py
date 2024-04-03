@@ -139,7 +139,10 @@ def fp8_gemm(
                 extra_output_tensor is not None
             ), 'ATOMIC_GEMM_RS_P2P requires extra output tensor'
             args = tuple(args + (extra_output_tensor,))
-    _ = fn(*args)
+    if ub_algo is not None and ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
+        out = fn(*args)
+    else:
+        _ = fn(*args)
 
     return out, gelu_input
 
