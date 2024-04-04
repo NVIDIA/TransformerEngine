@@ -518,7 +518,7 @@ def checkpoint(
     """
     only_tensor_args = True
     for arg in args:
-        if not isinstance(arg, torch.Tensor):
+        if not isinstance(arg, None | torch.Tensor):
             only_tensor_args = False
             break
 
