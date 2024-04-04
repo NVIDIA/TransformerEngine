@@ -231,13 +231,13 @@ def initialize_ub(
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
             ub_cfg = ub_cfgs[name]
-            method = ub_cfg["method"] if "method" in ub_cfg else get_method(name)
-            num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
-            cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
-            num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 4
-            set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
-            aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
-            atomic_gemm = ub_cfg["atomic_gemm"] if "atomic_gemm" in ub_cfg else 0
+            method = ub_cfg.get("method", get_method(name))
+            num_sm = ub_cfg.get("num_sm", 16)
+            cga_size = ub_cfg.get("cga_size", 2)
+            num_splits = ub_cfg.get("num_splits", 4)
+            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
+            aggregate = ub_cfg.get("aggregate", 0)
+            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = 1 if (name in layers_all_gather_overlap) or \
