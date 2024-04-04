@@ -7,6 +7,7 @@
 #include "ipcsocket.cc"
 #include "ipcsocket.h"
 #include "userbuffers.h"
+#include "gdrapi.h"
 #include <assert.h>
 #include <chrono>
 #include <cuda_runtime.h>
@@ -376,10 +377,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
-#define GPU_PAGE_SHIFT 16
-#define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
-#define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
-#define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
   CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
   unsigned int flag = 1;
   CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
