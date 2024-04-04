@@ -48,7 +48,6 @@
 #define ATOMIC_PRODUCER(chunk)                                                                     \
   if (counters) {                                                                                  \
     ((unsigned int *)counters)[chunk] = 0;                                                         \
-    asm volatile("fence.sc.gpu;\n");                                                               \
   }
 
 // Return true if producer > consumer, otherwise false while preventing integer overflow
