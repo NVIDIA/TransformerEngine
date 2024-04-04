@@ -25,6 +25,7 @@ from transformers.modeling_utils import _add_variant, load_state_dict, _load_sta
 from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
 
+
 @contextmanager
 def replace_decoder(te_decoder_cls):
     """
@@ -48,7 +49,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
         args: positional args (for compatibility with `GemmaDecoderLayer`)
         kwargs: keyword args (for compatibility with `GemmaDecoderLayer`)
     """
-    def __init__(self, config, *args, **kwargs):
+    def __init__(self, config, layer_idx, *args, **kwargs):
         super().__init__(
             hidden_size=config.hidden_size,
             ffn_hidden_size=config.intermediate_size,
@@ -62,7 +63,8 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             activation="geglu",
             attn_input_format="bshd",
             num_gqa_groups=config.num_key_value_heads,
-            attention_hidden_size=4096
+            attention_hidden_size=4096,
+            layer_number=(layer_idx+1)
         )
         te_rope = RotaryPositionEmbedding(256)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -71,13 +73,15 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
                 hidden_states,
                 *args,
                 attention_mask,
+                inference_params,
+                self_attn_mask_type='causal',
                 **kwargs):
         """
         Custom forward to make sure we only pass relevant arguments to the
         forward pass of the `TransformerLayer`. Also, make sure the output
         format matches the output of the HF's `GemmaDecoderLayer`.
         """
-        return (super().forward(hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb),)
+        return (super().forward(hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb, inference_params=inference_params, self_attn_mask_type=self_attn_mask_type),)
 
 
 class TEGemmaForCausalLM:
@@ -92,7 +96,11 @@ class TEGemmaForCausalLM:
 
     def __new__(cls, config: GemmaConfig):
         with replace_decoder(te_decoder_cls=TEGemmaDecoderLayer):
+            # trzeba wstawis layer number do tego czegos w jakis sposob
             gemma_for_causal_lm = GemmaForCausalLM(config)
+
+        gemma_for_causal_lm.generate = TEGemmaForCausalLM.generate.__get__(gemma_for_causal_lm, GemmaForCausalLM)
+
         return gemma_for_causal_lm
 
     @classmethod
@@ -101,6 +109,7 @@ class TEGemmaForCausalLM:
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
+        
         vanilla_model = cls(config)
         is_local = os.path.isdir(pretrained_model_name_or_path)
         subfolder = ""
@@ -134,6 +143,66 @@ class TEGemmaForCausalLM:
             gc.collect()
 
         return vanilla_model
+    
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        max_new_tokens = 0,
+        **kwargs,
+    ):
+        num_heads = self.model.config.num_attention_heads
+        batch_size, seq_len = input_ids.shape
+        max_seq_len = seq_len + max_new_tokens
+        generation_config, _ = self._prepare_generation_config(generation_config, **kwargs)
+        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+
+        # inference_params object is a cache, where keys and values of previous tokens are stored
+        inference_params = te.pytorch.InferenceParams(
+            max_batch_size=batch_size, 
+            max_sequence_length=seq_len+max_new_tokens+1) 
+
+        # mask has shape [batch_size, num_heads, 1, max_seq_len] and contains False 
+        # when coressponding token is padding and True otherwise.
+        pad_attention_mask = input_ids.ne(generation_config.pad_token_id)
+        mask = torch.ones((batch_size, num_heads, 1, max_seq_len), dtype=torch.bool).cuda()
+        mask[..., :seq_len] = mask[..., :seq_len] & pad_attention_mask.unsqueeze(1).unsqueeze(2).expand(-1, num_heads, -1, -1)
+
+        hidden_states = self.model.embed_tokens(input_ids)
+        output_tokens = []
+        for i in range(max_new_tokens):
+            normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
+            hidden_states = hidden_states * normalizer
+            for decoder_layer in self.model.layers:
+                hidden_states = decoder_layer(
+                            hidden_states,
+                            # In the case of arbiutrary mask, the meaning of True and False is switched, so negation is needed.
+                            attention_mask=pad_attention_mask if i == 0 else ~mask[..., :seq_len],
+                            self_attn_mask_type="padding_causal" if i == 0 else "arbitrary",
+                            inference_params=inference_params
+                        )[0]
+
+            # inference_params.sequence_len_offset should contain position of the current token in the sequence.
+            inference_params.sequence_len_offset += hidden_states.shape[1]
+
+            hidden_states = self.model.norm(hidden_states)
+            logits = self.lm_head(hidden_states)
+            logits = logits.float()
+            logits = logits[:, -1, :]
+            next_tokens = torch.argmax(logits, dim=-1)
+
+            # Sequences, which are finished should contain padding - taken from huggingface transformers.
+            next_tokens = next_tokens * unfinished_sequences + generation_config.pad_token_id * (1 - unfinished_sequences)
+            output_tokens.append(next_tokens)
+
+            unfinished_sequences = unfinished_sequences & ~(next_tokens == generation_config.eos_token_id)
+
+            hidden_states = self.model.embed_tokens(next_tokens).unsqueeze(1)
+            seq_len += 1
+
+        result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
+        return result
 
 
 def replace_params(hf_state_dict, te_state_dict):
