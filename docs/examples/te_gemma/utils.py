@@ -83,7 +83,6 @@ def init_baseline_model(hyperparams):
         torch_dtype=torch.bfloat16,
     )
     # Needed for the cases when using TEGemmaForCausalLM. So adding here for 1:1 comparison
-    model.config.use_cache=False
 
     return model
 
@@ -98,7 +97,6 @@ def init_te_gemma_model(hyperparams):
             torch_dtype=torch.bfloat16,
     )
     # Needed for the cases when using TEGemmaForCausalLM
-    model.config.use_cache=False
 
     return model
 
@@ -117,7 +115,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
+    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=False)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
