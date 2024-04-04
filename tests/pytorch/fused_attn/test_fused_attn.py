@@ -919,11 +919,11 @@ model_configs_fp8_vs_f16 = {
     #"fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     "fp8_9": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_11": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_12": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_11": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
-qkv_layout_fp8_vs_f16 = ['sbh3d']
+qkv_layout_fp8_vs_f16 = ['sbh3d', 'bshd_bshd_bshd']
 
 def _rmse(a, b):
     return math.sqrt(torch.pow((a-b), 2).sum()/a.numel())
@@ -993,6 +993,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
              DotProductAttention(
                     config.num_heads,
                     config.head_dim,
+                    num_gqa_groups=config.num_gqa_groups,
                     attention_dropout=config.dropout_p,
                     sequence_parallel=False,
                     tp_size=1,

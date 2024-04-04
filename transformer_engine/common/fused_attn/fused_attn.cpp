@@ -89,7 +89,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
       && (sm_arch_ >= 90)
       && (max_seqlen_q == max_seqlen_kv)
-      && (num_attn_heads == num_gqa_groups)
       && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
       && (
           ((cudnn_runtime_version >= 8900)
@@ -98,6 +97,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               && (head_dim == 64)
               && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK))
           || ((cudnn_runtime_version >= 9100)
+              && (max_seqlen_q % 64 == 0)
+              && (max_seqlen_kv % 64 == 0)
+              && ((head_dim <= 128) && (head_dim % 8 == 0))
               && ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
                   || (qkv_format == NVTE_QKV_Format::NVTE_SBHD))
               //&& (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
