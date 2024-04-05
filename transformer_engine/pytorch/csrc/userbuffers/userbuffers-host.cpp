@@ -282,7 +282,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
                            (NVTE_MAX_SMS + 100) * sizeof(int)));
   for (int i = 0; i < 100 + NVTE_MAX_SMS; i++)
     (*comm)->hostflags[i] = 0;
-#if (defined(__arm__) && __ARM_ARCH >= 7) || defined(__arm64__) || defined(__aarch64__)
+#if (defined(__arm__) && __ARM_ARCH >= 7) || defined(__aarch64__)
   __asm__ __volatile__("dmb sy" : : : "memory");
 #else
   _mm_mfence();
