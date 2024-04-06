@@ -1848,7 +1848,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
 }
 
 // fused attention FWD FP8 with FE 1.0+
-void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
             bool is_training, float scaling_factor,
             float dropout_probability, NVTE_QKV_Layout layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -1873,7 +1873,6 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
     bool is_padding = false;
     //is_training = true; //false;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
-    auto hg = h;
     auto bias_b = b;
     auto bias_h = h;
 
@@ -2141,7 +2140,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 }
 
 // fused attention BWD FP8 with FE 1.0+
-void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
             float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             void* devPtrQ, void* devPtrK, void* devPtrV,
@@ -2170,7 +2169,6 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
     bool is_padding = false;
     bool is_training = true;
     bool is_dropout = (is_training && dropout_probability != 0.0f);
-    auto hg = h;
     auto bias_b = b;
     auto bias_h = h;
 
@@ -2547,7 +2545,7 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 #if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with packed QKV
 void fused_attn_fp8_fwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -2566,9 +2564,9 @@ void fused_attn_fp8_fwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = typeToSize(QKV_type) * h * d;
+      stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = typeToSize(QKV_type) * d;
+      stride = typeToSize(QKV_type) * head_dim;
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -2590,10 +2588,10 @@ void fused_attn_fp8_fwd_qkvpacked(
       Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       output_M->data.dptr = nullptr;
-      output_M->data.shape = {b, h, max_seqlen, 1};
+      output_M->data.shape = {batch, num_attn_heads, max_seqlen, 1};
       output_M->data.dtype = DType::kFloat32;
       output_ZInv->data.dptr = nullptr;
-      output_ZInv->data.shape = {b, h, max_seqlen, 1};
+      output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen, 1};
       output_ZInv->data.dtype = DType::kFloat32;
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
@@ -2626,7 +2624,7 @@ void fused_attn_fp8_fwd_qkvpacked(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2640,7 +2638,7 @@ void fused_attn_fp8_fwd_qkvpacked(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2668,7 +2666,7 @@ void fused_attn_fp8_fwd_qkvpacked(
 }
 // fused attention BWD FP8 with packed QKV
 void fused_attn_fp8_bwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
@@ -2691,9 +2689,9 @@ void fused_attn_fp8_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = typeToSize(QKV_type) * h * d;
+      stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = typeToSize(QKV_type) * d;
+      stride = typeToSize(QKV_type) * head_dim;
   }
   void *devPtrQ = devPtrQKV;
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -2739,7 +2737,7 @@ void fused_attn_fp8_bwd_qkvpacked(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2759,7 +2757,7 @@ void fused_attn_fp8_bwd_qkvpacked(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2792,7 +2790,8 @@ void fused_attn_fp8_bwd_qkvpacked(
 }
 // fused attention FWD FP8 with packed KV
 void fused_attn_fp8_fwd_kvpacked(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -2814,9 +2813,9 @@ void fused_attn_fp8_fwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = typeToSize(QKV_type) * h * d;
+      stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = typeToSize(QKV_type) * d;
+      stride = typeToSize(QKV_type) * head_dim;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -2837,10 +2836,10 @@ void fused_attn_fp8_fwd_kvpacked(
       Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       output_M->data.dptr = nullptr;
-      output_M->data.shape = {b, h, max_seqlen_q, 1};
+      output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       output_M->data.dtype = DType::kFloat32;
       output_ZInv->data.dptr = nullptr;
-      output_ZInv->data.shape = {b, h, max_seqlen_q, 1};
+      output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       output_ZInv->data.dtype = DType::kFloat32;
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
@@ -2875,7 +2874,7 @@ void fused_attn_fp8_fwd_kvpacked(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2889,7 +2888,7 @@ void fused_attn_fp8_fwd_kvpacked(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2917,7 +2916,8 @@ void fused_attn_fp8_fwd_kvpacked(
 }
 // fused attention BWD FP8 with packed KV
 void fused_attn_fp8_bwd_kvpacked(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q,
@@ -2944,9 +2944,9 @@ void fused_attn_fp8_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = typeToSize(QKV_type) * h * d;
+      stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = typeToSize(QKV_type) * d;
+      stride = typeToSize(QKV_type) * head_dim;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -2993,7 +2993,7 @@ void fused_attn_fp8_bwd_kvpacked(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -3013,7 +3013,7 @@ void fused_attn_fp8_bwd_kvpacked(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -3046,7 +3046,8 @@ void fused_attn_fp8_bwd_kvpacked(
 }
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -3083,10 +3084,10 @@ void fused_attn_fp8_fwd(
       Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       output_M->data.dptr = nullptr;
-      output_M->data.shape = {b, h, max_seqlen_q, 1};
+      output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       output_M->data.dtype = DType::kFloat32;
       output_ZInv->data.dptr = nullptr;
-      output_ZInv->data.shape = {b, h, max_seqlen_q, 1};
+      output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       output_ZInv->data.dtype = DType::kFloat32;
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
@@ -3122,7 +3123,7 @@ void fused_attn_fp8_fwd(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -3136,7 +3137,7 @@ void fused_attn_fp8_fwd(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -3164,7 +3165,8 @@ void fused_attn_fp8_fwd(
 }
 // fused attention BWD FP8 with separate Q, K, V
 void fused_attn_fp8_bwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q,
@@ -3233,7 +3235,7 @@ void fused_attn_fp8_bwd(
   int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
   if (fe_ver == 1) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -3253,7 +3255,7 @@ void fused_attn_fp8_bwd(
                   workspace->data.dptr, &workspace_size, stream, handle);
   } else {
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,

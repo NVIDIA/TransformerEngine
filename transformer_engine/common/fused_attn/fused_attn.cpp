@@ -489,7 +489,7 @@ void nvte_fused_attn_fwd_kvpacked(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_kvpacked(
-            b, h_q, max_seqlen_q, max_seqlen_kv, d,
+            b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
             is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_Q, input_KV, input_output_S, output_O,
             Aux_CTX_Tensors,
@@ -607,7 +607,7 @@ void nvte_fused_attn_bwd_kvpacked(
     const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_kvpacked(
-                    b, h_q, max_seqlen_q, max_seqlen_kv, d,
+                    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
                     attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_Q, input_KV, input_O, input_dO,
                     input_M, input_ZInv,
@@ -700,7 +700,7 @@ void nvte_fused_attn_fwd(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(
-            b, h_q, max_seqlen_q, max_seqlen_kv, d,
+            b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
             is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_Q, input_K, input_V, input_output_S, output_O,
             Aux_CTX_Tensors,
@@ -813,7 +813,7 @@ void nvte_fused_attn_bwd(
     const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd(
-                    b, h_q, max_seqlen_q, max_seqlen_kv, d,
+                    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
                     attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_Q, input_K, input_V, input_O, input_dO,
                     input_M, input_ZInv,

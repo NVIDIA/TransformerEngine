@@ -14,7 +14,7 @@ namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with packed QKV
 void fused_attn_fp8_fwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -30,7 +30,7 @@ void fused_attn_fp8_fwd_qkvpacked(
 
 // fused attention BWD FP8 with packed QKV
 void fused_attn_fp8_bwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
@@ -49,7 +49,8 @@ void fused_attn_fp8_bwd_qkvpacked(
 
 // fused attention FWD FP8 with packed KV
 void fused_attn_fp8_fwd_kvpacked(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -67,7 +68,8 @@ void fused_attn_fp8_fwd_kvpacked(
 
 // fused attention BWD FP8 with packed KV
 void fused_attn_fp8_bwd_kvpacked(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q,
@@ -89,7 +91,8 @@ void fused_attn_fp8_bwd_kvpacked(
 
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -106,7 +109,8 @@ void fused_attn_fp8_fwd(
 
 // fused attention BWD FP8 with separate Q, K, V
 void fused_attn_fp8_bwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
