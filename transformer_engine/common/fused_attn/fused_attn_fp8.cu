@@ -2365,7 +2365,7 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             //}
 
             auto [dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP] = mha_graph->sdpa_fp8_backward(
-                q, k, v, o, stats, dO,
+                q, k, v, o, dO, stats,
                 descale_q, descale_k, descale_v,
                 descale_o, descale_dO, descale_s, descale_dP,
                 scale_s, scale_dQ, scale_dK, scale_dV, scale_dP,
