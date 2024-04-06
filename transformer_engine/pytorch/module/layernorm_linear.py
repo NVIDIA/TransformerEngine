@@ -86,6 +86,7 @@ class _LayerNormLinear(torch.autograd.Function):
         primary_weights_in_fp8: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
+        ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
@@ -316,6 +317,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
+            ctx.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
             ctx.ub_name = ub_name
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
@@ -367,6 +369,12 @@ class _LayerNormLinear(torch.autograd.Function):
                     update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
                 )
 
+            if ctx.ub_overlap_rs_dgrad:
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_overlap_rs_dgrad = False
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1 or not weight.requires_grad:
@@ -416,8 +424,35 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.ub_bulk_wgrad: # allocate dgrad output
                 ub_obj_dgrad = get_ub(ctx.ub_name+"_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+            elif ctx.ub_overlap_rs_dgrad:
+                ub_obj_dgrad = get_ub(ctx.ub_name+"_dgrad")
+                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+
+            if ctx.ub_bulk_dgrad:
+                ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
+                ub_obj = ub_obj_lnout
+            elif ctx.ub_overlap_rs_dgrad:
+                dim_size = list(grad_output.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = weight.size(1)
+                rs_out = torch.empty(
+                        dim_size, dtype=ctx.activation_dtype, device=grad_output.device)
+                if ub_obj_dgrad.is_p2p_overlap():
+                    if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
+                        ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                    else:
+                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                else:
+                    if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
+                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                    else:
+                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                ub_obj = ub_obj_dgrad
+            else:
+                ub_algo = None
+                ub_obj = None
 
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
@@ -428,7 +463,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 out_index, meta_tensor, out_te_type, out_type = (
                     None, None, None, ctx.activation_dtype)
-                if ctx.ub_bulk_wgrad and ub_obj_dgrad.is_fp8_ubuf():
+                if (ctx.ub_bulk_wgrad or ctx.ub_overlap_rs_dgrad) and ub_obj_dgrad.is_fp8_ubuf():
                     out_index = tex.FP8BwdTensors.GRAD_INPUT1
                     meta_tensor = ctx.fp8_meta["scaling_bwd"]
                     out_te_type = fp8_dtype_backward
@@ -449,8 +484,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     get_workspace(),
                     out=dgrad,
                     use_split_accumulator=_2X_ACC_DGRAD,
-                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
-                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None,
+                    ub_algo=ub_algo,
+                    ub=ub_obj,
+                    extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                     out_index=out_index,
                     fp8_meta_tensor = meta_tensor,
                     D_dtype = out_te_type,
@@ -466,8 +502,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     out=dgrad,
                     layout="NN",
                     grad=True,
-                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
-                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
+                    ub_algo=ub_algo,
+                    ub=ub_obj,
+                    extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                 )
             if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
@@ -476,7 +513,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
-                if not ctx.ub_bulk_wgrad:
+                if not ctx.ub_bulk_wgrad and not ctx.ub_overlap_rs_dgrad:
                     if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
                         dgrad = dgrad + grad_outputs[1].view_as(dgrad)
                     dgrad, handle = reduce_scatter_along_first_dim(
@@ -569,7 +606,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            dgrad = dgrad.view(inputmat.shape)
+            if ctx.ub_overlap_rs_dgrad:
+                dgrad = rs_out.view(inputmat.shape)
+            else:
+                dgrad = dgrad.view(inputmat.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
@@ -619,6 +659,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -758,6 +799,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_overlap_ag: bool = False,
+        ub_overlap_rs_dgrad: bool = False,
         ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -778,7 +820,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_overlap_ag = ub_overlap_ag
-        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag]):
+        self.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
+        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag, ub_overlap_rs_dgrad]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
@@ -1110,6 +1153,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.primary_weights_in_fp8,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
+                self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
             )
