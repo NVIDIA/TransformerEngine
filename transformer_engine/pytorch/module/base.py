@@ -137,7 +137,6 @@ def initialize_ub(
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
-    layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop":"proj_fprop", "fc1_fprop":"fc2_fprop"}

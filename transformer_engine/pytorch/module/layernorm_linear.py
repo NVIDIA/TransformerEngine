@@ -437,7 +437,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight.size(1)
-                rs_out = torch.empty(dim_size, dtype=ctx.activation_dtype, device=grad_output.device)
+                rs_out = torch.empty(
+                        dim_size, dtype=ctx.activation_dtype, device=grad_output.device)
                 if ub_obj_dgrad.is_p2p_overlap():
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
                         ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
@@ -469,7 +470,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     out_type = torch.uint8
                     ub_obj_dgrad.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
 
-                # DGRAD: Evaluated unconditionally to feed into Linear backward vasu
+                # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
                     weight_t_fp8._data,
                     fwd_scale_inverses,
