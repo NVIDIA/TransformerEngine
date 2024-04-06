@@ -22,8 +22,8 @@ from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import layernorm_geglu_fp8_mlp, geglu
-from ..mlp import layernorm_gelu_fp8_mlp, gelu
+from ..mlp import fused_layernorm_fp8_mlp, activation_lu
+""" from ..mlp import layernorm_gelu_fp8_mlp, gelu """
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -834,33 +834,48 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        def is_geglu(acts):
-            geglu_act_pool = [('gelu', 'linear'), ('linear', 'gelu')]
+        """ def is_gated(acts): """
+        """     gated_act_pool = [('gelu', 'linear'), ('linear', 'gelu'), """
+        """                     ('silu', 'linear'), ('linear', 'silu')] """
+        """"""
+        """     normalize_acts = [] """
+        """     for act in acts: """
+        """         if not isinstance(act, str): """
+        """             return False """
+        """         normalize_acts.append(act.lower()) """
+        """     return tuple(normalize_acts) in gated_act_pool """
+        """"""
+        """ def is_not_gated(acts): """
+        """     act_pool = [('gelu',), """
+        """                 ('silu',)] """
+        """"""
+        """     normalize_acts = [] """
+        """     for act in acts: """
+        """         if not isinstance(act, str): """
+        """             return False """
+        """         normalize_acts.append(act.lower()) """
+        """     return tuple(normalize_acts) in act_pool """
 
-            normalize_acts = []
-            for act in acts:
-                if not isinstance(act, str):
-                    return False
-                normalize_acts.append(act.lower())
-            return tuple(normalize_acts) in geglu_act_pool
+        gated_act_pool = [('gelu', 'linear'),
+                          ('linear', 'silu')] # Make sure this is sorted in alphabet order
+        act_pool = [('gelu',),
+                    ('silu',)]
+        normalize_acts = []
+        for act in self.activations:
+            if not isinstance(act, str):
+                return False
+            normalize_acts.append(act.lower())
+        normalize_acts = tuple(normalize_acts.sort())
+        is_gated = normalize_acts in gated_act_pool
+        is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
-        def is_gelu(acts):
-            geglu_act_pool = [('gelu',)]
 
-            normalize_acts = []
-            for act in acts:
-                if not isinstance(act, str):
-                    return False
-                normalize_acts.append(act.lower())
-            return tuple(normalize_acts) in geglu_act_pool
-
-        use_fused_ln_geglu_mlp = fuse_layernorm \
-            and (not self.use_bias) and is_geglu(self.activations) \
+        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented\
                 and (self.intermediate_dropout_rate < 1e-3)
 
-        use_fused_ln_gelu_mlp = fuse_layernorm \
-            and self.use_bias and is_gelu(self.activations) \
-                and (self.intermediate_dropout_rate < 1e-3)
+        """ use_fused_ln_gelu_mlp = fuse_layernorm \ """
+        """     and self.use_bias and is_gelu(self.activations) \ """
+        """         and (self.intermediate_dropout_rate < 1e-3) """
 
         # LayerNorm
         if self.enable_layernorm:
@@ -933,38 +948,41 @@ class LayerNormMLP(TransformerEngineBase):
         ffn1_ckpt_name = 'ffn1'
         ffn2_ckpt_name = 'ffn2'
 
-        if use_fused_ln_geglu_mlp:
+        """ if use_fused_ln_geglu_mlp: """
+        """     assert self.axis == -1    # Only support axis = =-1 at this moment """
+        """"""
+        """     out = layernorm_geglu_fp8_mlp(y, """
+        """                                   scale, """
+        """                                   ln_bias, [kernel_1, kernel_2], """
+        """                                   fp8_meta_package, """
+        """                                   self.layernorm_type, """
+        """                                   zero_centered_gamma=self.zero_centered_gamma, """
+        """                                   epsilon=self.epsilon, """
+        """                                   layernorm_input_axes=self.layernorm_input_axes, """
+        """                                   dot_1_input_axes=self.dot_1_input_axes, """
+        """                                   dot_2_input_axes=self.dot_2_input_axes, """
+        """                                   ffn1_ckpt_name=ffn1_ckpt_name, """
+        """                                   ffn2_ckpt_name=ffn2_ckpt_name) """
+        if use_fused_layernorm_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            out = layernorm_geglu_fp8_mlp(y,
-                                          scale,
-                                          ln_bias, [kernel_1, kernel_2],
-                                          fp8_meta_package,
-                                          self.layernorm_type,
-                                          zero_centered_gamma=self.zero_centered_gamma,
-                                          epsilon=self.epsilon,
-                                          layernorm_input_axes=self.layernorm_input_axes,
-                                          dot_1_input_axes=self.dot_1_input_axes,
-                                          dot_2_input_axes=self.dot_2_input_axes,
-                                          ffn1_ckpt_name=ffn1_ckpt_name,
-                                          ffn2_ckpt_name=ffn2_ckpt_name)
-        elif use_fused_ln_gelu_mlp:
-            assert self.axis == -1    # Only support axis = =-1 at this moment
-
+            bias_1_shape = intermediate_dim if self.use_bias else 0 
             bias_1 = nn_partitioning.param_with_axes('wi_bias',
                                                      self.bias_init,
-                                                     intermediate_dim,
+                                                     bias_1_shape,
                                                      jnp.float32,
                                                      axes=self.bias_axes_1)
             bias_1 = bias_1.astype(self.dtype)
 
+            bias_2_shape = (hidden_size,) if self.use_bias else (0,) #TODO or ((0,))
             bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                     self.bias_init, (hidden_size,),
+                                                     self.bias_init, 
+                                                     bias_2_shape,
                                                      jnp.float32,
                                                      axes=self.bias_axes_2)
             bias_2 = bias_2.astype(self.dtype)
 
-            out = layernorm_gelu_fp8_mlp(y,
+            out = fused_layernorm_fp8_mlp(y,
                                          scale,
                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
                                          fp8_meta_package,
@@ -975,7 +993,9 @@ class LayerNormMLP(TransformerEngineBase):
                                          dot_1_input_axes=self.dot_1_input_axes,
                                          dot_2_input_axes=self.dot_2_input_axes,
                                          ffn1_ckpt_name=ffn1_ckpt_name,
-                                         ffn2_ckpt_name=ffn2_ckpt_name)
+                                         ffn2_ckpt_name=ffn2_ckpt_name,
+                                         activation_type = normalize_acts,
+                                         use_bias = self.use_bias)
         else:    # not use_fused_ln_geglu_mlp
 
             # DenseGeneral 1
@@ -1013,17 +1033,16 @@ class LayerNormMLP(TransformerEngineBase):
             x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
-            if is_geglu(self.activations):
-                z = geglu(x)
-            elif is_gelu(self.activations):
-                z = gelu(x)
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+            if is_act_implemented:
+                z = activation_lu(x, normalize_acts)
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
+                """ z = jnp.reshape(z, (*z.shape[:-2], -1)) """
+            if not is_gated:
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
