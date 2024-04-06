@@ -187,27 +187,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
    SHARP and NSO/MNNVL)
 */
 
-#if 0
-void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
-                                communicator *comm, cudaStream_t stream = 0);
-// for DP distributed optimizer, only nonSHARP multinode is implemented & calls must come in pairs
-// ordered
-void allgather_userbuff_inplace(const int handler, const int offset, const int elements,
-                                communicator *comm, cudaStream_t stream = 0);
-void reducescatter_userbuff_inplace(const int handler, const int offset, const int elements,
-                                    communicator *comm, cudaStream_t stream = 0);
-
-void allreduce2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                 communicator *comm, cudaStream_t stream = 0);
-#endif
 // for TP-parallelism, only single node is implemented
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream = 0);
-#if 0
-void allgather2_userbuff_inplace_sliced(const int handler, const int offset, const int elements,
-                                        communicator *comm, const int slice_id, const int nslices,
-                                        cudaStream_t stream = 0);
-#endif
 /*
 each Rank input is
 allgather2_userbuff_inplace: offset+myrank*elements
@@ -237,14 +219,6 @@ void reducescatter2_userbuff_stridedoutput_fp8(void* output, float* scale, const
 template<typename fp8type>
 void reducescatter2_userbuff_fp8(void* output, float* scale, const int handler, const int offset,
                                  const int elements, communicator* comm, cudaStream_t stream = 0);
-#if 0
-template<typename fp8type>
-void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,
-                                                const int offset, const int rowelements,
-                                                const int colelements, const int strideelements,
-                                                const int numchunks, void *counters,
-                                                communicator* comm, cudaStream_t stream = 0);
-#endif
 template<typename fp8type>
 void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,
                                                 const int offset, const int rowelements,

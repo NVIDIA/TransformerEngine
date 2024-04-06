@@ -776,7 +776,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
 }  // fp16 inplace allgather kernel (Hopper) MC
 
 #else
-#if 1
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
@@ -789,7 +788,6 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
     void **commbuff, const int handleridx, void *outbuf, float4 *mc_ptr,
     const unsigned long long ub_timeout) {}
-#endif
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -799,7 +797,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            void **commbuff, const int handleridx, uint4 *mc_ptr,
                                            const unsigned long long ub_timeout) {}
 
-#if 1
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc_rs(const int op, const int flagoffset, const int firstrank,
@@ -807,7 +804,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, float4 *mc_ptr,
                                            const unsigned long long ub_timeout) {}
-#endif
 #endif
 
 template <int RANKS, typename fp8type>
@@ -1062,103 +1058,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
   if (threadIdx.x == 0 && lastSM)
     *reduceidptr = reduce_id;
 }  // fp16 reduce-scatter kernel (out of place) fp16
-
-#if 0
-template<int RANKS, typename fp8type>
-__global__ void
-__launch_bounds__(MAX_THREADS)
-userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic_fp8(
-  const int op, const int flagoffset, const int firstrank, const int myrank, const int gpustep,
-  const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
-  const int numchunks, void **commbuff, const int handleridx, void* outbuf, void *counters,
-  float* scale) {
-  if (counters) {
-      if ( threadIdx.x == 0 ) {
-          // spin-lock on counter from producer
-          while (0 != (atomicCAS(((unsigned int*)counters), 0, 0) )) {}
-
-          // make sure all threadblocks have read/waited on counters.
-          atomicInc(((unsigned int *)counters)+numchunks, gridDim.x-1);
-          while (0 != (atomicCAS(((unsigned int*)counters)+numchunks, 0, 0) )) {}
-
-          // reset counter for next producer.
-          ((unsigned int*)counters)[0] = 1;
-          asm volatile ("fence.sc.gpu;\n");
-      }
-  }
-  __syncthreads();
-
-  __shared__ int4* userptr[RANKS];
-  volatile int *flagptr;
-  int physgpu, targetgpu, *myptr;
-  int *reduceidptr, reduce_id;
-  int lastSM = 0;
-  half hscale = (half) *scale;
-
-  if (threadIdx.x < RANKS) {
-    physgpu = myrank*gpustep+firstrank;
-    targetgpu = threadIdx.x*gpustep+firstrank;
-    myptr = (reinterpret_cast<int*>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr-NVTE_MAX_OPS;  // +op;
-    reduce_id  =(*reduceidptr)+1;
-    flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset;
-    if (blockIdx.x == 0) flagptr[physgpu] = reduce_id;
-    volatile int* flag = (volatile int*)&(myptr[targetgpu]);
-    userptr[threadIdx.x] = reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
-    clock_t s = clock64();
-    while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64()-s > TIMEOUT) {
-        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d",
-                myrank, blockIdx.x, threadIdx.x, reduce_id, *flag);
-        break;
-      }
-    }
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    const int adder = blockIdx.x == 0 ? NVTE_MAX_SMS-gridDim.x+1 : 1;
-    int old_val = atomicAdd(myptr+(NVTE_MAX_NVLINK*2), adder);
-    if (old_val+adder == NVTE_MAX_SMS*reduce_id) lastSM = 1;
-  }
-
-
-  int warp = blockIdx.x+(threadIdx.x>>5);
-  int dest[RANKS];
-#pragma unroll
-  for (int i = 0; i < RANKS; i++)
-    dest[i] = (i+myrank+warp)&(RANKS-1);
-
-       for (int line = threadIdx.x+blockDim.x*blockIdx.x;
-            line < totallines; line+=blockDim.x*gridDim.x) {
-        int4 val[RANKS];
-        int index_in = mylineoffset + myrank*(totallines*skiplines/rowlines/2) +
-                       (line/rowlines)*skiplines/2+(line%rowlines);
-
-#pragma unroll
-        for (int i = 0; i < RANKS; i++) {
-           val[i] = userptr[dest[i]][index_in];
-        }
-
-        int4 sum[2] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
-        half *s = reinterpret_cast<half*>(&sum);
-
-#pragma unroll
-        for (int i = 0; i < RANKS; i++) {
-          fp8type *x = reinterpret_cast<fp8type*>(&val[i]);
-#pragma unroll
-          for (int j=0; j < sizeof(int4)/sizeof(fp8type); j++) s[j] += hscale * (half)(x[j]);
-        }
-        int hline = 2*line;
-        int index_out1 = (hline/rowlines)*skiplines+(hline%rowlines);
-        (reinterpret_cast<int4*>(outbuf))[index_out1] = sum[0];
-        hline++;
-        int index_out2 = (hline/rowlines)*skiplines+(hline%rowlines);
-        (reinterpret_cast<int4*>(outbuf))[index_out2] = sum[1];
-      }
-
-  if (threadIdx.x == 0 && lastSM) *reduceidptr = reduce_id;
-}  // fp16 reduce-scatter kernel (out of place) fp16
-#endif
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -1524,798 +1423,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }  // fp16 inplace allgather kernel (Volta,Hopper)
 
-#if 0
-template <int RANKS>
-__global__ void __launch_bounds__(MAX_THREADS)
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op, const int flagoffset,
-                                                const int firstrank, const int myrank,
-                                                const int lineoffset, const int numlines,
-                                                void **commbuff, const int handleridx,
-                                                const int peerblocklines, int *hostflags,
-                                                int *gpuflag, const int numblocks) {
-  const int basecounter = gpuflag[NVTE_GF_STATE + op];
-
-#define REDUCETHREADS (blockDim.x - 32)
-
-  if (threadIdx.x < 32) {
-    int *flagptr;
-    if (threadIdx.x < RANKS) {
-      if (!blockIdx.x) {
-        flagptr = reinterpret_cast<int *>(commbuff[threadIdx.x + firstrank]);
-        flagptr[flagoffset + myrank + firstrank] = basecounter;
-      }
-      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-          commbuff[myrank + firstrank]))[flagoffset + threadIdx.x + firstrank]);
-      while (CHECK_IDS(*flag, basecounter)) {
-      }
-    }
-    __syncthreads();
-
-    int startblock = 0, endblock = numblocks;
-
-    for (int nblock = 0; nblock < endblock; nblock++) {
-      asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-
-      if (threadIdx.x == 0) {
-        __threadfence();
-        if (blockIdx.x)
-          gpuflag[op * NVTE_MAX_SMS * 2 + blockIdx.x] = nblock + basecounter + 1;
-      } else if (blockIdx.x == 0) {
-        int expecting = (basecounter + nblock + 1);
-        if (threadIdx.x < gridDim.x)
-          while (((volatile int *)gpuflag)[op * NVTE_MAX_SMS * 2 + threadIdx.x] < expecting) {
-          }
-      }
-      if (!blockIdx.x) {
-        asm volatile("bar.sync 15, %0;" ::"r"(32));
-        if (!threadIdx.x)
-          hostflags[0] = nblock + basecounter + 1;
-      }
-    }
-
-    int cachedflag = basecounter;
-
-#define ALLGATHERFLAG NVTE_GF_IBSHARPDONE
-
-    if (blockIdx.x == 0 && threadIdx.x < RANKS) {
-      while (cachedflag < basecounter + numblocks) {
-        int newflag = ((volatile int *)gpuflag)[ALLGATHERFLAG];
-        if (newflag == cachedflag)
-          continue;
-        cachedflag = newflag;
-        flagptr[flagoffset + myrank + 32 + firstrank] = cachedflag;
-      }
-    }
-
-    if (blockIdx.x == 0 && threadIdx.x == 0)
-      gpuflag[NVTE_GF_STATE + op] = basecounter + numblocks;
-  } else {
-    const int warp = blockIdx.x + (threadIdx.x >> 5);
-    int4 *userptr[RANKS];
-    int4 *userptrmyrank;
-#pragma unroll
-    for (int i = 0; i < RANKS; i++)
-      userptr[i] = reinterpret_cast<int4 *>(
-          commbuff[((i + myrank + warp) & (RANKS - 1)) + handleridx + firstrank]);
-    userptrmyrank = reinterpret_cast<int4 *>(commbuff[myrank + handleridx + firstrank]);
-    __syncthreads();
-
-    int blocklineoffset = 0;
-
-    while (blocklineoffset < numlines) {
-      const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-      const int blocklines = remainder / RANKS;
-      const int blockstart = lineoffset + blocklineoffset + blocklines * myrank;
-
-      for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < blocklines;
-           line += REDUCETHREADS * gridDim.x) {
-        int4 val[RANKS];
-
-#pragma unroll
-        for (int i = 0; i < RANKS; i++) {
-          val[i] = userptr[i][blockstart + line];
-        }
-
-        int4 sum = val[0];
-        half *s = reinterpret_cast<half *>(&sum);
-
-#pragma unroll
-        for (int i = 1; i < RANKS; i++) {
-          half *x = reinterpret_cast<half *>(&val[i]);
-#pragma unroll
-          for (int j = 0; j < sizeof(int4) / sizeof(half); j++)
-            s[j] += x[j];
-        }
-
-        userptrmyrank[blockstart + line] = sum;
-      }  // single block loop
-
-      asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-
-      blocklineoffset += peerblocklines * RANKS;
-    }  // block loop NVLINK-REDUCESCATTER
-    const int nwarps = (REDUCETHREADS >> 5) / (RANKS - 1);
-    const int myblockDim = nwarps << 5;
-    const int mywarp = ((threadIdx.x - 32) >> 5) / (RANKS - 1);
-    const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
-    const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
-    const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-    volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-        commbuff[myrank + firstrank]))[flagoffset + mydest + 32 + firstrank]);
-
-    int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
-
-    blocklineoffset = 0;
-    int gathercounter = basecounter + 1;
-    while (blocklineoffset < numlines) {
-      const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-      const int blocklines = remainder / RANKS;
-      const int blockstart = lineoffset + blocklineoffset;
-
-#define UNROLL 6
-      int4 *myptr = &userptrmyrank[blockstart + blocklines * mydest];
-      int4 *peerptr = &userptrmydest[blockstart + blocklines * mydest];
-
-      if (threadIdx.x < maxthreadIdx) {
-        const int start_elem = mythreadIdx + myblockDim * blockIdx.x;
-        const int end_elem = max(start_elem, blocklines);
-        const int aligned_elem = ((end_elem - start_elem) / (myblockDim * gridDim.x * UNROLL)) *
-                                 (myblockDim * gridDim.x * UNROLL);
-        const int end_aligned = start_elem + aligned_elem;
-
-        if (mythreadIdx == 0) {
-          while (CHECK_IDS(*flag, gathercounter)) {
-          }
-          gathercounter++;
-        }
-
-        asm volatile("bar.sync %0, %1;" ::"r"(1 + mydest), "r"(myblockDim));
-
-        for (int line = start_elem; line < end_aligned; line += myblockDim * gridDim.x * UNROLL) {
-          int4 val[UNROLL];
-#pragma unroll
-          for (int i = 0; i < UNROLL; i++)
-            val[i] = peerptr[line + i * myblockDim * gridDim.x];
-#pragma unroll
-          for (int i = 0; i < UNROLL; i++)
-            myptr[line + i * myblockDim * gridDim.x] = val[i];
-        }
-        for (int line = end_aligned; line < end_elem; line += myblockDim * gridDim.x)
-          myptr[line] = peerptr[line];
-      }
-      blocklineoffset += peerblocklines * RANKS;
-    }  // block loop for NVLINK-ALLGATHER
-  }    // worker warps else block
-}  // fp16 inplace reduce kernel with SHARP / in blocks
-#endif
-
-#if 0
-// threadfence and SMs sync to SM0
-#define SMBAR(offset, block)                                                                       \
-  asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));                                              \
-  if (threadIdx.x == 0) {                                                                          \
-    __threadfence_system();                                                                        \
-    if (blockIdx.x)                                                                                \
-      gpuflag[offset + blockIdx.x] = block + basecounter + 1;                                      \
-  } else if (blockIdx.x == 0) {                                                                    \
-    int expecting = (basecounter + block + 1);                                                     \
-    if (threadIdx.x < gridDim.x)                                                                   \
-      while (((volatile int *)gpuflag)[offset + threadIdx.x] < expecting) {                        \
-      }                                                                                            \
-  }                                                                                                \
-  if (blockIdx.x == 0)                                                                             \
-    asm volatile("bar.sync 15, %0;" ::"r"(32));
-#endif 
-
-#if 0
-template <int RANKS>
-__global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2(
-    const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
-    const int commbufoffset, const int flagoffset, const int firstrank, const int myrank,
-    const int gpustep, const int lineoffset, const int numlines, void **commbuff,
-    const int handleridx, const int peerblocklines, int *hostflags, int *gpuflag,
-    const int numblocks) {
-  const int basecounter = gpuflag[NVTE_GF_STATE + op];
-  if (threadIdx.x < 32) {
-    int *flagptr;
-    volatile int *localflag = (volatile int *)&(
-        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
-    // initial intranode barrier - once
-    if (threadIdx.x < RANKS) {
-      if (!blockIdx.x) {
-        flagptr = reinterpret_cast<int *>(commbuff[gpustep * threadIdx.x + firstrank]);
-        flagptr[flagoffset + gpustep * myrank + firstrank] = basecounter;
-      }
-      volatile int *flag = &localflag[gpustep * threadIdx.x + firstrank];
-      while (CHECK_IDS(*flag, basecounter)) {
-      }
-    }
-    __syncthreads();
-
-    for (int nblock = 0; nblock < numblocks + headstart; nblock++) {
-      if (nblock < numblocks) {
-        // RS happens here
-        SMBAR(op * 2 * NVTE_MAX_SMS, nblock);
-        if (!blockIdx.x && !threadIdx.x)
-          hostflags[NVTE_HF_NVRSDONE + (op & 1)] = nblock + basecounter + 1;
-      }
-
-      if (nblock >= headstart) {
-        for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
-          if (ibflag != myibrank)
-            while (localflag[NVTE_REG0_IBRS + ibflag] < basecounter + nblock - headstart + 1) {
-            }
-        asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));
-        // REDUCE happens here
-        SMBAR(op * 2 * NVTE_MAX_SMS + NVTE_MAX_SMS, nblock - headstart);
-        if (!blockIdx.x && !threadIdx.x)
-          hostflags[NVTE_HF_NVREDUCEDONE + (op & 1)] = nblock + basecounter + 1 - headstart;
-      }
-    }
-    // final part doing NVAG based on responses from NIC-RMW:IBAG
-
-    if (blockIdx.x == 0) {
-      for (int nblock = 0; nblock < numblocks; nblock++) {
-        const int expected = basecounter + nblock + 1;
-        for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
-          if (ibflag != myibrank)
-            while (localflag[NVTE_REG0_IBAG + ibflag] < expected) {
-            }
-        asm volatile("bar.sync 15, %0;" ::"r"(32));
-        if (threadIdx.x < RANKS)
-          flagptr[flagoffset + gpustep * myrank + NVTE_MAX_NVLINK + firstrank] = expected;
-      }
-    }
-
-    if (blockIdx.x == 0 && threadIdx.x == 0)
-      gpuflag[NVTE_GF_STATE + op] = basecounter + numblocks;
-  } else {  // sync warp
-    // reducethreads
-    const int warp = blockIdx.x + (threadIdx.x >> 5);
-    int4 *userptr[RANKS];
-    int4 *userptrmyrank;
-#pragma unroll
-    for (int i = 0; i < RANKS; i++)
-      userptr[i] = reinterpret_cast<int4 *>(
-          commbuff[((i + myrank + warp) & (RANKS - 1)) * gpustep + handleridx + firstrank]);
-    userptrmyrank = reinterpret_cast<int4 *>(commbuff[gpustep * myrank + handleridx + firstrank]);
-    int4 *internalbuf = reinterpret_cast<int4 *>(commbuff[myrank * gpustep + firstrank] +
-                                                 commbufoffset * sizeof(int));
-    __syncthreads();
-
-    int blocklineoffset = 0, rblocklineoffset = 0;
-
-    for (int nblock = 0; nblock < numblocks + headstart; nblock++) {
-      // NVRS part(only first numblocks steps)
-      if (blocklineoffset < numlines) {
-        const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        const int blockstart = lineoffset + blocklineoffset + blocklines * myrank;
-        if (RANKS > 1) {
-          for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < blocklines;
-               line += REDUCETHREADS * gridDim.x) {
-            int4 val[RANKS];
-
-#pragma unroll
-            for (int i = 0; i < RANKS; i++) {
-              val[i] = userptr[i][blockstart + line];
-            }
-
-            int4 sum = val[0];
-            half *s = reinterpret_cast<half *>(&sum);
-
-#pragma unroll
-            for (int i = 1; i < RANKS; i++) {
-              half *x = reinterpret_cast<half *>(&val[i]);
-#pragma unroll
-              for (int j = 0; j < sizeof(int4) / sizeof(half); j++)
-                s[j] += x[j];
-            }
-
-            userptrmyrank[blockstart + line] = sum;
-          }  // single block loop
-        }
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-        blocklineoffset += peerblocklines * RANKS;
-      }
-      if (nblock >= headstart) {
-#define UNROLLRS 2
-        const int remainder = min(numlines - rblocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        rblocklineoffset += peerblocklines * RANKS;
-        const int ibblocklines = blocklines / ibranks;
-        int4 *tempbufptr = &internalbuf[((nblock - headstart) % maxcredit) * peerblocklines];
-        const int tempstart = lineoffset + (nblock - headstart) * peerblocklines * RANKS +
-                              myrank * blocklines + ibblocklines * myibrank;
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-
-        for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < ibblocklines;
-             line += REDUCETHREADS * gridDim.x) {
-          int4 val[UNROLLRS];
-
-#pragma unroll
-          for (int i = 0; i < UNROLLRS; i++)
-            val[i] = i == myibrank ? userptrmyrank[tempstart + line]
-                                   : tempbufptr[i * ibblocklines + line];
-
-          int4 sum = val[0];
-          half *s = reinterpret_cast<half *>(&sum);
-
-          for (int i = 0; i < ibranks - UNROLLRS; i++) {
-            val[i % UNROLLRS] = i == myibrank ? userptrmyrank[tempstart + line]
-                                              : tempbufptr[i * ibblocklines + line];
-            half *x = reinterpret_cast<half *>(&val[(i + 1) % UNROLLRS]);
-#pragma unroll
-            for (int j = 0; j < 16; j++)
-              s[j] += x[j];
-          }
-#pragma unroll
-          for (int i = 1; i < UNROLLRS; i++) {
-            half *x = reinterpret_cast<half *>(&val[i]);
-#pragma unroll
-            for (int j = 0; j < 16; j++)
-              s[j] += x[j];
-          }
-          userptrmyrank[tempstart + line] = sum;
-        }
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-      }
-    }  // nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
-
-    if (RANKS != 1) {
-      const int nwarps = (REDUCETHREADS >> 5) / (RANKS - 1);
-      const int myblockDim = nwarps << 5;
-      const int mywarp = ((threadIdx.x - 32) >> 5) / (RANKS - 1);
-      const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
-      const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
-      const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest + NVTE_MAX_NVLINK +
-                                                   firstrank]);
-
-      int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
-
-      blocklineoffset = 0;
-      int gathercounter = basecounter + 1;
-      while (blocklineoffset < numlines) {
-        const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        const int blockstart = lineoffset + blocklineoffset;
-
-#define UNROLL 6
-        int4 *myptr = &userptrmyrank[blockstart + blocklines * mydest];
-        int4 *peerptr = &userptrmydest[blockstart + blocklines * mydest];
-
-        if (threadIdx.x < maxthreadIdx) {
-          const int start_elem = mythreadIdx + myblockDim * blockIdx.x;
-          const int end_elem = max(start_elem, blocklines);
-          const int aligned_elem = ((end_elem - start_elem) / (myblockDim * gridDim.x * UNROLL)) *
-                                   (myblockDim * gridDim.x * UNROLL);
-          const int end_aligned = start_elem + aligned_elem;
-
-          if (mythreadIdx == 0) {
-            while (CHECK_IDS(*flag, gathercounter)) {
-            }
-            gathercounter++;
-          }
-
-          asm volatile("bar.sync %0, %1;" ::"r"(1 + mydest), "r"(myblockDim));
-
-          for (int line = start_elem; line < end_aligned; line += myblockDim * gridDim.x * UNROLL) {
-            int4 val[UNROLL];
-#pragma unroll
-            for (int i = 0; i < UNROLL; i++)
-              val[i] = peerptr[line + i * myblockDim * gridDim.x];
-#pragma unroll
-            for (int i = 0; i < UNROLL; i++)
-              myptr[line + i * myblockDim * gridDim.x] = val[i];
-          }
-          for (int line = end_aligned; line < end_elem; line += myblockDim * gridDim.x)
-            myptr[line] = peerptr[line];
-        }
-        blocklineoffset += peerblocklines * RANKS;
-      }  // block loop for NVLINK-ALLGATHER
-    }    // RANKS!=1
-  }      // worker warps else block
-}  // fp16 inplace reduce kernel with SHARP / in blocks
-#endif
-
-#if 0
-template <int RANKS>
-__global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2_rs(
-    const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
-    const int commbufoffset, const int flagoffset, const int firstrank, const int myrank,
-    const int gpustep, const int lineoffset, const int numlines, void **commbuff,
-    const int handleridx, const int peerblocklines, int *hostflags, int *gpuflag,
-    const int numblocks, const unsigned long long ub_timeout) {
-  const int basecounter = gpuflag[NVTE_GF_STATE + op];
-  if (threadIdx.x < 32) {
-    int *flagptr;
-    volatile int *localflag = (volatile int *)&(
-        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
-    // initial intranode barrier - once
-    if (threadIdx.x < RANKS) {
-      if (!blockIdx.x) {
-        flagptr = reinterpret_cast<int *>(commbuff[gpustep * threadIdx.x + firstrank]);
-        flagptr[flagoffset + gpustep * myrank + firstrank] = basecounter;
-      }
-      volatile int *flag = &localflag[gpustep * threadIdx.x + firstrank];
-      while (CHECK_IDS(*flag, basecounter)) {
-      }
-    }
-    __syncthreads();
-
-    for (int nblock = 0; nblock < numblocks + headstart; nblock++) {
-      if (nblock < numblocks) {
-        // RS happens here
-        SMBAR(op * 2 * NVTE_MAX_SMS, nblock);
-        if (!blockIdx.x && !threadIdx.x)
-          hostflags[NVTE_HF_NVRSDONE + (op & 1)] = nblock + basecounter + 1;
-      }
-
-      if (nblock >= headstart) {
-        for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
-          if (ibflag != myibrank)
-            while (localflag[NVTE_REG0_IBRS + ibflag] < basecounter + nblock - headstart + 1) {
-            }
-        asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));
-        // REDUCE happens here
-        SMBAR(op * 2 * NVTE_MAX_SMS + NVTE_MAX_SMS, nblock - headstart);
-      }
-    }
-  } else {  // sync warp
-    // reducethreads
-    const int warp = blockIdx.x + (threadIdx.x >> 5);
-    int4 *userptr[RANKS];
-    int4 *userptrmyrank;
-#pragma unroll
-    for (int i = 0; i < RANKS; i++)
-      userptr[i] = reinterpret_cast<int4 *>(
-          commbuff[((i + myrank + warp) & (RANKS - 1)) * gpustep + handleridx + firstrank]);
-    userptrmyrank = reinterpret_cast<int4 *>(commbuff[gpustep * myrank + handleridx + firstrank]);
-    int4 *internalbuf = reinterpret_cast<int4 *>(commbuff[myrank * gpustep + firstrank] +
-                                                 commbufoffset * sizeof(int));
-    __syncthreads();
-
-    int blocklineoffset = 0, rblocklineoffset = 0;
-
-    for (int nblock = 0; nblock < numblocks + headstart; nblock++) {
-      // NVRS part(only first numblocks steps)
-      if (blocklineoffset < numlines) {
-        const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        const int blockstart = lineoffset + blocklineoffset + blocklines * myrank;
-        if (RANKS > 1) {
-          for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < blocklines;
-               line += REDUCETHREADS * gridDim.x) {
-            int4 val[RANKS];
-
-#pragma unroll
-            for (int i = 0; i < RANKS; i++) {
-              val[i] = userptr[i][blockstart + line];
-            }
-
-            int4 sum = val[0];
-            half *s = reinterpret_cast<half *>(&sum);
-
-#pragma unroll
-            for (int i = 1; i < RANKS; i++) {
-              half *x = reinterpret_cast<half *>(&val[i]);
-#pragma unroll
-              for (int j = 0; j < sizeof(int4) / sizeof(half); j++)
-                s[j] += x[j];
-            }
-
-            userptrmyrank[blockstart + line] = sum;
-          }  // single block loop
-        }
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-        blocklineoffset += peerblocklines * RANKS;
-      }
-      if (nblock >= headstart) {
-#define UNROLLRS 2
-        const int remainder = min(numlines - rblocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        rblocklineoffset += peerblocklines * RANKS;
-        const int ibblocklines = blocklines / ibranks;
-        int4 *tempbufptr = &internalbuf[((nblock - headstart) % maxcredit) * peerblocklines];
-        const int tempstart = lineoffset + (nblock - headstart) * peerblocklines * RANKS +
-                              myrank * blocklines + ibblocklines * myibrank;
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-
-        for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < ibblocklines;
-             line += REDUCETHREADS * gridDim.x) {
-          int4 val[UNROLLRS];
-
-#pragma unroll
-          for (int i = 0; i < UNROLLRS; i++)
-            val[i] = i == myibrank ? userptrmyrank[tempstart + line]
-                                   : tempbufptr[i * ibblocklines + line];
-
-          int4 sum = val[0];
-          half *s = reinterpret_cast<half *>(&sum);
-
-          for (int i = 0; i < ibranks - UNROLLRS; i++) {
-            val[i % UNROLLRS] = i == myibrank ? userptrmyrank[tempstart + line]
-                                              : tempbufptr[i * ibblocklines + line];
-            half *x = reinterpret_cast<half *>(&val[(i + 1) % UNROLLRS]);
-#pragma unroll
-            for (int j = 0; j < 16; j++)
-              s[j] += x[j];
-          }
-#pragma unroll
-          for (int i = 1; i < UNROLLRS; i++) {
-            half *x = reinterpret_cast<half *>(&val[i]);
-#pragma unroll
-            for (int j = 0; j < 16; j++)
-              s[j] += x[j];
-          }
-          userptrmyrank[tempstart + line] = sum;
-        }
-
-        asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
-      }
-    }  // nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
-  }    // worker warps else block
-}  // fp16 inplace reduce kernel with SHARP / in blocks
-#endif
-
-#if 0
-template <int RANKS>
-__global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(
-    const int op, const int maxcredit, const int headstart, const int myibrank, const int ibranks,
-    const int commbufoffset, const int flagoffset, const int firstrank, const int myrank,
-    const int gpustep, const int lineoffset, const int numlines, void **commbuff,
-    const int handleridx, const int peerblocklines, int *hostflags, int *gpuflag,
-    const int numblocks) {
-  const int basecounter = gpuflag[NVTE_GF_STATE + op];
-  if (threadIdx.x < 32) {
-    int *flagptr;
-    volatile int *localflag = (volatile int *)&(
-        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
-    if (threadIdx.x < RANKS) {
-      if (!blockIdx.x) {
-        flagptr = reinterpret_cast<int *>(commbuff[gpustep * threadIdx.x + firstrank]);
-      }
-    }
-    __syncthreads();
-    if (!blockIdx.x && !threadIdx.x)
-      hostflags[NVTE_HF_NVREDUCEDONE + (op & 1)] = numblocks + basecounter;
-    // tell CPU proxy all blocks are done and ready for NVAG
-
-    // final part doing NVAG based on responses from NIC-RMW:IBAG
-
-    if (blockIdx.x == 0) {
-      for (int nblock = 0; nblock < numblocks; nblock++) {
-        const int expected = basecounter + nblock + 1;
-        for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
-          if (ibflag != myibrank)
-            while (localflag[NVTE_REG0_IBAG + ibflag] < expected) {
-            }
-        asm volatile("bar.sync 15, %0;" ::"r"(32));
-        if (threadIdx.x < RANKS)
-          flagptr[flagoffset + gpustep * myrank + NVTE_MAX_NVLINK + firstrank] = expected;
-      }
-    }
-
-    if (blockIdx.x == 0 && threadIdx.x == 0)
-      gpuflag[NVTE_GF_STATE + op] = basecounter + numblocks;
-  } else {  // sync warp
-    // reducethreads
-    const int warp = blockIdx.x + (threadIdx.x >> 5);
-    int4 *userptr[RANKS];
-    int4 *userptrmyrank;
-#pragma unroll
-    for (int i = 0; i < RANKS; i++)
-      userptr[i] = reinterpret_cast<int4 *>(
-          commbuff[((i + myrank + warp) & (RANKS - 1)) * gpustep + handleridx + firstrank]);
-    userptrmyrank = reinterpret_cast<int4 *>(commbuff[gpustep * myrank + handleridx + firstrank]);
-    __syncthreads();
-
-    int blocklineoffset = 0, rblocklineoffset = 0;
-
-    if (RANKS != 1) {
-      const int nwarps = (REDUCETHREADS >> 5) / (RANKS - 1);
-      const int myblockDim = nwarps << 5;
-      const int mywarp = ((threadIdx.x - 32) >> 5) / (RANKS - 1);
-      const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
-      const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
-      const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest + NVTE_MAX_NVLINK +
-                                                   firstrank]);
-
-      int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
-
-      blocklineoffset = 0;
-      int gathercounter = basecounter + 1;
-      while (blocklineoffset < numlines) {
-        const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
-        const int blocklines = remainder / RANKS;
-        const int blockstart = lineoffset + blocklineoffset;
-
-#define UNROLL 6
-        int4 *myptr = &userptrmyrank[blockstart + blocklines * mydest];
-        int4 *peerptr = &userptrmydest[blockstart + blocklines * mydest];
-
-        if (threadIdx.x < maxthreadIdx) {
-          const int start_elem = mythreadIdx + myblockDim * blockIdx.x;
-          const int end_elem = max(start_elem, blocklines);
-          const int aligned_elem = ((end_elem - start_elem) / (myblockDim * gridDim.x * UNROLL)) *
-                                   (myblockDim * gridDim.x * UNROLL);
-          const int end_aligned = start_elem + aligned_elem;
-
-          if (mythreadIdx == 0) {
-            while (CHECK_IDS(*flag, gathercounter)) {
-            }
-            gathercounter++;
-          }
-
-          asm volatile("bar.sync %0, %1;" ::"r"(1 + mydest), "r"(myblockDim));
-
-          for (int line = start_elem; line < end_aligned; line += myblockDim * gridDim.x * UNROLL) {
-            int4 val[UNROLL];
-#pragma unroll
-            for (int i = 0; i < UNROLL; i++)
-              val[i] = peerptr[line + i * myblockDim * gridDim.x];
-#pragma unroll
-            for (int i = 0; i < UNROLL; i++)
-              myptr[line + i * myblockDim * gridDim.x] = val[i];
-          }
-          for (int line = end_aligned; line < end_elem; line += myblockDim * gridDim.x)
-            myptr[line] = peerptr[line];
-        }
-        blocklineoffset += peerblocklines * RANKS;
-      }  // block loop for NVLINK-ALLGATHER
-    }    // RANKS!=1
-  }      // worker warps else block
-}  // fp16 inplace reduce kernel with SHARP / in blocks
-#endif
-
-#if 0
-__global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostflags, int *gpuflag,
-                                                      int numblocks) {
-  const int basecounter = gpuflag[NVTE_GF_STATE + op] + numblocks;
-  hostflags[0] = basecounter;
-  gpuflag[NVTE_GF_STATE + op] = basecounter;
-  while (((volatile int *)gpuflag)[NVTE_GF_IBSHARPDONE] < basecounter) {
-  }
-}
-#endif 
-
-#if 0
-#define callranks_block(x)                                                                         \
-  if (comm->ar_nvsize == x)                                                                        \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked<x><<<sms, warps * 32, 0, stream>>>(                \
-        userbuffers_allreduceop_sharp, NVTE_REG0_OFFSET(comm), comm->ar_firstgpu, comm->ar_nvrank, \
-        offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
-        handler * comm->nvsize, blocksize / sizeof(int4) / comm->ar_nvsize,                        \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags,                                     \
-        (elements * 2 + blocksize - 1) / blocksize, comm->ub_timeout);
-#endif
-
-#if 0
-#define callranks2_block(x)                                                                        \
-  if (ar_nvsize == x) {                                                                            \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                           \
-    if (headstart > maxcredit)                                                                     \
-      headstart = maxcredit;                                                                       \
-    if (x == 1)                                                                                    \
-      headstart = maxcredit;                                                                       \
-    if (headstart > numblocks)                                                                     \
-      headstart = numblocks;                                                                       \
-    if (headstart == 0)                                                                            \
-      headstart = 1;                                                                               \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2<x><<<sms, warps * 32, 0, stream>>>(               \
-        op, maxcredit, headstart, my_node, num_nodes,                                              \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_FLAGS +                                                 \
-            (op == userbuffers_allreduceop_nonsharp ? NVTE_REG0_COMMBUFFER : 0),                   \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step,          \
-        offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
-        handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks, comm->ub_timeout);       \
-  }
-#endif
-
-#if 0
-#define callranks2_block_rs(x)                                                                     \
-  if (ar_nvsize == x) {                                                                            \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                           \
-    if (headstart > maxcredit)                                                                     \
-      headstart = maxcredit;                                                                       \
-    if (x == 1)                                                                                    \
-      headstart = maxcredit;                                                                       \
-    if (headstart > numblocks)                                                                     \
-      headstart = numblocks;                                                                       \
-    if (headstart == 0)                                                                            \
-      headstart = 1;                                                                               \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_rs<x><<<sms, warps * 32, 0, stream>>>(            \
-        op, maxcredit, headstart, my_node, num_nodes,                                              \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_FLAGS +                                                 \
-            (op == userbuffers_allreduceop_nonsharp ? NVTE_REG0_COMMBUFFER : 0),                   \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step,          \
-        offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
-        handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks, comm->ub_timeout);       \
-  }
-#endif 
-
-#if 0
-#define callranks2_block_ag(x)                                                                     \
-  if (ar_nvsize == x) {                                                                            \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                    \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                           \
-    if (headstart > maxcredit)                                                                     \
-      headstart = maxcredit;                                                                       \
-    if (x == 1)                                                                                    \
-      headstart = maxcredit;                                                                       \
-    if (headstart > numblocks)                                                                     \
-      headstart = numblocks;                                                                       \
-    if (headstart == 0)                                                                            \
-      headstart = 1;                                                                               \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag<x><<<sms, warps * 32, 0, stream>>>(            \
-        op, maxcredit, headstart, my_node, num_nodes,                                              \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_FLAGS +                                                 \
-            (op == userbuffers_allreduceop_nonsharp ? NVTE_REG0_COMMBUFFER : 0),                   \
-        NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step,          \
-        offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                       \
-        handler * comm->nvsize, blocksize / sizeof(int4) / ar_nvsize,                              \
-        reinterpret_cast<int *>(comm->hostflags), comm->flags, numblocks);                         \
-  }
-#endif
-
-#define callranks(x)                                                                               \
-  if (ar_nvsize == x) {                                                                            \
-    int arg1 = op - NVTE_MAX_OPS,                                                                  \
-        arg2 = NVTE_REG0_OFFSET(comm) -                                                            \
-               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
-               NVTE_MAX_OPS,                                                                       \
-        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg6 = offset / 8,                   \
-        arg7 = elements / 8;                                                                       \
-    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
-    int arg9 = handler * comm->nvsize;                                                             \
-    unsigned long long arg10 = comm->ub_timeout;                                                  \
-    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
-                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
-                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
-                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
-                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
-    CUDACHECK(cudaLaunchKernelExC(                                                                 \
-        &cfg,                                                                                      \
-        reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr<x>      \
-                                                     : userbuffers_fp16_sum_inplace_gpu_rw<x>),    \
-        kernelArgs));                                                                              \
-  }
-
-#if 0 // Pasha
-#define callranksMC(x)                                                                             \
-  if (ar_nvsize == x) {                                                                            \
-    int arg1 = op - NVTE_MAX_OPS,                                                                  \
-        arg2 = NVTE_REG0_OFFSET(comm) -                                                            \
-               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
-               NVTE_MAX_OPS,                                                                       \
-        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg6 = offset / 8,                   \
-        arg7 = elements / 8;                                                                       \
-    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
-    int arg9 = handler * comm->nvsize;                                                             \
-    void *arg10 = comm->mc_ptr[handler];                                                           \
-    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
-                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
-                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
-                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
-                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
-    CUDACHECK(cudaLaunchKernelExC(                                                                 \
-        &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc<x>), kernelArgs));      \
-  }
-#endif
-
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                                  \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                                     \
   cudaLaunchAttribute attribute_ub[2];                                                             \
@@ -2326,64 +1433,6 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
   attribute_ub[0].id = cudaLaunchAttributeCooperative;                                             \
   cfg.attrs = attribute_ub;                                                                        \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
-
-#if 0
-int allreduce_userbuff_inplace_gpu(const int handler, const int offset, const int elements,
-                                   const int blocksize, communicator *comm, cudaStream_t stream) {
-  // schedule GPU kernel only
-  // CPU/SHARP part is responsibility of caller
-  const int ar_step = comm->ar2_nvsize;
-  const int op = userbuffers_allreduceop_nonsharp;
-  const int ar_nvsize = comm->nvsize;
-  const int ar_firstgpu = comm->ar_firstgpu;
-  const int ar_nvrank = comm->ar_nvrank;
-  if (elements < 8)
-    return 0;
-  int sms = sms = comm->sms;
-  int warps = comm->threads / 32;
-  if (warps < comm->ar_nvsize)
-    warps = comm->ar_nvsize;
-
-  if (comm->launch_mode & NVTE_LAUNCH_GPU) {
-    if (comm->ar_nvsize == 1)
-      userbuffers_fp16_sum_inplace_gpu_null<<<1, 1, 0, stream>>>(
-          userbuffers_allreduceop_sharp, reinterpret_cast<int *>(comm->hostflags), comm->flags,
-          (elements * 2 + blocksize - 1) / blocksize);
-    callranks_block(2) callranks_block(4) callranks_block(8)
-  }
-  return sms;
-}
-#endif
-
-#if 0
-int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                    const int elements, const int blocksize, communicator *comm,
-                                    cudaStream_t stream, int op) {
-  // schedule GPU kernel only
-  // CPU/SHARP part is responsibility of caller
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  const int my_node = op == userbuffers_allreduceop_nonsharp ? comm->my_node : comm->my2_node;
-  const int ar_firstgpu =
-      op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
-
-  if (elements < 8)
-    return 0;
-  int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
-  if (warps < ar_nvsize)
-    warps = ar_nvsize;
-  if (num_nodes > 1) {
-    callranks2_block(1) callranks2_block(2) callranks2_block(4) callranks2_block(8)
-  } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-      callranks(2) callranks(4) callranks(8)
-  }
-  return sms;
-}
-#endif
 
 #define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
@@ -2408,7 +1457,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         kernelArgs));                                                                              \
   }
 
-#if 1
 #define callranks_agMC(x)                                                                          \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2430,7 +1478,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_ag<x>), kernelArgs));   \
   }
-#endif
 
 #define callranks_rs(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
@@ -2452,7 +1499,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>), kernelArgs));   \
   }
 
-#if 1
 #define callranks_rsMC(x)                                                                          \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2474,7 +1520,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     CUDACHECK(cudaLaunchKernelExC(                                                                 \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs<x>), kernelArgs));   \
   }
-#endif
 
 #define callranks_rs_oop(x)                                                                        \
   if (ar_nvsize == x) {                                                                            \
@@ -2526,7 +1571,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         kernelArgs));                                                                              \
   }
 
-#if 1
 #define callranks_rs_oopMC(x)                                                                      \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2551,7 +1595,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs_oop<x>),             \
         kernelArgs));                                                                              \
   }
-#endif
 
 #define callranks_rs_oop_atomic_fp8(x)                                                             \
   if (ar_nvsize == x) {                                                                            \
@@ -2609,36 +1652,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         kernelArgs));                                                                              \
   }
 
-#if 0
-#define callranks_rs_oop_stride_atomic_fp8(x)                                                      \
-  if (ar_nvsize == x) {                                                                            \
-    int arg1 = op - NVTE_MAX_OPS,                                                                  \
-        arg2 = NVTE_REG0_OFFSET(comm) -                                                            \
-               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
-               NVTE_MAX_OPS,                                                                       \
-        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 16 / x,            \
-        arg6 = offset / 16, arg8 = rowelements / 8, arg9 = strideelements / 8, arg10 = numchunks;  \
-    void **arg11 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
-    int arg12 = handler * comm->nvsize;                                                            \
-    void *arg13 = output;                                                                          \
-    void *arg14 = counters;                                                                        \
-    float *arg15 = scale;                                                                          \
-    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
-                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
-                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
-                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
-                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
-                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
-                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
-                          reinterpret_cast<void *>(&arg15)};                                       \
-    CUDACHECK(cudaLaunchKernelExC(                                                                 \
-        &cfg,                                                                                      \
-        reinterpret_cast<void *>(                                                                  \
-            userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic_fp8<x, fp8type>),             \
-        kernelArgs));                                                                              \
-  }
-#endif
-
 #define callranks_rs_oop_stride_atomic(x)                                                          \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -2694,42 +1707,6 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
                             kernelArgs));                                                          \
   }
 
-#if 0
-int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                        const int elements, const int blocksize, communicator *comm,
-                                        cudaStream_t stream, int op) {
-  // schedule GPU kernel only
-  // CPU/SHARP part is responsibility of caller
-
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  const int my_node = op == userbuffers_allreduceop_nonsharp ? comm->my_node : comm->my2_node;
-  const int ar_firstgpu =
-      op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
-
-  if (elements < 8)
-    return 0;
-  int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
-  if (warps < ar_nvsize)
-    warps = ar_nvsize;
-
-  if (num_nodes > 1) {
-    callranks2_block_rs(1) callranks2_block_rs(2) callranks2_block_rs(4) callranks2_block_rs(8)
-  } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
-    } else {
-      callranks_rs(2) callranks_rs(4) callranks_rs(8)
-    }
-  }
-  return sms;
-}
-#endif
-
 void reducescatter2_userbuff_strided(void *output, const int handler, const int offset,
                                      const int rowelements, const int colelements,
                                      const int strideelements, communicator *comm,
@@ -2777,36 +1754,6 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
       callranks_rs_oop_stride_atomic(8)
 }
 
-#if 0
-  template<typename fp8type>
-  void reducescatter2_userbuff_strided_atomic_fp8(
-    void* output, float *scale, const int handler, const int offset, const int rowelements,
-    const int colelements, const int strideelements, const int numchunks, void *counters,
-    communicator* comm, cudaStream_t stream) {
-      const int elements = rowelements*colelements;
-      const int op = userbuffers_allreduceop_nonsharp2;
-      const int blocksize = elements;
-      const int ar_firstgpu = op == userbuffers_allreduceop_nonsharp ?
-                              comm->ar_firstgpu : comm->ar2_firstgpu;
-      const int ar_step = op == userbuffers_allreduceop_nonsharp2 ?
-                          1 : comm->ar2_nvsize;
-      const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ?
-                            comm->ar_nvsize : comm->ar2_nvsize;
-      const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ?
-                            comm->ar_nvrank : comm->ar2_nvrank;
-
-      assert(comm->sm_arch >= 9);
-      if (elements < 128) return;
-      int sms = ar_nvsize == 1 ? 2 : comm->sms;
-      int warps = comm->threads/32;
-      if (warps < ar_nvsize) warps = ar_nvsize;
-
-      SETUP_LAUNCH_CONFIG(sms, warps*32, stream);
-      callranks_rs_oop_stride_atomic_fp8(2)
-      callranks_rs_oop_stride_atomic_fp8(4)
-      callranks_rs_oop_stride_atomic_fp8(8)
-  }
-#endif
 template <typename fp8type>
 void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, const int handler,
                                                    const int offset, const int rowelements,
@@ -2877,53 +1824,9 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
     warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  // if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
-  //   //callranks_rs_oopMC(2)
-  //   //callranks_rs_oopMC(4)
-  //   //callranks_rs_oopMC(8)
-  // } else {
-  //   if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
-  //     //callranks_rs_oopUCPTR(2)
-  //     //callranks_rs_oopUCPTR(4)
-  //     //callranks_rs_oopUCPTR(8)
-  //   } else {
   callranks_rs_oop_stride_multiatomic(2) callranks_rs_oop_stride_multiatomic(4)
       callranks_rs_oop_stride_multiatomic(8)
-  //  }
-  //}
 }
-
-#if 0
-int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                    const int elements, const int blocksize, communicator *comm,
-                                    cudaStream_t stream, int op) {
-  // schedule GPU kernel only
-  // CPU/SHARP part is responsibility of caller
-
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  const int my_node = op == userbuffers_allreduceop_nonsharp ? comm->my_node : comm->my2_node;
-  const int ar_firstgpu =
-      op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
-
-  if (elements < 8)
-    return 0;
-  int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
-  if (warps < ar_nvsize)
-    warps = ar_nvsize;
-
-  if (num_nodes > 1) {
-    callranks2_block_ag(1) callranks2_block_ag(2) callranks2_block_ag(4) callranks2_block_ag(8)
-  } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    callranks_ag(2) callranks_ag(4) callranks_ag(8)
-  }
-  return sms;
-}
-#endif 
 
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream) {
@@ -3057,12 +1960,6 @@ template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void *output, float *sc
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
                                                          cudaStream_t stream);
-#if 0
-template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
-    void* output, float *scale, const int handler, const int offset,
-    const int rowelements, const int colelements, const int strideelements,
-    const int numchunks, void *counters, communicator* comm, cudaStream_t stream = 0);
-#endif
 
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
@@ -3073,55 +1970,6 @@ template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
-
-#if 0
-__global__ void __launch_bounds__(MAX_THREADS)
-    kuserbuffers_pullsendrecv(int myrank, int peer, int *recv_id, int *send_flagptr,
-                              int *recv_flagptr, int4 *srcptr, int4 *dstptr, const int lines) {
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    atomicAdd_system(send_flagptr, 1);
-  }
-
-#define UNROLLCOPY 8
-  const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
-  const int end_elem = lines;
-  const int aligned_elem = (end_elem - start_elem) & (~(blockDim.x * gridDim.x * UNROLLCOPY - 1));
-  const int end_aligned = start_elem + aligned_elem;
-
-  if (threadIdx.x == 0) {
-    const int signal_id = (*recv_id) + 1;
-    volatile int *flag = (volatile int *)recv_flagptr;
-    clock_t s = clock64();
-    while (CHECK_IDS(*flag, signal_id)) {
-      if (clock64() - s > TIMEOUT) {
-        UB_PRINT("pullsendrecv [dst:%d src:%d] : expected %d, observed %d", myrank, peer, signal_id,
-               *flag);
-        break;
-      }
-    }
-    if (lines == 0) {
-      *recv_id = signal_id;
-      return;
-    }  // otherwise need an extra kernel
-  }
-  __syncthreads();
-
-  if (end_elem <= start_elem)
-    return;
-
-  for (int line = start_elem; line < end_aligned; line += blockDim.x * gridDim.x * UNROLLCOPY) {
-    int4 val[UNROLLCOPY];
-#pragma unroll
-    for (int i = 0; i < UNROLLCOPY; i++)
-      val[i] = srcptr[line + i * blockDim.x * gridDim.x];
-#pragma unroll
-    for (int i = 0; i < UNROLLCOPY; i++)
-      dstptr[line + i * blockDim.x * gridDim.x] = val[i];
-  }
-  for (int line = end_aligned; line < end_elem; line += blockDim.x * gridDim.x)
-    dstptr[line] = srcptr[line];
-}
-#endif
 
 __global__ void kuserbuffers_pullsend(int myrank, int peer, int *send_id, int *flagptr) {
   atomicAdd_system(flagptr, 1);
@@ -3332,7 +2180,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
     const int signal_id = (*recv_id) + adder;
     *recv_id = signal_id;
     volatile int *flag = (volatile int *)recv_flagptr;
-    // if(*flag>=signal_id) return;
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
@@ -3402,7 +2249,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
       const int signal_id = (*recv_id) + adder;
       *recv_id = signal_id;
       volatile int *flag = (volatile int *)recv_flagptr;
-      // if(*flag>=signal_id) return;
       clock_t s = clock64();
       while (CHECK_IDS(*flag, signal_id)) {
         if (CHECK_TIMEOUT(s, ub_timeout)) {
@@ -3523,17 +2369,9 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
   int send_peerlocal = send_peer % comm->nvsize;
   int recv_peerlocal = recv_peer % comm->nvsize;
-  //void *flagptr_send =
-  //    (comm->peer_ptr[0][send_peerlocal]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + comm->myrank * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
   void *flagptr_send      = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 1);
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
-  //void *flagptr_recv =
-  //    (comm->mem_ptr[0]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + recv_peer * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
   void *send_srcptr = ((char *)comm->mem_ptr[srchandler]) + send_offset;
@@ -3571,7 +2409,6 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                         reinterpret_cast<void *>(&arg15)};
   CUDACHECK(
       cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
-  //}
 }
 
 void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
@@ -3583,14 +2420,6 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
 
   int send_peerlocal = send_peer % comm->nvsize;
   int recv_peerlocal = recv_peer % comm->nvsize;
-  //void *flagptr_send =
-  //    (comm->peer_ptr[0][send_peerlocal]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + comm->myrank * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
-  //void *flagptr_recv =
-  //    (comm->mem_ptr[0]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + recv_peer * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
   void *flagptr_send      = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 1);
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
@@ -3643,15 +2472,6 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
 
   int send_peerlocal = send_peer % comm->nvsize;
   int recv_peerlocal = recv_peer % comm->nvsize;
-  //void *flagptr_send =
-  //    (comm->peer_ptr[0][send_peerlocal]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + comm->myrank * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
-  //void *flagptr_recv =
-  //    (comm->mem_ptr[0]) +
-  //    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + recv_peer * NVTE_MAX_REGIONS + dsthandler) *
-  //     sizeof(int));
-
   void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
@@ -3688,82 +2508,11 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
     &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
 }
 
-#if 0
-__global__ void __launch_bounds__(MAX_THREADS)
-    kuserbuffers_alltoall(void **baseflagptrs, int flagoffset, int4 *basesrcptr, void **dstptrs,
-                          size_t dstoffset, const int lines, const int myrank) {
-  if (blockIdx.x == myrank)
-    return;
-  int4 *dstptr = reinterpret_cast<int4 *>(dstptrs[blockIdx.x] + dstoffset);
-  int *flagptr = reinterpret_cast<int *>(baseflagptrs[blockIdx.x] + flagoffset);
-  const size_t myblockoffset = blockIdx.x * lines;
-  int4 *srcptr = basesrcptr + myblockoffset;
-  dstptr += myblockoffset;
-
-  if (lines) {
-    const int start_elem = threadIdx.x;
-    const int end_elem = lines;
-    const int aligned_elem = ((end_elem - start_elem) & (~(blockDim.x * UNROLLCOPY - 1)));
-    const int end_aligned = start_elem + aligned_elem;
-    if (end_elem > start_elem) {
-      for (int line = start_elem; line < end_aligned; line += blockDim.x * UNROLLCOPY) {
-        int4 val[UNROLLCOPY];
-#pragma unroll
-        for (int i = 0; i < UNROLLCOPY; i++)
-          val[i] = srcptr[line + i * blockDim.x];
-#pragma unroll
-        for (int i = 0; i < UNROLLCOPY; i++)
-          dstptr[line + i * blockDim.x] = val[i];
-      }
-      for (int line = end_aligned; line < end_elem; line += blockDim.x)
-        dstptr[line] = srcptr[line];
-    }
-    __syncthreads();
-    if (threadIdx.x)
-      return;
-    __threadfence_system();
-    atomicAdd(flagptr, 1);
-
-  } else {
-    atomicAdd(flagptr, 1);
-  }
-}
-#endif
-
-#if 0
-void userbuffers_alltoall_send(const int srchandler, const size_t srcoffset, const int dsthandler,
-                               const size_t dstoffset, const size_t bytes, communicator *comm,
-                               cudaStream_t stream) {
-  if (comm->launch_mode & NVTE_LAUNCH_CPU) {
-    comm->fifo[comm->head].optype = userbuffers_alltoall;
-    comm->fifo[comm->head].basecounter = comm->basecounter[userbuffers_alltoall];
-    comm->fifo[comm->head].handler = srchandler;
-    comm->fifo[comm->head].offset = srcoffset;
-    comm->fifo[comm->head].handler2 = dsthandler;
-    comm->fifo[comm->head].offset2 = dstoffset;
-    comm->fifo[comm->head].elements = bytes;
-
-    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
-    while (newhead == comm->tail) {
-    }
-    comm->head = newhead;
-    comm->basecounter[userbuffers_alltoall] += 1;
-  }
-  if (comm->launch_mode & NVTE_LAUNCH_GPU)
-    kuserbuffers_proxysend<<<1, 1, 0, stream>>>(
-        &(comm->flags[NVTE_GF_STATE + userbuffers_alltoall]),
-        comm->hostflags + userbuffers_alltoall);
-}
-#endif
-
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, cudaStream_t stream) {
   int peerlocal      = peer % comm->nvsize;
   void *flagptr      = GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 0);
-  //(comm->peer_ptr[0][peerlocal]) +
-  //((REG0_OFFSET(comm) + REG0_RECV + MAX_NVLINK * MAX_REGIONS +
-   // comm->myrank * MAX_REGIONS + dsthandler) * sizeof(int));
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
   bool intranode = INTRANODE(peer);
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
@@ -3791,19 +2540,6 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
         reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2) : nullptr));
   }
 }
-
-#if 0
-void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream) {
-  void *flagptr =
-      (comm->mem_ptr[0]) +
-      ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_OPFLAGS * userbuffers_alltoall) * sizeof(int));
-
-  if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
-    return;
-  kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(comm->myrank, -1, reinterpret_cast<int *>(flagptr + 4),
-                                             reinterpret_cast<int *>(flagptr), comm->nranks - 1);
-}
-#endif
 
 // producer
 static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
