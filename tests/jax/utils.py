@@ -731,19 +731,18 @@ class LayerNorm(nn.Module):
                                                    axes=('embed',))
             bias = jnp.asarray(bias, self.dtype)
 
-            y = jnp.asarray(y, self.dtype)
             if not self.zero_centered_gamma:
                 z = y * scale + bias
             else:
-                z = y * (scale + 1) + bias
+                z = y * (scale + 1.) + bias
         else:
             assert self.layernorm_type == 'rmsnorm'
             assert not self.zero_centered_gamma
             mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-            y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
+            y = x * lax.rsqrt(mean2 + self.epsilon)
             z = y * scale
 
-        return z
+        return jnp.asarray(z, self.dtype)
 
 
 class RelativePositionBiases(nn.Module):
