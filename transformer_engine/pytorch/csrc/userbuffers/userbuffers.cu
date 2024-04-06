@@ -35,8 +35,7 @@
 #define ATOMIC_CONSUMER(chunk)                                                                     \
   if (counters) {                                                                                  \
     if (threadIdx.x == 0 && blockIdx.x == 0) {                                                     \
-      int old_val;                                                                                 \
-      while (0 != (old_val = atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) {               \
+      while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) {                         \
       }                                                                                            \
       ((unsigned int *)counters)[chunk] = 1;                                                       \
       asm volatile("fence.sc.gpu;\n");                                                             \
@@ -1076,13 +1075,11 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic_fp8(
   if (counters) {
       if ( threadIdx.x == 0 ) {
           // spin-lock on counter from producer
-          int old_val;
-          while (0 != (old_val = atomicCAS(((unsigned int*)counters), 0, 0) )) {}
+          while (0 != (atomicCAS(((unsigned int*)counters), 0, 0) )) {}
 
           // make sure all threadblocks have read/waited on counters.
-          int old_val2;
           atomicInc(((unsigned int *)counters)+numchunks, gridDim.x-1);
-          while (0 != (old_val2 = atomicCAS(((unsigned int*)counters)+numchunks, 0, 0) )) {}
+          while (0 != (atomicCAS(((unsigned int*)counters)+numchunks, 0, 0) )) {}
 
           // reset counter for next producer.
           ((unsigned int*)counters)[0] = 1;
@@ -1173,14 +1170,12 @@ __global__ void __launch_bounds__(MAX_THREADS)
   if (counters) {
     if (threadIdx.x == 0) {
       // spin-lock on counter from producer
-      int old_val;
-      while (0 != (old_val = atomicCAS(((unsigned int *)counters), 0, 0))) {
+      while (0 != (atomicCAS(((unsigned int *)counters), 0, 0))) {
       }
 
       // make sure all threadblocks have read/waited on counters.
-      int old_val2;
       atomicInc(((unsigned int *)counters) + numchunks, gridDim.x - 1);
-      while (0 != (old_val2 = atomicCAS(((unsigned int *)counters) + numchunks, 0, 0))) {
+      while (0 != (atomicCAS(((unsigned int *)counters) + numchunks, 0, 0))) {
       }
 
       // reset counter for next producer.
@@ -1271,15 +1266,12 @@ __global__ void __launch_bounds__(MAX_THREADS)
     if (counters) {
       if (threadIdx.x == 0) {
         // spin-lock on counter from producer
-        int old_val;
-        while (0 != (old_val = atomicCAS(((unsigned int *)counters) + chunk_i, 0, 0))) {
+        while (0 != (atomicCAS(((unsigned int *)counters) + chunk_i, 0, 0))) {
         }
 
         // make sure all threadblocks have read/waited on counters.
-        int old_val2;
         atomicInc(((unsigned int *)counters) + numchunks + chunk_i, gridDim.x - 1);
-        while (0 !=
-               (old_val2 = atomicCAS(((unsigned int *)counters) + numchunks + chunk_i, 0, 0))) {
+        while (0 != (atomicCAS(((unsigned int *)counters) + numchunks + chunk_i, 0, 0))) {
         }
 
         // reset counter for next producer.
@@ -1376,7 +1368,6 @@ __global__ void __launch_bounds__(MAX_THREADS)
     reduceidptr = myptr - NVTE_MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset;
-    volatile int *flag = (volatile int *)&(myptr[targetgpu]);
     userptr[threadIdx.x] = reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
     clock_t s = clock64();
   }
@@ -2745,7 +2736,6 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
                                      cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -2769,7 +2759,6 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
                                             cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -2828,7 +2817,6 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
                                                    communicator *comm, cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -2875,7 +2863,6 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
                                                  cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -2941,7 +2928,6 @@ int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream) {
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -2981,7 +2967,6 @@ void allgather2_userbuff_inplace_sliced(const int handler, const int offset, con
 void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
                                      communicator *comm, cudaStream_t stream) {
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -3008,7 +2993,6 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
                                            cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements * 2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -3041,7 +3025,6 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
                                                communicator *comm, cudaStream_t stream) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int blocksize = elements;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
@@ -3069,11 +3052,11 @@ void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, 
 template void reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream = 0);
+                                                         cudaStream_t stream);
 template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream = 0);
+                                                         cudaStream_t stream);
 #if 0
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void* output, float *scale, const int handler, const int offset,
@@ -3084,12 +3067,12 @@ template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
-    const int numchunks, void *counters, communicator *comm, cudaStream_t stream = 0);
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 
 template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
-    const int numchunks, void *counters, communicator *comm, cudaStream_t stream = 0);
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 
 #if 0
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -3442,9 +3425,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
     // sync all CTAs before moving to next chunk.
     if (threadIdx.x == 0) {
-      int old_val2;
       atomicInc(((unsigned int *)counters) + nchunks + chunk_i, gridDim.x - 1);
-      while (0 != (old_val2 = atomicCAS(((unsigned int *)counters) + nchunks + chunk_i, 0, 0))) {
+      while (0 != (atomicCAS(((unsigned int *)counters) + nchunks + chunk_i, 0, 0))) {
       }
     }
     __syncthreads();
@@ -3467,7 +3449,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 // 1 - CE start index counter
 // 2 - CE end index counter
 #define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index) \
-                             (((comm)->peer_ptr[0][(peerlocal)]) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
+                             (((char *)((comm)->peer_ptr[0][(peerlocal)])) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
                              (comm)->myrank * NVTE_MAX_REGIONS + (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS ) * sizeof(int)))
 
 // Index corresponds to the type of flag:
@@ -3475,7 +3457,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 // 1 - CE start index counter
 // 2 - CE end index counter
 #define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index) \
-                             (((comm)->mem_ptr[0]) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
+                             (((char *)((comm)->mem_ptr[0])) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
                              (recv_peer) * NVTE_MAX_REGIONS + (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS ) * sizeof(int)))
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
@@ -3515,8 +3497,8 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
                                                reinterpret_cast<int *>(flagptr));
   } else {
-    void *srcptr = (comm->mem_ptr[srchandler]) + srcoffset;
-    void *dstptr = (comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
+    void *srcptr = ((char *)comm->mem_ptr[srchandler]) + srcoffset;
+    void *dstptr = ((char *)comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
 
     if (comm->use_ce) {
       kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
@@ -3554,8 +3536,8 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   //     sizeof(int));
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = (comm->mem_ptr[srchandler]) + send_offset;
-  void *send_dstptr = (comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
+  void *send_srcptr = ((char *)comm->mem_ptr[srchandler]) + send_offset;
+  void *send_dstptr = ((char *)comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
 
   if (comm->use_ce) {
     kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
@@ -3614,8 +3596,8 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv      = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = (comm->mem_ptr[srchandler]) + send_offset;
-  void *send_dstptr = (comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
+  void *send_srcptr = ((char *)comm->mem_ptr[srchandler]) + send_offset;
+  void *send_dstptr = ((char *)comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
   if (comm->use_ce) {
     kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
@@ -3644,9 +3626,9 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
                         reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
                         reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
-                        reinterpret_cast<void *>(&arg12), reinterpret_cast<void *>(&arg13),
-                        reinterpret_cast<void *>(&arg14), reinterpret_cast<void *>(&arg15),
-                        reinterpret_cast<void *>(&arg16)};
+                        reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
+                        reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
+                        reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
   CUDACHECK(cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic),
                                 kernelArgs));
 }
@@ -3787,8 +3769,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
     return;
   if (comm->push == 0 && intranode) {
-    void *dstptr = (comm->mem_ptr[dsthandler]) + dstoffset;
-    void *srcptr = (comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
+    void *dstptr = ((char *)comm->mem_ptr[dsthandler]) + dstoffset;
+    void *srcptr = ((char *)comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
@@ -3840,8 +3822,7 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
 static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
   // Wait for producer to change the val to 0, which signal producer ready
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    int old_val;
-    while (0 != (old_val = atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
+    while (0 != (atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
     }
     ((unsigned int *)atomic_ptr)[chunk_i] = 1;
     asm volatile("fence.sc.gpu;\n");
@@ -3852,9 +3833,8 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
 static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i, int num_chunks) {
   // Wait for producer to change the val to 0, which signal producer ready
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    int old_val;
     for (int i = first_chunk_i; i < num_chunks; i++) {
-      while (0 != (old_val = atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
+      while (0 != (atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
       }
       ((unsigned int *)atomic_ptr)[i] = 1;
       asm volatile("fence.sc.gpu;\n");
