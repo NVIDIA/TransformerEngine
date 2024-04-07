@@ -19,6 +19,9 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
+    if (input.numel() == 0)
+        return output;
+
     auto input_cu     = makeTransformerEngineTensor(input);
     auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), shape, otype,
                                                     amax.data_ptr(), scale.data_ptr(),
