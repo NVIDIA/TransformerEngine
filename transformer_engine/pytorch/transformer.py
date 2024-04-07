@@ -261,6 +261,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad: bool = True,
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
+        ub_overlap_rs_dgrad: bool = False,
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
@@ -282,6 +283,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
         ub_overlap_ag = ub_tp_comm_overlap and ub_overlap_ag
         ub_overlap_rs = ub_tp_comm_overlap and ub_overlap_rs
+        ub_overlap_rs_dgrad = ub_tp_comm_overlap and ub_overlap_rs_dgrad
 
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
@@ -357,6 +359,7 @@ class TransformerLayer(torch.nn.Module):
             "ub_bulk_dgrad" : ub_bulk_dgrad,
             "ub_overlap_ag" : ub_overlap_ag,
             "ub_overlap_rs" : ub_overlap_rs,
+            "ub_overlap_rs_dgrad" : ub_overlap_rs_dgrad,
             "qkv_format" : self.attn_input_format,
         }
 
@@ -410,6 +413,7 @@ class TransformerLayer(torch.nn.Module):
             zero_centered_gamma=zero_centered_gamma,
             ub_bulk_wgrad=ub_bulk_wgrad,
             ub_bulk_dgrad=ub_bulk_dgrad,
+            ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             activation=activation,
