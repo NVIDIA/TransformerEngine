@@ -1114,13 +1114,16 @@ class LayerNormMLP(TransformerEngineBase):
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_shape = (*kernel_1_shape[:len(axis)], num_activations,
                                           self.low_rank_adaptation_dim)
-                wi_lora_a_kernel_init_shape = (kernel_1_each_shape[0], self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_init_shape = (kernel_1_each_shape[0], num_activations,
+                                               self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_init_each_shape = (kernel_1_each_shape[0],
+                                                    self.low_rank_adaptation_dim)
                 wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_init_shape)
                 wi_lora_a_kernel = nn_partitioning.param_with_axes('wi_lora_a_kernel',
                                                                    kernel_1_init,
                                                                    num_activations,
                                                                    -2,
-                                                                   wi_lora_a_kernel_init_shape,
+                                                                   wi_lora_a_kernel_init_each_shape,
                                                                    jnp.float32,
                                                                    axes=wi_lora_a_kernel_axes)
                 wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
