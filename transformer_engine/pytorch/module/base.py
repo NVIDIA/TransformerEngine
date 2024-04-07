@@ -825,8 +825,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if get_rng_state_tracker is None:
                 init_fn(param)
             else:
-                with get_rng_state_tracker().fork():
-                    init_fn(param)
+                if hasattr(self, "rng_tracker_name") and self.rng_tracker_name:
+                    with get_rng_state_tracker().fork(self.rng_tracker_name):
+                        init_fn(param)
+                else:
+                    with get_rng_state_tracker().fork():
+                        init_fn(param)
 
             # If primary weights are in fp8, wrap the parameter as Float8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index

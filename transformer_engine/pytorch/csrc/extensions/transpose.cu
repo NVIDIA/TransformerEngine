@@ -83,6 +83,9 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                 grad_output.size(0),
                                 DType::kByte);
 
+  if (M == 0 || N == 0)
+    return {grad_bias, grad_output_cast, grad_output_transpose};
+
   auto input_cu             = makeTransformerEngineTensor(grad_output);
   auto cast_output_cu       = makeTransformerEngineTensor(grad_output_cast.data_ptr(), {M, N},
                                                           otype, amax.data_ptr(), scale.data_ptr(),
@@ -335,6 +338,8 @@ at::Tensor fp8_transpose(at::Tensor input,
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
+  if (M == 0 || N == 0)
+    return input;
 
   auto output =
             allocateTorchTensor(input.size(1),
