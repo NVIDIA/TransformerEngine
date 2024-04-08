@@ -1886,6 +1886,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 rng_gen, fused_attention_backend, use_FAv2_bwd,
                 fp8, fp8_meta, tp_size, tp_group):
         if fp8:
+            if _NVTE_DEBUG:
+                print('{:22s} using FP8 forward'.format('[DotProductAttention]:'))
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             fused_attention_backend = FusedAttnBackend["FP8"]
             # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -1917,6 +1919,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
+            if _NVTE_DEBUG:
+                print('{:22s} using F16 forward'.format('[DotProductAttention]:'))
             out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
                 fused_attention_backend, attn_bias,
@@ -1969,6 +1973,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn_qkvpacked"
             ):
                 if ctx.fp8:
+                    if _NVTE_DEBUG:
+                        print('{:22s} using FP8 backward'.format('[DotProductAttention]:'))
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2001,6 +2007,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"], META_DQKV,
                         fp8_dtype_backward, ctx.qkv_dtype).view(dqkv_fp8.shape)
                 else:
+                    if _NVTE_DEBUG:
+                        print('{:22s} using F16 backward'.format('[DotProductAttention]:'))
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
                         ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
                         ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
@@ -2029,6 +2037,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta, tp_size, tp_group):
         if fp8:
+            if _NVTE_DEBUG:
+                print('{:22s} using FP8 forward'.format('[DotProductAttention]:'))
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             fused_attention_backend = FusedAttnBackend["FP8"]
             # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -2063,6 +2073,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
+            if _NVTE_DEBUG:
+                print('{:22s} using F16 forward'.format('[DotProductAttention]:'))
             out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2118,6 +2130,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn_kvpacked"
             ):
                 if ctx.fp8:
+                    if _NVTE_DEBUG:
+                        print('{:22s} using FP8 backward'.format('[DotProductAttention]:'))
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2154,6 +2168,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"], META_DQKV,
                         fp8_dtype_backward, ctx.qkv_dtype).view(dkv_fp8.shape)
                 else:
+                    if _NVTE_DEBUG:
+                        print('{:22s} using F16 backward'.format('[DotProductAttention]:'))
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, kv, out, d_out,
@@ -2182,6 +2198,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta, tp_size, tp_group):
         if fp8:
+            if _NVTE_DEBUG:
+                print('{:22s} using FP8 forward'.format('[DotProductAttention]:'))
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             fused_attention_backend = FusedAttnBackend["FP8"]
             # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -2217,8 +2235,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 v_fp8 = ext.cast_to_fp8(v,
                     fp8_meta["scaling_fwd"],
                     META_QKV, fp8_dtype_forward).view(v.shape)
-            if _NVTE_DEBUG:
-                print('fwd FP8')
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q_fp8, k_fp8, v_fp8, fp8_dtype_forward, fused_attention_backend, attn_bias,
@@ -2239,7 +2255,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
             if _NVTE_DEBUG:
-                print('fwd non FP8')
+                print('{:22s} using F16 forward'.format('[DotProductAttention]:'))
             out, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2306,14 +2322,14 @@ class FusedAttnFunc(torch.autograd.Function):
                 ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn"
             ):
                 if ctx.fp8:
+                    if _NVTE_DEBUG:
+                        print('{:22s} using FP8 backward'.format('[DotProductAttention]:'))
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
                     d_out_fp8 = ext.cast_to_fp8(
                         d_out.view(-1, d_out.shape[-2] * d_out.shape[-1]),
                         ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                         ).view(d_out.shape)
-                    if _NVTE_DEBUG:
-                        print('bwd FP8')
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
@@ -2371,7 +2387,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                 else:
                     if _NVTE_DEBUG:
-                        print('bwd non FP8')
+                        print('{:22s} using F16 backward'.format('[DotProductAttention]:'))
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, k, v, out, d_out,

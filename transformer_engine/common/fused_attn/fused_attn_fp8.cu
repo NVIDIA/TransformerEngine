@@ -1867,7 +1867,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             cudnnHandle_t handle) {
     using namespace transformer_engine;
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-    //bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
@@ -1875,6 +1875,10 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
     bool is_dropout = (is_training && dropout_probability != 0.0f);
     auto bias_b = b;
     auto bias_h = h;
+    NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
+    NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+    NVTE_CHECK(~is_padding, "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
@@ -1980,45 +1984,45 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
                             .set_causal_mask(is_causal)
                             .set_attn_scale(attn_scale);
 
-            //sdpa_options.set_alibi_mask(is_alibi);
-            //if (is_bias) {
-            //    bias = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("bias")
-            //                    .set_dim({bias_b, bias_h, s_q, s_kv})
-            //                    .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-            //    sdpa_options.set_bias(bias);
-            //}
+            // sdpa_options.set_alibi_mask(is_alibi);
+            // if (is_bias) {
+            //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("bias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     sdpa_options.set_bias(bias);
+            // }
 
-            //if (is_padding) {
-            //    seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("seq_q")
-            //                    .set_dim({b, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT32));
-            //    seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("seq_kv")
-            //                    .set_dim({b, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT32));
-            //    sdpa_options.set_padding_mask(is_padding)
-            //                    .set_seq_len_q(seq_q)
-            //                    .set_seq_len_kv(seq_kv);
-            //}
+            // if (is_padding) {
+            //     seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_q")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_kv")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     sdpa_options.set_padding_mask(is_padding)
+            //                     .set_seq_len_q(seq_q)
+            //                     .set_seq_len_kv(seq_kv);
+            // }
 
-            //if (is_dropout) {
-            //    dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("Seed")
-            //                    .set_dim({1, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT64));
-            //    dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("Offset")
-            //                    .set_dim({1, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT64));
-            //    sdpa_options.set_dropout(
-            //                    dropout_probability, dropout_seed, dropout_offset);
-            //}
+            // if (is_dropout) {
+            //     dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Seed")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Offset")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     sdpa_options.set_dropout(
+            //                     dropout_probability, dropout_seed, dropout_offset);
+            // }
 
             auto [O, Stats, amax_s, amax_o] = mha_graph->sdpa_fp8(
                 Q, K, V, descale_q, descale_k, descale_v, descale_s,
@@ -2111,28 +2115,28 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             variant_pack[Stats] = devPtrM;
         }
 
-        //if (is_bias) {
-        //    variant_pack[bias] = devPtrBias;
-        //}
+        // if (is_bias) {
+        //     variant_pack[bias] = devPtrBias;
+        // }
 
-        //if (is_padding) {
-        //    constexpr size_t nthreads_per_block = 128;
-        //    const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-        //    void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        //    void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
-        //    cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-        //        b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
-        //        static_cast<const int32_t *>(devPtrCuSeqlensKV),
-        //        static_cast<int32_t *>(devActualSeqlenQ),
-        //        static_cast<int32_t *>(devActualSeqlenKV));
-        //    variant_pack[seq_q]  = devActualSeqlenQ;
-        //    variant_pack[seq_kv] = devActualSeqlenKV;
-        //}
+        // if (is_padding) {
+        //     constexpr size_t nthreads_per_block = 128;
+        //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+        //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        //         static_cast<int32_t *>(devActualSeqlenQ),
+        //         static_cast<int32_t *>(devActualSeqlenKV));
+        //     variant_pack[seq_q]  = devActualSeqlenQ;
+        //     variant_pack[seq_kv] = devActualSeqlenKV;
+        // }
 
-        //if (is_dropout) {
-        //    variant_pack[dropout_seed] = devPtrDropoutSeed;
-        //    variant_pack[dropout_offset] = devPtrDropoutOffset;
-        //}
+        // if (is_dropout) {
+        //     variant_pack[dropout_seed] = devPtrDropoutSeed;
+        //     variant_pack[dropout_offset] = devPtrDropoutOffset;
+        // }
         NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
@@ -2164,7 +2168,7 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             cudnnHandle_t handle) {
     using namespace transformer_engine;
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-    //bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
@@ -2172,6 +2176,10 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
     bool is_dropout = (dropout_probability != 0.0f);
     auto bias_b = b;
     auto bias_h = h;
+    NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
+    NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+    NVTE_CHECK(~is_padding, "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
@@ -2314,56 +2322,56 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
                             .set_causal_mask(is_causal)
                             .set_attn_scale(attn_scale);
 
-            //sdpa_backward_options.set_alibi_mask(is_alibi);
+            // sdpa_backward_options.set_alibi_mask(is_alibi);
 
-            //if (is_bias) {
-            //    bias = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("bias")
-            //                    .set_dim({bias_b, bias_h, s_q, s_kv})
-            //                    .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-            //    dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("dBias")
-            //                    .set_dim({bias_b, bias_h, s_q, s_kv})
-            //                    .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-            //    sdpa_backward_options.set_bias(bias);
-            //    // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
-            //    // are not supported for dbias calculation but they are
-            //    // supported for forward bias calculation
-            //    if ((bias_b == 1) && (bias_h == h)) {
-            //      sdpa_backward_options.set_dbias(dBias);
-            //    }
-            //}
+            // if (is_bias) {
+            //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("bias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("dBias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     sdpa_backward_options.set_bias(bias);
+            //     // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
+            //     // are not supported for dbias calculation but they are
+            //     // supported for forward bias calculation
+            //     if ((bias_b == 1) && (bias_h == h)) {
+            //       sdpa_backward_options.set_dbias(dBias);
+            //     }
+            // }
 
-            //if (is_padding) {
-            //    seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("seq_q")
-            //                    .set_dim({b, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT32));
-            //    seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("seq_kv")
-            //                    .set_dim({b, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT32));
-            //    sdpa_backward_options.set_padding_mask(is_padding)
-            //                    .set_seq_len_q(seq_q)
-            //                    .set_seq_len_kv(seq_kv);
-            //}
+            // if (is_padding) {
+            //     seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_q")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_kv")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     sdpa_backward_options.set_padding_mask(is_padding)
+            //                     .set_seq_len_q(seq_q)
+            //                     .set_seq_len_kv(seq_kv);
+            // }
 
-            //if (is_dropout) {
-            //    dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("Seed")
-            //                    .set_dim({1, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT64));
-            //    dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
-            //                    .set_name("Offset")
-            //                    .set_dim({1, 1, 1, 1})
-            //                    .set_stride({1, 1, 1, 1})
-            //                    .set_data_type(fe::DataType_t::INT64));
-            //    sdpa_backward_options.set_dropout(
-            //                    dropout_probability, dropout_seed, dropout_offset);
-            //}
+            // if (is_dropout) {
+            //     dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Seed")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Offset")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     sdpa_backward_options.set_dropout(
+            //                     dropout_probability, dropout_seed, dropout_offset);
+            // }
 
             auto [dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP] = mha_graph->sdpa_fp8_backward(
                 q, k, v, o, dO, stats,
@@ -2504,33 +2512,33 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             {amax_dP, devPtrAmaxdP},
         };
 
-        //if (is_bias) {
-        //    variant_pack[bias] = devPtrBias;
-        //    if ((bias_b == 1) && (bias_h == h)) {
-        //      variant_pack[dBias] = devPtrdBias;
-        //    } else {
-        //      variant_pack[dBias] = nullptr;
-        //    }
-        //}
+        // if (is_bias) {
+        //     variant_pack[bias] = devPtrBias;
+        //     if ((bias_b == 1) && (bias_h == h)) {
+        //       variant_pack[dBias] = devPtrdBias;
+        //     } else {
+        //       variant_pack[dBias] = nullptr;
+        //     }
+        // }
 
-        //if (is_padding) {
-        //    constexpr size_t nthreads_per_block = 128;
-        //    const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-        //    void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        //    void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
-        //    cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-        //        b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
-        //        static_cast<const int32_t *>(devPtrCuSeqlensKV),
-        //        static_cast<int32_t *>(devActualSeqlenQ),
-        //        static_cast<int32_t *>(devActualSeqlenKV));
-        //    variant_pack[seq_q]  = devActualSeqlenQ;
-        //    variant_pack[seq_kv] = devActualSeqlenKV;
-        //}
+        // if (is_padding) {
+        //     constexpr size_t nthreads_per_block = 128;
+        //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+        //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        //         static_cast<int32_t *>(devActualSeqlenQ),
+        //         static_cast<int32_t *>(devActualSeqlenKV));
+        //     variant_pack[seq_q]  = devActualSeqlenQ;
+        //     variant_pack[seq_kv] = devActualSeqlenKV;
+        // }
 
-        //if (is_dropout) {
-        //    variant_pack[dropout_seed] = devPtrDropoutSeed;
-        //    variant_pack[dropout_offset] = devPtrDropoutOffset;
-        //}
+        // if (is_dropout) {
+        //     variant_pack[dropout_seed] = devPtrDropoutSeed;
+        //     variant_pack[dropout_offset] = devPtrDropoutOffset;
+        // }
 
         NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
     } catch (cudnn_frontend::cudnnException &e) {
@@ -2622,8 +2630,9 @@ void fused_attn_fp8_fwd_qkvpacked(
 
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
                   batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -2637,7 +2646,7 @@ void fused_attn_fp8_fwd_qkvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_fe_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_fwd_impl(
                   batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
@@ -2651,6 +2660,8 @@ void fused_attn_fp8_fwd_qkvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {
@@ -2735,8 +2746,9 @@ void fused_attn_fp8_bwd_qkvpacked(
 
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
                   batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -2756,7 +2768,7 @@ void fused_attn_fp8_bwd_qkvpacked(
                   get_cudnn_fe_dtype(QKV_type),
                   get_cudnn_fe_dtype(dQKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_bwd_impl(
                   batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   attn_scale, p_dropout, qkv_layout,
@@ -2775,6 +2787,8 @@ void fused_attn_fp8_bwd_qkvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {
@@ -2872,8 +2886,9 @@ void fused_attn_fp8_fwd_kvpacked(
 
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
                   batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -2887,7 +2902,7 @@ void fused_attn_fp8_fwd_kvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_fe_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_fwd_impl(
                   batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
@@ -2901,6 +2916,8 @@ void fused_attn_fp8_fwd_kvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {
@@ -2991,8 +3008,9 @@ void fused_attn_fp8_bwd_kvpacked(
 
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
                   batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -3012,7 +3030,7 @@ void fused_attn_fp8_bwd_kvpacked(
                   get_cudnn_fe_dtype(QKV_type),
                   get_cudnn_fe_dtype(dQKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_bwd_impl(
                   batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout,
@@ -3031,6 +3049,8 @@ void fused_attn_fp8_bwd_kvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {
@@ -3121,8 +3141,9 @@ void fused_attn_fp8_fwd(
   const DType QKV_type = input_Q->data.dtype;
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_fwd_impl_v1(
                   batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -3136,7 +3157,7 @@ void fused_attn_fp8_fwd(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_fe_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_fwd_impl(
                   batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
@@ -3150,6 +3171,8 @@ void fused_attn_fp8_fwd(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {
@@ -3233,8 +3256,9 @@ void fused_attn_fp8_bwd(
   const DType dQKV_type = output_dQ->data.dtype;
   size_t workspace_size = 0;
 
-  int fe_ver = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FE_VER", 1);
-  if (fe_ver == 1) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
   fused_attn::fused_attn_fp8_bwd_impl_v1(
                   batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
@@ -3254,7 +3278,7 @@ void fused_attn_fp8_bwd(
                   get_cudnn_fe_dtype(QKV_type),
                   get_cudnn_fe_dtype(dQKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_bwd_impl(
                   batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout,
@@ -3273,6 +3297,8 @@ void fused_attn_fp8_bwd(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
   }
 
   if (workspace_size > 0) {

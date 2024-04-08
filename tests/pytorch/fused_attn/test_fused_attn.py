@@ -909,19 +909,12 @@ def _run_transformer_layer(
 
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    #"fp8_1": ModelConfig(1,  1,  1,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    #"fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
-    #"fp8_3": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    #"fp8_4": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    #"fp8_5": ModelConfig(1,  1,  1,  64,  512,  512, 0.0,  "causal", "no_bias"),
-    #"fp8_6": ModelConfig(4, 16, 16,  64,  512,  512, 0.0,  "causal", "no_bias"),
-    #"fp8_7": ModelConfig(1,  1,  1, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
-    #"fp8_8": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
-    "fp8_9": ModelConfig(1, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
-    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_11": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_13": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),
+    "fp8_9 ": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_11": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
+    "fp8_13": ModelConfig(1, 32,  4, 128, 8192, 8192, 0.0, "no_mask", "no_bias"),
+    "fp8_14": ModelConfig(1, 32,  4, 128, 8192, 8192, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
 qkv_layout_fp8_vs_f16 = ['sbh3d', 'bshd_bshd_bshd', 'sbhd_sbhd_sbhd']
@@ -935,10 +928,16 @@ def _rmse(a, b):
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout):
+@pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
+def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
     config = model_configs_fp8_vs_f16[model]
 
+    if (config.num_heads != config.num_gqa_groups and '3' in qkv_layout):
+        pytest.skip("qkv_layout not applicable for MQA/GQA");
+
+    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     if _NVTE_DEBUG:
+        print()
         print("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
         dtype, config, True, qkv_layout)
@@ -947,13 +946,9 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout):
     fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
         dtype, config, False, qkv_layout)
 
-    tols = dict(atol=5e-1, rtol=5e-1)
-    #tols = dict(atol=5e-2, rtol=5e-2)
-    #tols = dict(atol=5e-3, rtol=5e-3)
-    #if dtype == torch.bfloat16:
-    #    tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    tols = dict(atol=5e-1, rtol=5e-2)
     if _NVTE_DEBUG:
-        print('[test_dpa_fp8_vs_f16] tols:', tols)
+        print('[test_dpa_fp8_vs_f16]: ', tols)
         print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
         print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
@@ -989,6 +984,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
         fp8_dpa=fp8_dpa,
     )
 
+    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
     with fp8_model_init(enabled=fp8_dpa):
         dpa = (
              DotProductAttention(
@@ -1002,7 +998,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
                     tp_group=None,
                     layer_number=1,
                     attention_type="self",
-                    qkv_format="bshd",
+                    qkv_format=qkv_format,
             ).to(dtype=dtype, device="cuda")
         )
 
@@ -1015,7 +1011,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
 
-    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
     dim_to_num = {
         'b'  : config.batch_size,
         'sq' : config.max_seqlen_q,
@@ -1091,7 +1086,7 @@ model_configs_fp8 = {
     "fp8_8": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
 }
 param_types_fp8 = [torch.float16, torch.bfloat16]
-fe_ver = int(os.getenv('NVTE_FUSED_ATTN_FE_VER','1'))
+cudnn_frontend_version = int(os.getenv('NVTE_FUSED_ATTN_FE_VER','1'))
 models_v0 = ['fp8_1', 'fp8_2', 'fp8_5', 'fp8_6']
 models_v1 = ['fp8_3', 'fp8_4', 'fp8_7', 'fp8_8']
 
@@ -1099,58 +1094,41 @@ models_v1 = ['fp8_3', 'fp8_4', 'fp8_7', 'fp8_8']
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
-@pytest.mark.parametrize("model", models_v1 if fe_ver == 1 else models_v0) #model_configs_fp8.keys())
-def test_mha_fp8(dtype, model):
-    """Test FP8 dot product attention
-
-    FusedAttention uses fused_attn_fwd/bwd_qkvpacked from cpp_extensions,
-    and UnfusedDotProductAttention uses plain PyTorch operations in FP16
-    and converts inputs/outputs from/to FP8.
-
-    """
+@pytest.mark.parametrize("model", models_v1 if cudnn_frontend_version == 1 else models_v0)
+def test_custom_mha_fp8_vs_f16(dtype, model):
+    """Test FP8 dot product attention implementations based on cuDNN frontend
+    v0.9 and v1.0+. Each test compares results from a custom implementation of
+    an FP8 MHA module, i.e. Custom_MHA_FP8(), to results from an F16 MHA
+    implementation, i.e. transformer_engine.pytorch.attention.MultiHeadAttention.
+    Both paths take F16 input and output. QKV layout is t3hd or bs3hd"""
 
     config = model_configs_fp8[model]
 
-    # Skip if not supported
-    if (fe_ver == 0) and ((config.head_dim != 64) or (config.attn_mask_type == "causal")):
-        pytest.skip("FusedAttention does not support this model config")
-
-    # Run dot-product attention with different backends
-    fused_attn_fwd, fused_attn_bwd = _run_mha_fp8(
+    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(
         dtype, config, "FusedAttention")
-    unfused_attn_fwd, unfused_attn_bwd = _run_mha_fp8_ref(
-        dtype, config, "UnfusedDotProductAttention")
-        #dtype, config, "FusedAttention")
+    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
+        dtype, config, "UnfusedAttention")
 
     tols = dict(atol=5e-1, rtol=5e-1)
-    #tols = dict(atol=5e-2, rtol=5e-2)
-    #tols = dict(atol=5e-3, rtol=5e-3)
-    #if dtype == torch.bfloat16:
-    #    tols = dict(atol=2.5e-2, rtol=2.5e-2)
-    #torch.save(fused_attn_fwd, 'fused_attn_fwd_'+str(fe_ver)+'.pt')
-    #torch.save(unfused_attn_fwd, 'unfused_attn_fwd_'+str(fe_ver)+'.pt')
-    #torch.save(fused_attn_bwd, 'fused_attn_bwd_'+str(fe_ver)+'.pt')
-    #torch.save(unfused_attn_bwd, 'unfused_attn_bwd_'+str(fe_ver)+'.pt')
     if _NVTE_DEBUG:
-        print('[test_mha_fp8] tols:', tols)
-        print('  fused_attn_fwd min {:.6f} max {:.6f}'.format(
-            fused_attn_fwd.min().item(),fused_attn_fwd.max().item()))
-        print('unfused_attn_fwd min {:.6f} max {:.6f}'.format(
-            unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item()))
-        print('fused vs unfused_attn_fwd RMSE: {:.6f}'.format(
-            _rmse(fused_attn_fwd, unfused_attn_fwd)))
-        print('  fused_attn_bwd min {:.6f} max {:.6f}'.format(
-            fused_attn_bwd.min().item(), fused_attn_bwd.max().item()))
-        print('unfused_attn_bwd min {:.6f} max {:.6f}'.format(
-            unfused_attn_bwd.min().item(), unfused_attn_bwd.max().item()))
-        print('fused vs unfused_attn_bwd RMSE: {:.6f}'.format(
-            _rmse(fused_attn_bwd, unfused_attn_bwd)))
-    torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-    torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+        print('fused_attn_fwd_fp8   min {:.6f} max {:.6f}'.format(
+            fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
+        print('unfused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
+            unfused_attn_fwd_f16.min().item(), unfused_attn_fwd_f16.max().item()))
+        print('fused_attn_fwd_fp8 vs unfused_attn_fwd_f16 RMSE: {:.6f}'.format(
+            _rmse(fused_attn_fwd_fp8, unfused_attn_fwd_f16)))
+        print('fused_attn_bwd_fp8   min {:.6f} max {:.6f}'.format(
+            fused_attn_bwd_fp8.min().item(), fused_attn_bwd_fp8.max().item()))
+        print('unfused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
+            unfused_attn_bwd_f16.min().item(), unfused_attn_bwd_f16.max().item()))
+        print('fused_attn_bwd_fp8 vs unfused_attn_bwd_f16 RMSE: {:.6f}'.format(
+            _rmse(fused_attn_bwd_fp8, unfused_attn_bwd_f16)))
+    torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
+    torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
 
-def _run_mha_fp8(dtype, config, backend):
-    """Run FusedAttention FP8 backend, i.e.
-    fused_attn_fwd/bwd_qkvpacked from cpp_extensions"""
+def _run_custom_mha_fp8(dtype, config, backend):
+    """Run Custom_MHA_FP8 with FP8 FusedAttention backend. Both input and output
+    are in F16. QKV GEMM, DPA, and projection GEMM are calculated in FP8."""
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1160,18 +1138,14 @@ def _run_mha_fp8(dtype, config, backend):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    #inp = 0.1 *  torch.randn(
-    #inp = 0.02 * torch.randn(
-    inp = 0.01 * torch.randn(
-            config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
+    inp = 0.0001 * torch.randint(0, 100,
+            (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim),
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
             dtype=torch.int32, device="cuda")
     cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
 
-    #out_grad = 0.1 * torch.randn(
-    #out_grad = 0.02 * torch.randn(
     out_grad = 0.01 * torch.randn(
             config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim,
             dtype=dtype, device="cuda")
@@ -1185,7 +1159,7 @@ def _run_mha_fp8(dtype, config, backend):
         amax_compute_algo="most_recent",
     )
 
-    mha = MHA_FP8(config).to(dtype=dtype, device="cuda")
+    mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         out = mha(inp, cu_seqlens, config.max_seqlen_q)
         out.backward(out_grad)
@@ -1196,10 +1170,9 @@ def _run_mha_fp8(dtype, config, backend):
             dqkv.view(config.batch_size, config.max_seqlen_q, 3,
             config.num_heads, config.head_dim).contiguous())
 
-def _run_mha_fp8_ref(dtype, config, backend):
-    """Run UnfusedDotProductAttention as a reference, i.e.
-    plain PyTorch implementation in FP16 and inputs/outputs
-    are converted from/to FP8"""
+def _run_ref_mha_f16(dtype, config, backend):
+    """Run reference F16 FusedAttention. Both input and output
+    are in F16. QKV GEMM, DPA, and projection GEMM are also in F16."""
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
@@ -1266,7 +1239,7 @@ META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
 META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
-class _mha_fp8(torch.autograd.Function):
+class _custom_mha_fp8(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -1333,7 +1306,7 @@ class _mha_fp8(torch.autograd.Function):
                 META_QKV, fp8_dtype_forward,
                 tex.DType.kFloat16).view(b, max_s, 3, h, d).contiguous()
         torch.save(qkv_fp16, 'qkv.pt')
-        if fe_ver == 1:
+        if cudnn_frontend_version == 1:
             qkv = qkv.view(b, max_s, 3, h, d) # bs3hd
 
         # FMHA
@@ -1343,9 +1316,9 @@ class _mha_fp8(torch.autograd.Function):
                 max_s,
                 cu_seqlens,
                 cu_seqlens,
-                qkv[:,:,0,:,:] if fe_ver == 1 else qkv[:,0,:,:],
-                qkv[:,:,1,:,:] if fe_ver == 1 else qkv[:,1,:,:],
-                qkv[:,:,2,:,:] if fe_ver == 1 else qkv[:,2,:,:],
+                qkv[:,:,0,:,:] if cudnn_frontend_version == 1 else qkv[:,0,:,:],
+                qkv[:,:,1,:,:] if cudnn_frontend_version == 1 else qkv[:,1,:,:],
+                qkv[:,:,2,:,:] if cudnn_frontend_version == 1 else qkv[:,2,:,:],
                 fp8_dtype_forward,
                 FusedAttnBackend["FP8"],
                 None,
@@ -1358,12 +1331,11 @@ class _mha_fp8(torch.autograd.Function):
                 attn_scale=None,
                 dropout=p_dropout,
                 fast_zero_fill=fast_zero_fill,
-                qkv_layout="bs3hd" if fe_ver == 1 else "t3hd",
+                qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd",
                 attn_bias_type="no_bias",
-                attn_mask_type=mask_type if fe_ver == 1 else "padding",
+                attn_mask_type=mask_type if cudnn_frontend_version == 1 else "padding",
                 rng_gen=None,
                 )
-        #fp8.amax_and_scale_update(fp8_meta, True, True)
 
         M, ZInv, philox_unpacked = aux_ctx_tensors
 
@@ -1421,9 +1393,9 @@ class _mha_fp8(torch.autograd.Function):
                     ctx.max_s,
                     ctx.cu_seqlens,
                     ctx.cu_seqlens,
-                    qkv[:,:,0,:,:] if fe_ver == 1 else qkv[:,0,:,:],
-                    qkv[:,:,1,:,:] if fe_ver == 1 else qkv[:,1,:,:],
-                    qkv[:,:,2,:,:] if fe_ver == 1 else qkv[:,2,:,:],
+                    qkv[:,:,0,:,:] if cudnn_frontend_version == 1 else qkv[:,0,:,:],
+                    qkv[:,:,1,:,:] if cudnn_frontend_version == 1 else qkv[:,1,:,:],
+                    qkv[:,:,2,:,:] if cudnn_frontend_version == 1 else qkv[:,2,:,:],
                     out,
                     proj_dgrad.view_as(out),
                     fp8_dtype_forward,
@@ -1443,11 +1415,11 @@ class _mha_fp8(torch.autograd.Function):
                     attn_scale=None,
                     dropout=ctx.p_dropout,
                     fast_zero_fill=ctx.fast_zero_fill,
-                    qkv_layout="bs3hd" if fe_ver == 1 else "t3hd",
+                    qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd",
                     attn_bias_type="no_bias",
-                    attn_mask_type=ctx.mask_type if fe_ver == 1 else "padding",
+                    attn_mask_type=ctx.mask_type if cudnn_frontend_version == 1 else "padding",
                     )
-            dim = 2 if fe_ver == 1 else 1
+            dim = 2 if cudnn_frontend_version == 1 else 1
             dqkv = torch.Tensor().to(device=dq.device, dtype=dq.dtype)
             dqkv_shape = list(dq.shape)
             dqkv_shape.insert(dim, 3)
@@ -1512,7 +1484,7 @@ class _mha_fp8(torch.autograd.Function):
             None,
             None)
 
-class MHA_FP8(TransformerEngineBaseModule):
+class Custom_MHA_FP8(TransformerEngineBaseModule):
     def __init__(
         self,
         config,
@@ -1553,7 +1525,7 @@ class MHA_FP8(TransformerEngineBaseModule):
         cu_seqlens, max_s,
     ) -> torch.Tensor:
         with self.prepare_forward(inp, None, num_gemms=3) as inp:
-            out = _mha_fp8.apply(
+            out = _custom_mha_fp8.apply(
                 inp,
                 self.qkv_weight,
                 self.qkv_bias,
