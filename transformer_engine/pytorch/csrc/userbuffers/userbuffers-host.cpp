@@ -284,6 +284,9 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->hostflags[i] = 0;
 #if (defined(__arm__) && __ARM_ARCH >= 7) || defined(__aarch64__)
   __asm__ __volatile__("dmb sy" : : : "memory");
+#elif defined(_MSC_VER) && _MSC_VER >= 1310
+  extern "C" void _ReadWriteBarrier();
+#  pragma intrinsic(_ReadWriteBarrier)
 #else
   _mm_mfence();
 #endif
