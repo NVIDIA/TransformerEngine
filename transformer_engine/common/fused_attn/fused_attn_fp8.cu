@@ -1866,12 +1866,12 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             cudaStream_t stream,
             cudnnHandle_t handle) {
     using namespace transformer_engine;
-    bool is_bias = false;
-    //bool is_alibi = false;
+    bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_padding = false;
-    //is_training = true; //false;
+    bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_dropout = (is_training && dropout_probability != 0.0f);
     auto bias_b = b;
     auto bias_h = h;
@@ -2163,12 +2163,13 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             cudaStream_t stream,
             cudnnHandle_t handle) {
     using namespace transformer_engine;
-    bool is_bias = false;
+    bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
     bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_padding = false;
-    bool is_training = true;
-    bool is_dropout = (is_training && dropout_probability != 0.0f);
+    bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_dropout = (dropout_probability != 0.0f);
     auto bias_b = b;
     auto bias_h = h;
 

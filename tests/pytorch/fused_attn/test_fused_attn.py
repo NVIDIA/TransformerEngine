@@ -921,9 +921,10 @@ model_configs_fp8_vs_f16 = {
     "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_11": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "fp8_13": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
-qkv_layout_fp8_vs_f16 = ['sbh3d', 'bshd_bshd_bshd']
+qkv_layout_fp8_vs_f16 = ['sbh3d', 'bshd_bshd_bshd', 'sbhd_sbhd_sbhd']
 
 def _rmse(a, b):
     return math.sqrt(torch.pow((a-b), 2).sum()/a.numel())

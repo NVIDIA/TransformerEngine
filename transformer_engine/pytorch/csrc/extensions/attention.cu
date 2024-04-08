@@ -127,7 +127,9 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero
+        && ((h * d) % block_size == 0)
+        && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       O.fill_(0);
@@ -295,7 +297,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero
+        && ((h * d) % block_size == 0)
+        && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(dQKV, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       dQKV.fill_(0);
@@ -462,7 +466,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero
+        && ((h * d) % block_size == 0)
+        && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       O.fill_(0);
@@ -649,7 +655,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   TensorWrapper te_Q, te_KV, te_O, te_dO, te_S, te_dP, te_dQ, te_dKV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h_q * d)% block_size == 0) && ((h_kv * d)% block_size == 0)) {
+    if (set_zero
+        && ((h_q * d)% block_size == 0)
+        && ((h_kv * d)% block_size == 0)
+        && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       mha_fill(dKV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
@@ -839,7 +848,9 @@ std::vector<at::Tensor> fused_attn_fwd(
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero
+        && ((h * d) % block_size == 0)
+        && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       O.fill_(0);
@@ -1094,7 +1105,8 @@ std::vector<at::Tensor> fused_attn_bwd(
           && ((h_kv * d) % block_size == 0)
           && dQ.is_contiguous()
           && dK.is_contiguous()
-          && dV.is_contiguous()) {
+          && dV.is_contiguous()
+          && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       mha_fill(dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       mha_fill(dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
