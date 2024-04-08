@@ -63,7 +63,7 @@ def get_workspace() -> torch.Tensor:
 
 def initialize_ub(
     shape: list,
-    tp_size: int,
+    tp_group: dist_group_type,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None
@@ -72,7 +72,10 @@ def initialize_ub(
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
-    rank_id = torch.distributed.get_rank()
+    world_rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    local_rank = torch.distributed.get_rank(group=tp_group)
+    local_size = torch.distributed.get_world_size(group=tp_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -103,16 +106,26 @@ def initialize_ub(
                 return method
         raise KeyError(f"Given layer name {name} does not exist.")
 
+    def allgather_callback(send_capsule, recv_capsule, group):
+        send = torch.utils.dlpack.from_dlpack(send_capsule)
+        recv = torch.utils.dlpack.from_dlpack(recv_capsule)
+        pg = None if group == "world" else tp_group
+        torch.distributed.all_gather_into_tensor(recv, send, group=pg)
+
+    def barrier_callback(group):
+        pg = None if group == "world" else tp_group
+        torch.distributed.barrier(group=pg)
+
     def add_ub(
         name: str,
         method: str,
-        is_reduce_scatter: int,
-        num_sm: int = 16,
+        num_splits: int = 4,
         cga_size: int = 2,
+        num_sm: int = 16,
         set_sm_margin: int = 0,
-        num_splits: int = 0,
-        aggregate: int = 0,
         atomic_gemm: int = 0,
+        aggregate: int = 0,
+        is_reduce_scatter: int = 0,
         fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
@@ -156,30 +169,35 @@ def initialize_ub(
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
                     sample_buffer,          # Sample userbuffer
-                    rank_id,                # Rank id
-                    tp_size,                # TP size
-                    num_sm,                 # Number of communication SMs
+                    world_rank,             # Global rank
+                    world_size,             # Global number of processes
+                    local_rank,             # Local rank within the TP group
+                    local_size,             # Size of the TP group
+                    num_splits,
+                    _NUM_MAX_UB_STREAMS,
                     cga_size,               # CGA cluster size
+                    num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
-                    aggregate,              # Aggregate 2X GEMM chunks
-                    _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
-                    is_reduce_scatter,      # overlap with reduce scatter
                     atomic_gemm,            # use a single GEMM with atomic-counters
-                    torch.Tensor(),         # empty tensor to pass to counters
+                    aggregate,              # Aggregate 2X GEMM chunks
+                    is_reduce_scatter       # overlap with reduce scatter
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
                     sample_buffer,          # Sample userbuffer
-                    rank_id,                # Rank id
-                    tp_size,                # TP size
-                    num_sm,                 # Number of communication SMs
+                    world_rank,             # Global rank
+                    world_size,             # Global number of processes
+                    local_rank,             # Local rank within the TP group
+                    local_size,             # Size of the TP group
+                    num_splits,
+                    _NUM_MAX_UB_STREAMS,
                     cga_size,               # CGA cluster size
-                    num_splits,             # Number of communication splits
+                    num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
-                    _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
-                    atomic_gemm,            # use a single GEMM with atomic-counters
-                    torch.Tensor(),         # empty tensor to pass to counters
+                    atomic_gemm             # use a single GEMM with atomic-counters
                 )
+        ub_obj.allgather = allgather_callback
+        ub_obj.barrier = barrier_callback
         _ub_communicators[name] = ub_obj
 
     if ub_cfgs is not None:
@@ -207,14 +225,14 @@ def initialize_ub(
             add_ub(
                 name,
                 method,
-                is_reduce_scatter,
-                num_sm,
-                cga_size,
-                set_sm_margin,
                 num_splits,
-                aggregate,
+                cga_size,
+                num_sm,
+                set_sm_margin,
                 atomic_gemm,
-                fp8_buf,
+                aggregate,
+                is_reduce_scatter,
+                fp8_buf
             )
         else:
             method = get_method(name)

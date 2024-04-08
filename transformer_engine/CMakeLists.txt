@@ -29,9 +29,8 @@ include_directories(${PROJECT_SOURCE_DIR})
 add_subdirectory(common)
 if(NVTE_WITH_USERBUFFERS)
     message(STATUS "userbuffers support enabled")
-    add_subdirectory(pytorch/csrc/userbuffers)
+    add_subdirectory(common/userbuffers)
 endif()
-
 
 option(ENABLE_JAX "Enable JAX in the building workflow." OFF)
 message(STATUS "JAX support: ${ENABLE_JAX}")

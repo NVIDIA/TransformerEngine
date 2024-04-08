@@ -492,14 +492,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-    # userbuffers support
-    if with_userbuffers():
-        if os.getenv("MPI_HOME"):
-            mpi_home = Path(os.getenv("MPI_HOME"))
-            include_dirs.append(mpi_home / "include")
-        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
-        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
-
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]

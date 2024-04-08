@@ -20,23 +20,6 @@
 #include <unistd.h>
 #define MULTICAST_GB_TOTAL 512
 
-static int oob_bcast(void *comm_context, void *buf, int size, int root) {
-  MPI_Bcast(buf, size, MPI_BYTE, root,
-            (reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
-
-static int oob_barrier(void *comm_context) {
-  MPI_Barrier((reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
-
-static int oob_gather(void *comm_context, int root, void *sbuf, void *rbuf, int len) {
-  MPI_Gather(sbuf, len, MPI_BYTE, rbuf, len, MPI_BYTE, root,
-             (reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
-
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
 #define CUDACHECK(cmd)                                                                             \
@@ -95,18 +78,33 @@ int pipe_rank(communicator *comm, int step) {
   return newnode * numlocal + newlocal;
 }
 
-int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
-                                 int tensornodes) {
+int create_communicator_grouped2(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+, int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
   *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
-  int myrank, nranks, cur_dev, ndev;
-  MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
-  MPI_Comm_size(MPI_COMM_WORLD, &nranks);
-  (*comm)->nranks = nranks;
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+  (*comm)->comm_world = EXT_COMM_WORLD;
+  (*comm)->_allgather = ext_allgather;
+  (*comm)->_barrier = ext_barrier;
+#else
+  int myrank, numranks;
+  (*comm)->comm_world = MPI_COMM_WORLD;
+  MPI_Comm_rank((*comm)->comm_world, &myrank);
+  MPI_Comm_size((*comm)->comm_world, &numranks);
+  (*comm)->_allgather = &ub_allgather;
+  (*comm)->_barrier = &ub_barrier;
+#endif
+  (*comm)->nranks = numranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
   (*comm)->launch_mode = NVTE_LAUNCH_GPU | NVTE_LAUNCH_CPU;
 
+  int cur_dev, ndev;
   cudaDeviceProp device_prop;
   CUDACHECK(cudaGetDevice(&cur_dev));
   CUDACHECK(cudaGetDeviceCount(&ndev));
@@ -136,17 +134,20 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   }
 
   int ret = 0;
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+  (*comm)->comm_intra = EXT_COMM_INTRA;
+#else
   // split communicator
   char host_name[MPI_MAX_PROCESSOR_NAME];
   char(*host_names)[MPI_MAX_PROCESSOR_NAME];
-  int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
+  int namelen, bytes, color, mylocal, numlocal;
   int rank = (*comm)->myrank, size = (*comm)->nranks;
   MPI_Get_processor_name(host_name, &namelen);
   bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
   host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
   strcpy(host_names[rank], host_name);  // NOLINT(*)
   for (int n = 0; n < size; n++)
-    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, MPI_COMM_WORLD);
+    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, (*comm)->comm_world);
   qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
 
   color = 0;
@@ -158,11 +159,12 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   }
   free(host_names);
 
-  MPI_Comm_split(MPI_COMM_WORLD, color, rank, &(*comm)->comm_intra);
+  MPI_Comm_split((*comm)->comm_world, color, rank, &(*comm)->comm_intra);
   // find intranode numbers and make internode communicator
   // figure out mylocal
   MPI_Comm_rank((*comm)->comm_intra, &mylocal);
   MPI_Comm_size((*comm)->comm_intra, &numlocal);
+#endif
   (*comm)->nvrank = mylocal;
   (*comm)->nvsize = numlocal;
 
@@ -198,7 +200,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
-      printf("%d: device used %d[%d] ,resetting device to %d\n", rank, cur_dev, ndev, mylocal);
+      printf("%d: device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev, mylocal);
     CUDACHECK(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
@@ -214,31 +216,36 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->ar2_firstgpu = mylocal - mylocal % tensorgpus;
   (*comm)->ar2_nvrank = mylocal - (*comm)->ar2_firstgpu;
   // ar2 has step equal to ar_nvsize
-  int allnodes = nranks / numlocal;
-  int mynode = myrank / numlocal;
+  int allnodes = numranks / numlocal;
+  int nodeid = myrank / numlocal;
   int datanodes = allnodes / pipenodes / tensornodes;
   int pipenodegroup_id = myrank / numlocal / (datanodes * tensornodes);
 
   (*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
 
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+  (*comm)->comm_inter = EXT_COMM_INTER;
+#else
   CUDACHECK(cudaFree(0));
   int datanodegroup_id =
       myrank / numlocal / datanodes;  // data reduction group node belongs, equals 0 for all if both
                                       // pipenodes=1 and tensornodes=1
   // mpi communicator only needed for SHARP which is always
   // allreduce1/data-parallel
-  MPI_Comm_split(MPI_COMM_WORLD, mylocal + numlocal * datanodegroup_id, rank, &(*comm)->comm_inter);
+  MPI_Comm_split((*comm)->comm_world, mylocal + numlocal * datanodegroup_id, rank, &(*comm)->comm_inter);
   // different rails from same group are in different subcommunicators
-
-  MPI_Comm_size((*comm)->comm_inter, &num_nodes);
-  MPI_Comm_rank((*comm)->comm_inter, &my_node);
-  (*comm)->first_node = mynode - my_node;
-  (*comm)->num_nodes = num_nodes;
-  (*comm)->my_node = my_node;
+  int mynode, numnodes;
+  MPI_Comm_size((*comm)->comm_inter, &numnodes);
+  MPI_Comm_rank((*comm)->comm_inter, &mynode);
+#endif
+  (*comm)->first_node = nodeid - mynode;
+  (*comm)->num_nodes = numnodes;
+  (*comm)->my_node = mynode;
 
   (*comm)->num2_nodes = tensornodes;
   (*comm)->my2_node = (mynode / datanodes) % tensornodes;
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
+
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
@@ -268,22 +275,22 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
     ncclResult_t ret = ncclSuccess;
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
-    MPI_Barrier(MPI_COMM_WORLD);
+    (*comm)->_barrier((*comm)->comm_world);
 
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
       CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
                                            CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-        MPI_Barrier((*comm)->comm_intra);
+        (*comm)->_barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
       for (int i = 0; i < (*comm)->ar2_nvrank; i++)
-        MPI_Barrier((*comm)->comm_intra);
+        (*comm)->_barrier((*comm)->comm_intra);
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
-        MPI_Barrier((*comm)->comm_intra);
+        (*comm)->_barrier((*comm)->comm_intra);
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
                                              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
@@ -303,7 +310,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     CUCHECK(cuMemSetAccess(mc_va, mc_maxsize, &accessDesc, 1));
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
-    MPI_Barrier(MPI_COMM_WORLD);
+    (*comm)->_barrier((*comm)->comm_world);
     if (!(*comm)->myrank)
       printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
@@ -342,6 +349,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
   using namespace std;
+
   sched_param param;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -353,7 +361,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   if (getenv("NVTE_UBDEBUG"))
     printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
            "%dx%d PIPE_ID %d/%d\n",
-           myrank, nranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
+           myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
            (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
            (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
            pipegpus * pipenodes);
@@ -361,15 +369,141 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 
   return 0;
 }
-int create_communicator_grouped(communicator **comm, int pipegpus, int pipenodes) {
-  return create_communicator_grouped2(comm, pipegpus, pipenodes, 1, 1);
+int create_communicator_grouped(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+, int pipegpus, int pipenodes) {
+  return create_communicator_grouped2(comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+  , myrank, numranks,mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+#endif
+  , pipegpus, pipenodes, 1, 1);
 }
 
-int create_communicator(communicator **comm) {
-  return create_communicator_grouped2(comm, 1, 1, 1, 1);
+int create_communicator(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+) {
+  return create_communicator_grouped2(comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+  , myrank, numranks,mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+#endif
+  , 1, 1, 1, 1);
 }
 
 void destroy_communicator(communicator *comm) {
+}
+
+void alloc_multicast_buffer(void **gpubuff, size_t bytes, communicator *comm) {
+  int nranks = comm->nvsize;  // total GPUs in NVLINK domain
+  int myrank = comm->nvrank;
+  void **remptrs = reinterpret_cast<void **>(malloc(nranks * sizeof(void *)));
+
+  int hndl = comm->free_region;
+  comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
+  size_t aligned_size = bytes;
+  comm->memflags[hndl] = 0;
+
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = comm->mydev;
+  prop.requestedHandleTypes =
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;  // CU_MEM_HANDLE_TYPE_FABRIC;
+
+  size_t granularity = 0;
+  CUCHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+  // MPI_Allreduce MAX of granularity check
+  aligned_size = (bytes + granularity - 1) / granularity * granularity;
+
+  if (comm->use_mc) {
+    CUmulticastObjectProp mcProp = {};
+    mcProp.numDevices = nranks;
+    mcProp.size = aligned_size;
+    mcProp.handleTypes = prop.requestedHandleTypes;
+    CUCHECK(cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
+    aligned_size = (aligned_size + granularity - 1) / granularity * granularity;
+  }
+
+  prop.location.id = comm->mydev;
+  comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
+      malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
+  CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
+
+  int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
+  CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
+                                        CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+
+  volatile uint32_t abortFlag = 0;
+  struct ncclIpcSocket ipcSock = {0};
+  uint64_t opId = 0xdeadcafebeef;
+  ncclResult_t ret = ncclSuccess;
+
+  NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
+  for (int p = 1; p < nranks; p++) {
+    comm->_barrier(comm->comm_intra);
+    NCCLCHECKGOTO(
+        ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
+        error);
+    NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
+                  error);
+  }
+error:
+  NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+
+  for (int p = 0; p < nranks; p++) {
+    if (p != myrank)
+      CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
+                                              reinterpret_cast<void *>(peerfd[p]),
+                                              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+    close(peerfd[p]);
+  }
+  CUdeviceptr ptr;
+  CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
+  comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
+  CUmemAccessDesc accessDesc = {};
+  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  accessDesc.location.id = comm->mydev;
+
+  for (int i = 0; i < nranks; i++) {
+    CUCHECK(cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
+    remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
+    if (i == comm->nvrank) {
+      if (hndl)
+        *gpubuff = remptrs[i];
+      else
+        comm->gpu_ptrs = remptrs[i];
+    }
+    comm->peer_ptr[hndl][i] = remptrs[i];
+  }
+  CUCHECK(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
+
+  if (hndl == 0)
+    CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
+  CUDACHECK(
+      cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
+                  remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
+  free(remptrs);
+  free(peerfd);
+  comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
+
+  if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
+    CUCHECK(cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
+                                0 /*memOffset*/, aligned_size, 0));
+    comm->memflags[hndl] |= UB_MEM_MC_CREATED;
+    comm->mc_ptr[hndl] = comm->mc_baseptr + comm->mc_offset;
+    comm->mc_offset += aligned_size;
+  } else if (!comm->myrank) {
+    printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,
+            aligned_size / 1024 / 1024);
+  }
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
@@ -479,7 +613,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,
              aligned_size / 1024 / 1024);
     }
-
   } else {
     assert(comm->nvsize <= 8);
     cudaIpcMemHandle_t *memhndl =
@@ -487,8 +620,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
 
-    MPI_Allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl,
-                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, comm->comm_intra);
+    comm->_allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t),
+                     memhndl, sizeof(cudaIpcMemHandle_t) * comm->nvsize,
+                     comm->comm_intra);
 
     for (int i = 0; i < comm->nvsize; i++)
       if (i != comm->nvrank)

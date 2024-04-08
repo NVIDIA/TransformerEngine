@@ -7,12 +7,32 @@
 #ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
-#include <cuda.h>
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+typedef char *ExtComm;
+const static ExtComm EXT_COMM_WORLD = "world";
+const static ExtComm EXT_COMM_INTRA = "intra";
+const static ExtComm EXT_COMM_INTER = "inter";
+#else
 #include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
+
+typedef MPI_Comm ExtComm;
+
+void ub_allgather(void *global, void *local, size_t bytes, ExtComm comm) {
+  MPI_Allgather(local, bytes, MPI_BYTE, global, bytes, MPI_BYTE, c);
+};
+
+void ub_barrier(ExtComm c) {
+  MPI_Barrier(c);
+};
+
+#endif
+
+#include <cuda.h>
 #include "cuda_runtime.h"
 #include <pthread.h>
 #include <chrono>
 #include <stdexcept>
+#include <functional>
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
@@ -130,9 +150,17 @@ struct communicator {
   int padding2[15];
   volatile int tail;
 
+  // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
+  std::function<void(void*, size_t, void*, size_t, ExtComm)> _allgather;
+  std::function<void(ExtComm)> _barrier;
+
+  ExtComm comm_world,
+          comm_inter,       // reduction group communicator (subset of the nodes) along GPU rail
+          comm_intra;       // full intranode (all ndev GPUS)
+#ifndef UBUF_EXTERNAL_BOOTSTRAP
   MPI_Request mpihndl[NVTE_MAX_SHARP];
-  MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
-      comm_intra;       // full intranode (all ndev GPUS)
+#endif
+
   int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
@@ -142,12 +170,29 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
-int create_communicator(communicator **comm);
+int create_communicator(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+);
 /*  creates communicator, allocates all internal buffers if necessary */
 
-int create_communicator_grouped(communicator **comm, int pipegpus, int pipenodes);
-int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
-                                 int tensornodes);
+int create_communicator_grouped(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+, int pipegpus, int pipenodes);
+int create_communicator_grouped2(communicator **comm
+#ifdef UBUF_EXTERNAL_BOOTSTRAP
+, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(ExtComm)> ext_barrier
+#endif
+, int pipegpus, int pipenodes, int tensorgpus,  int tensornodes);
 /*  creates communicator with
     allreduce1 to happen in datagpus x datanodes groups,
     allreduce2 to happen in tensorgpus x tensor nodes,
@@ -166,6 +211,8 @@ int pipe_rank(communicator *comm,
               int step);  // helper function to help walk across allreduce1 x allreduce2 groups
                           // data-parallel and tensor-parallel position within data and tensor
                           // groups would be preserved
+
+void alloc_multicast_buffer(void **gpubuff, size_t bytes, communicator *comm);
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm,
                                     bool alloc = false);
@@ -273,6 +320,10 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
 // void unregister_user_buffer(int handler);
 
 void destroy_communicator(communicator *comm);
+
+template <typename in_type, typename out_type>
+void reduce_full_precision(void *input, void *output, int num_inputs,
+                           int input_size, cudaStream_t stream);
 
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,

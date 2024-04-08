@@ -11,8 +11,12 @@
 #ifndef TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 #define TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 
+#include <cassert>
+#include <numeric>
 #include <stddef.h>
 #include <cuda_runtime_api.h>
+
+#include "../common.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +45,15 @@ struct NVTEShape {
   const size_t *data;
   /*! \brief Number of dimensions. */
   size_t ndim;
+
+  std::vector<size_t> to_vector() {
+    return std::vector<size_t>{data, data+ndim};
+  }
+
+  void from_vector(const std::vector<size_t> &shape) {
+    ndim = shape.size();
+    data = shape.data();
+  }
 };
 
 /*! \brief TE Tensor type
@@ -317,6 +330,54 @@ class TensorWrapper {
   float *scale_inv() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_scale_inv(tensor_);
+  }
+
+  /*! \brief Get the size of this TensorWrapper in the given dimension.
+   *
+   *  \return Size of this TensorWrapper in given dimension.
+   */
+  size_t size(size_t dim) const {
+    if (tensor_ == nullptr) return 0;
+    auto shape_ = shape();
+    assert(dim < shape_.ndim);
+    return shape_.data[dim];
+  }
+
+  /*! \brief Get the number of dimensions for this TensorWrapper.
+   *
+   *  \return Number of dimensions for this TensorWrapper.
+   */
+  size_t ndim() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return shape().ndim;
+  }
+
+  /*! \brief Get the number of elements in the tensor.
+   *
+   *  \return Number of elements in the tensor.
+   */
+  size_t numel() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    auto shape_ = shape();
+    return std::reduce(shape_.data, shape_.data+shape_.ndim, (size_t)1, std::multiplies<size_t>{});
+  }
+
+  /*! \brief Get the tensor's element size in bytes.
+   *
+   *  \return Element size in bytes.
+   */
+  size_t element_size() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return typeToSize(dtype());
+  }
+
+  /*! \brief Get the tensor's total size in bytes.
+   *
+   *  \return Total tensor size in bytes.
+   */
+  size_t bytes() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return numel() * element_size();
   }
 
  private:
