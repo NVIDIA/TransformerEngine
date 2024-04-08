@@ -837,7 +837,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   std::vector<size_t> k_shape{k_sizes.begin(), k_sizes.end()};
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
-  
+
   // create output tensor O
   auto O = torch::empty_like(Q);
 

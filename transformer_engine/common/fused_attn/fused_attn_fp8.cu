@@ -1848,7 +1848,8 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
 }
 
 // fused attention FWD FP8 with FE 1.0+
-void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
+void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg,
+            int64_t s_q, int64_t s_kv, int64_t d,
             bool is_training, float scaling_factor,
             float dropout_probability, NVTE_QKV_Layout layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -1877,7 +1878,8 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
     auto bias_h = h;
     NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
     NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
-    NVTE_CHECK(~is_padding, "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_padding,
+        "FP8 fused attention does not support padding/padding_causal mask yet!");
     NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
 
     try {
@@ -2036,7 +2038,7 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
             amax_s->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
 
             if (is_training) {
-                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)//;
+                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
                         .set_dim({b, h, s_q, 1})
                         .set_stride({h * s_q, s_q, 1, 1});
             }
@@ -2123,7 +2125,8 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
         //     constexpr size_t nthreads_per_block = 128;
         //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
         //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ)
+        //         + b * sizeof(int32_t);
         //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
         //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
         //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
@@ -2144,7 +2147,8 @@ void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
 }
 
 // fused attention BWD FP8 with FE 1.0+
-void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
+void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg,
+            int64_t s_q, int64_t s_kv, int64_t d,
             float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
             NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             void* devPtrQ, void* devPtrK, void* devPtrV,
@@ -2178,7 +2182,8 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
     auto bias_h = h;
     NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
     NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
-    NVTE_CHECK(~is_padding, "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_padding,
+        "FP8 fused attention does not support padding/padding_causal mask yet!");
     NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
 
     try {
@@ -2248,7 +2253,8 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
 
             std::shared_ptr<fe::graph::Tensor_attributes> q, k, v, o, dO, stats, attn_scale;
             std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
-            std::shared_ptr<fe::graph::Tensor_attributes> descale_s, descale_o, descale_dP, descale_dO;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_s, descale_o;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_dP, descale_dO;
             std::shared_ptr<fe::graph::Tensor_attributes> scale_s, scale_dP;
             std::shared_ptr<fe::graph::Tensor_attributes> scale_dQ, scale_dK, scale_dV;
             std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
@@ -2525,7 +2531,8 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
         //     constexpr size_t nthreads_per_block = 128;
         //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
         //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ)
+        //         + b * sizeof(int32_t);
         //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
         //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
         //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
@@ -2544,7 +2551,6 @@ void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg, int64_t s_q, i
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
     }
-
 }
 
 #endif
