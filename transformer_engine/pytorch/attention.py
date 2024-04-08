@@ -819,7 +819,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dq_, dk_, dv_, _ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             cu_seqlens_q, cu_seqlens_k,
-                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype], TE_DType[kv.dtype],
                             [softmax_lse, ctx.rng_states[cp_size-i-1]],
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
@@ -859,7 +859,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dq_, dk_, dv_, _ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                             cu_seqlens_q, cu_seqlens_k//2,
-                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype], TE_DType[kv.dtype],
                             [softmax_lse, ctx.rng_states[cp_size-i-1]],
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
@@ -899,7 +899,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dq_, dk_, dv_, _ = fused_attn_bwd(
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             cu_seqlens_q//2, cu_seqlens_k,
-                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype], TE_DType[kv.dtype],
                             [softmax_lse_, ctx.rng_states[cp_size-i-1]],
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
@@ -932,7 +932,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dq_, dk_, dv_, _ = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         cu_seqlens_q, cu_seqlens_k,
-                        q, kv[0], kv[1], out, dout, TE_DType[q.dtype],
+                        q, kv[0], kv[1], out, dout, TE_DType[q.dtype], TE_DType[kv.dtype],
                         [softmax_lse, ctx.rng_states[cp_size-i-1]],
                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                         attn_scale=ctx.softmax_scale,
