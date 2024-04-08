@@ -670,7 +670,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
 
 class LayerNormMLP(TransformerEngineBase):
-    r"""
+    """
     Applies layer normalization on the input followed by the MLP module,
     consisting of 2 successive linear transformations, separated by given activations.
 
@@ -834,28 +834,6 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        """ def is_gated(acts): """
-        """     gated_act_pool = [('gelu', 'linear'), ('linear', 'gelu'), """
-        """                     ('silu', 'linear'), ('linear', 'silu')] """
-        """"""
-        """     normalize_acts = [] """
-        """     for act in acts: """
-        """         if not isinstance(act, str): """
-        """             return False """
-        """         normalize_acts.append(act.lower()) """
-        """     return tuple(normalize_acts) in gated_act_pool """
-        """"""
-        """ def is_not_gated(acts): """
-        """     act_pool = [('gelu',), """
-        """                 ('silu',)] """
-        """"""
-        """     normalize_acts = [] """
-        """     for act in acts: """
-        """         if not isinstance(act, str): """
-        """             return False """
-        """         normalize_acts.append(act.lower()) """
-        """     return tuple(normalize_acts) in act_pool """
-
         gated_act_pool = [('gelu', 'linear'),
                           ('linear', 'silu')] # Make sure this is sorted in alphabet order
         act_pool = [('gelu',),
@@ -865,17 +843,14 @@ class LayerNormMLP(TransformerEngineBase):
             if not isinstance(act, str):
                 return False
             normalize_acts.append(act.lower())
-        normalize_acts = tuple(normalize_acts.sort())
+        normalize_acts = tuple(sorted(normalize_acts))
         is_gated = normalize_acts in gated_act_pool
-        is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
+        is_implemented_in_fused_layernorm = normalize_acts in (gated_act_pool + act_pool)
 
 
-        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented\
-                and (self.intermediate_dropout_rate < 1e-3)
-
-        """ use_fused_ln_gelu_mlp = fuse_layernorm \ """
-        """     and self.use_bias and is_gelu(self.activations) \ """
-        """         and (self.intermediate_dropout_rate < 1e-3) """
+        use_fused_layernorm_mlp = fuse_layernorm and is_implemented_in_fused_layernorm\
+                and (self.intermediate_dropout_rate < 1e-3) \
+                and ((is_gated and not self.use_bias) or (not is_gated and self.use_bias))
 
         # LayerNorm
         if self.enable_layernorm:
@@ -966,7 +941,7 @@ class LayerNormMLP(TransformerEngineBase):
         if use_fused_layernorm_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            bias_1_shape = intermediate_dim if self.use_bias else 0 
+            bias_1_shape = intermediate_dim if self.use_bias else 0
             bias_1 = nn_partitioning.param_with_axes('wi_bias',
                                                      self.bias_init,
                                                      bias_1_shape,
@@ -1033,7 +1008,7 @@ class LayerNormMLP(TransformerEngineBase):
             x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
-            if is_act_implemented:
+            if is_implemented_in_fused_layernorm:
                 z = activation_lu(x, normalize_acts)
             else:
                 x = jnp.split(x, num_activations, axis=-2)

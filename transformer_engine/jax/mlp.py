@@ -39,31 +39,30 @@ activation_lu_fp8_dict = {
 }
 
 
-def activation_lu(x: jnp.ndarray, activation_type: str):
+def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
     """
     Activation Unit
     """
-    if activation_type == "geglu":
+    if 'linear' in activation_type:
         assert x.shape[-2] == 2 # Linear + GeLU
-
     output = _activation_lu(x, activation_type)
     return output
 
 
-@partial(jax.custom_vjp)
-def _activation_lu(x: jnp.ndarray, activation_type):
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
 
-    output, _ = _activation_lu_fwd_rule(x, activation_type)
+    _output, _ = _activation_lu_fwd_rule(x, activation_type)
 
-    return output
+    return _output
 
 
 def _activation_lu_fwd_rule(x, activation_type):
-    output = activation_lu_dict[activation_type]["fwd"](x)
-    return output, (x,)
+    fwd_output = activation_lu_dict[activation_type]["fwd"](x)
+    return fwd_output, (x,)
 
 
-def _activation_lu_bwd_rule(ctx, g, activation_type):
+def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
     assert x.dtype == g.dtype
 
@@ -131,7 +130,8 @@ def _fused_layernorm_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarr
                             bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
                             epsilon: float, layernorm_input_axes: Tuple[str, ...],
                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
-                            ffn1_ckpt_name: str, ffn2_ckpt_name: str, activation_type: str,
+                            ffn1_ckpt_name: str, ffn2_ckpt_name: str, 
+                            activation_type: Sequence[Union[str, Callable]],
                             use_bias: bool):
     output, _ = _fused_layernorm_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
                                                  fp8_max, amax, scale, scale_inv, fwd_dtype,
