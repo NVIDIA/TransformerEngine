@@ -129,7 +129,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->active_req[i].active = -1;
 
   int device_clock    = 0;
-  int sec_timeout     = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110; // 110 sec wait time by default
+  // 110 sec wait time by default
+  int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
   CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {

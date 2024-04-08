@@ -66,7 +66,9 @@
 })
 
 // Printf to provide enough information so it is easier to attribute failures
-#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__), __FUNCTION__, __LINE__, __VA_ARGS__)
+#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__),              \
+                                                                  __FUNCTION__,                    \
+                                                                  __LINE__, __VA_ARGS__)
 
 // Report and error on timeout
 #define CHECK_TIMEOUT(t, timeout) ((clock64() - (t)) > timeout)
@@ -97,7 +99,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allreduce reduce-scatter: SM %d [%d]: expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id, *flag);
+        UB_PRINT("[%d] Allreduce reduce-scatter: SM %d [%d]: expecting %d got %d", myrank,
+                 blockIdx.x, threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -150,8 +153,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allreduce Gather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Allreduce Gather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -185,8 +188,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d ]Allreduce reduce-scatter:SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d ]Allreduce reduce-scatter:SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -234,8 +237,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allreduce gather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Allreduce gather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -276,7 +279,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr_rs(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
+                                           void **commbuff, const int handleridx,
+                                           const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -296,8 +300,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -372,8 +376,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -446,8 +450,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (clock64() - s > TIMEOUT) {
-        UB_PRINT("Reduce-scatter: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("Reduce-scatter: SM %d [%d]:expecting %d got %d", blockIdx.x, threadIdx.x,
+                  reduce_id, *flag);
         break;
       }
     }
@@ -550,9 +554,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
        if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
-        break;
+         UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
+                 threadIdx.x, reduce_id, *flag);
+         break;
       }
     }
   }
@@ -637,7 +641,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT("[%d] Reduce-scatter: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x,
-               threadIdx.x, reduce_id, *flag);
+                  threadIdx.x, reduce_id, *flag);
         break;
       }
     }
@@ -767,9 +771,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
        if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
-        break;
+         UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x,
+                  reduce_id, *flag);
+         break;
       }
     }
   }
@@ -810,7 +814,8 @@ template <int RANKS, typename fp8type>
 __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8(
     const int op, const int flagoffset, const int firstrank, const int myrank, const int gpustep,
     const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
-    void **commbuff, const int handleridx, void *outbuf, float *scale, const unsigned long long ub_timeout) {
+    void **commbuff, const int handleridx, void *outbuf, float *scale,
+    const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1255,7 +1260,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr_ag(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
+                                           void **commbuff, const int handleridx,
+                                           const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1318,8 +1324,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x,
+                  reduce_id, *flag);
         break;
       }
     }
@@ -1331,7 +1337,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rw_ag(const int op, const int flagoffset, const int firstrank,
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
-                                           void **commbuff, const int handleridx, const unsigned long long ub_timeout) {
+                                           void **commbuff, const int handleridx,
+                                           const unsigned long long ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1415,8 +1422,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x, reduce_id,
-               *flag);
+        UB_PRINT("[%d] Allgather: SM %d [%d]:expecting %d got %d", myrank, blockIdx.x, threadIdx.x,
+                 reduce_id, *flag);
         break;
       }
     }
@@ -1988,8 +1995,9 @@ __global__ void kuserbuffers_proxysend(int *id, int *hostflag) {
 __global__ void kuserbuffers_dummy(void) {}
 
 __global__ void __launch_bounds__(MAX_THREADS)
-    kuserbuffers_pullrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr, int4 *srcptr,
-                          int4 *dstptr, const int lines, unsigned long long ub_timeout) {
+    kuserbuffers_pullrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr,
+                          int4 *srcptr, int4 *dstptr, const int lines,
+                          unsigned long long ub_timeout) {
 #define UNROLLCOPY 8
   const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
   const int end_elem = lines;
@@ -2002,8 +2010,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pullrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d, observed %d",
-                  myrank, peer, nvrank, nvpeer, signal_id, *flag);
+        UB_PRINT("pullrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expected %d,"
+                 " observed %d", myrank, peer, nvrank, nvpeer, signal_id, *flag);
         break;
       }
     }
@@ -2062,10 +2070,12 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }
 
-#define CHECK_CE(ce_start, ce_end) ((ce_start) != nullptr && (ce_end) !=nullptr && *(ce_start) != *(ce_end))
+#define CHECK_CE(ce_start, ce_end) ((ce_start) != nullptr && (ce_end) != nullptr && \
+                                    *(ce_start) != *(ce_end))
 
-__global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr, int adder,
-                                      unsigned long long ub_timeout, int *ce_start_ptr, int *ce_end_ptr) {
+__global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id,
+                                      int *flagptr, int adder, unsigned long long ub_timeout,
+                                      int *ce_start_ptr, int *ce_end_ptr) {
   const int signal_id = (*recv_id) + adder;
   *recv_id = signal_id;
   volatile int *flag = (volatile int *)flagptr;
@@ -2074,10 +2084,11 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpe
   clock_t s = clock64();
   while (CHECK_IDS(*flag, signal_id)) {
     if (CHECK_TIMEOUT(s, ub_timeout)) {
-      UB_PRINT("pushrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d] : expected %d, observed %d",
-                myrank, peer, nvrank, nvpeer, signal_id, *flag);
+      UB_PRINT("pushrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d] : "
+               "expected %d, observed %d", myrank, peer, nvrank, nvpeer, signal_id, *flag);
       if (CHECK_CE(ce_start_ptr, ce_end_ptr))
-          UB_PRINT("pushrecv: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n", *ce_start_ptr, *ce_end_ptr);
+        UB_PRINT("pushrecv: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n",
+                 *ce_start_ptr, *ce_end_ptr);
       return;
     }
   }
@@ -2129,10 +2140,12 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pushsendrecv [sending peer:%d receiving peer:%d][nvrank(GPU) sending peer: %d receiving peer: %d]: expected %d, observed %d",
-                  send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag);
+        UB_PRINT("pushsendrecv [sending peer:%d receiving peer:%d][nvrank(GPU) sending peer: %d"
+                 " receiving peer: %d]: expected %d, observed %d",
+                 send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag);
         if (CHECK_CE(ce_start_ptr, ce_end_ptr))
-            UB_PRINT("pushrecv: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n", *ce_start_ptr, *ce_end_ptr);
+          UB_PRINT("pushrecv: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n",
+                   *ce_start_ptr, *ce_end_ptr);
         return;
       }
     }
@@ -2142,8 +2155,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv_atomic(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                                      const int lines, int send_peer, int recv_peer, int *recv_id,
-                                     int *recv_flagptr, int adder, void *counters, unsigned long long ub_timeout,
-                                     int nv_send, int nv_recv,  int *ce_start_ptr, int *ce_end_ptr) {
+                                     int *recv_flagptr, int adder, void *counters,
+                                     unsigned long long ub_timeout, int nv_send, int nv_recv,
+                                     int *ce_start_ptr, int *ce_end_ptr) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
     const int end_elem = lines;
@@ -2183,10 +2197,12 @@ __global__ void __launch_bounds__(MAX_THREADS)
     clock_t s = clock64();
     while (CHECK_IDS(*flag, signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
-        UB_PRINT("pushsendrecv atomic [sending peer:%d receiving peer:%d][nvrank(GPU) sending peer: %d receiving peer: %d]: expected %d, observed %d",
-                  send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag); /*return;*/
+        UB_PRINT("pushsendrecv atomic [sending peer:%d receiving peer:%d][nvrank(GPU) sending peer:"
+                 " %d receiving peer: %d]: expected %d, observed %d",
+                 send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag); /*return;*/
         if (CHECK_CE(ce_start_ptr, ce_end_ptr))
-          UB_PRINT("pushsendrecv atomic: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n", *ce_start_ptr, *ce_end_ptr);
+          UB_PRINT("pushsendrecv atomic: CE deadlock DETECTED: %d (ce_start) != %d (ce_end)\n",
+                   *ce_start_ptr, *ce_end_ptr);
       }
     }
 
@@ -2200,11 +2216,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv_multiatomic(int *send_id, int *send_flagptr, int4 *srcptr,
-                                          int4 *dstptr, const int lines, int send_peer, int recv_peer,
-                                          int *recv_id, int *recv_flagptr, int adder,
+                                          int4 *dstptr, const int lines, int send_peer,
+                                          int recv_peer, int *recv_id, int *recv_flagptr, int adder,
                                           void *counters, int nchunks, int send_stride,
-                                          int recv_stride, bool shuffle, unsigned long long ub_timeout,
-                                          int nv_send, int nv_recv) {
+                                          int recv_stride, bool shuffle,
+                                          unsigned long long ub_timeout, int nv_send, int nv_recv) {
   for (int chunk_i = 0; chunk_i < nchunks - 1; chunk_i++) {
     int send_chunk_id = shuffle ? chunk_i : (nchunks + send_peer - chunk_i) % nchunks;
     int recv_chunk_id = shuffle ? chunk_i + 1 : (nchunks + send_peer - chunk_i - 1) % nchunks;
@@ -2252,8 +2268,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
       clock_t s = clock64();
       while (CHECK_IDS(*flag, signal_id)) {
         if (CHECK_TIMEOUT(s, ub_timeout)) {
-          UB_PRINT("pushsendrecv multiatomic [sending peer:%d receiving peer:%d][nvrank(GPU) sending peer: %d receiving peer: %d]: expected %d, observed %d",
-                    send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag); /*return;*/
+          UB_PRINT("pushsendrecv multiatomic [sending peer:%d receiving peer:%d][nvrank(GPU)"
+                   " sending peer: %d receiving peer: %d]: expected %d, observed %d",
+                   send_peer, recv_peer, nv_send, nv_recv, signal_id, *flag); /*return;*/
           // CE mode is not supported for multi-atomic, so there is no need to check for a deadlock
           return;
         }
@@ -2294,17 +2311,23 @@ __global__ void __launch_bounds__(MAX_THREADS)
 // 0 - Send index counter
 // 1 - CE start index counter
 // 2 - CE end index counter
-#define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index) \
-                             (((char *)((comm)->peer_ptr[0][(peerlocal)])) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
-                             (comm)->myrank * NVTE_MAX_REGIONS + (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS ) * sizeof(int)))
+#define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index)                                       \
+  ((reinterpret_cast<char *>((comm)->peer_ptr[0][(peerlocal)])) +                                 \
+   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV +                                                    \
+     (comm)->myrank * NVTE_MAX_REGIONS + (dsth) +                                                 \
+     (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                              \
+    sizeof(int)))
 
 // Index corresponds to the type of flag:
 // 0 - Receive index counter
 // 1 - CE start index counter
 // 2 - CE end index counter
-#define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index) \
-                             (((char *)((comm)->mem_ptr[0])) + ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + \
-                             (recv_peer) * NVTE_MAX_REGIONS + (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS ) * sizeof(int)))
+#define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index)                                       \
+  ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                               \
+   ((NVTE_REG0_OFFSET(comm) +                                                                     \
+     NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS +                                            \
+     (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
+    sizeof(int)))
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
@@ -2397,8 +2420,12 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   unsigned long long arg11 = comm->ub_timeout;
   int arg12 = send_peerlocal;
   int arg13 = recv_peerlocal;
-  int *arg14 = reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1) : nullptr);
-  int *arg15 = reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2) : nullptr);
+  int *arg14 = reinterpret_cast<int *>(comm->use_ce ?
+                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1):
+                                       nullptr);
+  int *arg15 = reinterpret_cast<int *>(comm->use_ce ?
+                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2):
+                                       nullptr);
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
@@ -2448,8 +2475,12 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   int arg12 = comm->ub_timeout;
   int arg13 = send_peerlocal;
   int arg14 = recv_peerlocal;
-  int *arg15 = reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1) : nullptr);
-  int *arg16 = reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2) : nullptr);
+  int *arg15 = reinterpret_cast<int *>(comm->use_ce ?
+                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1) :
+                                       nullptr);
+  int *arg16 = reinterpret_cast<int *>(comm->use_ce ?
+                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2) :
+                                       nullptr);
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                         reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
@@ -2522,7 +2553,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     void *srcptr = ((char *)comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
-        comm->myrank, peer, comm->nvrank, peerlocal, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
+        comm->myrank, peer, comm->nvrank,
+        peerlocal, &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]),
         reinterpret_cast<int *>(flagptr), reinterpret_cast<int4 *>(srcptr),
         reinterpret_cast<int4 *>(dstptr), signalonly ? 0 : bytes / 16,
         comm->ub_timeout);
@@ -2533,11 +2565,14 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
-        comm->myrank, peer, comm->nvrank, peerlocal, &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
+        comm->myrank, peer, comm->nvrank, peerlocal,
+        &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
         reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms,
         comm->ub_timeout,
-        reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1) : nullptr),
-        reinterpret_cast<int *>(comm->use_ce ? GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2) : nullptr));
+        reinterpret_cast<int *>(comm->use_ce ?
+                                GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1) : nullptr),
+        reinterpret_cast<int *>(comm->use_ce ?
+                                GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2) : nullptr));
   }
 }
 
