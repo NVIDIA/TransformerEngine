@@ -4,7 +4,7 @@
 
 import functools
 import operator
-from typing import Callable, Sequence, Tuple, Union
+from typing import Callable, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -174,14 +174,11 @@ class TestFP8Dot:
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
 
-
-#    @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
-#                                       (16384, 1024, 1024)])
-
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('m, n, k, activation_type, use_bias',
-                             [(256, 256, 512, ('gelu', ), True),
-                              (256, 256, 512, ('gelu', 'linear'), False) ])
+    @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
+                                       (16384, 1024, 1024)])
+    @pytest.mark.parametrize('activation_type, use_bias', [(('gelu', ), True),
+                                                           (('gelu', 'linear'), False) ])
     def test_grad_fused_layernorm_fp8_mlp(self, m, n, k, activation_type: Sequence[Union[str, Callable]], use_bias: bool):
         """  N/a """
         key = jax.random.PRNGKey(0)
@@ -259,7 +256,7 @@ class TestFP8Dot:
                     acts.append(x_i)
                 x = functools.reduce(operator.mul, acts)
             else:
-                x = activation_dict[activation_type](linear_1_out) #TODO: use the _convert_to_activation_function !?
+                x = activation_dict[activation_type](linear_1_out)
 
             x = jnp.asarray(jnp.squeeze(x, axis=-2), jnp.bfloat16)
 

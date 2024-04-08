@@ -61,6 +61,50 @@ void nvte_dgeglu(const NVTETensor grad,
                  NVTETensor output,
                  cudaStream_t stream);
 
+/*! \brief Compute SiLU activation of the input.
+ *
+ *  \param[in]     input     Input tensor for GELU activation.
+ *  \param[in,out] output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_silu(const NVTETensor input,
+               NVTETensor output,
+               cudaStream_t stream);
+
+/*! \brief Compute SiLU activation gradient.
+ *
+ *  \param[in]     grad      Incoming gradient.
+ *  \param[in]     input     Input tensor for SiLU activation.
+ *  \param[in,out] output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dsilu(const NVTETensor grad,
+                const NVTETensor input,
+                NVTETensor output,
+                cudaStream_t stream);
+
+/*! \brief Compute SwiGLU of the input.
+ *
+ *  \param[in]     input     Input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Output tensor of shape [N, H].
+ *                           It computes SiLU(input[N, :H]) x input[N, H:]
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_swiglu(const NVTETensor input,
+                NVTETensor output,
+                cudaStream_t stream);
+
+/*! \brief Compute SwiGLU gradient.
+ *  \param[in]     grad      Incoming gradient of shape [N, H].
+ *  \param[in]     input     Forward input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Outgoing gradient of shape [N, H * 2].
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dswiglu(const NVTETensor grad,
+                 const NVTETensor input,
+                 NVTETensor output,
+                 cudaStream_t stream);
+
 /*! \brief Compute RELU activation of the input.
  *
  *  \param[in]     input     Input tensor for RELU activation.

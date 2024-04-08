@@ -13,11 +13,62 @@
 
 namespace transformer_engine {
 
+void silu(const Tensor &input,
+          Tensor *output,
+          cudaStream_t stream) {
+  CheckInputTensor(input, "silu_input");
+  CheckOutputTensor(*output, "silu_output");
+  NVTE_CHECK(input.data.shape == output->data.shape, "Input and output shapes must match.");
+  const size_t tot_elts = product(input.data.shape);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
+      constexpr int nvec = 32 / sizeof(IType);
+      VectorizedUnaryKernelLauncher<nvec, Empty, swish<fp32, fp32> >(
+        reinterpret_cast<const IType*>(input.data.dptr),
+        reinterpret_cast<OType*>(output->data.dptr),
+        reinterpret_cast<const fp32*>(output->scale.dptr),
+        reinterpret_cast<fp32*>(output->amax.dptr),
+        tot_elts,
+        Empty(),
+        stream);
+    );  // NOLINT(*)
+  );  // NOLINT(*)
+}
+
+void dsilu(const Tensor &grad,
+           const Tensor &input,
+           Tensor *output,
+           cudaStream_t stream) {
+  CheckInputTensor(input, "dsilu_input");
+  CheckInputTensor(grad, "dsilu_input_grad");
+  CheckOutputTensor(*output, "dsilu_output");
+  NVTE_CHECK(input.data.shape == output->data.shape, "Input and output shapes must match.");
+  NVTE_CHECK(input.data.dtype == grad.data.dtype,
+             "Input and incoming gradient types must match.");
+  const size_t tot_elts = product(input.data.shape);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
+      constexpr int nvec = 32 / sizeof(IType);
+      VectorizedUnaryGradKernelLauncher<nvec, Empty, dswish<fp32, fp32>>(
+        reinterpret_cast<const IType*>(grad.data.dptr),
+        reinterpret_cast<const IType*>(input.data.dptr),
+        reinterpret_cast<OType*>(output->data.dptr),
+        reinterpret_cast<const fp32*>(output->scale.dptr),
+        reinterpret_cast<fp32*>(output->amax.dptr),
+        tot_elts,
+        {},
+        stream);
+    );  // NOLINT(*)
+  );  // NOLINT(*)
+}
+
 void swiglu(const Tensor &input,
             Tensor *output,
             cudaStream_t stream) {
-  CheckInputTensor(input, "geglu_input");
-  CheckOutputTensor(*output, "geglu_output");
+  CheckInputTensor(input, "swiglu_input");
+  CheckOutputTensor(*output, "swiglu_output");
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
   NVTE_CHECK(input.data.shape[0] == output->data.shape[0],
@@ -74,6 +125,28 @@ void dswiglu(const Tensor &grad,
 }
 
 }  // namespace transformer_engine
+
+void nvte_silu(const NVTETensor input,
+               NVTETensor output,
+               cudaStream_t stream) {
+  NVTE_API_CALL(nvte_silu);
+  using namespace transformer_engine;
+  silu(*reinterpret_cast<const Tensor*>(input),
+       reinterpret_cast<Tensor*>(output),
+       stream);
+}
+
+void nvte_dsilu(const NVTETensor grad,
+                const NVTETensor input,
+                NVTETensor output,
+                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dsilu);
+  using namespace transformer_engine;
+  dsilu(*reinterpret_cast<const Tensor*>(grad),
+        *reinterpret_cast<const Tensor*>(input),
+        reinterpret_cast<Tensor*>(output),
+        stream);
+}
 
 void nvte_swiglu(const NVTETensor input,
                  NVTETensor output,
