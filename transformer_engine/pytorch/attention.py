@@ -85,6 +85,7 @@ META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+_NVTE_FP8_DPA_BWD = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
@@ -1930,7 +1931,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             fp8_tensors = (None, None, None, None)
 
         ctx.save_for_backward(qkv, out, cu_seqlens, *fp8_tensors)
-        ctx.fp8 = fp8
+        ctx.fp8 = fp8 and _NVTE_FP8_DPA_BWD
         ctx.fp8_meta = fp8_meta
         ctx.tp_size = tp_size
         ctx.tp_group = tp_group
@@ -1943,7 +1944,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
-        ctx.fused_attention_backend = fused_attention_backend
+        ctx.fused_attention_backend = \
+            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
@@ -2084,7 +2086,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             fp8_tensors = (None, None, None, None, None)
 
         ctx.save_for_backward(q, kv, out, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
-        ctx.fp8 = fp8
+        ctx.fp8 = fp8 and _NVTE_FP8_DPA_BWD
         ctx.fp8_meta = fp8_meta
         ctx.tp_size = tp_size
         ctx.tp_group = tp_group
@@ -2098,7 +2100,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
-        ctx.fused_attention_backend = fused_attention_backend
+        ctx.fused_attention_backend = \
+            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
@@ -2273,7 +2276,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     tensor.activation_offloading = True
 
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
-        ctx.fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "0")) and fp8
+        ctx.fp8 = fp8 and _NVTE_FP8_DPA_BWD
         ctx.fp8_meta = fp8_meta
         ctx.tp_size = tp_size
         ctx.tp_group = tp_group
