@@ -1413,6 +1413,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1550,7 +1551,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.bias_gelu_nvfusion,
                 self.set_parallel_mode,
                 torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin,
+                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,

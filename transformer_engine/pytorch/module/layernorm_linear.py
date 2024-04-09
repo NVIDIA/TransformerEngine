@@ -989,6 +989,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1146,7 +1147,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.return_layernorm_output,
                 self.return_layernorm_output_gathered,
                 torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin,
+                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.normalization,
