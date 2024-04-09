@@ -78,7 +78,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rw(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        const unsigned long long ub_timeout) {
+                                        const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -168,7 +168,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rr(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        const unsigned long long ub_timeout) {
+                                        const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -280,7 +280,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx,
-                                           const unsigned long long ub_timeout) {
+                                           const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -356,7 +356,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                const int totallines, const int rowlines,
                                                const int skiplines, void **commbuff,
                                                const int handleridx, void *outbuf,
-                                               const unsigned long long ub_timeout) {
+                                               const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -534,7 +534,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, float4 *mc_ptr,
-                                           const unsigned long long ub_timeout) {
+                                           const uint64_t ub_timeout) {
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -621,7 +621,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                const int totallines, const int rowlines,
                                                const int skiplines, void **commbuff,
                                                const int handleridx, void *outbuf, float4 *mc_ptr,
-                                               const unsigned long long ub_timeout) {
+                                               const uint64_t ub_timeout) {
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -706,7 +706,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, uint4 *mc_ptr,
-                                           const unsigned long long ub_timeout) {
+                                           const uint64_t ub_timeout) {
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -791,7 +791,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     const int op, const int flagoffset, const int firstrank, const int myrank, const int gpustep,
     const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
     void **commbuff, const int handleridx, void *outbuf, float4 *mc_ptr,
-    const unsigned long long ub_timeout) {}
+    const uint64_t ub_timeout) {}
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -799,7 +799,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, uint4 *mc_ptr,
-                                           const unsigned long long ub_timeout) {}
+                                           const uint64_t ub_timeout) {}
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -807,7 +807,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx, float4 *mc_ptr,
-                                           const unsigned long long ub_timeout) {}
+                                           const uint64_t ub_timeout) {}
 #endif
 
 template <int RANKS, typename fp8type>
@@ -815,7 +815,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     const int op, const int flagoffset, const int firstrank, const int myrank, const int gpustep,
     const int mylineoffset, const int totallines, const int rowlines, const int skiplines,
     void **commbuff, const int handleridx, void *outbuf, float *scale,
-    const unsigned long long ub_timeout) {
+    const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -895,7 +895,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines_out, const int skiplines_in, void **commbuff, const int handleridx,
         void *outbuf, float *scale, void *counters, const int numchunks, const int atomicindex,
-        const unsigned long long ub_timeout) {
+        const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -993,7 +993,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                       const int totallines, const int rowlines,
                                                       const int skiplines, void **commbuff,
                                                       const int handleridx, void *outbuf,
-                                                      const unsigned long long ub_timeout) {
+                                                      const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1070,7 +1070,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int op, const int flagoffset, const int firstrank, const int myrank,
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines, const int numchunks, void **commbuff, const int handleridx,
-        void *outbuf, void *counters, const unsigned long long ub_timeout) {
+        void *outbuf, void *counters, const uint64_t ub_timeout) {
   if (counters) {
     if (threadIdx.x == 0) {
       // spin-lock on counter from producer
@@ -1165,7 +1165,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         const int op, const int flagoffset, const int firstrank, const int myrank,
         const int gpustep, const int mylineoffset, const int totallines, const int rowlines,
         const int skiplines, const int numchunks, void **commbuff, const int handleridx,
-        void *outbuf, void *counters, const unsigned long long ub_timeout) {
+        void *outbuf, void *counters, const uint64_t ub_timeout) {
   for (int chunk_i = 0; chunk_i < numchunks; chunk_i++) {
     if (counters) {
       if (threadIdx.x == 0) {
@@ -1261,7 +1261,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx,
-                                           const unsigned long long ub_timeout) {
+                                           const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1338,7 +1338,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                            const int myrank, const int gpustep,
                                            const int mylineoffset, const int totallines,
                                            void **commbuff, const int handleridx,
-                                           const unsigned long long ub_timeout) {
+                                           const uint64_t ub_timeout) {
   __shared__ int4 *userptr[RANKS];
   volatile int *flagptr;
   int physgpu, targetgpu, *myptr;
@@ -1451,7 +1451,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         arg6 = offset / 8 + (comm->use_rr_kernel ? 0 : arg4 * arg7);                               \
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
-    unsigned long long  arg10 = comm->ub_timeout;                                                  \
+    uint64_t arg10 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
@@ -1475,7 +1475,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
     uint4 *arg10 = reinterpret_cast<uint4 *>(comm->mc_ptr[handler]);                               \
-    unsigned long long arg11 = comm->ub_timeout;                                                   \
+    uint64_t arg11 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
@@ -1496,7 +1496,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         arg6 = offset / 8 + arg4 * arg7;                                                           \
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
-    unsigned long long arg10 = comm->ub_timeout;                                                   \
+    uint64_t arg10 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
@@ -1517,7 +1517,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
     void *arg10 = comm->mc_ptr[handler];                                                           \
-    unsigned long long arg11 = comm->ub_timeout;                                                   \
+    uint64_t arg11 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
@@ -1539,7 +1539,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
-    unsigned long long arg13 = comm->ub_timeout;                                                   \
+    uint64_t arg13 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1564,7 +1564,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
     float *arg13 = scale;                                                                          \
-    unsigned long long arg14 = comm->ub_timeout;                                                   \
+    uint64_t arg14 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1590,7 +1590,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
     void *arg13 = comm->mc_ptr[handler];                                                           \
-    unsigned long long arg14 = comm->ub_timeout;                                                   \
+    uint64_t arg14 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1618,7 +1618,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     float *arg14 = scale;                                                                          \
     void *arg15 = counters;                                                                        \
     int arg16 = numchunks, arg17 = atomicindex;                                                    \
-    unsigned long long arg18 = comm->ub_timeout;                                                   \
+    uint64_t arg18 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1646,7 +1646,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
     int arg11 = handler * comm->nvsize;                                                            \
     void *arg12 = output;                                                                          \
-    unsigned long long arg13 = comm->ub_timeout;                                                   \
+    uint64_t arg13 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1671,7 +1671,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     int arg12 = handler * comm->nvsize;                                                            \
     void *arg13 = output;                                                                          \
     void *arg14 = counters;                                                                        \
-    unsigned long long arg15 = comm->ub_timeout;                                                   \
+    uint64_t arg15 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1698,7 +1698,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     int arg12 = handler * comm->nvsize;                                                            \
     void *arg13 = output;                                                                          \
     void *arg14 = counters;                                                                        \
-    unsigned long long arg15 = comm->ub_timeout;                                                   \
+    uint64_t arg15 = comm->ub_timeout;                                                             \
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
                           reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
                           reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
@@ -1997,7 +1997,7 @@ __global__ void kuserbuffers_dummy(void) {}
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pullrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id, int *flagptr,
                           int4 *srcptr, int4 *dstptr, const int lines,
-                          unsigned long long ub_timeout) {
+                          uint64_t ub_timeout) {
 #define UNROLLCOPY 8
   const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
   const int end_elem = lines;
@@ -2074,7 +2074,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                     *(ce_start) != *(ce_end))
 
 __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id,
-                                      int *flagptr, int adder, unsigned long long ub_timeout,
+                                      int *flagptr, int adder, uint64_t ub_timeout,
                                       int *ce_start_ptr, int *ce_end_ptr) {
   const int signal_id = (*recv_id) + adder;
   *recv_id = signal_id;
@@ -2097,7 +2097,7 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpe
 __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                               const int lines, int send_peer, int recv_peer, int *recv_id,
-                              int *recv_flagptr, int adder, unsigned long long ub_timeout,
+                              int *recv_flagptr, int adder, uint64_t ub_timeout,
                               int nv_send, int nv_recv, int *ce_start_ptr, int *ce_end_ptr) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
@@ -2156,7 +2156,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_pushsendrecv_atomic(int *send_id, int *send_flagptr, int4 *srcptr, int4 *dstptr,
                                      const int lines, int send_peer, int recv_peer, int *recv_id,
                                      int *recv_flagptr, int adder, void *counters,
-                                     unsigned long long ub_timeout, int nv_send, int nv_recv,
+                                     uint64_t ub_timeout, int nv_send, int nv_recv,
                                      int *ce_start_ptr, int *ce_end_ptr) {
   if (lines) {
     const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
@@ -2220,7 +2220,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                           int recv_peer, int *recv_id, int *recv_flagptr, int adder,
                                           void *counters, int nchunks, int send_stride,
                                           int recv_stride, bool shuffle,
-                                          unsigned long long ub_timeout, int nv_send, int nv_recv) {
+                                          uint64_t ub_timeout, int nv_send, int nv_recv) {
   for (int chunk_i = 0; chunk_i < nchunks - 1; chunk_i++) {
     int send_chunk_id = shuffle ? chunk_i : (nchunks + send_peer - chunk_i) % nchunks;
     int recv_chunk_id = shuffle ? chunk_i + 1 : (nchunks + send_peer - chunk_i - 1) % nchunks;
@@ -2418,7 +2418,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   int *arg8 = &comm->recv_id[recv_peer * NVTE_MAX_REGIONS + dsthandler];
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
-  unsigned long long arg11 = comm->ub_timeout;
+  uint64_t arg11 = comm->ub_timeout;
   int arg12 = send_peerlocal;
   int arg13 = recv_peerlocal;
   int *arg14 = reinterpret_cast<int *>(comm->use_ce ?
@@ -2525,7 +2525,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   int arg13 = send_stride;
   int arg14 = recv_stride;
   bool arg15 = shuffle;
-  unsigned long long arg16 = comm->ub_timeout;
+  uint64_t arg16 = comm->ub_timeout;
   int arg17 = send_peerlocal;
   int arg18 = recv_peerlocal;
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),

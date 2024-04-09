@@ -147,7 +147,7 @@ struct communicator {
                  // or force MNNVL
   int *send_id, *recv_id;
   int mydev;
-  unsigned long long ub_timeout;
+  uint64_t ub_timeout;
 };
 typedef struct communicator communicator;
 

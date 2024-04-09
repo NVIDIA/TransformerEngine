@@ -134,7 +134,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {
-    printf("UB_TIMEOUT is set to %d sec, %llu cycles, freq: %dkhz\n",
+    printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n",
             sec_timeout, (*comm)->ub_timeout, device_clock);
   }
 
