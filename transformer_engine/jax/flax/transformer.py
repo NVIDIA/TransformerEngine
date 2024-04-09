@@ -651,7 +651,6 @@ class LoRAScope:    # pylint: disable=too-few-public-methods
 
 
 def _canonicalize_lora_scope(scope):
-    scope = scope.lower()
 
     SCOPE_NONE = 'none'
     SCOPE_ALL = 'all'
@@ -661,6 +660,10 @@ def _canonicalize_lora_scope(scope):
     SCOPE_EX_QKV_PROJ = 'exclude_qkv_proj'
     SCOPE_EX_OUTPUT_PROJ = 'exclude_output_proj'
     SCOPE_EX_MLP = 'exclude_mlp'
+
+    scope = SCOPE_NONE if scope is None else scope
+
+    scope = scope.lower()
 
     assert scope in [
         SCOPE_NONE, SCOPE_ALL, SCOPE_QKV_PROJ, SCOPE_OUTPUT_PROJ, SCOPE_MLP, SCOPE_EX_QKV_PROJ,
