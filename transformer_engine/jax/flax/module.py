@@ -23,7 +23,6 @@ from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
 from ..mlp import fused_layernorm_fp8_mlp, activation_lu
-""" from ..mlp import layernorm_gelu_fp8_mlp, gelu """
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -834,10 +833,11 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        gated_act_pool = [('gelu', 'linear'),
-                          ('linear', 'silu')] # Make sure this is sorted in alphabet order
-        act_pool = [('gelu',),
-                    ('silu',)]
+        # Make sure each tuple is sorted in alphabet order
+        gated_act_pool = [('gelu', 'linear')]
+                          #('linear', 'silu')] coming
+        act_pool = [('gelu',)]
+                    #('silu',)] coming
         normalize_acts = []
         for act in self.activations:
             if not isinstance(act, str):
@@ -845,10 +845,10 @@ class LayerNormMLP(TransformerEngineBase):
             normalize_acts.append(act.lower())
         normalize_acts = tuple(sorted(normalize_acts))
         is_gated = normalize_acts in gated_act_pool
-        is_implemented_in_fused_layernorm = normalize_acts in (gated_act_pool + act_pool)
+        is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
 
-        use_fused_layernorm_mlp = fuse_layernorm and is_implemented_in_fused_layernorm\
+        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented\
                 and (self.intermediate_dropout_rate < 1e-3) \
                 and ((is_gated and not self.use_bias) or (not is_gated and self.use_bias))
 
@@ -923,21 +923,6 @@ class LayerNormMLP(TransformerEngineBase):
         ffn1_ckpt_name = 'ffn1'
         ffn2_ckpt_name = 'ffn2'
 
-        """ if use_fused_ln_geglu_mlp: """
-        """     assert self.axis == -1    # Only support axis = =-1 at this moment """
-        """"""
-        """     out = layernorm_geglu_fp8_mlp(y, """
-        """                                   scale, """
-        """                                   ln_bias, [kernel_1, kernel_2], """
-        """                                   fp8_meta_package, """
-        """                                   self.layernorm_type, """
-        """                                   zero_centered_gamma=self.zero_centered_gamma, """
-        """                                   epsilon=self.epsilon, """
-        """                                   layernorm_input_axes=self.layernorm_input_axes, """
-        """                                   dot_1_input_axes=self.dot_1_input_axes, """
-        """                                   dot_2_input_axes=self.dot_2_input_axes, """
-        """                                   ffn1_ckpt_name=ffn1_ckpt_name, """
-        """                                   ffn2_ckpt_name=ffn2_ckpt_name) """
         if use_fused_layernorm_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
@@ -949,9 +934,9 @@ class LayerNormMLP(TransformerEngineBase):
                                                      axes=self.bias_axes_1)
             bias_1 = bias_1.astype(self.dtype)
 
-            bias_2_shape = (hidden_size,) if self.use_bias else (0,) #TODO or ((0,))
+            bias_2_shape = (hidden_size,) if self.use_bias else (0,)
             bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                     self.bias_init, 
+                                                     self.bias_init,
                                                      bias_2_shape,
                                                      jnp.float32,
                                                      axes=self.bias_axes_2)
@@ -972,7 +957,6 @@ class LayerNormMLP(TransformerEngineBase):
                                          activation_type = normalize_acts,
                                          use_bias = self.use_bias)
         else:    # not use_fused_ln_geglu_mlp
-
             # DenseGeneral 1
             gemm1_fp8_meta_package = None if fp8_meta_package is None \
                                      else fp8_meta_package.get_package_by_gemm_idx(0)
@@ -994,21 +978,21 @@ class LayerNormMLP(TransformerEngineBase):
                                           fp8_meta_pkg=gemm1_fp8_meta_package,
                                           contracting_dims=(axis, contract_ind))
 
-            bias = None
+            bias_1 = None
             if self.use_bias:
-                bias = nn_partitioning.param_with_axes('wi_bias',
+                bias_1 = nn_partitioning.param_with_axes('wi_bias',
                                                        self.bias_init,
                                                        intermediate_dim,
                                                        jnp.float32,
                                                        axes=self.bias_axes_1)
-                bias = bias.astype(self.dtype)
-                bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
-                x += jnp.reshape(bias, bias_shape)
+                bias_1 = bias_1.astype(self.dtype)
+                bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
+                x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
-            if is_implemented_in_fused_layernorm:
+            if is_act_implemented:
                 z = activation_lu(x, normalize_acts)
             else:
                 x = jnp.split(x, num_activations, axis=-2)
@@ -1016,7 +1000,6 @@ class LayerNormMLP(TransformerEngineBase):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
-                """ z = jnp.reshape(z, (*z.shape[:-2], -1)) """
             if not is_gated:
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
@@ -1036,14 +1019,14 @@ class LayerNormMLP(TransformerEngineBase):
                                         fp8_meta_pkg=gemm2_fp8_meta_package,
                                         contracting_dims=(axis, contract_ind))
 
-            bias = None
+            bias_2 = None
             if self.use_bias:
-                bias = nn_partitioning.param_with_axes('wo_bias',
+                bias_2 = nn_partitioning.param_with_axes('wo_bias',
                                                        self.bias_init, (hidden_size,),
                                                        jnp.float32,
                                                        axes=self.bias_axes_2)
-                bias = bias.astype(self.dtype)
-                out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
+                bias_2 = bias_2.astype(self.dtype)
+                out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 

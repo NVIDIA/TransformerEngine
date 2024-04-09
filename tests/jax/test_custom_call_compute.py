@@ -4,7 +4,7 @@
 
 import functools
 import operator
-from typing import Callable, Sequence, Tuple, Union
+from typing import Callable, Sequence, Union
 
 import jax
 import jax.numpy as jnp

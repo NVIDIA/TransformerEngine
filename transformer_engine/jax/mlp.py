@@ -3,9 +3,8 @@
 # See LICENSE for license information.
 """JAX MLP modules"""
 
-from typing import List, Tuple
+from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
-from typing import Callable, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -130,15 +129,16 @@ def _fused_layernorm_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarr
                             bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
                             epsilon: float, layernorm_input_axes: Tuple[str, ...],
                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
-                            ffn1_ckpt_name: str, ffn2_ckpt_name: str, 
+                            ffn1_ckpt_name: str, ffn2_ckpt_name: str,
                             activation_type: Sequence[Union[str, Callable]],
                             use_bias: bool):
-    output, _ = _fused_layernorm_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
-                                                 fp8_max, amax, scale, scale_inv, fwd_dtype,
-                                                 bwd_dtype, layernorm_type, zero_centered_gamma,
-                                                 epsilon, layernorm_input_axes, dot_1_input_axes,
-                                                 dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name,
-                                                 activation_type, use_bias)
+    output, _ = _fused_layernorm_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1,
+                                                  bias_2, fp8_max, amax, scale, scale_inv,
+                                                  fwd_dtype, bwd_dtype, layernorm_type,
+                                                  zero_centered_gamma, epsilon,
+                                                  layernorm_input_axes, dot_1_input_axes,
+                                                  dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name,
+                                                  activation_type, use_bias)
     return output
 
 
@@ -184,7 +184,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     # Squeeze act axis
     # (hidden_in, 1, hidden_out) -> (hidden_in, hidden_out)
     if not is_gated:
-        kernel_1 = jnp.squeeze(kernel_1, axis=-2) #TODO: check if this squeeze is needed
+        kernel_1 = jnp.squeeze(kernel_1, axis=-2)
 
     amax = FP8Helper.update_amax_history(amax)
 
@@ -254,7 +254,8 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
                                                     activation_lu_out_amax, activation_lu_out_scale,
                                                     activation_lu_out_scale_inv, fwd_dtype)
 
-    casted_activation_lu_out = with_sharding_constraint_by_logical_axes(casted_activation_lu_out, dot_2_input_axes)
+    casted_activation_lu_out = with_sharding_constraint_by_logical_axes(casted_activation_lu_out,
+                                                                        dot_2_input_axes)
 
     kernel_2_scale = scale[gemm2_kernel_idx]
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
@@ -263,7 +264,8 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     casted_kernel_2, updated_kernel_2_amax = quantize(kernel_2, fwd_dtype, kernel_2_scale)
 
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    dot_2_output = fp8_dot_impl(casted_activation_lu_out, casted_kernel_2, activation_lu_out_scale_inv,
+    dot_2_output = fp8_dot_impl(casted_activation_lu_out, casted_kernel_2,
+                                activation_lu_out_scale_inv,
                                 kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
@@ -274,9 +276,9 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, casted_kernel_1,
-           casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_activation_lu_amax,
-           updated_kernel_1_amax, updated_kernel_2_amax, x_contracting_dims, xt_batch_dims,
-           bias_1.shape, bias_2.shape)
+           casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax,
+           updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax,
+           x_contracting_dims, xt_batch_dims, bias_1.shape, bias_2.shape)
 
     return dot_2_output, ctx
 
@@ -325,8 +327,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
     # (hidden, batch...,) x (hidden, batch...)
     gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
-    wgrad_2 = fp8_dot_impl(casted_activation_lu_out_t, casted_grad_t, gemm2_x_scale_inv, grad_scale_inv,
-                           grad.dtype, (xt_batch_dims, xt_batch_dims),
+    wgrad_2 = fp8_dot_impl(casted_activation_lu_out_t, casted_grad_t, gemm2_x_scale_inv,
+                           grad_scale_inv, grad.dtype, (xt_batch_dims, xt_batch_dims),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)
@@ -343,11 +345,10 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     dactivation_lu_scale = scale[gemm1_grad_idx]
     dactivation_lu_scale_inv = scale_inv[gemm1_grad_idx]
 
-    # TODO
+    dactivation_lu_cast_transpose = activation_lu_fp8_dict[activation_type]["bwd"]
     if not is_gated and use_bias:
-        dactivation_lu_dbias_cast_transpose = activation_lu_fp8_dict[activation_type]["bwd"]
         casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
-        dactivation_lu_dbias_cast_transpose(
+        dactivation_lu_cast_transpose(
             dgrad_2,
             dot_1_output,
             dactivation_lu_amax,
@@ -359,7 +360,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
         dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
     elif is_gated and not use_bias:
-        casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = dgated_gelu_cast_transpose(
+        casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
+        dactivation_lu_cast_transpose(
             dgrad_2,
             dot_1_output,
             dactivation_lu_amax,
@@ -367,7 +369,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             dactivation_lu_scale_inv,
             bwd_dtype,
             static_axis_boundary=-1)
-    else: 
+    else:
         raise NotImplementedError
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
@@ -377,7 +379,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     # Check if not gated
     xt_batch_dims_2 = xt_batch_dims if not is_gated \
         else tuple(i + 1 for i in xt_batch_dims)
-    wgrad_1 = fp8_dot_impl(ln_out_t, casted_dactivation_lu_t, gemm1_x_scale_inv, 
+    wgrad_1 = fp8_dot_impl(ln_out_t, casted_dactivation_lu_t, gemm1_x_scale_inv,
                            dactivation_lu_scale_inv, grad.dtype,
                            (xt_batch_dims, xt_batch_dims_2),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
@@ -392,7 +394,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     else:
         x_contracting_dims = (x_contracting_dims, (1,))
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
-    dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1, dactivation_lu_scale_inv, kernel_1_scale_inv,
+    dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1,
+                           dactivation_lu_scale_inv, kernel_1_scale_inv,
                            grad.dtype, x_contracting_dims,
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
@@ -421,7 +424,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
 
-    # TODO
     if not use_bias:
         dbias_1 = None
         dbias_2 = None
