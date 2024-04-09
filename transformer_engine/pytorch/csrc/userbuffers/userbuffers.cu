@@ -2313,9 +2313,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
 // 2 - CE end index counter
 #define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index)                                       \
   ((reinterpret_cast<char *>((comm)->peer_ptr[0][(peerlocal)])) +                                 \
-   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV +                                                    \
-     (comm)->myrank * NVTE_MAX_REGIONS + (dsth) +                                                 \
-     (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                              \
+    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV +                                                   \
+    (comm)->myrank * NVTE_MAX_REGIONS + (dsth) +                                                  \
+    (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                               \
     sizeof(int)))
 
 // Index corresponds to the type of flag:
@@ -2324,9 +2324,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
 // 2 - CE end index counter
 #define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index)                                       \
   ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                               \
-   ((NVTE_REG0_OFFSET(comm) +                                                                     \
-     NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS +                                            \
-     (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
+  ((NVTE_REG0_OFFSET(comm) +                                                                      \
+    NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS +                                             \
+    (dsth) + (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                      \
     sizeof(int)))
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
@@ -2366,13 +2366,13 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
                                                reinterpret_cast<int *>(flagptr));
   } else {
-    void *srcptr = ((char *)comm->mem_ptr[srchandler]) + srcoffset;
-    void *dstptr = ((char *)comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
+    void *srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + srcoffset;
+    void *dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
 
     if (comm->use_ce) {
-      kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
+      kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
       CUDACHECK(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-      kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_end_ptr);
+      kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
     int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
@@ -2397,13 +2397,14 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = ((char *)comm->mem_ptr[srchandler]) + send_offset;
-  void *send_dstptr = ((char *)comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
+  void *send_srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + send_offset;
+  void *send_dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal])
+                      + send_offset;
 
   if (comm->use_ce) {
-    kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
+    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_end_ptr);
+    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2452,12 +2453,13 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv      = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = ((char *)comm->mem_ptr[srchandler]) + send_offset;
-  void *send_dstptr = ((char *)comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
+  void *send_srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + send_offset;
+  void *send_dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal])
+                      + send_offset;
   if (comm->use_ce) {
-    kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_start_ptr);
+    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    kuserbuffers_inc<<<1, 1, 0, stream>>>((int *)ce_send_end_ptr);
+    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2549,8 +2551,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
     return;
   if (comm->push == 0 && intranode) {
-    void *dstptr = ((char *)comm->mem_ptr[dsthandler]) + dstoffset;
-    void *srcptr = ((char *)comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
+    void *dstptr = reinterpret_cast<char *>(comm->mem_ptr[dsthandler]) + dstoffset;
+    void *srcptr = reinterpret_cast<char *>(comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->myrank, peer, comm->nvrank,
