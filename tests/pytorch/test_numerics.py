@@ -4,7 +4,6 @@
 
 import math
 import os
-import sys
 from typing import List, Optional
 import pytest
 import copy
@@ -53,6 +52,14 @@ class ModelConfig:
 model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
+
+model_configs_inference = {
+    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
+}
+backends_inference = ["FlashAttention", "UnfusedAttention"]
+module_inference = ["TransformerLayer", "MultiheadAttention"]
+input_formats_inference = ["sbhd", "bshd"]
 
 param_types = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
@@ -104,7 +111,7 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
 def reset_rng_states() -> None:
     """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -373,10 +380,10 @@ class TorchGPT(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b = self.causal_attn(a, attn_mask)
+        b = self.causal_attn(a, attention_mask)
         if self.parallel_attention_mlp:
             n = self.ln_mlp(x)
             x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
@@ -683,7 +690,7 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    out = block(inp_hidden_states, inp_attn_mask)
+    out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
     loss.backward()
 
@@ -1321,6 +1328,7 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     assert_all_equal(outputs, outputs_fp8_params)
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -1398,14 +1406,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 
     assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
 
-
-model_configs_inference = {
-    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
-}
-backends_inference = ["FlashAttention", "UnfusedAttention"]
-module_inference = ["TransformerLayer", "MultiheadAttention"]
-input_formats_inference = ["sbhd", "bshd"]
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)

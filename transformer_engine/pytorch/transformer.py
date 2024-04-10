@@ -473,6 +473,15 @@ class TransformerLayer(torch.nn.Module):
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
 
+    def reset_fp8_meta_tensors(self) -> None:
+        """Set TP group"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "reset_fp8_meta_tensors"):
+                child.reset_fp8_meta_tensors()
+
     def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
@@ -665,7 +674,8 @@ class TransformerLayer(torch.nn.Module):
 
         # MLP.
         mlp_outputs = self.layernorm_mlp(
-            hidden_states, is_first_microbatch=is_first_microbatch
+            hidden_states,
+            is_first_microbatch=is_first_microbatch,
         )
         if self.apply_residual_connection_post_layernorm:
             mlp_output, mlp_bias, residual = mlp_outputs
