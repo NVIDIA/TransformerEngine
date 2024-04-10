@@ -18,6 +18,7 @@ using namespace transformer_engine;
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_kernel(
     FwdParams params) {
+    enum { THREADS_PER_CTA = Ktraits::THREADS_PER_CTA };
     enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
     enum { WARPS_N = Ktraits::WARPS_N };
     enum { WARPS_M = Ktraits::WARPS_M };
@@ -55,11 +56,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
 
     compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
 
-    Wvec gamma[LDGS];
+    __shared__ Wvec gamma_shared[LDGS * THREADS_PER_CTA];
     index_t idx = c;
 #pragma unroll
     for (int it = 0; it < LDGS; it++) {
-        gamma[it].load_from(params.gamma, idx);
+        Wvec& g = gamma_shared[tidx + it*THREADS_PER_CTA];
+        g.load_from(params.gamma, idx);
         idx += VEC_COLS_PER_LDG;
     }
 
@@ -72,16 +74,15 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
     compute_t amax = 0;
 
     for (int row = r; row < params.rows; row += params.ctas_per_col * ROWS_PER_CTA) {
-        Ivec x[LDGS];
         index_t idx = row * Ktraits::VEC_COLS + c;
         compute_t xf[LDGS * NUM_ELTS];
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
-            x[it].load_from(params.x, idx);
+            Ivec x;
+            x.load_from(params.x, idx);
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
-                compute_t x_ij = compute_t(x[it].data.elt[jt]);
-                xf[it * NUM_ELTS + jt] = x_ij;
+                xf[it * NUM_ELTS + jt] = compute_t(x.data.elt[jt]);
             }
             idx += VEC_COLS_PER_LDG;
         }
@@ -98,14 +99,15 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
             rs_ptr[row] = rs;
         }
 
-        Ovec z[LDGS];
         idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
+            Ovec z;
+            Wvec g = gamma_shared[tidx + it*THREADS_PER_CTA];
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t y_ij = rs * (xf[it * NUM_ELTS + jt]);
-                compute_t g_ij = gamma[it].data.elt[jt];
+                compute_t g_ij = g.data.elt[jt];
                 if (params.zero_centered_gamma) {
                   g_ij += 1;
                 }
@@ -117,9 +119,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
                     temp_output = temp_output * scale;
                 }
 
-                z[it].data.elt[jt] = output_t(temp_output);
+                z.data.elt[jt] = output_t(temp_output);
             }
-            z[it].store_to(params.z, idx);
+            z.store_to(params.z, idx);
             idx += VEC_COLS_PER_LDG;
         }
     }

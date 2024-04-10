@@ -16,6 +16,7 @@ using namespace transformer_engine;
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_kernel(
     BwdParams params) {
+    enum { THREADS_PER_CTA = Ktraits::THREADS_PER_CTA };
     enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
     enum { WARPS_M = Ktraits::WARPS_M };
     enum { WARPS_N = Ktraits::WARPS_N };
@@ -64,11 +65,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
     Sum<reduce_t> sum;
 
     constexpr float rn = 1.f / static_cast<float>(COLS);
-    Wvec gamma[LDGS];
+    __shared__ Wvec gamma_shared[LDGS * THREADS_PER_CTA];
     index_t idx = c;
 #pragma unroll
     for (int it = 0; it < LDGS; it++) {
-        gamma[it].load_from(params.gamma, idx);
+        Wvec& g = gamma_shared[tidx + it*THREADS_PER_CTA];
+        g.load_from(params.gamma, idx);
         idx += Ktraits::VEC_COLS_PER_LDG;
     }
 // TODO if ROWS_PER_CTA does not divide rows, we might get divergence in the
@@ -93,12 +95,13 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         compute_t mdyy_local = 0.f;
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
+            Wvec g = gamma_shared[tidx + it*THREADS_PER_CTA];
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t x_tmp = x[it].data.elt[jt];
                 compute_t y_tmp = rs_r * (x_tmp);
                 const compute_t dy_tmp_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
-                compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]) + dy_tmp_shift;
+                compute_t dy_tmp = compute_t(g.data.elt[jt]) + dy_tmp_shift;
                 dy_tmp *= compute_t(dz[it].data.elt[jt]);
                 compute_t dz_tmp = dz[it].data.elt[jt];
 
@@ -114,18 +117,18 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         reduce_t result = reducer.allreduce({0, mdyy_local}, sum);
         mdyy_local = Get<1>::of<reduce_t, compute_t>(result) * rn;
 
-        Ivec dx[LDGS];
         idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
+            Ivec dx;
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t dy_tmp = dy[it * NUM_ELTS + jt];
                 compute_t y_tmp = y[it * NUM_ELTS + jt];
                 compute_t dx_tmp = rs_r * (dy_tmp - (mdyy_local * y_tmp));
-                dx[it].data.elt[jt] = dx_tmp;
+                dx.data.elt[jt] = dx_tmp;
             }
-            dx[it].store_to(params.dx, idx);
+            dx.store_to(params.dx, idx);
             idx += Ktraits::VEC_COLS_PER_LDG;
         }
     }  // end: grid stride loop
