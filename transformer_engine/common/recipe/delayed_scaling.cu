@@ -56,13 +56,9 @@ struct OtherParams {
 };
 
 #if CUDART_VERSION >= 12010
-constexpr size_t max_constant_memory_per_kernel = 32000;
-constexpr size_t AMAX_PARAMS_LIMIT = (
-  max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
+constexpr size_t AMAX_PARAMS_LIMIT = 1000;
 #else
-constexpr size_t max_constant_memory_per_kernel = 4000;
-constexpr size_t AMAX_PARAMS_LIMIT = (
-  max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
+constexpr size_t AMAX_PARAMS_LIMIT = 100;
 #endif
 
 struct AmaxParams {
