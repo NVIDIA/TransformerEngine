@@ -8,7 +8,7 @@ variables:
 
     # framework containers
     PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
-    JAX_IMAGE: ghcr.io/nvidia/jax:latest
+    JAX_IMAGE: ghcr.io/nvidia/jax:pax
     PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
 
     # container tags are in the form <TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>
