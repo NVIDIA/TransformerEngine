@@ -56,16 +56,10 @@ def graph_safe_rng_available() -> bool:
 def _get_cuda_rng_state(
     device: Union[int, str, torch.device] = "cuda",
     clone: bool = False,
+    graph_safe: bool = True,
 ) -> torch.Tensor:
-    r"""Return the random number generator state of the specified GPU as a ByteTensor.
+    """Return the random number generator state of the specified GPU."""
 
-    Args:
-        device (torch.device or int, optional): The device to return the RNG state of.
-            Default: ``'cuda'`` (i.e., ``torch.device('cuda')``, the current CUDA device).
-
-    .. warning::
-        This function eagerly initializes CUDA.
-    """
     _lazy_init()
     if isinstance(device, str):
         device = torch.device(device)
@@ -75,7 +69,7 @@ def _get_cuda_rng_state(
     if idx is None:
         idx = torch.cuda.current_device()
     default_generator = torch.cuda.default_generators[idx]
-    if graph_safe_rng_available():
+    if graph_safe_rng_available() and graph_safe:
         if clone:
             # Reference to the cloned generator state
             return default_generator.clone_state()
@@ -84,15 +78,13 @@ def _get_cuda_rng_state(
     return default_generator.get_state()
 
 
-def _set_cuda_rng_state(new_state: torch.Tensor, device: Union[int, str] = -1) -> None:
-    """Sets the random number generator state of the current GPU.
+def _set_cuda_rng_state(
+    new_state: torch.Tensor,
+    device: Union[int, str] = -1,
+    graph_safe = True,
+) -> None:
+    """Sets the random number generator state of the current GPU."""
 
-    Arguments:
-        new_state (torch.ByteTensor): The desired state
-    This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
-    with a single change: the input state is not cloned. Cloning caused
-    major performance issues for +4 GPU cases.
-    """
     if device == -1:
         device = torch.device("cuda")
     elif isinstance(device, str):
@@ -105,7 +97,7 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: Union[int, str] = -1) -
         if idx is None:
             idx = torch.cuda.current_device()
         default_generator = torch.cuda.default_generators[idx]
-        if graph_safe_rng_available():
+        if graph_safe_rng_available() and graph_safe:
             default_generator.graphsafe_set_state(new_state)
             return
         default_generator.set_state(new_state)
@@ -262,7 +254,7 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
-        ctx.fwd_cuda_rng_state = _get_cuda_rng_state()
+        ctx.fwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=False)
         if get_rng_state_tracker is not None:
             ctx.fwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
@@ -327,13 +319,13 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Store the current states.
         bwd_cpu_rng_state = torch.get_rng_state()
-        bwd_cuda_rng_state = _get_cuda_rng_state()
+        bwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=False)
         if get_rng_state_tracker is not None:
             bwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
         # Set the states to what it used to be before the forward pass.
         torch.set_rng_state(ctx.fwd_cpu_rng_state)
-        _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
+        _set_cuda_rng_state(ctx.fwd_cuda_rng_state, graph_safe=False)
         if get_rng_state_tracker is not None:
             get_rng_state_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
@@ -347,7 +339,7 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
-        _set_cuda_rng_state(bwd_cuda_rng_state)
+        _set_cuda_rng_state(bwd_cuda_rng_state, graph_safe=False)
         if get_rng_state_tracker is not None:
             get_rng_state_tracker().set_states(bwd_cuda_rng_state_tracker)
 
@@ -395,7 +387,7 @@ class _CheckpointFrame:
         """Cache fwd/bwd RNG states in the frame to restore later."""
         rng_states = (
             torch.get_rng_state(),
-            _get_cuda_rng_state(),
+            _get_cuda_rng_state(graph_safe=False),
         )
         if self.get_rng_state_tracker is not None:
             rng_states += (self.get_rng_state_tracker().get_states(), )
@@ -413,7 +405,7 @@ class _CheckpointFrame:
             rng_states = self.bwd_rng_states
 
         torch.set_rng_state(rng_states[0])
-        _set_cuda_rng_state(rng_states[1])
+        _set_cuda_rng_state(rng_states[1], graph_safe=False)
         if self.get_rng_state_tracker is not None:
             self.get_rng_state_tracker().set_states(rng_states[2])
 

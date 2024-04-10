@@ -52,7 +52,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 def reset_rng_states() -> None:
     """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
