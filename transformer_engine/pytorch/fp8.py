@@ -435,7 +435,7 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph:
+        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
             cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
 
     @classmethod
