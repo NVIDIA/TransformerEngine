@@ -11,8 +11,9 @@ Transformer Engine
 `Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `FP8 Convergence <#fp8-convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
 
 Latest News
-==================
+===========
 
+* [03/2024] `Turbocharged Training: Optimizing the Databricks Mosaic AI stack with FP8 <https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8>`_
 * [03/2024] `FP8 Training Support in SageMaker Model Parallelism Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-release-notes.html>`_
 * [12/2023] `New NVIDIA NeMo Framework Features and NVIDIA H200 <https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility/>`_
 
@@ -28,7 +29,7 @@ Latest News
 * [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
 
 What is Transformer Engine?
-==================
+===========================
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
@@ -55,7 +56,7 @@ Modules provided by TE internally maintain scaling factors and other values need
 simplifying mixed precision training for users.
 
 Highlights
-----------
+==========
 
 * Easy-to-use modules for building Transformer layers with FP8 support
 * Optimizations (e.g. fused kernels) for Transformer models
@@ -63,7 +64,7 @@ Highlights
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
-----------
+========
 
 PyTorch
 ^^^^^^^
@@ -142,7 +143,7 @@ Flax
 .. overview-end-marker-do-not-remove
 
 Installation
-----------
+============
 .. installation
 
 Pre-requisites
@@ -188,7 +189,7 @@ It is a known issue that FlashAttention-2 compilation is resource-intensive and 
 Note that NGC PyTorch 23.08+ containers include FlashAttention-2.
 
 FP8 Convergence
-==================
+===============
 
 FP8 has been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
 
@@ -207,6 +208,8 @@ FP8 has been tested extensively across different model architectures and configu
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | T5-11B     |  JAX/T5x         | Available on request                                                                                    |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
+| MPT-13B    |  Mosaic Composer | https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8         |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
 | GPT-22B    |  NeMo Framework  | Available on request                                                                                    |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
@@ -215,7 +218,7 @@ FP8 has been tested extensively across different model architectures and configu
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 
 Integrations
-==================
+============
 
 Transformer Engine has been integrated with popular LLM frameworks such as:
 
@@ -227,19 +230,20 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
 * `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`_
+* `Levanter <https://github.com/stanford-crfm/levanter>`_
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
 * `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!
 
 
 Contributing
-==================
+============
 
 We welcome contributions to Transformer Engine! To contribute to Transformer Engine and make pull requests,
 follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide.
 
 Papers
-==================
+======
 
 * `Attention original paper <https://proceedings.neurips.cc/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf>`_
 * `Megatron-LM tensor parallel <https://arxiv.org/pdf/1909.08053.pdf>`_
@@ -247,10 +251,11 @@ Papers
 * `FP8 Formats for Deep Learning <https://arxiv.org/abs/2209.05433>`_
 
 Videos
-==================
+======
 
-* `FP8 Training with Transformer Engine <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51393>`_
-* `FP8 for Deep Learning <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s52166/>`_
+* `What's New in Transformer Engine and FP8 Training | GTC 2024 <https://register.nvidia.com/flow/nvidia/gtcs24/attendeeportaldigital/page/sessioncatalog/session/1696264811206001TJ7M>`_
+* `FP8 Training with Transformer Engine | GTC 2023 <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51393>`_
+* `FP8 for Deep Learning | GTC 2023 <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s52166/>`_
 * `Inside the Hopper Architecture <https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s42663/>`_
 
 .. |License| image:: https://img.shields.io/badge/License-Apache%202.0-blue.svg

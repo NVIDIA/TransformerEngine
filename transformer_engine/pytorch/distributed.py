@@ -523,6 +523,18 @@ def checkpoint(
     tp_group = kwargs.pop("tp_group", None)
     get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
 
+    # Ensure backward compatibility.
+    if (len(args) > 3 and isinstance(args[0], bool) and callable(args[1])
+        and isinstance(args[2], None | dist_group_type)):
+        warnings.warn(
+            "Passing non-tensor non-keyword arguments is deprecated and support will be removed in "
+            "future releases of TransformerEngine. `distribute_saved_activations`, `tp_group`, and "
+            "`get_rng_state_tracker` must be passed as keyword arguments to `checkpoint`.",
+            DeprecationWarning, stacklevel=2,
+        )
+        distribute_saved_activations, get_rng_state_tracker, tp_group = args[:3] # pylint: disable=unbalanced-tuple-unpacking
+        args = args[3:]
+
     # Trigger the native PyTorch checkpoint if:
     # 1. `function` is a `torch.nn.Module`
     #    AND
@@ -554,16 +566,6 @@ def checkpoint(
         if distribute_saved_activations:
             assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
             tp_group = torch.distributed.GroupMember.WORLD if tp_group is None else tp_group
-
-        # Make sure at least one tensor input has `requires_grad=True`
-        input_requires_grad = False
-        for arg in args:
-            if isinstance(arg, torch.Tensor) and arg.requires_grad:
-                input_requires_grad = True
-                break
-        assert input_requires_grad, (
-            "`use_reentrant=True` requires at least one input tensor with `requires_grad=True`."
-        )
 
         return _CheckpointFunction.apply(
             function,

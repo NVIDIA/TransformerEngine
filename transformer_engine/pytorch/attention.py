@@ -58,7 +58,6 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("2.0.6")
-_flash_attn_max_version = packaging.version.Version("2.5.6")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
@@ -1658,9 +1657,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            _flash_attn_version <= _flash_attn_max_version
-        ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3175,6 +3171,7 @@ class MultiheadAttention(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
+        ub_overlap_rs_dgrad: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         bias: bool = True,
@@ -3263,6 +3260,7 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
@@ -3294,6 +3292,7 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",

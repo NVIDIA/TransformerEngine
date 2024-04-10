@@ -45,6 +45,7 @@ _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _amax_reduce_handle_bwd = None
+layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -125,18 +126,23 @@ def initialize_ub(
     _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
-    fp8_buf = [
+    layers_all_gather_overlap = [
         "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
     ]
-    if bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
-        fp8_buf += ["proj_fprop", "fc2_fprop"]
+    layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
+    dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
-    layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
+
+    # AG-RS overlap pairs of layers forming a tensor-parallel block
+    ag_rs_pairs = {"qkv_fprop":"proj_fprop", "fc1_fprop":"fc2_fprop"}
+    rs_ag_pairs = {v : k for k, v in ag_rs_pairs.items()}
+    global layers_atomic_ring_exchange
+    layers_atomic_ring_exchange = []
 
     def get_method(name):
         for method, names in methods.items():
@@ -147,36 +153,52 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
+        is_reduce_scatter: int,
         num_sm: int = 16,
         cga_size: int = 2,
         set_sm_margin: int = 0,
-        num_splits: int = 4,
+        num_splits: int = 0,
         aggregate: int = 0,
         atomic_gemm: int = 0,
-        is_reduce_scatter: int = 0,
+        fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if is_reduce_scatter and method == "ring_exchange":
-                raise ValueError(
-                    "Atomic GEMM is not supported for ReduceScatter with `ring_exchange` method."
-                )
             if method == 'bulk':
                 warnings.warn(
-                    "Atoimic GEMM not is supported for a bulk overlap."
+                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
                 atomic_gemm = 0
         if not is_reduce_scatter and method == 'pipeline':
             raise ValueError(
-                "`pipeline` overlap method is not supported for AllGather."
+                f"At {name}, `pipeline` overlap method is not supported for AllGather."
             )
+        # Check if both AG and RS overlaps use `atomic GEMM`` + `p2p ring-exchange`.
+        # Using atomic GEMM + p2p ring-exchange in only one of the pair breaks functionality.
+        global layers_atomic_ring_exchange
+        if atomic_gemm and method == "ring_exchange" and name in ag_rs_pairs:
+            layers_atomic_ring_exchange += [name, ag_rs_pairs[name]]
+        if name in rs_ag_pairs:
+            assert_message = (
+                f"At {name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM chunk "
+                "outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
+                "GEMM-RS overlaps forming a TP block (e.g., qkv_fprop and proj_fprop) uses "
+                "`atomic gemm` and `ring_exhcnage`, its pair must use the same overlap config "
+                "for functionality."
+            )
+            if name in layers_atomic_ring_exchange:
+                assert atomic_gemm and method == "ring_exchange", assert_message
+            else:
+                if atomic_gemm and method == "ring_exchange":
+                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+
         sample_buffer = torch.empty(
             shape,
-            dtype=torch.uint8 if (use_fp8 and name in fp8_buf) else dtype,
+            dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype,
             device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
@@ -207,34 +229,49 @@ def initialize_ub(
                 )
         _ub_communicators[name] = ub_obj
 
+    if ub_cfgs is not None:
+        for name in dgrad_reduce_scatter_overlap:
+            if name in ub_cfgs and 'method' in ub_cfgs[name] and ub_cfgs[name]['method'] != 'bulk':
+                wgrad_name = name.replace('dgrad','wgrad')
+                assert wgrad_name not in ub_cfgs
+                layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_reduce_scatter_overlap.append(name)
+
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
             ub_cfg = ub_cfgs[name]
-            method = ub_cfg["method"] if "method" in ub_cfg else get_method(name)
-            num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
-            cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
-            num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
-            set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
-            aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
-            atomic_gemm = ub_cfg["atomic_gemm"] if "atomic_gemm" in ub_cfg else 0
+            method = ub_cfg.get("method", get_method(name))
+            num_sm = ub_cfg.get("num_sm", 16)
+            cga_size = ub_cfg.get("cga_size", 2)
+            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
+            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
+            aggregate = ub_cfg.get("aggregate", 0)
+            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
+            # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
+            fp8_buf = ((name in layers_all_gather_overlap) or
+                      (ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]))
             add_ub(
                 name,
                 method,
+                is_reduce_scatter,
                 num_sm,
                 cga_size,
                 set_sm_margin,
                 num_splits,
                 aggregate,
                 atomic_gemm,
-                is_reduce_scatter,
+                fp8_buf,
             )
         else:
             method = get_method(name)
-            if method == "pipeline":
-                add_ub(name, method)
-            else:
-                add_ub(name, method, num_splits=0)
+            add_ub(
+                name,
+                method=method,
+                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
+                num_splits=4 if method == "pipeline" else 0,
+                fp8_buf=name in layers_all_gather_overlap,
+            )
 
 
 def get_ub(name: str):
