@@ -5,7 +5,6 @@
 import functools
 from importlib.metadata import version
 import os
-import math
 from typing import Any, Dict, List, Tuple, Union
 
 from pkg_resources import packaging
@@ -28,10 +27,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_bwd,
     fused_attn_fwd,
 )
-from transformer_engine.pytorch.distributed import (
-    _set_cuda_rng_state,
-    CudaRNGStatesTracker,
-)
+from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
@@ -55,10 +51,12 @@ _cuda_rng_state = torch.cuda.get_rng_state()
 
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
+
 def reset_rng_states() -> None:
     """Revert back to initial RNG state"""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
+
 
 @functools.cache
 def _cudnn_version() -> Tuple[int, int, int]:
@@ -67,6 +65,7 @@ def _cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, 1000)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
+
 
 class ModelConfig:
     def __init__(
@@ -99,6 +98,7 @@ class ModelConfig:
         self.attn_type  = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
         self.bias_shape = bias_shape
+
 
 def _is_fused_attention_supported(
     config: ModelConfig,
@@ -148,11 +148,13 @@ def _is_fused_attention_supported(
         return True, backends
     return False, backends
 
+
 @functools.cache
 def _is_flash_attention_2_available() -> bool:
     """Check if flash-attn 2.0+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2")
+
 
 @functools.cache
 def _is_flash_attention_2_1() -> bool:
@@ -160,11 +162,13 @@ def _is_flash_attention_2_1() -> bool:
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2.1")
 
+
 @functools.cache
 def _is_flash_attention_2_3() -> bool:
     """Check if flash-attn 2.3+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2.3")
+
 
 def _is_flash_attention_supported(config: ModelConfig) -> bool:
     """Check if FlashAttention supports a model configuration"""
@@ -181,6 +185,7 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
             return False
     return True
 
+
 def _is_unfused_attention_supported(config: ModelConfig) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
     if ("padding" in config.attn_mask_type):
@@ -188,6 +193,7 @@ def _is_unfused_attention_supported(config: ModelConfig) -> bool:
     if ("causal" in config.attn_mask_type and config.attn_type == 'cross'):
         return False
     return True
+
 
 model_configs_base = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
@@ -197,10 +203,12 @@ model_configs_base = {
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
 }
 
+
 param_types = [torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
+
 
 def get_swa(seq_q, seq_kv, w=None):
     """Generate a random sliding window size (left, right) if w is None,
@@ -212,6 +220,7 @@ def get_swa(seq_q, seq_kv, w=None):
     ml = torch.tril(mu, diagonal=seq_kv-seq_q+w[1])
     ml = ~ ml
     return w, ml
+
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -310,6 +319,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
@@ -317,6 +327,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False)
+
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
@@ -334,6 +345,7 @@ model_configs_mask = {
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
@@ -341,6 +353,7 @@ model_configs_mask = {
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+
 
 model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
@@ -370,6 +383,7 @@ model_configs_bias = {
     "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",           "alibi"), # skipped
 }
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
@@ -377,6 +391,7 @@ model_configs_bias = {
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+
 
 model_configs_bias_shapes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,
@@ -395,6 +410,7 @@ model_configs_bias_shapes = {
         "causal",                   "alibi", bias_shape='bhss', alibi_type='custom'),
 }
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
@@ -410,6 +426,8 @@ model_configs_swa = {
     "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",          "no_bias"),
     "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",          "no_bias"),
 }
+
+
 @pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
@@ -425,6 +443,8 @@ model_configs_alibi_slopes = {
     "alibi_2_0": ModelConfig(2, 24, 24, 128, 1024, 1024, 0.0, "causal", "alibi", alibi_type= "custom"),
     "alibi_2_1": ModelConfig(1, 24, 24, 128, 1024, 2048, 0.0, "causal", "alibi", alibi_type= "custom"),
 }
+
+
 @pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_alibi_slopes])
@@ -433,12 +453,14 @@ def test_dpa_alibi_slopes(dtype, model_configs, model):
     """Test DotProductAttention module with ALiBi slopes"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
 
+
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
     # will add tests for thd layouts later when the support is available in fused attention
     #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
     ]
+
 
 model_configs_layout = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
@@ -452,6 +474,7 @@ model_configs_layout = {
     "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
 }
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
@@ -460,6 +483,7 @@ model_configs_layout = {
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
+
 
 def _run_dot_product_attention(
         dtype: torch.dtype,
@@ -643,6 +667,7 @@ def _run_dot_product_attention(
 
     return out, (inp[0].grad, inp[1].grad, inp[2].grad)
 
+
 model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
     "te_1_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
@@ -654,6 +679,7 @@ model_configs_te_layer = {
     "te_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,  "causal",           "alibi"),
     "te_3_1": ModelConfig(4, 16, 16,  64, 2048, 2048, 0.0,  "causal",           "alibi"),
 }
+
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -739,6 +765,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
+
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
@@ -751,6 +778,7 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     RoPE = True
     test_transformer_layer(dtype, model_configs, model,
             ckpt_attn, qkv_format, fused_qkv_params, RoPE)
+
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
@@ -776,6 +804,7 @@ def test_te_layer_mqa_gqa(dtype, model_configs, model):
         config.num_gqa_groups=config.num_heads // num_q_per_gqa_group
         test_transformer_layer(dtype, model_configs, model,
                 ckpt_attn, qkv_format, fused_qkv_params, RoPE)
+
 
 def _run_transformer_layer(
         dtype: torch.dtype,
@@ -909,7 +938,9 @@ model_configs_fp8 = {
     "fp8_1": ModelConfig(1, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
     "fp8_2": ModelConfig(4, 16, 16,  64,  512,  512, 0.0, "no_mask", "no_bias"),
 }
+
 param_types_fp8 = [torch.float16]
+
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -942,6 +973,7 @@ def test_dpa_fp8(dtype, model):
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+
 
 def _run_dpa_fp8(dtype, config, backend):
     """Run FusedAttention FP8 backend, i.e.
@@ -985,6 +1017,7 @@ def _run_dpa_fp8(dtype, config, backend):
     return (context.view(config.batch_size, config.max_seqlen_q, -1).transpose(0,1),
             dqkv.view(config.batch_size, config.max_seqlen_q, 3,
             config.num_heads, config.head_dim).transpose(0,1).contiguous())
+
 
 def _run_dpa_fp8_ref(dtype, config, backend):
     """Run UnfusedDotProductAttention as a reference, i.e.
@@ -1293,6 +1326,7 @@ class _dpa_fp8(torch.autograd.Function):
             None,
             None,
             None)
+
 
 class DPA_FP8(TransformerEngineBaseModule):
     def __init__(

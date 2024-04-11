@@ -24,7 +24,6 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
 
 
 # Only run FP8 tests on H100.
@@ -403,13 +402,6 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
             TransformerLayer(
@@ -424,7 +416,6 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
                 kv_channels=config.embed,
                 apply_residual_connection_post_layernorm=False,
                 output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 params_dtype=dtype,
                 fuse_qkv_params=True,
             )
@@ -483,13 +474,6 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
         TransformerLayer(
@@ -504,7 +488,6 @@ def _test_e2e_full_recompute(
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
             params_dtype=dtype,
             fuse_qkv_params=True,
         )
@@ -527,7 +510,6 @@ def _test_e2e_full_recompute(
                 checkpoint_core_attention=False,
                 distribute_saved_activations=False,
                 tp_group=None,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 use_reentrant=use_reentrant,
             )
         else:
@@ -1268,13 +1250,6 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8_model_params):
         block = (
             TransformerLayer(
@@ -1289,7 +1264,6 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
                 kv_channels=config.embed,
                 apply_residual_connection_post_layernorm=False,
                 output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 params_dtype=dtype,
                 fuse_qkv_params=True,
             )

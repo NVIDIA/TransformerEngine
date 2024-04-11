@@ -11,7 +11,6 @@ from transformer_engine.pytorch import (
     MultiheadAttention, TransformerLayer, fp8_autocast, fp8_model_init,
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 

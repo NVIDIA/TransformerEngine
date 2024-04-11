@@ -13,12 +13,7 @@ from .fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
-from .distributed import (
-    get_all_rng_states,
-    graph_safe_rng_available,
-    _get_cuda_rng_state,
-    _set_cuda_rng_state,
-)
+from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
 
 
@@ -522,7 +517,12 @@ def make_graphed_callables(
         forward_funcs = tuple(forward_funcs)
 
     # Save RNG state.
-    cuda_rng_state = _get_cuda_rng_state(graph_safe=False)
+    if graph_safe_rng_available():
+        generators = [torch.cuda.default_generators[torch.cuda.current_device()],
+                    *get_all_rng_states().values()]
+        original_rng_states = [state.get_state() for state in generators]
+    else:
+        original_rng_states = torch.cuda.get_rng_state()
 
     graphed_callables = _make_graphed_callables(
         forward_funcs, sample_args, num_warmup_iters=num_warmup_iters,
@@ -530,7 +530,11 @@ def make_graphed_callables(
         fp8_weight_caching=fp8_weight_caching, _order=_order)
 
     # Ensures warmup does not affect numerics for ops such as dropout.
-    _set_cuda_rng_state(cuda_rng_state, graph_safe=False)
+    if graph_safe_rng_available():
+        for gen, state in zip(generators, original_rng_states):
+            gen.set_state(state)
+    else:
+        torch.cuda.set_rng_state(original_rng_states)
 
     # Reset FP8 gradients.
     for module in modules:
