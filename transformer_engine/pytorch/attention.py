@@ -2104,6 +2104,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 else:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using non-FP8 backward')
+                    if d_out.dtype == torch.uint8:
+                        d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
                         ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
                         ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
@@ -2321,6 +2323,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 else:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using non-FP8 backward')
+                    if d_out.dtype == torch.uint8:
+                        d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, kv, out, d_out,
@@ -2632,6 +2636,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 else:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using non-FP8 backward')
+                    if d_out.dtype == torch.uint8:
+                        d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, k, v, out, d_out,
