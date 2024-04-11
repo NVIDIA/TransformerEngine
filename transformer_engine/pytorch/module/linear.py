@@ -974,7 +974,9 @@ class Linear(TransformerEngineBaseModule):
                       Whether to output in FP8. By default, Linear outputs in inp.dtype.
         """
 
-        with self.prepare_forward(inp, is_first_microbatch, allow_non_contiguous=True) as inp:
+        with self.prepare_forward(inp,
+            is_first_microbatch,
+            allow_non_contiguous=isinstance(inp,Float8Tensor)) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
 
