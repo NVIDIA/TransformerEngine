@@ -127,6 +127,7 @@ class DelayedScaling:
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
     fp8_dpa: bool = False
+    fp8_mha: bool = False
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."

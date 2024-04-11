@@ -85,21 +85,22 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
-  if (
-      ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
+  if (((q_dtype == NVTEDType::kNVTEByte)
+          || (q_dtype == NVTEDType::kNVTEFloat8E4M3)
+          || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
       && (sm_arch_ >= 90)
-      && (max_seqlen_q == max_seqlen_kv)
       && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
       && (
           ((cudnn_runtime_version >= 8900)
               && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)
+              && (max_seqlen_q == max_seqlen_kv)
               && (max_seqlen_q <= 512)
               && (head_dim == 64)
               && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK))
-          || ((cudnn_runtime_version >= 9100)
-              && (max_seqlen_q % 64 == 0)
-              && (max_seqlen_kv % 64 == 0)
-              && ((head_dim <= 128) && (head_dim % 8 == 0))
+          || ((cudnn_runtime_version >= 90100)
+              && (max_seqlen_q % 128 == 0)
+              && (max_seqlen_kv % 128 == 0)
+              && (head_dim == 128)
               && ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
                   || (qkv_format == NVTE_QKV_Format::NVTE_SBHD))
               && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)

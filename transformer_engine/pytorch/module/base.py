@@ -698,8 +698,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R4: bias gradient on R1.
 
         """
-        grad_output = grad_output.contiguous()
-        grad_output_mat = grad_output.view((-1, grad_output.shape[-1]))
+        if isinstance(grad_output, Float8Tensor):
+            grad_output._data = grad_output._data.contiguous()
+        else:
+            grad_output = grad_output.contiguous()
+        grad_output_mat = grad_output.view(-1, grad_output.shape[-1])
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         # No-FP8 case: bgrad is fused with wgrad for this case.
@@ -737,16 +740,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
-            cast_to_fp8(
-                grad_output_mat,
-                ctx.fp8_meta["scaling_bwd"],
-                tex.FP8BwdTensors.GRAD_OUTPUT1,
-                fp8_dtype_backward,
-                out=grad_output_c,
-            )
+            if not isinstance(grad_output_mat, Float8Tensor):
+                cast_to_fp8(
+                    grad_output_mat,
+                    ctx.fp8_meta["scaling_bwd"],
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    fp8_dtype_backward,
+                    out=grad_output_c,
+                )
+            else:
+                grad_output_c = grad_ouput_mat
             if not ctx.ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
-                grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                if not isinstance(grad_output_c, Float8Tensor):
+                    grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                else:
+                    grad_output_t = grad_output_c.transpose(0,1)
             else:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
                 grad_output_t = None
@@ -755,28 +764,38 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # FP8 case without gather: cast, transpose, bgrad fused
         if ctx.use_bias:
+            grad_output_mat_no_fp8 = grad_output_mat
+            if isinstance(grad_output_mat, Float8Tensor):
+                grad_output_mat_no_fp8 = grad_output_mat.from_float8(grad_output_mat.dtype)
             grad_bias, grad_output_c, grad_output_t = fp8_cast_transpose_bgrad_fused(
-                grad_output_mat,
+                grad_output_mat_no_fp8,
                 ctx.fp8_meta["scaling_bwd"],
                 tex.FP8BwdTensors.GRAD_OUTPUT1,
                 fp8_dtype_backward,
             )
         else:
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                grad_output_c, grad_output_t = fp8_cast_transpose_fused(
-                    grad_output_mat,
-                    ctx.fp8_meta["scaling_bwd"],
-                    tex.FP8BwdTensors.GRAD_OUTPUT1,
-                    fp8_dtype_backward,
-                )
+                if isinstance(grad_output_mat, Float8Tensor):
+                    grad_output_c = grad_output_mat
+                    grad_output_t = grad_output_c.transpose(0,1)
+                else:
+                    grad_output_c, grad_output_t = fp8_cast_transpose_fused(
+                        grad_output_mat,
+                        ctx.fp8_meta["scaling_bwd"],
+                        tex.FP8BwdTensors.GRAD_OUTPUT1,
+                        fp8_dtype_backward,
+                    )
             else:
                 grad_output_t = None
-                grad_output_c = cast_to_fp8(
-                    grad_output_mat,
-                    ctx.fp8_meta["scaling_bwd"],
-                    tex.FP8BwdTensors.GRAD_OUTPUT1,
-                    fp8_dtype_backward,
-                )
+                if not isinstance(grad_output_mat, Float8Tensor):
+                    grad_output_c = cast_to_fp8(
+                        grad_output_mat,
+                        ctx.fp8_meta["scaling_bwd"],
+                        tex.FP8BwdTensors.GRAD_OUTPUT1,
+                        fp8_dtype_backward,
+                    )
+                else:
+                    grad_output_c = grad_output_mat
             grad_bias = None
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias

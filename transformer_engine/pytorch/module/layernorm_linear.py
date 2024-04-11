@@ -43,6 +43,7 @@ from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 __all__ = ["LayerNormLinear"]
 
@@ -185,6 +186,9 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out = ln_out_total
 
         if fp8:
+            if _NVTE_DEBUG:
+                print('[LayerNormLinear]: using FP8 forward')
+
             bias_dtype = (
                 torch.bfloat16
                 if activation_dtype == torch.float32
@@ -225,25 +229,82 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
                     weight_t_fp8 = None
 
-            out, _ = tex.fp8_gemm(
-                weight_fp8._data,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_WEIGHT,
-                fp8_dtype_forward,
-                ln_out_total,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-                activation_dtype,
-                get_workspace(),
-                bias=bias,
-                use_bias=use_bias,
-                use_split_accumulator=_2X_ACC_FPROP,
-                ub_algo=ub_algo if ub_overlap_ag else None,
-                ub=ub_obj_lnout if ub_overlap_ag else None,
-                extra_output_tensor=ln_out if ub_overlap_ag else None,
-            )
+            if fp8_meta["recipe"].fp8_mha:
+                out_index, meta_tensor, output_te_dtype, output_dtype = (
+                    tex.FP8FwdTensors.GEMM1_OUTPUT,
+                    fp8_meta["scaling_fwd"],
+                    fp8_dtype_forward,
+                    torch.uint8)
+            else:
+                out_index, meta_tensor, output_te_dtype, output_dtype = (
+                    None, None, None, activation_dtype)
+            if ub_overlap_ag: # workaround; need to investigate UB
+                out, _ = tex.fp8_gemm(
+                    weight_fp8._data,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    fp8_dtype_forward,
+                    ln_out_total,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                    activation_dtype,
+                    get_workspace(),
+                    bias=bias,
+                    use_bias=use_bias,
+                    use_split_accumulator=_2X_ACC_FPROP,
+                    ub_algo=ub_algo if ub_overlap_ag else None,
+                    ub=ub_obj_lnout if ub_overlap_ag else None,
+                    extra_output_tensor=ln_out if ub_overlap_ag else None,
+                )
+                if output_dtype == torch.uint8:
+                    out = tex.cast_to_fp8(
+                            out,
+                            fp8_meta["scaling_fwd"],
+                            tex.FP8FwdTensors.GEMM1_OUTPUT,
+                            fp8_dtype_forward,
+                            )
+                    out = Float8Tensor(data=out,
+                        fp8_meta=fp8_meta,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_OUTPUT,
+                        fp8_dtype=fp8_dtype_forward,
+                        dtype=activation_dtype,
+                    )
+            else:
+                out, _ = tex.fp8_gemm(
+                    weight_fp8._data,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    fp8_dtype_forward,
+                    ln_out_total,
+                    fp8_meta["scaling_fwd"].scale_inv,
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                    output_dtype,
+                    get_workspace(),
+                    bias=bias,
+                    use_bias=use_bias,
+                    use_split_accumulator=_2X_ACC_FPROP,
+                    ub_algo=ub_algo if ub_overlap_ag else None,
+                    ub=ub_obj_lnout if ub_overlap_ag else None,
+                    extra_output_tensor=ln_out if ub_overlap_ag else None,
+                    out_index=out_index,
+                    fp8_meta_tensor=meta_tensor,
+                    D_dtype=output_te_dtype,
+                )
+                if output_dtype == torch.uint8:
+                    out = Float8Tensor(data=out,
+                        fp8_meta=fp8_meta,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_OUTPUT,
+                        fp8_dtype=fp8_dtype_forward,
+                        dtype=activation_dtype,
+                    )
         else:
+            if _NVTE_DEBUG:
+                print('[LayerNormLinear]: using non-FP8 forward')
+
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -330,7 +391,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
-
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp.shape)
@@ -344,6 +404,10 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        if isinstance(grad_outputs[0], Float8Tensor):
+            ctx.fp8_meta["scaling_bwd"].scale_inv[
+                tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_outputs[0]._scale_inv
+
         with _prepare_backward(
             ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
         ):
@@ -455,6 +519,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj = None
 
             if ctx.fp8:
+                if _NVTE_DEBUG:
+                    print('[LayerNormLinear]: using FP8 backward')
+
                 fp8_dtype_forward = get_fp8_te_dtype(
                     ctx.fp8_meta["recipe"], fprop_tensor=True
                 )
@@ -476,7 +543,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
-                    grad_output_c,
+                    grad_output_c._data
+                    if isinstance(grad_output_c, Float8Tensor) else grad_output_c,
                     ctx.fp8_meta["scaling_bwd"].scale_inv,
                     tex.FP8BwdTensors.GRAD_OUTPUT1,
                     fp8_dtype_backward,
@@ -493,6 +561,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 clear_tensor_data(grad_output_c)
             else:
+                if _NVTE_DEBUG:
+                    print('[LayerNormLinear]: using non-FP8 backward')
+
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
                     weight,
@@ -541,7 +612,8 @@ class _LayerNormLinear(torch.autograd.Function):
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
-                            grad_output_t,
+                            grad_output_t._data
+                            if isinstance(grad_output_t, Float8Tensor) else grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT1,
                             fp8_dtype_backward,

@@ -16,6 +16,7 @@ from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
+    MultiheadAttention,
     RotaryPositionEmbedding,
 )
 from transformer_engine.pytorch.constants import TE_DType
@@ -918,9 +919,155 @@ model_configs_fp8_vs_f16 = {
 }
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
 qkv_layout_fp8_vs_f16 = ['sbh3d', 'bshd_bshd_bshd', 'sbhd_sbhd_sbhd']
+qkv_format_fp8_vs_f16 = ['bshd', 'sbhd']
 
 def _rmse(a, b):
-    return math.sqrt(torch.pow((a-b), 2).sum()/a.numel())
+    return math.sqrt((torch.pow((a-b), 2)/a.numel()).sum())
+
+@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
+@pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
+@pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
+@pytest.mark.parametrize("input_layernorm", [True, False])
+@pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
+def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    config = model_configs_fp8_vs_f16[model]
+
+    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    if _NVTE_DEBUG:
+        print()
+        print("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+    fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
+        dtype, config, True, qkv_format, input_layernorm)
+    if _NVTE_DEBUG:
+        print()
+        print("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+    fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
+        dtype, config, False, qkv_format, input_layernorm)
+
+    tols = dict(atol=5e-1, rtol=5e-1)
+    if _NVTE_DEBUG:
+        print()
+        print('========== {:^25s} =========='.format('forward output'))
+        print('[test_mha_fp8_vs_f16] tols:', tols)
+        print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
+            fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
+        print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
+            fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
+        print('fused_attn_fwd RMSE: {:.6f}'.format(
+            _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)))
+    try:
+        torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+    except Exception as e:
+        print(e)
+        print()
+    for i in range(len(param_names)):
+        if _NVTE_DEBUG:
+            print()
+            print('========== {:^25s} =========='.format(param_names[i]))
+            print('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
+                fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
+            print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
+                fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
+            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i,
+                _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])))
+        try:
+            torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+        except Exception as e:
+            print(e)
+            print()
+
+def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
+    reset_rng_states()
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+    def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        interval=1,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=fp8_mha,
+        fp8_mha=fp8_mha,
+    )
+
+    with fp8_model_init(enabled=fp8_mha):
+        mha = (MultiheadAttention(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_heads,
+            kv_channels=config.head_dim,
+            num_gqa_groups=config.num_gqa_groups,
+            attention_dropout=config.dropout_p,
+            layer_number=1,
+            bias=True,
+            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+            params_dtype=dtype,
+            input_layernorm=input_layernorm,
+            fuse_qkv_params=True,
+            attention_type="self",
+            qkv_weight_interleaved=True,
+            qkv_format=qkv_format,
+            ).to(dtype=dtype, device="cuda")
+        )
+
+    seqlens_q = torch.full([config.batch_size], config.max_seqlen_q,
+        dtype=torch.int32, device="cuda")
+    seqlens_kv = torch.full([config.batch_size], config.max_seqlen_kv,
+        dtype=torch.int32, device="cuda")
+    cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
+    cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+
+    dim_to_num = {
+        'b'  : config.batch_size,
+        'sq' : config.max_seqlen_q,
+        'skv': config.max_seqlen_kv,
+        'h'  : config.num_heads,
+        'hg' : config.num_gqa_groups,
+        'd'  : config.head_dim,
+        't'  : cu_seqlens_q[-1],
+        'tg' : cu_seqlens_kv[-1],
+        '3'  : 3,
+        '2'  : 2,
+        '1'  : 1,
+        }
+    layout = '_'.join(qkv_format)
+    layout = layout.replace('s', 'sq')
+    tensor_shape = [dim_to_num[j] for j in layout.split('_')]
+    tensor = 0.01 * torch.randint(-100, 100, tensor_shape, dtype=dtype, device="cuda")
+    hidden_states = tensor.view(*tensor.shape[:-2], -1)
+    hidden_states.requires_grad = True
+    tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+    out_grad = tensor.view(*tensor.shape[:-2], -1)
+
+    with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
+        out = mha(hidden_states,
+            attn_mask_type=config.attn_mask_type,
+            checkpoint_core_attention=False,
+            core_attention_bias_type=config.attn_bias_type,
+            is_first_microbatch=None,
+            )
+        out.backward(out_grad)
+
+    param_names = []
+    param_names.append('hidden_states.grad')
+    params = []
+    params.append(hidden_states)
+    for name, param in mha.named_parameters():
+        if param.requires_grad:
+            param_names.append(name+'.grad')
+            params.append(param)
+
+    return out, param_names, tuple(x.grad for x in params)
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
