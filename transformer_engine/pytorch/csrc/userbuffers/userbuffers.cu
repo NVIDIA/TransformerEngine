@@ -1986,12 +1986,6 @@ __global__ void kuserbuffers_inc(int *id) {
   atomicAdd(id, 1);
 }
 
-__global__ void kuserbuffers_proxysend(int *id, int *hostflag) {
-  const int signal_id = (*id) + 1;
-  *hostflag = signal_id;
-  *id = signal_id;
-}
-
 __global__ void kuserbuffers_dummy(void) {}
 
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -2305,6 +2299,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }                                                                                              \
   } while (0)
 
+// Return TRUE if two ranks share the same NV domain
 #define INTRANODE(peer) ((peer / comm->nvsize) == (comm->myrank / comm->nvsize))
 
 // Index corresponds to the type of flag:
@@ -2337,29 +2332,9 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 1);
   void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 2);
   bool signalonly    = (bytes / 16 == 0) || (comm->use_ce != 0);
-  bool intranode     = INTRANODE(peer);
 
-  if (!intranode && (comm->launch_mode & NVTE_LAUNCH_CPU)) {
-    comm->fifo[comm->head].optype = userbuffers_sendop;
-    comm->fifo[comm->head].basecounter = comm->basecounter[userbuffers_sendop];
-    comm->fifo[comm->head].handler = srchandler;
-    comm->fifo[comm->head].offset = srcoffset;
-    comm->fifo[comm->head].handler2 = dsthandler;
-    comm->fifo[comm->head].offset2 = dstoffset;
-    comm->fifo[comm->head].elements = bytes;
-    comm->fifo[comm->head].peer = peer;
+  assert(INTRANODE(peer));
 
-    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
-    while (newhead == comm->tail) {
-    }
-    comm->head = newhead;
-    comm->basecounter[userbuffers_sendop] += 1;
-  }
-  if (!intranode && (comm->launch_mode & NVTE_LAUNCH_GPU)) {
-    kuserbuffers_proxysend<<<1, 1, 0, stream>>>(&(comm->flags[NVTE_GF_STATE + userbuffers_sendop]),
-                                                comm->hostflags + userbuffers_sendop);
-    return;
-  }
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
     return;
   if (comm->push == 0) {
@@ -2547,10 +2522,12 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   int peerlocal      = peer % comm->nvsize;
   void *flagptr      = GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 0);
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
-  bool intranode = INTRANODE(peer);
+
+  assert(INTRANODE(peer));
+
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU))
     return;
-  if (comm->push == 0 && intranode) {
+  if (comm->push == 0) {
     void *dstptr = reinterpret_cast<char *>(comm->mem_ptr[dsthandler]) + dstoffset;
     void *srcptr = reinterpret_cast<char *>(comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
@@ -2569,7 +2546,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
         &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
-        reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms,
+        reinterpret_cast<int *>(flagptr), signalonly || comm->sms,
         comm->ub_timeout,
         reinterpret_cast<int *>(comm->use_ce ?
                                 GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1) : nullptr),

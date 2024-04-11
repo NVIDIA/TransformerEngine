@@ -123,7 +123,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->basecounter[i] = 0;
   (*comm)->head = 0;
   (*comm)->tail = 0;
-  (*comm)->activeproxy = 1;
   (*comm)->active_nreqs = 0;
   for (int i = 0; i < userbuffers_op_types; i++)
     (*comm)->active_req[i].active = -1;
@@ -242,58 +241,11 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->num2_nodes = tensornodes;
   (*comm)->my2_node = (mynode / datanodes) % tensornodes;
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
-
-  char *ib_dev_list;
-  int ZIONROCE = getenv("NVTE_ZIONROCE") ? atoi(getenv("NVTE_ZIONROCE")) : 0;
-  int ROCE = getenv("NVTE_ROCE") ? atoi(getenv("NVTE_ROCE")) : 0;
-  if (ZIONROCE)
-    ROCE = 1;
-  int DGX_H100 = device_prop.major == 9;
-
-  switch (mylocal) {
-  case 0:
-    ib_dev_list = "mlx5_0:1";
-    break;  // NOLINT(*)
-  case 1:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_3:1" : "mlx5_1:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 2:
-    ib_dev_list = (char *)(ZIONROCE   ? "mlx5_4:1" : DGX_H100 ? "mlx5_4:1" : "mlx5_2:1");  // NOLINT(*)
-    break;                                                                                 // NOLINT(*)
-  case 3:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_5:1" : "mlx5_3:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 4:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_6:1" : "mlx5_6:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 5:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_9:1" : "mlx5_7:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 6:
-    ib_dev_list = (char *)(ZIONROCE   ? "mlx5_10:1" : DGX_H100 ? "mlx5_10:1" : "mlx5_8:1");  // NOLINT(*)
-    break;                                                                                   // NOLINT(*)
-  case 7:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_11:1" : "mlx5_9:1");  // NOLINT(*)
-    break;                                                        // NOLINT(*)
-  default:
-    break;
-  }
-
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
   (*comm)->minblock = 1024 * 2 * 1024;
   (*comm)->asyncblocks = 16;
-
-  CUDACHECK(cudaMallocHost((void **)&(*comm)->hostflags,  // NOLINT(*)
-                           (NVTE_MAX_SMS + 100) * sizeof(int)));
-  for (int i = 0; i < 100 + NVTE_MAX_SMS; i++)
-    (*comm)->hostflags[i] = 0;
-  _mm_mfence();
-  sleep(1);
-
-  // init_p2p_transport();
-  (*comm)->ibnvsize = (*comm)->nvsize;
 
 #define NBUF 2
   if ((*comm)->sm_arch >= 9 && (*comm)->ar2_nvsize > 1 &&
@@ -384,6 +336,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 #define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
 #define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
+
   CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
   unsigned int flag = 1;
   CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
@@ -391,23 +344,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
   using namespace std;
-  (*comm)->g = gdr_open();
-  if ((*comm)->g == NULL) {
-    fprintf(stderr, "gdrcopy open failed\n");
-    return -1;
-  }
-  gdr_mh_t mh;
-  ret = gdr_pin_buffer((*comm)->g, (CUdeviceptr)(*comm)->flags, GPU_PAGE_SIZE, 0, 0, &mh);
-  if (ret) {
-    fprintf(stderr, "gdr_pin_buffer failed\n");
-    return -1;
-  }
-  ret = gdr_map((*comm)->g, mh, (void **)&((*comm)->map_flags), GPU_PAGE_SIZE);  // NOLINT(*)
-
-  if (ret) {
-    fprintf(stderr, "gdr_map failed\n");
-    return -1;
-  }
   sched_param param;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -436,10 +372,6 @@ int create_communicator(communicator **comm) {
 }
 
 void destroy_communicator(communicator *comm) {
-  comm->activeproxy = 0;
-  if (!comm->myrank && getenv("NVTE_UBDEBUG"))
-    printf("waiting for userbuffers proxy thread to exit()\n");
-  gdr_close(comm->g);
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
@@ -543,7 +475,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       CUCHECK(cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
                                  0 /*memOffset*/, aligned_size, 0));
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
-      comm->mc_ptr[hndl] = comm->mc_baseptr + comm->mc_offset;
+      comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
     } else if (!comm->myrank) {
       printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,

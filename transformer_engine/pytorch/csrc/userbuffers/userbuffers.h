@@ -12,7 +12,6 @@
 #include "cuda_runtime.h"
 #include <pthread.h>
 #include <chrono>
-#include "gdrapi.h"
 #include <stdexcept>
 
 #define NVTE_MAX_REGIONS 16
@@ -31,10 +30,6 @@
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
 #define NVTE_UB_MEM_ALLOCATED 4
-
-#ifdef UCP
-#include <ucp/api/ucp.h>
-#endif
 
 // region 0 flag offsets
 #define NVTE_REG0_OPFLAGS 1024
@@ -123,16 +118,11 @@ struct communicator {
   // max value for running block counters in hostflags
   int basecounter[userbuffers_op_types];  // NOLINT(*)
 
-  int *hostflags;
   int *flags, *map_flags;
-  gdr_t g;
 
-  struct sharp_coll_context *sharp_coll_context;
-  struct sharp_coll_comm *sharp_coll_comm;
   void *mem_mr[NVTE_MAX_REGIONS];
 
   ub_request *fifo;
-  volatile int activeproxy;
   int nblocks, alignblock, minblock, asyncblocks, active_nreqs;
   ub_request active_req[userbuffers_op_types];  // NOLINT(*)
   int padding[7];
@@ -143,8 +133,6 @@ struct communicator {
   MPI_Request mpihndl[NVTE_MAX_SHARP];
   MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
       comm_intra;       // full intranode (all ndev GPUS)
-  int ibnvsize;  // can be used to fake smaller or larger nvlink domain to use ib instead of nvlink
-                 // or force MNNVL
   int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
