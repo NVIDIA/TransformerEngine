@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch.utils._pytree import tree_map
@@ -231,8 +231,7 @@ class _ViewFunc(torch.autograd.Function):
                 tensor,
                 data=tensor._data.view(*shape),
             )
-        elif isinstance(tensor, torch.Tensor):
-            return tensor.view(*shape)
+        return tensor.view(*shape)
 
     @staticmethod
     def backward(ctx,
@@ -245,8 +244,7 @@ class _ViewFunc(torch.autograd.Function):
                 data=grad._data.view(ctx.shape),
             )
             return dgrad, None
-        elif isinstance(grad, torch.Tensor):
-            return grad.view(ctx.shape), None
+        return grad.view(ctx.shape), None
 
 
 class _ReshapeFunc(torch.autograd.Function):
@@ -274,8 +272,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 tensor,
                 data=tensor._data.reshape(*shape),
             )
-        elif isinstance(tensor, torch.Tensor):
-            return tensor.reshape(*shape)
+        return tensor.reshape(*shape)
 
     @staticmethod
     def backward(ctx,
@@ -288,8 +285,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 data=grad._data.reshape(ctx.shape),
             )
             return dgrad, None
-        elif isinstance(grad, torch.Tensor):
-            return grad.reshape(ctx.shape), None
+        return grad.reshape(ctx.shape), None
 
 
 class Float8Tensor(torch.Tensor):

@@ -13,7 +13,6 @@ import transformer_engine_extensions as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
-import transformer_engine.pytorch.utils
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 

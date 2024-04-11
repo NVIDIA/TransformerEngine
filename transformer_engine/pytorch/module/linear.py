@@ -105,6 +105,7 @@ class _Linear(torch.autograd.Function):
         # Cast input to expected dtype
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_t = None
+        inputmat_no_fp8 = inputmat
 
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -318,7 +319,7 @@ class _Linear(torch.autograd.Function):
                         if cpu_offloading:
                             saved_inputmat_t.activation_offloading = True
                 else:
-                    saved_inputmat = inputmat
+                    saved_inputmat = inputmat_no_fp8
 
                 if cpu_offloading:
                     if fuse_wgrad_accumulation:
@@ -554,7 +555,8 @@ class _Linear(torch.autograd.Function):
                             if isinstance(inputmat_total, Float8Tensor):
                                 inputmat_t_total = inputmat_total.transpose(0,1)
                             else:
-                                inputmat_t_total = tex.fp8_transpose(inputmat_total, fp8_dtype_backward)
+                                inputmat_t_total = tex.fp8_transpose(
+                                    inputmat_total, fp8_dtype_backward)
                         wgrad, _ = fp8_gemm(
                             inputmat_t_total._data
                             if isinstance(inputmat_t_total, Float8Tensor) else inputmat_t_total,
