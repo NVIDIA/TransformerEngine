@@ -38,10 +38,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
-from transformer_engine.pytorch.module.base import (
-    _prepare_backward,
-    TransformerEngineBaseModule,
-)
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     divide,
     attention_mask_func,
@@ -2057,9 +2054,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             )
             dqkv = dqkv[..., :d_out.shape[-1]]
         else:
-            with _prepare_backward(
-                ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn_qkvpacked"
-            ):
+            with torch.cuda.nvtx.range("_FusedAttn_qkvpacked"):
                 if ctx.fp8:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using FP8 backward')
@@ -2265,9 +2260,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             dq = dq[..., :d_out.shape[-1]]
             dkv = dkv[..., :d_out.shape[-1]]
         else:
-            with _prepare_backward(
-                ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn_kvpacked"
-            ):
+            with torch.cuda.nvtx.range("_FusedAttn_kvpacked"):
                 if ctx.fp8:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using FP8 backward')
@@ -2543,9 +2536,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = dk[..., :d_out.shape[-1]]
             dv = dv[..., :d_out.shape[-1]]
         else:
-            with _prepare_backward(
-                ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_FusedAttn"
-            ):
+            with torch.cuda.nvtx.range("_FusedAttn"):
                 if ctx.fp8:
                     if _NVTE_DEBUG:
                         print('[DotProductAttention]: using FP8 backward')
