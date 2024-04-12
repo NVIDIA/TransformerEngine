@@ -31,6 +31,7 @@ class _RMSNorm(torch.autograd.Function):
         eps: float,
         fwd_rmsnorm_sm_margin: int,
         bwd_rmsnorm_sm_margin: int,
+        inf_rmsnorm_sm_margin: int,
         zero_centered_gamma: bool,
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
@@ -55,7 +56,7 @@ class _RMSNorm(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
             rmsnorm_out = tex.rmsnorm_fwd_inf(inputmat, rmsnorm_weight,
-                                              eps,
+                                              eps, inf_rmsnorm_sm_margin,
                                               zero_centered_gamma)
         return rmsnorm_out.view_as(inp)
 
@@ -73,6 +74,7 @@ class _RMSNorm(torch.autograd.Function):
         return (
             dxmat.view(ctx.inp_shape),
             dgamma,
+            None,
             None,
             None,
             None,
@@ -151,6 +153,7 @@ class RMSNorm(torch.nn.Module):
         # communication overlap with RMSNorm.
         self.fwd_rmsnorm_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_rmsnorm_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_rmsnorm_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_rms_norm_parameters(self) -> None:
         """Init RMSNorm params"""
@@ -195,6 +198,7 @@ class RMSNorm(torch.nn.Module):
             self.eps,
             self.fwd_rmsnorm_sm_margin,
             self.bwd_rmsnorm_sm_margin,
+            self.inf_rmsnorm_sm_margin,
             self.zero_centered_gamma,
             torch.is_grad_enabled(),
             self.activation_dtype,

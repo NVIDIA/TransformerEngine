@@ -78,6 +78,7 @@ def _apply_normalization(inputmat:torch.Tensor,
                 fp8_meta["scaling_fwd"],
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
+                fwd_ln_sm_margin,
                 zero_centered_gamma,
             ), None, None
     else:
@@ -88,7 +89,7 @@ def _apply_normalization(inputmat:torch.Tensor,
             )
         else:
             return normalization_func(
-                    *inputs, eps, zero_centered_gamma
+                    *inputs, eps, fwd_ln_sm_margin, zero_centered_gamma
             ), None, None
     if normalization == "RMSNorm":
         output = (ln_out, None, output[1])
