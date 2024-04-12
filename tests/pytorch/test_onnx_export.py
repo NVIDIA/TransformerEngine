@@ -86,6 +86,12 @@ def set_max_seq_len(max_seq_len=128):
     os.environ["NVTE_ONNX_KVCACHE_MAX_SEQ_LEN"] = f"{max_seq_len}"
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 def create_fp8_recipe():
     return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
 

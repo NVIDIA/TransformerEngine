@@ -11,7 +11,6 @@ import transformer_engine_extensions as tex
 
 from .base import (
     get_workspace,
-    _prepare_backward,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -65,6 +64,7 @@ class _Linear(torch.autograd.Function):
         bias: torch.Tensor,
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Union[torch.Tensor, None],
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
@@ -80,7 +80,8 @@ class _Linear(torch.autograd.Function):
         primary_weights_in_fp8: bool,
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
-        ub_name: str
+        ub_name: str,
+        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -90,7 +91,12 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
 
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        update_fp8_weights = (
+            is_first_microbatch is None
+            or is_first_microbatch
+            or skip_fp8_weight_update is not None
+        )
+
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_rs = False if tp_world_size == 1 else ub_overlap_rs
 
@@ -140,7 +146,6 @@ class _Linear(torch.autograd.Function):
                 # Weight is already in FP8
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
-                weight_t_fp8 = None
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -158,6 +163,7 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=weight_fp8._data,
                         transpose_out=weight_t_fp8._data,
+                        noop_flag=skip_fp8_weight_update,
                     )
                 else:
                     cast_to_fp8(
@@ -296,6 +302,7 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
             )
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -313,6 +320,7 @@ class _Linear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
+            ctx.primary_weights_in_fp8 = primary_weights_in_fp8
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -330,9 +338,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_Linear"
-        ):
+        with torch.cuda.nvtx.range("_Linear_backward"):
             (
                 inputmat,
                 inputmat_t,
@@ -340,6 +346,7 @@ class _Linear(torch.autograd.Function):
                 main_grad,
                 weight_t_fp8,
                 fwd_scale_inverses,
+                skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -347,10 +354,14 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             # Primary weights are in FP8.
-            if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(
-                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
+            if ctx.primary_weights_in_fp8:
+                weight_t_fp8 = weight.transpose_2d(
+                    cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
                 )
+            elif ctx.fp8:
+                weight_t_fp8 = weight_t_fp8._data
+
             tp_world_size = get_distributed_world_size(ctx.tp_group)
             ctx.ub_overlap_ag = False if tp_world_size == 1 else ctx.ub_overlap_ag
             if ctx.ub_overlap_ag:
@@ -361,6 +372,7 @@ class _Linear(torch.autograd.Function):
                     ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
                 else:
                     ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+
             (
                 grad_output,
                 grad_output_c,
@@ -401,7 +413,7 @@ class _Linear(torch.autograd.Function):
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     dgrad, _ = fp8_gemm(
-                        weight_t_fp8._data,
+                        weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
@@ -524,6 +536,8 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
+            None,
             None,
             None,
             None,
@@ -772,7 +786,6 @@ class Linear(TransformerEngineBaseModule):
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
@@ -784,6 +797,10 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+
+        # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
+        self.dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
+        FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -858,6 +875,10 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
+        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
@@ -903,6 +924,7 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
+                skip_fp8_weight_update,
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
@@ -919,6 +941,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.ub_name,
+                self.dummy_tensor,
             )
             out = linear_fn(*args)
 
