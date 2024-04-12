@@ -229,19 +229,29 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
+    if (launch_params.workspace_bytes == 0) {
+        launch_params.workspace_bytes = 1;
+    }
+
     if (workspace->data.dptr == nullptr) {
         NVTE_CHECK(barrier->data.dptr == nullptr);
 
         workspace->data.dtype = layer_norm::DType::kByte;
-        if (launch_params.workspace_bytes == 0) {
-            launch_params.workspace_bytes = 1;
-        }
         workspace->data.shape = { launch_params.workspace_bytes };
 
         barrier->data.dtype = layer_norm::DType::kInt32;
         barrier->data.shape = { launch_params.barrier_size };
 
         return;
+    } else {
+        NVTE_CHECK(workspace->data.dtype == layer_norm::DType::kByte);
+        NVTE_CHECK(workspace->data.shape == std::vector<size_t>{ launch_params.workspace_bytes });
+    }
+
+    if (launch_params.barrier_size > 0) {
+        NVTE_CHECK(barrier->data.dptr != nullptr);
+        NVTE_CHECK(barrier->data.dtype == layer_norm::DType::kInt32);
+        NVTE_CHECK(barrier->data.shape == std::vector<size_t>{ launch_params.barrier_size });
     }
 
     // Tensor checks are delayed here in order to recover workspace sizes with null data
@@ -368,6 +378,27 @@ void layernorm_bwd(const Tensor& dz,
         barrier->data.shape = { launch_params.barrier_size };
 
         return;
+    } else {
+        NVTE_CHECK(dbeta_part->data.dptr != nullptr);
+        auto pdw_shape = std::vector<size_t>{
+            static_cast<uint64_t>(launch_params.params.ctas_per_col), hidden_size};
+
+        NVTE_CHECK(dgamma_part->data.dtype == ctype);
+        NVTE_CHECK(dgamma_part->data.shape == pdw_shape);
+        NVTE_CHECK(dbeta_part->data.dtype == ctype);
+        NVTE_CHECK(dbeta_part->data.shape == pdw_shape);
+    }
+
+    if (launch_params.barrier_size > 0) {
+        NVTE_CHECK(barrier->data.dptr != nullptr);
+        NVTE_CHECK(barrier->data.dtype == layer_norm::DType::kInt32);
+        NVTE_CHECK(barrier->data.shape == std::vector<size_t>{ launch_params.barrier_size });
+    }
+
+    if (launch_params.workspace_bytes > 0) {
+        NVTE_CHECK(workspace->data.dptr != nullptr);
+        NVTE_CHECK(workspace->data.dtype == layer_norm::DType::kByte);
+        NVTE_CHECK(workspace->data.shape == std::vector<size_t>{ launch_params.workspace_bytes });
     }
 
     // Tensor checks are delayed here in order to recover workspace sizes with null data
