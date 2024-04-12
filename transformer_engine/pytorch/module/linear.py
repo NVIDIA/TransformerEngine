@@ -347,7 +347,7 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,     # None if fp8 == False
-                saved_inputmat_t,   # None if fp8 == False AND in training mode
+                saved_inputmat_t,   # None if fp8 == False AND not is_grad_enabled
                 weight_t_fp8 if fp8 else None,
             )
 

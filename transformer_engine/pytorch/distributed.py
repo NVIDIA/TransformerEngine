@@ -20,6 +20,7 @@ from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_module
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
+from .float8_tensor import Float8Tensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -870,13 +871,12 @@ def _fsdp_scatter_tensors(
 ):
     shapes = []
     if fsdp_group is not None:
-        print(f"")
         for t in tensors:
             if isinstance(t, torch.Tensor):
-                shapes.append(t.data.shape)
-                print(f"original tensor shape: {t.data.shape}")
+                target = t._data if isinstance(t, Float8Tensor) else t
+                shapes.append(target.data.shape)
                 safely_set_viewless_tensor_data(
-                    t, split_tensor_into_1d_equal_chunks(t.data, fsdp_group, new_buffer=True)
+                    target, split_tensor_into_1d_equal_chunks(t.data, fsdp_group, new_buffer=True)
                 )
             else:
                 shapes.append(None)
@@ -893,8 +893,9 @@ def _fsdp_gather_tensors(
         for s, t in zip(shapes, tensors):
             if isinstance(t, torch.Tensor):
                 assert s is not None, "Internal TE error."
+                target = t._data if isinstance(t, Float8Tensor) else t
                 safely_set_viewless_tensor_data(
-                    t, gather_split_1d_tensor(t.data, fsdp_group).view(s)
+                    target, gather_split_1d_tensor(target.data, fsdp_group).view(s)
                 )
 
 

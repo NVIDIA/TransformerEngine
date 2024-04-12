@@ -507,7 +507,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
-                inputmat,
                 mu,
                 rsigma,
                 ln_out,
@@ -616,7 +615,6 @@ class _LayerNormMLP(torch.autograd.Function):
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
                 ctx.fsdp_shapes,
-                inputmat,
                 mu,
                 rsigma,
                 ln_out,

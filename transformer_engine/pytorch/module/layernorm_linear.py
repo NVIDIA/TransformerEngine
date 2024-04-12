@@ -322,15 +322,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
-            fwd_scale_inverses = fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
-                inputmat,
                 mu,
                 rsigma,
+                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
-                ln_out if weight.requires_grad else None
+                ln_out if weight.requires_grad else None,
             )
 
             ctx.save_for_backward(
@@ -419,9 +418,9 @@ class _LayerNormLinear(torch.autograd.Function):
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
                 ctx.fsdp_shapes,
-                inputmat,
                 mu,
                 rsigma,
+                main_grad,
                 weight_t_fp8,
                 ln_out,
             )
