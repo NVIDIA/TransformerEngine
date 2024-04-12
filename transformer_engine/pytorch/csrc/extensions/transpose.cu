@@ -32,6 +32,35 @@ void fused_cast_transpose(at::Tensor input,
 }
 
 
+void fused_cast_transpose_noop(at::Tensor input,
+                               at::Tensor noop,
+                               at::Tensor scale,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               at::Tensor input_cast,
+                               at::Tensor input_transpose,
+                               transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t M = static_cast<size_t>(input.size(0));
+  size_t N = static_cast<size_t>(input.size(1));
+
+  auto input_cu            = makeTransformerEngineTensor(input);
+  auto noop_cu             = makeTransformerEngineTensor(noop);
+  auto output_cast_cu      = makeTransformerEngineTensor(input_cast.data_ptr(), {M, N}, otype,
+                                                         amax.data_ptr(), scale.data_ptr(),
+                                                         scale_inv.data_ptr());
+  auto output_transpose_cu = makeTransformerEngineTensor(input_transpose.data_ptr(), {N, M}, otype,
+                                                         amax.data_ptr(), scale.data_ptr(),
+                                                         scale_inv.data_ptr());
+
+  nvte_cast_transpose_with_noop(input_cu.data(), noop_cu.data(), output_cast_cu.data(),
+                                output_transpose_cu.data(),
+                                at::cuda::getCurrentCUDAStream());
+}
+
+
 std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,
@@ -318,4 +347,40 @@ at::Tensor fp8_transpose(at::Tensor input,
   nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return output;
+}
+
+
+void fp8_transpose_noalloc(at::Tensor input,
+                           at::Tensor output,
+                           transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t M = static_cast<size_t>(input.size(0));
+  size_t N = static_cast<size_t>(input.size(1));
+
+  auto input_cu  = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {N, M}, otype);
+
+  nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+}
+
+
+void fp8_transpose_noalloc_noop(at::Tensor input,
+                                at::Tensor output,
+                                at::Tensor noop,
+                                transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t M = static_cast<size_t>(input.size(0));
+  size_t N = static_cast<size_t>(input.size(1));
+
+  auto input_cu  = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
+  auto noop_cu   = makeTransformerEngineTensor(noop);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {N, M}, otype);
+
+  nvte_transpose_with_noop(
+    input_cu.data(), noop_cu.data(), output_cu.data(),
+    at::cuda::getCurrentCUDAStream());
 }

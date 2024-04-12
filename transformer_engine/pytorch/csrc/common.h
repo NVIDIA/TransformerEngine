@@ -43,6 +43,7 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/cast_transpose_noop.h>
 
 namespace transformer_engine {
 

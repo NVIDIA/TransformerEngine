@@ -4,7 +4,6 @@
 
 import math
 import os
-import sys
 from typing import List, Optional
 import pytest
 import copy
@@ -25,7 +24,6 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
 
 
 # Only run FP8 tests on H100.
@@ -53,6 +51,14 @@ class ModelConfig:
 model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
+
+model_configs_inference = {
+    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
+}
+backends_inference = ["FlashAttention", "UnfusedAttention"]
+module_inference = ["TransformerLayer", "MultiheadAttention"]
+input_formats_inference = ["sbhd", "bshd"]
 
 param_types = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
@@ -104,7 +110,13 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
 def reset_rng_states() -> None:
     """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
+
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -373,10 +385,10 @@ class TorchGPT(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b = self.causal_attn(a, attn_mask)
+        b = self.causal_attn(a, attention_mask)
         if self.parallel_attention_mlp:
             n = self.ln_mlp(x)
             x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
@@ -396,13 +408,6 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
             TransformerLayer(
@@ -417,7 +422,6 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
                 kv_channels=config.embed,
                 apply_residual_connection_post_layernorm=False,
                 output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 params_dtype=dtype,
                 fuse_qkv_params=True,
             )
@@ -476,13 +480,6 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
         TransformerLayer(
@@ -497,7 +494,6 @@ def _test_e2e_full_recompute(
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
             params_dtype=dtype,
             fuse_qkv_params=True,
         )
@@ -520,7 +516,6 @@ def _test_e2e_full_recompute(
                 checkpoint_core_attention=False,
                 distribute_saved_activations=False,
                 tp_group=None,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 use_reentrant=use_reentrant,
             )
         else:
@@ -683,7 +678,7 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    out = block(inp_hidden_states, inp_attn_mask)
+    out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
     loss.backward()
 
@@ -1261,13 +1256,6 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8_model_params):
         block = (
             TransformerLayer(
@@ -1282,7 +1270,6 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
                 kv_channels=config.embed,
                 apply_residual_connection_post_layernorm=False,
                 output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 params_dtype=dtype,
                 fuse_qkv_params=True,
             )
@@ -1320,6 +1307,7 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     assert_all_equal(outputs, outputs_fp8_params)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1398,14 +1386,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 
     assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
 
-
-model_configs_inference = {
-    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
-}
-backends_inference = ["FlashAttention", "UnfusedAttention"]
-module_inference = ["TransformerLayer", "MultiheadAttention"]
-input_formats_inference = ["sbhd", "bshd"]
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)

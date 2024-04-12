@@ -157,7 +157,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     }
 
     // Catch up the default torch stream
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t)stream_main));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
@@ -238,13 +238,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
-    CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
-    for (int i = 0; i < _stream_compute.size(); i++) {
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _stop_comm, 0));
-    }
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_compute, 0));
 
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
@@ -350,11 +347,12 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     for (int i = 0; i < _stream_compute.size(); i++) {
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
     }
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_compute, 0));
 
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
@@ -469,13 +467,13 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
       }
     }
+    for (int i = 0; i < _stream_compute.size(); i++) {
+      CHECK_CUDA(
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[i]));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    }
     _ub_comm->sms = ori_sms;
-    int last_compute_stream_id =
-        (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
-    CHECK_CUDA(
-        cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_comm, 0));
     at::cuda::setCurrentCUDAStream(stream_main);
 
@@ -506,7 +504,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       }
     }
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
     CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input.data_ptr(), input.numel() * input.element_size(),
@@ -805,14 +803,15 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     if (B_scale_inverse.numel())
       B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t)stream_main));
 
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
+    for (int i = 0; i < _stream_compute.size(); i++) {
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
+    }
     if (_aggregate2) {
-      // Catch up the default torch stream
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
-
       const int num_steps = _tp_size / 2;
       char *input_b_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
 
@@ -877,21 +876,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
           CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
                                      _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
                                      cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
-          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
-      at::cuda::setCurrentCUDAStream(stream_main);
-      int last_compute_stream_id =
-          (num_steps + _stream_compute.size() - 1) % _stream_compute.size();
-      CHECK_CUDA(
-          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     } else {
-      // Catch up the default torch stream
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
-
       for (int i = 0; i < _tp_size; i++) {
         // Set the userbuffer id. Buffer under send is the input for the current
         // GEMM chunk The initial input chunk is stored _ubuf[rank]. This is to
@@ -936,16 +923,19 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
           CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
                                      _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
                                      cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
-          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
-      at::cuda::setCurrentCUDAStream(stream_main);
-      int last_compute_stream_id = (_tp_size + _stream_compute.size() - 1) % _stream_compute.size();
-      CHECK_CUDA(
-          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     }
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    for (int i = 0; i < _stream_compute.size(); i++) {
+      CHECK_CUDA(
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[i]));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    }
+    CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
+    CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_recv, 0));
+    at::cuda::setCurrentCUDAStream(stream_main);
 
     return D;
   }  // split_overlap_ag

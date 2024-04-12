@@ -133,3 +133,13 @@ class DelayedScaling:
             (False, False, False),
             (False, False, True),
         ), "Only wgrad GEMM override is currently supported."
+
+    def __repr__(self) -> str:
+        return (
+            f"margin={self.margin}, "
+            f"interval={self.interval}, "
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"amax_history_len={self.amax_history_len}, "
+            f"wgrad_override={self.override_linear_precision.wgrad}, "
+            f"reduce_amax={self.reduce_amax}"
+        )
