@@ -73,7 +73,7 @@ class _LayerNorm(torch.autograd.Function):
             d_ln_out, inputmat, mu, rsigma, ln_weight,
             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
