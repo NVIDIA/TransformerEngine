@@ -230,7 +230,7 @@ class TestFP8Dot:
         def layernorm_fp8_mlp_ref(x: jnp.ndarray, ln_scale: jnp.ndarray, kernel_1: jnp.ndarray,
                                 kernel_2: jnp.ndarray, bias_1: jnp.ndarray, bias_2: jnp.ndarray,
                                 fp8_maxs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                                  scale_inv: jnp.ndarray) -> jnp.ndarray:
+                                scale_inv: jnp.ndarray) -> jnp.ndarray:
 
             x = jnp.asarray(x, jnp.float32)
             mean2 = jnp.mean(jax.lax.square(x), axis=-1, keepdims=True)

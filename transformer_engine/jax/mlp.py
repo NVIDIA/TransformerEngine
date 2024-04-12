@@ -23,14 +23,14 @@ from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
 
 
-activation_lu_dict = {
+activation_dict = {
     ('gelu',): { 'fwd': gelu,
                 "bwd": dgelu },
     ('gelu', 'linear'): { 'fwd': gated_gelu,
                          'bwd': dgated_gelu }
 }
 
-activation_lu_fp8_dict = {
+activation_fp8_dict = {
     ('gelu',): { 'fwd': gelu_fp8,
                 'bwd': dgelu_dbias_cast_transpose },
     ('gelu', 'linear'): { 'fwd': gated_gelu_fp8,
@@ -42,7 +42,7 @@ def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]
     """
     Activation Unit
     """
-    if 'linear' in activation_type:
+    if len(activation_type) > 1:
         assert x.shape[-2] == 2 # Linear + GeLU
     output = _activation_lu(x, activation_type)
     return output
@@ -57,7 +57,7 @@ def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable
 
 
 def _activation_lu_fwd_rule(x, activation_type):
-    fwd_output = activation_lu_dict[activation_type]["fwd"](x)
+    fwd_output = activation_dict[activation_type]["fwd"](x)
     return fwd_output, (x,)
 
 
@@ -65,7 +65,7 @@ def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
     assert x.dtype == g.dtype
 
-    dx = activation_lu_dict[activation_type]["bwd"](g, x)
+    dx = activation_dict[activation_type]["bwd"](g, x)
     dx = jnp.reshape(dx, x.shape)
     return (dx,)
 
@@ -167,12 +167,12 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         activation_type,
         use_bias):
 
-    is_gated = 'linear' in activation_type
+    is_gated = len(activation_type) > 1
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 1, Hidden_out)
     # Kernel_2 should be in shape of (Hidden_in, Hidden_out)
     assert len(kernel_1.shape) == 3
-    assert kernel_1.shape[-2] == 2 if is_gated else 1
+    assert kernel_1.shape[-2] == len(activation_type)
     assert len(kernel_2.shape) == 2
 
     x_contracting_dims = (len(x.shape) - 1,)
@@ -247,7 +247,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     activation_lu_out_scale = scale[gemm2_x_idx]
     activation_lu_out_scale_inv = scale_inv[gemm2_x_idx]
 
-    activation_lu_fp8 = activation_lu_fp8_dict[activation_type]["fwd"]
+    activation_lu_fp8 = activation_fp8_dict[activation_type]["fwd"]
 
     # (batch..., hidden_in) -> (batch..., hidden)
     casted_activation_lu_out, updated_activation_lu_amax = activation_lu_fp8(dot_1_output,
@@ -303,7 +303,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape= ctx
 
-    is_gated = 'linear' in activation_type
+    is_gated = len(activation_type) > 1
 
     gemm2_x_idx, gemm2_kernel_idx, gemm2_grad_idx = FP8Helper.get_fp8_meta_indices(1)
 
@@ -345,7 +345,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     dactivation_lu_scale = scale[gemm1_grad_idx]
     dactivation_lu_scale_inv = scale_inv[gemm1_grad_idx]
 
-    dactivation_lu_cast_transpose = activation_lu_fp8_dict[activation_type]["bwd"]
+    dactivation_lu_cast_transpose = activation_fp8_dict[activation_type]["bwd"]
     if not is_gated and use_bias:
         casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
         dactivation_lu_cast_transpose(
