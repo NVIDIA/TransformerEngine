@@ -38,8 +38,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    _distribute_and_save_activations,
-    _gather_distributed_activations,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
@@ -322,8 +322,18 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
-            ctx = _distribute_and_save_activations(
-                ctx,
+            fwd_scale_inverses = fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                inputmat,
+                mu,
+                rsigma,
+                weight_t_fp8,
+                ln_out if weight.requires_grad else None
+            )
+
+            ctx.save_for_backward(
                 inputmat,
                 ln_weight,
                 mu,
@@ -334,7 +344,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out if weight.requires_grad else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
-                process_group=fsdp_group,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -405,7 +414,17 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 fwd_scale_inverses,
                 skip_fp8_weight_update,
-            ) = _gather_distributed_activations(ctx)
+            ) = ctx.saved_tensors
+
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                inputmat,
+                mu,
+                rsigma,
+                weight_t_fp8,
+                ln_out,
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)

@@ -43,9 +43,9 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    use_reentrant_activation_recompute
-    _distribute_and_save_activations,
-    _gather_distributed_activations,
+    use_reentrant_activation_recompute,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 
 from .. import cpp_extensions as tex
@@ -504,8 +504,20 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out.activation_offloading = True
                 gelu_out.activation_offloading = True
 
-            ctx = _distribute_and_save_activations(
-                ctx,
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                inputmat,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_t_fp8,
+                fc2_weight_t_fp8,
+            )
+
+            ctx.save_for_backward(
                 inputmat,
                 ln_weight,
                 mu,
@@ -522,7 +534,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
-                process_group=fsdp_group,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -600,7 +611,20 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fwd_scale_inverses,
                 skip_fp8_weight_update,
-            ) = _gather_distributed_activations(ctx)
+            ) = ctx.saved_tensors
+
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                inputmat,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_t_fp8,
+                fc2_weight_t_fp8,
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 fc1_weight = Parameter(fc1_weight, False)
@@ -1598,14 +1622,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.gemm_gelu_fusion,
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
                 self.dummy_tensor,
-=======
                 self.fsdp_group,
->>>>>>> 6b1a0d9 (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
->>>>>>> c2e712f (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
             )
             out = fwd_fn(*args)
 

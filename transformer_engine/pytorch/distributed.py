@@ -5,7 +5,7 @@
 """Methods needed for distributed training (DP/TP)."""
 import warnings
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
-from typing import Any, Dict, List, Union, Optional, Callable, Tuple, final
+from typing import Any, Dict, Union, Optional, Callable, Tuple, List, final
 from abc import ABC
 from collections.abc import Iterable
 from functools import partial
@@ -14,7 +14,8 @@ import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import _Policy, _wrap_module_cls_individually
+from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
+from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
@@ -863,141 +864,92 @@ def allreduce(
     return input_, handle
 
 
-def _distribute_and_save_activations(ctx, *tensors_to_save, process_group=None):
-    ctx.saved_shapes = []
-    ctx.fsdp_group = process_group
-    if process_group is not None and not is_fp8_activation_recompute_enabled():
-        for saved_tensor in tensors_to_save:
-            if isinstance(saved_tensor, torch.Tensor):
-                ctx.saved_shapes.append(saved_tensor.shape)
+def _fsdp_scatter_tensors(
+    fsdp_group: dist_group_type,
+    *tensors: torch.Tensor,
+):
+    shapes = []
+    if fsdp_group is not None:
+        print(f"")
+        for t in tensors:
+            if isinstance(t, torch.Tensor):
+                shapes.append(t.data.shape)
+                print(f"original tensor shape: {t.data.shape}")
                 safely_set_viewless_tensor_data(
-                    saved_tensor.data,
-                    split_tensor_into_1d_equal_chunks(
-                        saved_tensor, process_group, new_buffer=True
-                    )
+                    t, split_tensor_into_1d_equal_chunks(t.data, fsdp_group, new_buffer=True)
                 )
             else:
-                ctx.saved_shapes.append(None)
-    ctx.save_for_backward(*tensors_to_save)
-    return ctx
+                shapes.append(None)
+    return shapes
 
 
-def _gather_distributed_activations(ctx):
-    if ctx.fsdp_group is not None and not is_fp8_activation_recompute_enabled():
-        for saved_tensor, saved_shape in zip(ctx.saved_tensors, ctx.saved_shapes):
-            if isinstance(saved_tensor, torch.Tensor):
+def _fsdp_gather_tensors(
+    fsdp_group: dist_group_type,
+    shapes: List[Tuple[int,...]],
+    *tensors: torch.Tensor,
+):
+    if fsdp_group is not None:
+        assert len(shapes) == len(tensors), "Number of tensors and tensor shapes must be equal."
+        for s, t in zip(shapes, tensors):
+            if isinstance(t, torch.Tensor):
+                assert s is not None, "Internal TE error."
                 safely_set_viewless_tensor_data(
-                    saved_tensor.data,
-                    gather_split_1d_tensor(saved_tensor, ctx.fsdp_group).view(saved_shape)
+                    t, gather_split_1d_tensor(t.data, fsdp_group).view(s)
                 )
-    return ctx.saved_tensors
 
 
-def fsdp_wrap_policy(
-    module: torch.nn.Module,
-    recurse: bool,
-    nonwrapped_numel: int,
-    fsdp_group: dist_group_type = None,
-    custom_wrap_policy: Callable = None,
-    ignored_modules: Iterable = [],
-) -> Union[Dict[str, Any], bool]:
+def _is_te_module(module):
     """
-    Policy function for wrapping Transformer Engine modules with FSDP. If there is no given
-    `custom_wrap_policy()`, the default behavior is to wrap any module that is not in the
-    list of ignored modules.
+    Check if given module is a Transformer Engine module that requires the TE checkpoint
+    implementation for activation recompute.
+    """
+    from .module import LayerNorm, RMSNorm
+    from .module.base import TransformerEngineBaseModule
+    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .transformer import TransformerLayer
+    te_classes_list = [
+        LayerNorm,
+        RMSNorm,
+        TransformerEngineBaseModule,
+        UnfusedDotProductAttention,
+        DotProductAttention,
+        MultiheadAttention,
+        TransformerLayer,
+    ]
+    is_te_module = False
+    for te_class in te_classes_list:
+        if isinstance(module, te_class):
+            is_te_module = True
+            break
+    return is_te_module
+
+
+def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
+    """
+    Inject FSDP process gorup references into FSDP-wrapped TE modules in an FSDP-wrapped root
+    module in order to scatter/gather the Fp8 weight copies at the same time FSDP scatters/gathers
+    its `FlatParameters`.
 
     Parameters
     ----------
-    module: torch.nn.Module
-            PyTorch or Transformer Engine module to be wrapped with FSDP.
-    fsdp_group: torch.distributed.ProcessGroup, default=`None`
-                Process group for scattering/gathering saved activation tensors in TE modules.
-                The process group returned by the `custom_wrap_policy()` (if it exists) is
-                prioritized over this argument.
-    custom_wrap_policy: Callable, default=`None`
-                        User-supplied policy function to wrap a module. Must return either a
-                        dictionary or a boolean.
-    ignored_modules: Iterable, default=`[]`
-                    A list of modules or module classes to exclude from FSDP.
+    fsdp_root: torch.nn.Module
+               FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
-    te_modules_to_wrap = [
-        'transformer_engine.pytorch.linear',
-        'transformer_engine.pytorch.layernorm_linear',
-        'transformer_engine.pytorch.layernorm_mlp'
-    ]
+    assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."
 
-    # evaluate the user's wrap policy and extract process group if assigned
-    if callable(custom_wrap_policy):
-        wrap = custom_wrap_policy(module, recurse, nonwrapped_numel)
-        if isinstance(wrap, dict) and "process_group" in wrap.keys():
-            fsdp_group = wrap["process_group"]
-        else:
-            assert type(wrap) == bool, "FSDP wrap policy did not return either a Dict or bool."
-    else:
-        assert custom_wrap_policy is None, "FSDP wrap policy must be a callable or None."
-        ignored_modules = [] if ignored_modules is None else ignored_modules
-        assert isinstance(ignored_modules, Iterable), \
-            "Ignored modules must be iterable or None."
-        wrap = ((recurse and isinstance(module.children(), torch.nn.Module))
-                or (module not in ignored_modules and module.__class__ not in ignored_modules))
+    # If the root module is a TE module, inject FSDP information into it
+    if _is_te_module(fsdp_root.module):
+        root_state = _get_module_fsdp_state(fsdp_root)
+        assert root_state is not None, "Root module does not have a valid _FSDPState."
+        setattr(fsdp_root.module, "fsdp_wrapped", True)
+        setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
 
-    # set process group to world group if none given
-    if fsdp_group is None:
-        assert torch.distributed.is_initialized(), "Default process group is not initialized."
-        fsdp_group = torch.distributed.GroupMember.WORLD
-    else:
-        assert isinstance(fsdp_group, torch.distributed.ProcessGroup), \
-            "FSDP process group must be a torch.distributed.ProcessGroup or None."
-
-    # add FSDP wrapped flag and FSDP communication group to the TE module attributes
-    if (module.__module__ in te_modules_to_wrap
-        and (wrap or isinstance(wrap, dict))):
-        setattr(module, "fsdp_wrapped", True)
-        setattr(module, "fsdp_group", fsdp_group)
-
-    return wrap
-
-
-class FSDPWrapPolicy(_Policy):
-    """
-    Policy class for injecting the custom TE wrapper on top of a user-supplied FSDP wrapping
-    policy.
-    """
-
-    def __new__(cls, policy=None, fsdp_group=None, ignored_modules=None):
-        if isinstance(policy, _Policy):
-            return super().__new__(cls)
-        else:
-            return partial(
-                fsdp_wrap_policy,
-                fsdp_group=fsdp_group,
-                custom_wrap_policy=policy,
-                ignored_modules=ignored_modules
-            )
-
-    def __init__(self, policy, fsdp_group, ignored_modules):
-        assert isinstance(policy, _Policy), \
-            "FSDP policy must be a torch.distributed.fsdp.wrap._Policy implementation."
-        self.policy = policy
-        self.fsdp_group = fsdp_group
-        self.ignored_modules = ignored_modules
-
-
-
-    def _run_policy(self, *args, **kwargs) -> Dict[torch.nn.Module, Dict[str, Any]]:
-        mapping = self.policy._run_policy(*args, **kwargs)
-        assert isinstance(mapping, dict), "FSDP wrap policy did not return a Dict."
-        for module in mapping.keys():
-            assert isinstance(module, torch.nn.Module), (
-                "Mapping dictionary from the FSDP wrap policy is not keyed by PyTorch modules."
-            )
-            fsdp_group = mapping[module].get("process_group", self.fsdp_group)
-            wrap = fsdp_wrap_policy(module, None, fsdp_group, self.ignored_modules)
-            # If this assert fails, that means the user policy tried to wrap a module that was
-            # in the ignored modules list. This should never happen!
-            assert wrap, "Internal TE error."
-
-        return mapping
+    # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
+    fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
+    for state, module in zip(fsdp_states, fsdp_modules):
+        if _is_te_module(module):
+            setattr(module, "fsdp_wrapepd", True)
+            setattr(module, "fsdp_group", state.process_group)
 
 
 class FullyShardedDataParallel(FSDP):
@@ -1008,17 +960,5 @@ class FullyShardedDataParallel(FSDP):
     """
 
     def __init__(self, module, *args, **kwargs):
-        policy = kwargs.pop("auto_wrap_policy", None)
-        ignored_modules = kwargs.pop("ignored_modules", [])
-        fsdp_group = kwargs.pop("process_group", None)
-
-        # This will return either a function handle or a _Policy object depending on
-        # the type of kwarg["auto_wrap_policy"]
-        auto_wrap_policy = FSDPWrapPolicy(policy, fsdp_group, ignored_modules)
-
-        super().__init__(module,
-                        *args,
-                        auto_wrap_policy=auto_wrap_policy,
-                        process_group=fsdp_group,
-                        ignored_modules=ignored_modules,
-                        **kwargs)
+        super().__init__(module, *args, **kwargs)
+        prepare_te_modules_for_fsdp(self)
