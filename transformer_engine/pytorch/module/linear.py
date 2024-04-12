@@ -123,7 +123,7 @@ class _Linear(torch.autograd.Function):
                     and not sequence_parallel
                 ):
                     # FP8 input for forward, FP8 input transpose for backward wgrad
-                    inputmat_t = inputmat.transpose(0,1)
+                    inputmat_t = inputmat.transpose_2d()
             else:
                 if (
                     not fp8_meta["recipe"].override_linear_precision.wgrad
@@ -529,12 +529,12 @@ class _Linear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_overlap_ag:
                             if isinstance(grad_output_c, Float8Tensor):
-                                grad_output_t = grad_output_c.transpose(0,1)
+                                grad_output_t = grad_output_c.transpose_2d()
                             else:
                                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                         if inputmat_t_total is None:
                             if isinstance(inputmat_total, Float8Tensor):
-                                inputmat_t_total = inputmat_total.transpose(0,1)
+                                inputmat_t_total = inputmat_total.transpose_2d()
                             else:
                                 inputmat_t_total = tex.fp8_transpose(
                                     inputmat_total, fp8_dtype_backward)
