@@ -435,7 +435,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.fsdp_shapes,
                 mu,
                 rsigma,
-                main_grad,
                 weight_t_fp8,
                 ln_out,
             )
@@ -759,6 +758,8 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
+            None,
             None,
             None,
             None,
