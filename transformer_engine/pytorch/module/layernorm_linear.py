@@ -211,6 +211,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
             elif update_fp8_weights:
+                # Gather Fp8 weight buffers if needed
+                if fsdp_group is not None and weight_fp8._data.shape != weight.data.shape:
+                    _fsdp_gather_tensors(fsdp_group, [weight.data.shape], weight_fp8)
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
                     data=weight_fp8._data,
@@ -220,6 +223,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 if (is_grad_enabled
                     or (is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase())):
+                    # Gather Fp8 transposed-weight buffers if needed
+                    if (fsdp_group is not None
+                        and weight_t_fp8._data.shape != reversed(weight.data.shape)):
+                        _fsdp_gather_tensors(fsdp_group,
+                                             [tuple(reversed(weight.data.shape))],
+                                             weight_t_fp8)
                     tex.fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -322,12 +331,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 mu,
                 rsigma,
-                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
                 ln_out if weight.requires_grad else None,
             )
@@ -384,6 +393,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
+
+        # Scatter Fp8 weight buffers
+        _fsdp_scatter_tensors(fsdp_group, weight_fp8, weight_fp8)
+
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp.shape)
@@ -415,6 +428,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
+            # Gather intermediate/activation tensors if needed
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
                 ctx.fsdp_shapes,
@@ -703,6 +717,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
+            clear_tensor_data(mu)
+            clear_tensor_data(rsigma)
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -730,6 +746,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
+        # Scatter fp8 transposed-weight buffers
+        _fsdp_scatter_tensors(ctx.fsdp_group, weight_t_fp8)
 
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,

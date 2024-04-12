@@ -87,12 +87,8 @@ class _Linear(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-<<<<<<< HEAD
         is_first_module_in_mha: bool,
-=======
-        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
         fsdp_group: Union[dist_group_type, None],
->>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
         if is_input_fp8:
@@ -175,6 +171,9 @@ class _Linear(torch.autograd.Function):
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
             elif update_fp8_weights:
+                # Gather Fp8 weight buffers if needed
+                if fsdp_group is not None and weight_fp8._data.shape != weight.data.shape:
+                    _fsdp_gather_tensors(fsdp_group, [weight.data.shape], weight_fp8)
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
                     data=weight_fp8._data,
@@ -184,6 +183,12 @@ class _Linear(torch.autograd.Function):
                 if (is_grad_enabled
                     or (is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase())):
+                    # Gather Fp8 transposed-weight buffers if needed
+                    if (fsdp_group is not None
+                        and weight_t_fp8._data.shape != reversed(weight.data.shape)):
+                        _fsdp_gather_tensors(fsdp_group,
+                                             [tuple(reversed(weight.data.shape))],
+                                             weight_t_fp8)
                     fp8_cast_transpose_fused(
                         weight,
                         fp8_meta["scaling_fwd"],
@@ -343,6 +348,7 @@ class _Linear(torch.autograd.Function):
                     if saved_inputmat is not None:
                         saved_inputmat.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
@@ -393,6 +399,9 @@ class _Linear(torch.autograd.Function):
         elif parallel_mode == "row" and tensor_parallel:
             out, _ = allreduce(out, tp_group)
 
+        # Scatter Fp8 weight buffers
+        _fsdp_scatter_tensors(fsdp_group, weight_fp8)
+
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
 
@@ -416,6 +425,7 @@ class _Linear(torch.autograd.Function):
                 skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
+            # Gather intermediate/activation tensors if needed
             _fsdp_gather_tensors(ctx.fsdp_group,
                                  ctx.fsdp_shapes,
                                  inputmat,
@@ -640,6 +650,9 @@ class _Linear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        # Scatter fp8 transposed-weight buffers
+        _fsdp_scatter_tensors(ctx.fsdp_group, weight_t_fp8)
+
         return (
             wgrad,
             None,
@@ -666,10 +679,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
-<<<<<<< HEAD
-=======
             None,
->>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
         )
 
 
