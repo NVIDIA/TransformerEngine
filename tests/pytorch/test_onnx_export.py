@@ -743,6 +743,7 @@ def test_export_rmsnorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
+                0,
                 zero_centered_gamma)
 
             ret = cast_from_fp8(
