@@ -985,22 +985,32 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
         dtype, config, False, qkv_format, input_layernorm)
 
     tols = dict(atol=5e-1, rtol=5e-1)
+    rmse_tol = 0.02
+    fwd_rmse = _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)
+    fwd_range = max(fused_attn_fwd_fp8.max().item(),
+        fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
+        fused_attn_fwd_f16.min().item())
     if _NVTE_DEBUG:
         print()
         print('========== {:^25s} =========='.format('forward output'))
-        print('[test_mha_fp8_vs_f16] tols:', tols)
         print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
         print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd RMSE: {:.6f}'.format(
-            _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)))
-    try:
-        torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
-    except Exception as e:
-        print(e)
-        print()
-    for i in range(len(param_names)):
+        print('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+        except Exception as e:
+            print(e)
+            print()
+    assert(fwd_rmse < rmse_tol * fwd_range
+        ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
+    for i in range(len(param_names[:1])):
+        bwd_rmse = _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])
+        bwd_range = max(fused_attn_bwd_fp8[i].max().item(),
+            fused_attn_bwd_f16[i].max().item()) - min(fused_attn_bwd_fp8[i].min().item(),
+            fused_attn_bwd_f16[i].min().item())
         if _NVTE_DEBUG:
             print()
             print('========== {:^25s} =========='.format(param_names[i]))
@@ -1008,13 +1018,15 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
             print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
-            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i,
-                _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])))
-        try:
-            torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
-        except Exception as e:
-            print(e)
-            print()
+            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
+            try:
+                torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+            except Exception as e:
+                print(e)
+                print()
+        assert(bwd_rmse < rmse_tol * bwd_range
+            ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
 
 def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
     reset_rng_states()
