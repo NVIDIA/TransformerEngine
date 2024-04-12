@@ -3400,8 +3400,13 @@ class DotProductAttention(torch.nn.Module):
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
+            or any(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
         ):
             use_flash_attention = False
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
+            or key_layer.dtype not in [torch.bfloat16, torch.float16]
+            or value_layer.dtype not in [torch.bfloat16, torch.float16]
+        ):
             use_fused_attention = False
 
         # Filter: Device and dimensions.
