@@ -58,6 +58,12 @@ def reset_rng_states() -> None:
     torch.cuda.set_rng_state(_cuda_rng_state)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    fp8.FP8GlobalStateManager.reset()
+
+
 @functools.cache
 def _cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""

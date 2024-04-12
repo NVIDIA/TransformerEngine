@@ -48,6 +48,7 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
     """Custom func to test recipe."""
     return torch.min(amax_history, dim=0).values
 
+
 @dataclass
 class ModelConfig:
     """Transformer model configuration"""
@@ -113,6 +114,12 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 def _disable_wgrads(block):
     for p in block.parameters():
         p.requires_grad = False
+
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
 
 
 def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):

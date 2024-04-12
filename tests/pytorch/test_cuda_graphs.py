@@ -54,6 +54,12 @@ def reset_rng_states() -> None:
     torch.cuda.set_rng_state(_cuda_rng_state)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."

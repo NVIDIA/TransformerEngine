@@ -113,6 +113,12 @@ def reset_rng_states() -> None:
     torch.cuda.set_rng_state(_cuda_rng_state)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 class TorchScaledMaskedSoftmax(nn.Module):
     def __init__(self) -> None:
         super().__init__()
