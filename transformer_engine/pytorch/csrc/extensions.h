@@ -408,6 +408,7 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor amax,
                                  at::Tensor scale_inv,
                                  transformer_engine::DType otype,
+                                 const int sm_margin,
                                  const bool zero_centered_gamma
 );
 
@@ -432,6 +433,7 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const at::Tensor &weight,
                              const at::Tensor &bias,
                              float eps,
+                             const int sm_margin,
                              const bool zero_centered_gamma
 );
 
@@ -478,6 +480,7 @@ at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
                                at::Tensor amax,
                                at::Tensor scale_inv,
                                transformer_engine::DType otype,
+                               const int sm_margin,
                                const bool zero_centered_gamma
 );
 
@@ -499,6 +502,7 @@ std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,
                            const at::Tensor &weight,
                            float eps,
+                           const int sm_margin,
                            const bool zero_centered_gamma
 );
 

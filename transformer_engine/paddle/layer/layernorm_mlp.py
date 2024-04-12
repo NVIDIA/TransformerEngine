@@ -824,6 +824,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def _te_forward(
         self,
@@ -865,7 +866,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.activation_dtype,
                 self.return_layernorm_output,
                 paddle.is_grad_enabled(),
-                self.fwd_ln_sm_margin,
+                self.fwd_ln_sm_margin if paddle.is_grad_enabled() else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.normalization,
