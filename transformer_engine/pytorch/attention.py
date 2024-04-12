@@ -52,9 +52,14 @@ from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
     checkpoint,
+    set_all_rng_states,
+    CudaRNGStatesTracker,
+    graph_safe_rng_available,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
+from transformer_engine.pytorch.graph import is_graph_capturing
+
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("2.0.6")
@@ -2401,10 +2406,13 @@ class DotProductAttention(torch.nn.Module):
         assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
 
+        self.rng_states_tracker = None
         if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
         else:
-            attention_dropout_ctx = get_rng_state_tracker().fork
+            self.rng_states_tracker = get_rng_state_tracker()
+            set_all_rng_states(self.rng_states_tracker.get_states())
+            attention_dropout_ctx = self.rng_states_tracker.fork
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
@@ -2647,6 +2655,14 @@ class DotProductAttention(torch.nn.Module):
 
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
+
+        if self.rng_states_tracker is not None and is_graph_capturing():
+            assert (
+                isinstance(self.rng_states_tracker, CudaRNGStatesTracker)
+            ), "Unsupported RNG states tracker."
+            assert (
+                graph_safe_rng_available()
+            ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
         if window_size is None:
             window_size = self.window_size
@@ -3695,7 +3711,8 @@ class MultiheadAttention(torch.nn.Module):
         # ===================
 
         projection_output = self.proj(
-            context_layer, is_first_microbatch=is_first_microbatch
+            context_layer,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.return_bias:
