@@ -459,63 +459,32 @@ class _Linear(torch.autograd.Function):
                     else:
                         out_index, meta_tensor, output_te_dtype, output_dtype = (
                             None, None, None, ctx.activation_dtype)
-                    if ctx.ub_overlap_ag:
-                        dgrad, _ = fp8_gemm(
-                            weight_t_fp8._data,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_WEIGHT,
-                            fp8_dtype_forward,
-                            grad_output_c,
-                            ctx.fp8_meta["scaling_bwd"].scale_inv,
-                            tex.FP8BwdTensors.GRAD_OUTPUT1,
-                            fp8_dtype_backward,
-                            ctx.activation_dtype,
-                            get_workspace(),
-                            use_split_accumulator=_2X_ACC_DGRAD,
-                            ub_algo=ub_algo if ctx.ub_overlap_ag else None,
-                            ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
-                        )
-                        if output_dtype == torch.uint8:
-                            dgrad = cast_to_fp8(
-                                dgrad,
-                                ctx.fp8_meta["scaling_bwd"],
-                                tex.FP8BwdTensors.GRAD_INPUT1,
-                                fp8_dtype_backward,
-                                )
-                            dgrad = Float8Tensor(data=dgrad,
-                                fp8_meta=ctx.fp8_meta,
-                                fp8_meta_forward=False,
-                                fp8_meta_index=tex.FP8BwdTensors.GRAD_INPUT1,
-                                fp8_dtype=fp8_dtype_backward,
-                                dtype=ctx.activation_dtype,
-                                )
-                    else:
-                        dgrad, _ = fp8_gemm(
-                            weight_t_fp8._data,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_WEIGHT,
-                            fp8_dtype_forward,
-                            grad_output_c,
-                            ctx.fp8_meta["scaling_bwd"].scale_inv,
-                            tex.FP8BwdTensors.GRAD_OUTPUT1,
-                            fp8_dtype_backward,
-                            output_dtype,
-                            get_workspace(),
-                            use_split_accumulator=_2X_ACC_DGRAD,
-                            ub_algo=ub_algo if ctx.ub_overlap_ag else None,
-                            ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
-                            out_index=out_index,
-                            fp8_meta_tensor=meta_tensor,
-                            D_dtype=output_te_dtype,
-                        )
-                        if output_dtype == torch.uint8:
-                            dgrad = Float8Tensor(data=dgrad,
-                                fp8_meta=ctx.fp8_meta,
-                                fp8_meta_forward=False,
-                                fp8_meta_index=tex.FP8BwdTensors.GRAD_INPUT1,
-                                fp8_dtype=fp8_dtype_backward,
-                                dtype=ctx.activation_dtype,
-                                )
+                    dgrad, _ = fp8_gemm(
+                        weight_t_fp8._data,
+                        fwd_scale_inverses,
+                        tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        fp8_dtype_forward,
+                        grad_output_c,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv,
+                        tex.FP8BwdTensors.GRAD_OUTPUT1,
+                        fp8_dtype_backward,
+                        output_dtype,
+                        get_workspace(),
+                        use_split_accumulator=_2X_ACC_DGRAD,
+                        ub_algo=ub_algo if ctx.ub_overlap_ag else None,
+                        ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
+                        out_index=out_index,
+                        fp8_meta_tensor=meta_tensor,
+                        D_dtype=output_te_dtype,
+                    )
+                    if output_dtype == torch.uint8:
+                        dgrad = Float8Tensor(data=dgrad,
+                            fp8_meta=ctx.fp8_meta,
+                            fp8_meta_forward=False,
+                            fp8_meta_index=tex.FP8BwdTensors.GRAD_INPUT1,
+                            fp8_dtype=fp8_dtype_backward,
+                            dtype=ctx.activation_dtype,
+                            )
                 else:
                     if _NVTE_DEBUG:
                         print('[Linear]: using non-FP8 backward')
