@@ -56,11 +56,11 @@ struct OtherParams {
 };
 
 #if CUDART_VERSION >= 12010
-constexpr size_t max_constant_memory_per_kernel = 32000;
+constexpr size_t max_constant_memory_per_kernel = 32768;
 constexpr size_t AMAX_PARAMS_LIMIT = (
   max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
 #else
-constexpr size_t max_constant_memory_per_kernel = 4000;
+constexpr size_t max_constant_memory_per_kernel = 4096;
 constexpr size_t AMAX_PARAMS_LIMIT = (
   max_constant_memory_per_kernel - sizeof(OtherParams)) / sizeof(AmaxParam);
 #endif
@@ -389,6 +389,7 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
 
   // Number of tensors in the bulk
   const size_t num_tensors = amax_histories.size();
+  size_t num_remaining_tensors = num_tensors;
   const int num_kernels = (num_tensors+AMAX_PARAMS_LIMIT-1)/AMAX_PARAMS_LIMIT;
   size_t amax_history_length = 0;
   if (num_tensors > 0) {
@@ -400,8 +401,8 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
   AmaxParams p;
   for (int iter = 0; iter < num_kernels; iter++) {
     size_t kernel_num_scales = 0;
-    size_t kernel_num_tensors = (iter == (num_kernels -1))
-          ? num_tensors % AMAX_PARAMS_LIMIT: AMAX_PARAMS_LIMIT;
+    size_t kernel_num_tensors = (iter == (num_kernels - 1))
+          ? num_remaining_tensors: AMAX_PARAMS_LIMIT;
     for (size_t pi = 0; pi < kernel_num_tensors; pi++) {
       size_t i = iter * AMAX_PARAMS_LIMIT + pi;
 
@@ -446,6 +447,7 @@ void amax_and_scale_update_after_reduction(const Tensor &amax_reduction_buffer,
     if (amax_buffer != nullptr) {
       amax_buffer += kernel_num_scales;
     }
+    num_remaining_tensors -= AMAX_PARAMS_LIMIT;
   }
 }
 
