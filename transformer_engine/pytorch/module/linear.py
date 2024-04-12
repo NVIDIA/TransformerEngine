@@ -942,6 +942,11 @@ class Linear(TransformerEngineBaseModule):
         super().reset_parameters(defer_init=defer_init)
 
         if not defer_init:
+            # Materialize fp8 hook tensor
+            if self.dummy_tensor.device == torch.device('meta'):
+                self.dummy_tensor = torch.zeros_like(
+                    self.dummy_tensor, device='cuda', requires_grad=True)
+
             # Set parallelism attributes for linear weights
             for weight in self.weight_names:
                 set_tensor_model_parallel_attributes(

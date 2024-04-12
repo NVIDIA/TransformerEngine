@@ -1519,6 +1519,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         super().reset_parameters(defer_init=defer_init)
 
         if not defer_init:
+            # Materialize fp8 hook tensor
+            if self.dummy_tensor.device == torch.device('meta'):
+                self.dummy_tensor = torch.zeros_like(
+                    self.dummy_tensor, device='cuda', requires_grad=True)
+
             # Set parallel attributes for layer norm parameters
             setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
             if self.normalization != "RMSNorm":
