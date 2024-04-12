@@ -618,8 +618,10 @@ void cast_transpose_dbias(const Tensor &input,
   );  // NOLINT(*)
 }
 
+// TODO Phuong: Change all the names in these generalized functions.
+// For now, I keep the old names so that it is easier to do code review
 template <typename ComputeType, typename ParamOP,
-         int nvec_in, int nvec_out, typename Param, 
+         int nvec_in, int nvec_out, typename Param,
          ComputeType (*OP)(ComputeType, const ParamOP&)>
 __global__ void
 __launch_bounds__(cast_transpose_num_threads)
@@ -781,7 +783,7 @@ cast_transpose_dbias_dgelu_kernel(const Param param,
 }
 
 template <typename ComputeType, typename ParamOP,
-         int nvec_in, int nvec_out, typename Param, 
+         int nvec_in, int nvec_out, typename Param,
          ComputeType (*OP)(ComputeType, const ParamOP&)>
 __global__ void
 __launch_bounds__(cast_transpose_num_threads)
@@ -972,7 +974,7 @@ cast_transpose_dbias_dgelu_kernel_notaligned(const Param param,
   }
 }
 
-template <int nvec_in, int nvec_out, 
+template <int nvec_in, int nvec_out,
          typename CType, typename IType, typename OType,
          typename ParamOP,
          CType (*OP1)(CType, const ParamOP&),
@@ -1145,7 +1147,7 @@ dgeglu_cast_transpose_kernel(const IType * const input,
   }
 }
 
-template <int nvec_in, int nvec_out, 
+template <int nvec_in, int nvec_out,
          typename CType, typename IType, typename OType,
          typename ParamOP,
          CType (*OP1)(CType, const ParamOP&),
@@ -1436,14 +1438,14 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       param.scale_ptr = reinterpret_cast<const ComputeType *>(cast_output->scale.dptr);
       param.amax = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
-      
+
       if (full_tile) {
         cudaFuncSetAttribute(
-            cast_transpose_dbias_dgelu_kernel<ComputeType, Empty, 
+            cast_transpose_dbias_dgelu_kernel<ComputeType, Empty,
             nvec_in, nvec_out, Param, OP>,
             cudaFuncAttributePreferredSharedMemoryCarveout,
             100);
-        cast_transpose_dbias_dgelu_kernel<ComputeType, Empty, 
+        cast_transpose_dbias_dgelu_kernel<ComputeType, Empty,
             nvec_in, nvec_out, Param, OP>
             <<<n_blocks,
             cast_transpose_num_threads,
@@ -1530,7 +1532,7 @@ void dgeglu_cast_transpose(const Tensor &input,
                              num_rows % (nvec_out * THREADS_PER_WARP) == 0;
       if (full_tile) {
         cudaFuncSetAttribute(dgeglu_cast_transpose_kernel<
-                             nvec_in, nvec_out, 
+                             nvec_in, nvec_out,
                              ComputeType, InputType, OutputType,
                              Empty, OP1, OP2>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
@@ -1552,7 +1554,7 @@ void dgeglu_cast_transpose(const Tensor &input,
                 row_length, num_rows, n_tiles);
       } else {
         cudaFuncSetAttribute(dgeglu_cast_transpose_kernel_notaligned<
-                             nvec_in, nvec_out, 
+                             nvec_in, nvec_out,
                              ComputeType, InputType, OutputType,
                              Empty, OP1, OP2>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
@@ -1624,6 +1626,40 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
   dgeglu_cast_transpose<fp32, Empty, dgelu<fp32, fp32>, gelu<fp32, fp32>>(
                         *reinterpret_cast<const Tensor*>(input),
                         *reinterpret_cast<const Tensor*>(geglu_input),
+                        reinterpret_cast<Tensor*>(cast_output),
+                        reinterpret_cast<Tensor*>(transposed_output),
+                        stream);
+}
+
+void nvte_cast_transpose_dbias_dsilu(const NVTETensor input,
+                                     const NVTETensor silu_input,
+                                     NVTETensor cast_output,
+                                     NVTETensor transposed_output,
+                                     NVTETensor dbias,
+                                     NVTETensor workspace,
+                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cast_transpose_dbias_dsilu);
+  using namespace transformer_engine;
+  cast_transpose_dbias_dgelu<fp32, Empty, dswish<fp32, fp32>>(
+                             *reinterpret_cast<const Tensor*>(input),
+                             *reinterpret_cast<const Tensor*>(silu_input),
+                             reinterpret_cast<Tensor*>(cast_output),
+                             reinterpret_cast<Tensor*>(transposed_output),
+                             reinterpret_cast<Tensor*>(dbias),
+                             reinterpret_cast<Tensor*>(workspace),
+                             stream);
+}
+
+void nvte_dswiglu_cast_transpose(const NVTETensor input,
+                                const NVTETensor swiglu_input,
+                                NVTETensor cast_output,
+                                NVTETensor transposed_output,
+                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dswiglu_cast_transpose);
+  using namespace transformer_engine;
+  dgeglu_cast_transpose<fp32, Empty, dswish<fp32, fp32>, swish<fp32, fp32>>(
+                        *reinterpret_cast<const Tensor*>(input),
+                        *reinterpret_cast<const Tensor*>(swiglu_input),
                         reinterpret_cast<Tensor*>(cast_output),
                         reinterpret_cast<Tensor*>(transposed_output),
                         stream);

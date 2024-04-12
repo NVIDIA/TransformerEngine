@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include "common/common.h"
 #include "common/util/logging.h"
@@ -392,7 +393,6 @@ void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *op
                                output_trans_tensor.data(), stream);
 }
 
-// HERE
 void SiluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
               cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
     auto input_shape = std::vector<size_t>{m, n};

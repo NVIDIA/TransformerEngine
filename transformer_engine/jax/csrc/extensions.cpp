@@ -76,6 +76,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("get_cublasLt_version", &cublasLtGetVersion);
     m.def("get_dgelu_dbias_ct_workspace_sizes", &GetDGeluDBiasCastTransposeWorkspaceSizes);
+    m.def("get_dsilu_dbias_ct_workspace_sizes", &GetDSiluDBiasCastTransposeWorkspaceSizes);
     m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
