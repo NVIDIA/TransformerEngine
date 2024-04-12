@@ -706,7 +706,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not isinstance(grad_output_c, Float8Tensor):
                     grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                 else:
-                    grad_output_t = grad_output_c.transpose(0,1)
+                    grad_output_t = grad_output_c.transpose_2d()
             else:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
                 grad_output_t = None
@@ -728,7 +728,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                 if isinstance(grad_output_mat, Float8Tensor):
                     grad_output_c = grad_output_mat
-                    grad_output_t = grad_output_c.transpose(0,1)
+                    grad_output_t = grad_output_c.transpose_2d()
                 else:
                     grad_output_c, grad_output_t = fp8_cast_transpose_fused(
                         grad_output_mat,
