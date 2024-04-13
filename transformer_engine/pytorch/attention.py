@@ -2401,7 +2401,7 @@ class DotProductAttention(torch.nn.Module):
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
-        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
 
         assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
