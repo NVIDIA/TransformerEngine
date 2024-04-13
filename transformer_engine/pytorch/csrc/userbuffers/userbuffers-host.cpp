@@ -255,13 +255,28 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     CUmulticastObjectProp mcProp = {};
     mcProp.numDevices = (*comm)->ar2_nvsize;
     mcProp.size = (*comm)->mc_maxsize;
+#ifdef MNNVL
+    mcProp.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+#else
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+#endif
 
     CUCHECK(cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
 
+#ifdef MNNVL
+    CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(sizeof(CUmemFabricHandle));
+    if ((*comm)->ar2_nvrank == 0) {
+      CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(exphndl), (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    }
+    MPI_Bcast(exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, 0, (*comm)->comm_intra);
+    if ((*comm)->ar2_nvrank != 0) {
+      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(exphndl), CU_MEM_HANDLE_TYPE_FABRIC));
+    }
+    free(exphndl);
+#else
     int fd;
     volatile uint32_t abortFlag = 0;
     struct ncclIpcSocket ipcSock = {0};
@@ -290,6 +305,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
     close(fd);
+#endif
     CUCHECK(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
 
     CUdeviceptr mc_va;
@@ -410,15 +426,23 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
     CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
+#ifdef MNNVL
+    CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(nranks * sizeof(CUmemFabricHandle));
+    CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(&exphndl[myrank]), comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    MPI_Allgather(&exphndl[myrank], sizeof(CUmemFabricHandle), MPI_BYTE, exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, comm->comm_intra);
+    for (int p = 0; p < nranks; p++)
+      if (p != myrank)
+        CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p], reinterpret_cast<void *>(&exphndl[p]), CU_MEM_HANDLE_TYPE_FABRIC));
+    free(exphndl);
+#else
+    int *peerfd                  = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
+    volatile uint32_t abortFlag  = 0;
+    struct ncclIpcSocket ipcSock = {0};
+    uint64_t opId                = 0xdeadcafebeef;
+    ncclResult_t ret             = ncclSuccess;
 
-    int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
     CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
-
-    volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
-    uint64_t opId = 0xdeadcafebeef;
-    ncclResult_t ret = ncclSuccess;
 
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
     for (int p = 1; p < nranks; p++) {
@@ -429,7 +453,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
                     error);
     }
-  error:
+error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
 
     for (int p = 0; p < nranks; p++) {
@@ -439,6 +463,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
                                                CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
       close(peerfd[p]);
     }
+    free(peerfd);
+#endif
     CUdeviceptr ptr;
     CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
@@ -466,7 +492,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
                    remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
     free(remptrs);
-    free(peerfd);
     comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
