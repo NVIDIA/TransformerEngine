@@ -14,6 +14,8 @@
 #include <chrono>
 #include <stdexcept>
 
+#define MNNVL
+
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
 #define NVTE_MAX_OPS 32
