@@ -562,6 +562,16 @@ class MultiHeadAttention(paddle.nn.Layer):
                    name should be registered through
                    `paddle.distributed.fleet.meta_parallel.get_rng_state_tracker()
                    .add(rng_state_name, seed)`.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
+
     """
 
     def __init__(
@@ -584,6 +594,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
         num_gqa_groups: Optional[int] = None,
+        fuse_wgrad_accumulation: bool = False,
         rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
     ) -> None:
@@ -633,6 +644,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                     backend=self.backend,
                 )
             else:
@@ -644,6 +656,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                     backend=self.backend,
                 )
 
@@ -661,6 +674,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                     backend=self.backend,
                 )
             else:
@@ -672,6 +686,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     parallel_mode=qkv_parallel_mode,
                     sequence_parallel=self.sequence_parallel,
                     tp_group=self.tp_group,
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                     backend=self.backend,
                 )
             self.key_value = Linear(
@@ -682,6 +697,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                 parallel_mode=qkv_parallel_mode,
                 sequence_parallel=self.sequence_parallel,
                 tp_group=self.tp_group,
+                fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                 backend=self.backend,
             )
 
@@ -706,6 +722,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             parallel_mode="row" if set_parallel_mode else None,
             sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
             backend=self.backend,
         )
 
