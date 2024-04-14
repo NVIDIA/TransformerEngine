@@ -268,6 +268,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             fp8_meta_tensor_keys = ("scaling_fwd" if fwd else "scaling_bwd",)
 
         for meta_key in fp8_meta_tensor_keys:
+            if meta_key not in self.fp8_meta:
+                # Handles non-parameter FP8 modules, e.g. DPA.
+                continue
             curr_len = self.fp8_meta[meta_key].amax_history.shape[0]
             if length == curr_len:
                 continue
