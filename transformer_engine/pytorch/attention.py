@@ -2840,11 +2840,11 @@ class FusedAttention(TransformerEngineBaseModule):
             if qkv_format == 'sbhd':
                 output = output.transpose(0,1).contiguous()
         else:
-            with self.attention_dropout_ctx():
-                with self.prepare_forward(query_layer,
-                    is_first_microbatch,
-                    num_gemms=3,
-                    allow_non_contiguous=True) as query_layer:
+            with self.prepare_forward(query_layer,
+                is_first_microbatch,
+                num_gemms=3,
+                allow_non_contiguous=True) as query_layer:
+                with self.attention_dropout_ctx():
                     forced_fp8_dpa = ""
                     if self.fp8_meta["recipe"].fp8_mha:
                         if not self.fp8_meta["recipe"].fp8_dpa:
