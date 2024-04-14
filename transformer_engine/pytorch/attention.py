@@ -35,7 +35,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
     FusedAttnBackend,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -2010,8 +2010,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         qkvo_tensors = (qkv, out_save) if not ctx.fp8 else (None, None)
         ctx.save_for_backward(*qkvo_tensors, cu_seqlens, *fp8_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.tp_size = tp_size if ctx.fp8 else None
-        ctx.tp_group = tp_group if ctx.fp8 else None
+        ctx.tp_size = tp_size
+        ctx.tp_group = tp_group
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen = max_seqlen
         ctx.qkv_dtype = qkv_dtype
@@ -2213,8 +2213,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         qkvo_tensors = (q, kv, out_save) if not ctx.fp8 else (None, None, None)
         ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.tp_size = tp_size if ctx.fp8 else None
-        ctx.tp_group = tp_group if ctx.fp8 else None
+        ctx.tp_size = tp_size
+        ctx.tp_group = tp_group
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -2487,8 +2487,8 @@ class FusedAttnFunc(torch.autograd.Function):
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.tp_size = tp_size if ctx.fp8 else None
-        ctx.tp_group = tp_group if ctx.fp8 else None
+        ctx.tp_size = tp_size
+        ctx.tp_group = tp_group
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -2690,7 +2690,6 @@ class FusedAttention(TransformerEngineBaseModule):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
-        device: Union[torch.device, str] = "cuda",
         tp_size: int = 1,
         tp_group: Optional[dist_group_type] = None,
     ) -> None:
@@ -2722,18 +2721,6 @@ class FusedAttention(TransformerEngineBaseModule):
         self.tp_size = tp_size
         self.tp_group = tp_group
 
-        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
-        if self.primary_weights_in_fp8:
-            self.init_fp8_metadata(num_gemms=3)
-        self.reset_parameters(defer_init=(device == 'meta'))
-
-        # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
-        self.dummy_tensor = torch.zeros(1, device="cuda", requires_grad=True)
-        FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
-
-    def reset_parameters(self, defer_init=False):
-        super().reset_parameters(defer_init=defer_init)
-
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -2764,10 +2751,6 @@ class FusedAttention(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
-
-        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
-        if skip_fp8_weight_update is not None:
-            is_first_microbatch = False
 
         assert (fused_attention_backend
             != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
@@ -2857,11 +2840,11 @@ class FusedAttention(TransformerEngineBaseModule):
             if qkv_format == 'sbhd':
                 output = output.transpose(0,1).contiguous()
         else:
-            with self.prepare_forward(query_layer,
-                is_first_microbatch,
-                num_gemms=3,
-                allow_non_contiguous=True) as query_layer:
-                with self.attention_dropout_ctx():
+            with self.attention_dropout_ctx():
+                with self.prepare_forward(query_layer,
+                    is_first_microbatch,
+                    num_gemms=3,
+                    allow_non_contiguous=True) as query_layer:
                     forced_fp8_dpa = ""
                     if self.fp8_meta["recipe"].fp8_mha:
                         if not self.fp8_meta["recipe"].fp8_dpa:
