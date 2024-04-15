@@ -449,6 +449,7 @@ class TestDecoderLayer:
                             hidden_dropout_dims=(sequence_dim,),
                             intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
+                            self_attn_mask_type='padding_causal',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
@@ -497,6 +498,7 @@ class TestDecoderLayer:
                             hidden_dropout_dims=(sequence_dim,),
                             intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
+                            self_attn_mask_type='padding_causal',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,

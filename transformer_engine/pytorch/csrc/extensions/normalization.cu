@@ -154,12 +154,13 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor amax,
                                  at::Tensor scale_inv,
                                  transformer_engine::DType otype,
+                                 const int sm_margin,
                                  const bool zero_centered_gamma
 ) {
     // This is a specialized version of layernorm_fwd_fp8, optimized for inference,
     // which only returns the normalized output.
     std::vector<at::Tensor> out = layernorm_fwd_fp8(
-      input, weight, bias, eps, scale, amax, scale_inv, otype, 0, zero_centered_gamma);
+      input, weight, bias, eps, scale, amax, scale_inv, otype, sm_margin, zero_centered_gamma);
     return out[0];
 }
 
@@ -203,11 +204,13 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const at::Tensor &weight,
                              const at::Tensor &bias,
                              float eps,
+                             const int sm_margin,
                              const bool zero_centered_gamma
 ) {
     // This is a specialized version of layernorm_fwd, optimized for inference,
     // which only returns the normalized output.
-    std::vector<at::Tensor> out = layernorm_fwd(input, weight, bias, eps, 0, zero_centered_gamma);
+    std::vector<at::Tensor> out = layernorm_fwd(input, weight, bias, eps, sm_margin,
+                                                zero_centered_gamma);
     return out[0];
 }
 
@@ -345,12 +348,13 @@ at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
                                at::Tensor amax,
                                at::Tensor scale_inv,
                                transformer_engine::DType otype,
+                               const int sm_margin,
                                const bool zero_centered_gamma
 ) {
     // This is a specialized version of rmsnorm_fwd_fp8, optimized for inference,
     // which only returns the normalized output.
     std::vector<at::Tensor> out = rmsnorm_fwd_fp8(
-      input, weight, eps, scale, amax, scale_inv, otype, 0, zero_centered_gamma);
+      input, weight, eps, scale, amax, scale_inv, otype, sm_margin, zero_centered_gamma);
     return out[0];
 }
 
@@ -391,10 +395,11 @@ std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,
                            const at::Tensor &weight,
                            float eps,
+                           const int sm_margin,
                            const bool zero_centered_gamma
 ) {
     // This is a specialized version of rmsnorm_fwd, optimized for inference,
     // which only returns the normalized output.
-    std::vector<at::Tensor> out = rmsnorm_fwd(input, weight, eps, 0, zero_centered_gamma);
+    std::vector<at::Tensor> out = rmsnorm_fwd(input, weight, eps, sm_margin, zero_centered_gamma);
     return out[0];
 }

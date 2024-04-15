@@ -52,13 +52,17 @@ from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
     checkpoint,
+    set_all_rng_states,
+    CudaRNGStatesTracker,
+    graph_safe_rng_available,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
+from transformer_engine.pytorch.graph import is_graph_capturing
+
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("2.0.6")
-_flash_attn_max_version = packaging.version.Version("2.5.6")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
@@ -1869,9 +1873,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            _flash_attn_version <= _flash_attn_max_version
-        ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -2616,10 +2617,13 @@ class DotProductAttention(torch.nn.Module):
         assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
 
+        self.rng_states_tracker = None
         if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
         else:
-            attention_dropout_ctx = get_rng_state_tracker().fork
+            self.rng_states_tracker = get_rng_state_tracker()
+            set_all_rng_states(self.rng_states_tracker.get_states())
+            attention_dropout_ctx = self.rng_states_tracker.fork
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
@@ -2862,6 +2866,14 @@ class DotProductAttention(torch.nn.Module):
 
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
+
+        if self.rng_states_tracker is not None and is_graph_capturing():
+            assert (
+                isinstance(self.rng_states_tracker, CudaRNGStatesTracker)
+            ), "Unsupported RNG states tracker."
+            assert (
+                graph_safe_rng_available()
+            ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
         if window_size is None:
             window_size = self.window_size
@@ -3386,10 +3398,9 @@ class MultiheadAttention(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
-        ub_split_rs: bool = False,
-        ub_split_ag: bool = False,
-        ub_atomic_gemm_rs: bool = False,
-        ub_atomic_gemm_ag: bool = False,
+        ub_overlap_rs_dgrad: bool = False,
+        ub_overlap_rs: bool = False,
+        ub_overlap_ag: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
@@ -3476,9 +3487,9 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
-                    ub_split_ag=ub_split_ag,
+                    ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
+                    ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
-                    ub_atomic_gemm_ag=ub_atomic_gemm_ag,
                     ub_name="qkv",
                     **common_gemm_kwargs,
                 )
@@ -3508,9 +3519,9 @@ class MultiheadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
-                    ub_split_ag=ub_split_ag,
+                    ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
+                    ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
-                    ub_atomic_gemm_ag=ub_atomic_gemm_ag,
                     ub_name="qkv",
                     **common_gemm_kwargs,
                 )
@@ -3558,10 +3569,8 @@ class MultiheadAttention(torch.nn.Module):
             bias=bias,
             return_bias=return_bias,
             parallel_mode="row" if set_parallel_mode else None,
-            ub_split_rs=ub_split_rs,
-            ub_split_ag=ub_split_ag,
-            ub_atomic_gemm_rs=ub_atomic_gemm_rs,
-            ub_atomic_gemm_ag=ub_atomic_gemm_ag,
+            ub_overlap_rs=ub_overlap_rs,
+            ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
             **common_gemm_kwargs,
         )
@@ -3913,7 +3922,8 @@ class MultiheadAttention(torch.nn.Module):
         # ===================
 
         projection_output = self.proj(
-            context_layer, is_first_microbatch=is_first_microbatch
+            context_layer,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.return_bias:

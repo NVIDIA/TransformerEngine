@@ -265,7 +265,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.5.6,!=2.0.9,!=2.1.0"])
+        add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
@@ -445,6 +445,12 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
+        # We need to compile system.cpp because the pytorch extension uses
+        # transformer_engine::getenv. This is a workaround to avoid direct
+        # linking with libtransformer_engine.so, as the pre-built PyTorch
+        # wheel from conda or PyPI was not built with CXX11_ABI, and will
+        # cause undefined symbol issues.
+        root_path / "transformer_engine" / "common" / "util" / "system.cpp",
     ] + \
     _all_files_in_dir(extensions_dir)
 

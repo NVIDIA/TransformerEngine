@@ -151,6 +151,7 @@ typedef struct communicator communicator;
 
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
+void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
 int create_communicator(communicator **comm);
 /*  creates communicator, allocates all internal buffers if necessary */
 
@@ -304,5 +305,9 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
 // void unregister_user_buffer(int handler);
 
 void destroy_communicator(communicator *comm);
+
+template <typename fp8type>
+void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,
+                            int input_size, cudaStream_t stream);
 
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

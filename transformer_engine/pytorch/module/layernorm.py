@@ -34,6 +34,7 @@ class _LayerNorm(torch.autograd.Function):
         eps: float,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
+        inf_ln_sm_margin: int,
         zero_centered_gamma: bool,
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
@@ -58,7 +59,7 @@ class _LayerNorm(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
             ln_out, mu, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
-                ln_bias, eps, zero_centered_gamma), None, None
+                ln_bias, eps, inf_ln_sm_margin, zero_centered_gamma), None, None
         return ln_out.view_as(inp)
 
     @staticmethod
@@ -72,7 +73,7 @@ class _LayerNorm(torch.autograd.Function):
             d_ln_out, inputmat, mu, rsigma, ln_weight,
             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
@@ -148,6 +149,7 @@ class LayerNorm(torch.nn.Module):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -198,6 +200,7 @@ class LayerNorm(torch.nn.Module):
             self.eps,
             self.fwd_ln_sm_margin,
             self.bwd_ln_sm_margin,
+            self.inf_ln_sm_margin,
             self.zero_centered_gamma,
             torch.is_grad_enabled(),
             self.activation_dtype,
