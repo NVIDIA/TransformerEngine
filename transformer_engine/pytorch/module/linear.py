@@ -44,7 +44,7 @@ from ..cpp_extensions import (
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-
+from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -85,7 +85,6 @@ class _Linear(torch.autograd.Function):
         ub_overlap_ag: bool,
         ub_name: str,
         is_first_module_in_mha: bool,
-        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
         if is_input_fp8:
@@ -364,6 +363,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.is_input_fp8 = is_input_fp8
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
+            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -611,13 +611,15 @@ class _Linear(torch.autograd.Function):
         else:
             wgrad = None
 
+        if ctx.is_first_module and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
         return (
             wgrad,
             None,
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
-            None,
             None,
             None,
             None,
@@ -880,10 +882,6 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
-        # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
-        self.dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
-        FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
-
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -1031,7 +1029,6 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_ag,
                 self.ub_name,
                 is_first_module_in_mha,
-                self.dummy_tensor,
             )
             out = linear_fn(*args)
 
