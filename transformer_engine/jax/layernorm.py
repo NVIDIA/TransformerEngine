@@ -13,9 +13,7 @@ from .cpp_extensions import cast_fp8, cast_transpose, transpose
 from .cpp_extensions import rmsnorm_fwd, rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd, layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot
-from .fp8 import FP8Helper, FP8MetaFP32, FP8MetaPackage
-from .fp8 import convert_fp8_meta_fm32tofp32
-from .fp8 import convert_fp8_meta_fp32tofm32
+from .fp8 import FP8Helper, FlaxFloatMeta32, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
 
 
@@ -164,10 +162,10 @@ def _layernorm_fp8_dot_fwd_rule(
     k_contracting_dims = (0,)
     assert x.shape[-1] == kernel.shape[0]
 
-    is_fp8_meta_fm32 = amax.dtype == FP8MetaFP32
+    is_fp8_meta_fm32 = amax.dtype == FlaxFloatMeta32
     if is_fp8_meta_fm32:
         fp8_max, amax, scale, scale_inv = \
-            convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv)
+            FP8Helper.convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv)
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
     amax = FP8Helper.update_amax_history(amax)
@@ -292,7 +290,7 @@ def _layernorm_fp8_dot_bwd_rule(
 
     if is_fp8_meta_fm32:
         fp8_max, amax, scale, scale_inv = \
-            convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv)
+            FP8Helper.convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv)
 
     return dx, wgrad, \
            dgamma, dbeta, \

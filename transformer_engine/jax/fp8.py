@@ -74,35 +74,7 @@ def _format2dtypes(format_: Format):
 # would sum gradients from all micro-batches, and this is not the expected
 # behavior for FP8 meta. Instead, the summation of FP8 meta gradients should
 # be "MAX".
-FP8MetaFP32 = fp8_ops.fm32
-
-
-def convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv):
-    """Convert FP8 meta from FM32 to FP32"""
-    assert fp8_max.dtype == FP8MetaFP32
-    assert amax.dtype == FP8MetaFP32
-    assert scale.dtype == FP8MetaFP32
-    assert scale_inv.dtype == FP8MetaFP32
-
-    fp8_max = jax.lax.convert_element_type(fp8_max, jnp.float32)
-    amax = jax.lax.convert_element_type(amax, jnp.float32)
-    scale = jax.lax.convert_element_type(scale, jnp.float32)
-    scale_inv = jax.lax.convert_element_type(scale_inv, jnp.float32)
-    return fp8_max, amax, scale, scale_inv
-
-
-def convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv):
-    """Convert FP8 meta from FP32 to FM32"""
-    assert fp8_max.dtype == jnp.float32
-    assert amax.dtype == jnp.float32
-    assert scale.dtype == jnp.float32
-    assert scale_inv.dtype == jnp.float32
-
-    fp8_max = jax.lax.convert_element_type(fp8_max, FP8MetaFP32)
-    amax = jax.lax.convert_element_type(amax, FP8MetaFP32)
-    scale = jax.lax.convert_element_type(scale, FP8MetaFP32)
-    scale_inv = jax.lax.convert_element_type(scale_inv, FP8MetaFP32)
-    return fp8_max, amax, scale, scale_inv
+FlaxFloatMeta32 = fp8_ops.fm32
 
 
 class FP8MetaPackage:
@@ -340,6 +312,34 @@ class FP8Helper:
             fp8_meta_arrays[fp8_scale_inv_idx] = 1 / sf
 
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
+
+    @staticmethod
+    def convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv):
+        """Convert FP8 meta from FM32 to FP32"""
+        assert fp8_max.dtype == FlaxFloatMeta32
+        assert amax.dtype == FlaxFloatMeta32
+        assert scale.dtype == FlaxFloatMeta32
+        assert scale_inv.dtype == FlaxFloatMeta32
+
+        fp8_max = jax.lax.convert_element_type(fp8_max, jnp.float32)
+        amax = jax.lax.convert_element_type(amax, jnp.float32)
+        scale = jax.lax.convert_element_type(scale, jnp.float32)
+        scale_inv = jax.lax.convert_element_type(scale_inv, jnp.float32)
+        return fp8_max, amax, scale, scale_inv
+
+    @staticmethod
+    def convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv):
+        """Convert FP8 meta from FP32 to FM32"""
+        assert fp8_max.dtype == jnp.float32
+        assert amax.dtype == jnp.float32
+        assert scale.dtype == jnp.float32
+        assert scale_inv.dtype == jnp.float32
+
+        fp8_max = jax.lax.convert_element_type(fp8_max, FlaxFloatMeta32)
+        amax = jax.lax.convert_element_type(amax, FlaxFloatMeta32)
+        scale = jax.lax.convert_element_type(scale, FlaxFloatMeta32)
+        scale_inv = jax.lax.convert_element_type(scale_inv, FlaxFloatMeta32)
+        return fp8_max, amax, scale, scale_inv
 
     @staticmethod
     def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:

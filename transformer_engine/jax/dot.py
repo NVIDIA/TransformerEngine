@@ -9,9 +9,7 @@ import jax
 import jax.numpy as jnp
 
 from .cpp_extensions import cast_transpose
-from .fp8 import FP8Helper, FP8MetaFP32, FP8MetaPackage
-from .fp8 import convert_fp8_meta_fm32tofp32
-from .fp8 import convert_fp8_meta_fp32tofm32
+from .fp8 import FP8Helper, FlaxFloatMeta32, FP8MetaPackage
 
 Precision = jax.lax.Precision
 
@@ -106,10 +104,10 @@ def _fp8_dot_fwd_rule(
         bwd_dtype,    # pylint: disable=unused-argument
         contracting_dims):
 
-    is_fp8_meta_fm32 = amax.dtype == FP8MetaFP32
+    is_fp8_meta_fm32 = amax.dtype == FlaxFloatMeta32
     if is_fp8_meta_fm32:
         fp8_max, amax, scale, scale_inv = \
-            convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv)
+            FP8Helper.convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv)
 
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
@@ -182,7 +180,7 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
 
     if is_fp8_meta_fm32:
         fp8_max, amax, scale, scale_inv = \
-            convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv)
+            FP8Helper.convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv)
 
     return dgrad, wgrad, fp8_max, amax, scale, scale_inv
 
