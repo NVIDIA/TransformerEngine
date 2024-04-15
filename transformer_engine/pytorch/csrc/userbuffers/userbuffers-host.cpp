@@ -11,7 +11,6 @@
 #include <chrono>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#include <immintrin.h>
 #include <iostream>
 #include <math.h>
 #include <mpi.h>
@@ -19,7 +18,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <x86intrin.h>
 #define MULTICAST_GB_TOTAL 512
 
 static int oob_bcast(void *comm_context, void *buf, int size, int root) {
