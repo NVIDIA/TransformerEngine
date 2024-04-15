@@ -41,11 +41,13 @@ def clear_live_arrays():
         arr.delete()
 
 
+# TODO(rewang): As the base functions?
 def loss_fn(diff_xs, no_diff_xs, params, others, model, rngs):
     output = model.apply({"params": params, **others}, *diff_xs, *no_diff_xs, rngs=rngs)
     return jnp.mean(output)
 
 
+# TODO(rewang): RNGKey?
 def generate_test_rngs():
     data_rng = jax.random.PRNGKey(0)
     init_rng = {'params': jax.random.PRNGKey(1), 'dropout': jax.random.PRNGKey(2)}
@@ -61,25 +63,19 @@ def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
     return layer, params, others
 
 
-def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
-    # To be compatible with both Flax>=0.7.1 or <0.7.1
-    # since Flax 0.7.1 removed FrozenDict.
-    ref_fd = flax.core.unfreeze(ref_fd)
-    test_fd = flax.core.unfreeze(test_fd)
-    for key in ref_fd:
-        assert key in test_fd, \
-            f"{key} not found in test dict {test_fd}"
-        assert isinstance(test_fd[key], type(ref_fd[key])), \
-            f"The data type is not match between ref and test " \
-            f"dict on {key=}"
-        if isinstance(ref_fd[key], dict):
-            compare_dict(ref_fd[key], test_fd[key], rtol, atol)
-        else:
-            assert_allclose(ref_fd[key],
-                            test_fd[key],
-                            rtol=rtol,
-                            atol=atol,
-                            err_msg=f"{key=} is not close")
+def assert_tree_like_close(expected, actual, rtol=1e-05, atol=1e-08):
+    flatten_expected, _ = jax.tree_util.tree_flatten_with_path(expected)
+    flatten_actual, _ = jax.tree_util.tree_flatten_with_path(actual)
+
+    for (expected_path, expected_value), (actual_path,
+                                          actual_value) in zip(flatten_expected, flatten_actual):
+        assert expected_path == actual_path
+        key_str = jax.tree_util.keystr(expected_path)
+        assert_allclose(expected_value,
+                        actual_value,
+                        rtol=rtol,
+                        atol=atol,
+                        err_msg=f'Value of expected{key_str} and actual{key_str} is not close')
 
 
 DATA_SHAPE = [(32, 128, 1024), (32, 512, 1024)]    # (batch, seqlen, emb_dim)
@@ -109,9 +105,9 @@ BASE_ATTRS = {
 }
 
 ATTRS = [{
-    _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-}, {
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+}, {
+    _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_ZERO_CENTERED_GAMMA: True
@@ -218,21 +214,63 @@ ATTRS = [{
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
 
+def sync_params_values(dst, src, transformations, sep='/'):
+    """
+    transformations = {
+        # dst key map 0: src key map 0,
+        # dst key map 1: src key map 1,
+        ...
+    }
+    Copy the values from src to dst and retain the dst's shape
+    """
+    src_values = {}
+    for key, value in jax.tree_util.tree_leaves_with_path(src):
+        normalized_key = sep.join(x.key for x in key)
+        src_values[normalized_key] = value
+
+    flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
+    synced_dst_values = []
+
+    src_keys = [
+        jax.tree_util.keystr(key) for key, value in jax.tree_util.tree_leaves_with_path(src)
+    ]
+    dst_keys = [jax.tree_util.keystr(key) for key, value in flatten_dst]
+    print(f'{src_keys=}')
+    print(f'{dst_keys=}')
+
+    for key, value in flatten_dst:
+        normalized_key = sep.join(x.key for x in key)
+        synced_dst_values.append(src_values[transformations[normalized_key]])
+
+    synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
+
+    return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
+
+
 class TestEncoderLayer:
 
     @staticmethod
     def sync_params(ref, target):
-        unfreeze_target = flax.core.unfreeze(target)
-        unfreeze_attn_scope = unfreeze_target['attention']
-        ref_attn_scope = ref['attention']
-        for key in ref_attn_scope.keys():
-            unfreeze_attn_scope[key]['kernel'] = \
-                ref_attn_scope[key]['kernel'].reshape(unfreeze_attn_scope[key]['kernel'].shape)
-        unfreeze_target['mlp']['wi_kernel'] = \
-            jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
-        unfreeze_target['mlp']['wo_kernel'] = \
-            ref['mlp']['wo']['kernel']
-        return ref, unfreeze_target
+        transformations = {
+            'attention/out/kernel': 'attention/out/kernel',
+            'attention/qkv/kernel': 'attention/qkv/kernel',
+            'attention/qkv/scale': 'pre_attention_layer_norm/scale',
+            'attention/qkv/ln_bias': 'pre_attention_layer_norm/ln_bias',
+            'attention/kv/kernel': 'attention/kv/kernel',
+            'attention/query/kernel': 'attention/query/kernel',
+            'attention/key/kernel': 'attention/key/kernel',
+            'attention/value/kernel': 'attention/value/kernel',
+            'attention/query/scale': 'pre_attention_layer_norm/scale',
+            'attention/query/ln_bias': 'pre_attention_layer_norm/ln_bias',
+            'mlp/wi_kernel': 'mlp/wi/kernel',
+            'mlp/wo_kernel': 'mlp/wo/kernel',
+            'mlp/scale': 'pre_mlp_layer_norm/scale',
+            'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
+            'output_layernorm/scale': 'output_layernorm/scale',
+            'relpos_bias/rel_embedding': 'relpos_bias/rel_embedding',
+        }
+        target = sync_params_values(target, ref, transformations)
+        return ref, target
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
         transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
@@ -334,62 +372,17 @@ class TestEncoderLayer:
 
         grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 2), has_aux=False)
 
-        ref_out, ref_grads = grad_fn(inputs, ref_masks, ref_params, ref_others, ref_layer,
-                                     apply_rng)
-        test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
-                                       apply_rng)
-
-        def reorganize_test_wgrad(test_wgrad, attrs):
-            num_heads = attrs.get(_KEY_OF_NUM_HEADS)
-            num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
-            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True) and \
-                       num_heads == num_gqa_groups
-
-            attn_name = 'attention'
-            unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
-            if "output_layernorm" not in attrs:
-                unfreeze_test_wgrad['pre_attention_layer_norm'] = {}
-                pre_attn_layer_key = 'qkv' if fuse_qkv else 'query'
-                unfreeze_test_wgrad['pre_attention_layer_norm']['scale'] = \
-                    unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['scale']
-                del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['scale']
-                if 'ln_bias' in unfreeze_test_wgrad[attn_name][pre_attn_layer_key]:
-                    unfreeze_test_wgrad['pre_attention_layer_norm']['ln_bias'] = \
-                        unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
-                    del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
-
-            for key in unfreeze_test_wgrad[attn_name].keys():
-                unfreeze_test_wgrad[attn_name][key]['kernel'] = \
-                    jnp.reshape(unfreeze_test_wgrad[attn_name][key]['kernel'],
-                        (unfreeze_test_wgrad[attn_name][key]['kernel'].shape[0], -1))
-
-            unfreeze_test_wgrad['pre_mlp_layer_norm'] = {}
-            unfreeze_test_wgrad['pre_mlp_layer_norm']['scale'] = \
-                unfreeze_test_wgrad['mlp']['scale']
-            del unfreeze_test_wgrad['mlp']['scale']
-            if 'ln_bias' in unfreeze_test_wgrad['mlp']:
-                unfreeze_test_wgrad['pre_mlp_layer_norm']['ln_bias'] = \
-                    unfreeze_test_wgrad['mlp']['ln_bias']
-                del unfreeze_test_wgrad['mlp']['ln_bias']
-            unfreeze_test_wgrad['mlp']['wi'] = {}
-            unfreeze_test_wgrad['mlp']['wi']['kernel'] = \
-                jnp.reshape(unfreeze_test_wgrad['mlp']['wi_kernel'],
-                            (unfreeze_test_wgrad['mlp']['wi_kernel'].shape[0], -1))
-            del unfreeze_test_wgrad['mlp']['wi_kernel']
-            unfreeze_test_wgrad['mlp']['wo'] = {}
-            unfreeze_test_wgrad['mlp']['wo']['kernel'] = \
-                unfreeze_test_wgrad['mlp']['wo_kernel']
-            del unfreeze_test_wgrad['mlp']['wo_kernel']
-            return unfreeze_test_wgrad
+        ref_out, (ref_dgrads, ref_wgrads) = grad_fn(inputs, ref_masks, ref_params, ref_others,
+                                                    ref_layer, apply_rng)
+        test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
+                                                       test_layer, apply_rng)
 
         if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
             assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
+            assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
 
-            compare_dict(ref_grads[1],
-                         reorganize_test_wgrad(test_grads[1], attrs),
-                         rtol=rtol,
-                         atol=atol)    # wgrad
+            _, restructed_ref_wgrads = TestEncoderLayer.sync_params(ref_wgrads, test_wgrads)
+            assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -432,18 +425,36 @@ class TestDecoderLayer:
 
     @staticmethod
     def sync_params(ref, target):
-        unfreeze_target = flax.core.unfreeze(target)
-        for scope in ['self_attention', 'encoder_decoder_attention']:
-            unfreeze_scope = unfreeze_target[scope]
-            ref_scope = ref[scope]
-            for key in unfreeze_scope.keys():
-                unfreeze_scope[key]['kernel'] = \
-                    ref_scope[key]['kernel'].reshape(unfreeze_scope[key]['kernel'].shape)
-        unfreeze_target['mlp']['wi_kernel'] = \
-            jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
-        unfreeze_target['mlp']['wo_kernel'] = \
-            ref['mlp']['wo']['kernel']
-        return ref, unfreeze_target
+        transformations = {
+            'encoder_decoder_attention/out/kernel': 'encoder_decoder_attention/out/kernel',
+            'encoder_decoder_attention/qkv/kernel': 'encoder_decoder_attention/qkv/kernel',
+            'encoder_decoder_attention/qkv/scale': 'pre_cross_attention_layer_norm/scale',
+            'encoder_decoder_attention/qkv/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
+            'encoder_decoder_attention/kv/kernel': 'encoder_decoder_attention/kv/kernel',
+            'encoder_decoder_attention/query/kernel': 'encoder_decoder_attention/query/kernel',
+            'encoder_decoder_attention/key/kernel': 'encoder_decoder_attention/key/kernel',
+            'encoder_decoder_attention/value/kernel': 'encoder_decoder_attention/value/kernel',
+            'encoder_decoder_attention/query/scale': 'pre_cross_attention_layer_norm/scale',
+            'encoder_decoder_attention/query/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
+            'self_attention/out/kernel': 'self_attention/out/kernel',
+            'self_attention/qkv/kernel': 'self_attention/qkv/kernel',
+            'self_attention/qkv/scale': 'pre_self_attention_layer_norm/scale',
+            'self_attention/qkv/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
+            'self_attention/kv/kernel': 'self_attention/kv/kernel',
+            'self_attention/query/kernel': 'self_attention/query/kernel',
+            'self_attention/key/kernel': 'self_attention/key/kernel',
+            'self_attention/value/kernel': 'self_attention/value/kernel',
+            'self_attention/query/scale': 'pre_self_attention_layer_norm/scale',
+            'self_attention/query/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
+            'mlp/wi_kernel': 'mlp/wi/kernel',
+            'mlp/wo_kernel': 'mlp/wo/kernel',
+            'mlp/scale': 'pre_mlp_layer_norm/scale',
+            'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
+            'output_layernorm/scale': 'output_layernorm/scale',
+            'relpos_bias/rel_embedding': 'relpos_bias/rel_embedding',
+        }
+        target = sync_params_values(target, ref, transformations)
+        return ref, target
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
         transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
@@ -548,70 +559,17 @@ class TestDecoderLayer:
 
         grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 2), has_aux=False)
 
-        ref_out, ref_grads = grad_fn(inputs, ref_masks, ref_params, ref_others, ref_layer,
-                                     apply_rng)
-        test_out, test_grads = grad_fn(inputs, test_masks, test_params, test_others, test_layer,
-                                       apply_rng)
-
-        def reorganize_test_wgrad(test_wgrad, attrs):
-            num_heads = attrs.get(_KEY_OF_NUM_HEADS)
-            num_gqa_groups = attrs.get(_KEY_OF_NUM_GQA_GROUPS, num_heads)
-            fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True) and \
-                       num_heads == num_gqa_groups
-
-            unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
-            if "output_layernorm" not in attrs:
-                attn_name = 'self_attention'
-                unfreeze_test_wgrad['pre_self_attention_layer_norm'] = {}
-                pre_attn_layer_key = 'qkv' if fuse_qkv else 'query'
-                unfreeze_test_wgrad['pre_self_attention_layer_norm']['scale'] = \
-                    unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['scale']
-                del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['scale']
-                if 'ln_bias' in unfreeze_test_wgrad[attn_name][pre_attn_layer_key]:
-                    unfreeze_test_wgrad['pre_self_attention_layer_norm']['ln_bias'] = \
-                        unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
-                    del unfreeze_test_wgrad[attn_name][pre_attn_layer_key]['ln_bias']
-
-            for scope in ['self_attention', 'encoder_decoder_attention']:
-                for key in unfreeze_test_wgrad[scope].keys():
-                    unfreeze_test_wgrad[scope][key]['kernel'] = \
-                        jnp.reshape(unfreeze_test_wgrad[scope][key]['kernel'],
-                            (unfreeze_test_wgrad[scope][key]['kernel'].shape[0], -1))
-
-            unfreeze_test_wgrad['pre_cross_attention_layer_norm'] = {}
-            unfreeze_test_wgrad['pre_cross_attention_layer_norm']['scale'] = \
-                unfreeze_test_wgrad['encoder_decoder_attention']['query']['scale']
-            del unfreeze_test_wgrad['encoder_decoder_attention']['query']['scale']
-            if 'ln_bias' in unfreeze_test_wgrad['encoder_decoder_attention']['query']:
-                unfreeze_test_wgrad['pre_cross_attention_layer_norm']['ln_bias'] = \
-                    unfreeze_test_wgrad['encoder_decoder_attention']['query']['ln_bias']
-                del unfreeze_test_wgrad['encoder_decoder_attention']['query']['ln_bias']
-            unfreeze_test_wgrad['pre_mlp_layer_norm'] = {}
-            unfreeze_test_wgrad['pre_mlp_layer_norm']['scale'] = \
-                unfreeze_test_wgrad['mlp']['scale']
-            del unfreeze_test_wgrad['mlp']['scale']
-            if 'ln_bias' in unfreeze_test_wgrad['mlp']:
-                unfreeze_test_wgrad['pre_mlp_layer_norm']['ln_bias'] = \
-                    unfreeze_test_wgrad['mlp']['ln_bias']
-                del unfreeze_test_wgrad['mlp']['ln_bias']
-            unfreeze_test_wgrad['mlp']['wi'] = {}
-            unfreeze_test_wgrad['mlp']['wi']['kernel'] = \
-                jnp.reshape(unfreeze_test_wgrad['mlp']['wi_kernel'],
-                            (unfreeze_test_wgrad['mlp']['wi_kernel'].shape[0], -1))
-            del unfreeze_test_wgrad['mlp']['wi_kernel']
-            unfreeze_test_wgrad['mlp']['wo'] = {}
-            unfreeze_test_wgrad['mlp']['wo']['kernel'] = \
-                unfreeze_test_wgrad['mlp']['wo_kernel']
-            del unfreeze_test_wgrad['mlp']['wo_kernel']
-            return unfreeze_test_wgrad
+        ref_out, (ref_dgrads, ref_wgrads) = grad_fn(inputs, ref_masks, ref_params, ref_others,
+                                                    ref_layer, apply_rng)
+        test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
+                                                       test_layer, apply_rng)
 
         if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
             assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-            assert_allclose(ref_grads[0][0], test_grads[0][0], rtol=rtol, atol=atol)    # dgrad
-            compare_dict(ref_grads[1],
-                         reorganize_test_wgrad(test_grads[1], attrs),
-                         rtol=rtol,
-                         atol=atol)    # wgrad
+            assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
+
+            _, restructed_ref_wgrads = TestDecoderLayer.sync_params(ref_wgrads, test_wgrads)
+            assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
