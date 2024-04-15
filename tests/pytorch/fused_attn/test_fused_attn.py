@@ -514,25 +514,18 @@ qkv_layouts_thd = [
 
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    #"layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #th3d/thd_t2hd
-    #"layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #th3d/thd_t2hd
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
     "layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #th3d/thd_t2hd
-    #"layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd
-    #"layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    #"layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd
-    #"layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 fail
-    #"layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 fail
-    #"layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
-
-# Note: all failed tests were due to mismatches (30-50%) except for layout_2_1 tests which were exec errors: 
-#E       RuntimeError: /code/fmha/github3/pr-thd/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_f16_arbitrary_seqlen.cu:633 in function operator(): cuDNN Error: CUDNN_BACKEND_OPERATIONGRAPH_DESCRIPTOR: Check and Set CUDNN_ATTR_OPERATIONGRAPH_HANDLE cudnn_status: CUDNN_STATUS_BAD_PARAM. For more information, enable cuDNN error logging by setting CUDNN_LOGERR_DBG=1 and CUDNN_LOGDEST_DBG=stderr in the environment.
-#E! CuDNN (v8907) function cudnnCreate() called:
-#e!         Error: CUDNN_STATUS_INTERNAL_ERROR; Reason: cudaStreamCreateWithFlags(&ctx->streamPool[0][i], 0x01) != cudaSuccess
-#e! Time: 2024-03-21T03:36:55.887897 (0d+0h+0m+0s since start)
-#e! Process=8573; Thread=8678; GPU=NULL; Handle=NULL; StreamId=NULL.
+    "layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd/thd_th2d
+    "layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd/thd_th2d
+    "layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
