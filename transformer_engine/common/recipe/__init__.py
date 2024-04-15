@@ -131,7 +131,8 @@ class DelayedScaling:
           FP8_MAX = maximum_representable_value(fp8_format)
           new_scaling_factor = (FP8_MAX / amax) / (2 ^ margin)
 
-    * `fp8_dpa` and `fp8_mha` are beta features.
+    * `fp8_dpa` and `fp8_mha` are Beta features, and their API and functionality are
+      subject to change in future Transformer Engine releases.
     """
 
     margin: int = 0

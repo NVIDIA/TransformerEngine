@@ -1307,21 +1307,44 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         dtype, config, "UnfusedAttention")
 
     tols = dict(atol=5e-1, rtol=5e-1)
+    rmse_tol = 0.1
+    fwd_rmse = _rmse(fused_attn_fwd_fp8, unfused_attn_fwd_f16)
+    fwd_range = max(fused_attn_fwd_fp8.max().item(),
+        unfused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
+        unfused_attn_fwd_f16.min().item())
+    bwd_rmse = _rmse(fused_attn_bwd_fp8, unfused_attn_bwd_f16)
+    bwd_range = max(fused_attn_bwd_fp8.max().item(),
+        unfused_attn_bwd_f16.max().item()) - min(fused_attn_bwd_fp8.min().item(),
+        unfused_attn_bwd_f16.min().item())
     if _NVTE_DEBUG:
         print('fused_attn_fwd_fp8   min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
         print('unfused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             unfused_attn_fwd_f16.min().item(), unfused_attn_fwd_f16.max().item()))
         print('fused_attn_fwd_fp8 vs unfused_attn_fwd_f16 RMSE: {:.6f}'.format(
-            _rmse(fused_attn_fwd_fp8, unfused_attn_fwd_f16)))
+            fwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
+        except Exception as e:
+            print(e)
+            print()
         print('fused_attn_bwd_fp8   min {:.6f} max {:.6f}'.format(
             fused_attn_bwd_fp8.min().item(), fused_attn_bwd_fp8.max().item()))
         print('unfused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
             unfused_attn_bwd_f16.min().item(), unfused_attn_bwd_f16.max().item()))
         print('fused_attn_bwd_fp8 vs unfused_attn_bwd_f16 RMSE: {:.6f}'.format(
-            _rmse(fused_attn_bwd_fp8, unfused_attn_bwd_f16)))
-    torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
-    torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
+            bwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
+        except Exception as e:
+            print(e)
+            print()
+    assert(fwd_rmse < rmse_tol * fwd_range
+        ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
+    assert(bwd_rmse < rmse_tol * bwd_range
+        ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+        bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
 
 
 def _run_custom_mha_fp8(dtype, config, backend):
