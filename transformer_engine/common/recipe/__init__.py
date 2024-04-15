@@ -106,6 +106,20 @@ class DelayedScaling:
                 GPU maintains local amaxes and scaling factors. To ensure results are
                 numerically identical across checkpointing boundaries in this case, all
                 ranks must checkpoint in order to store the local tensors.
+    fp8_dpa: bool, default = `False`
+             Whether to enable FP8 dot product attention (DPA). When the model is placed in an
+             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             inputs from higher precision to FP8, performs attention in FP8, and casts tensors
+             back to higher precision as outputs. FP8 DPA currently is only supported in the
+             `FusedAttention` backend.
+    fp8_mha: bool, default = `False`
+            Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
+            operations mentioned above at the DPA boundaries. Currently only standard MHA modules
+            i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
+            `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
+            `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
+            When `fp8_mha = True, fp8_dpa = True`, it becomes
+            `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
 
     Notes
     -----
@@ -116,6 +130,8 @@ class DelayedScaling:
 
           FP8_MAX = maximum_representable_value(fp8_format)
           new_scaling_factor = (FP8_MAX / amax) / (2 ^ margin)
+
+    * `fp8_dpa` and `fp8_mha` are beta features.
     """
 
     margin: int = 0
