@@ -40,6 +40,7 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
+from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 
@@ -89,7 +90,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -328,6 +328,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
+            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -660,6 +661,9 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
+        if ctx.is_first_module and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -668,7 +672,6 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
-            None,
             None,
             None,
             None,
@@ -1001,10 +1004,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
-        # Initialize a dummy tensor to be used as gradient hook for bwd amax reduction.
-        self.dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
-        FP8GlobalStateManager.add_tensor_for_bwd_reduction_multi_grad_hook(self.dummy_tensor)
-
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1176,7 +1175,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
-                self.dummy_tensor,
             )
             out = fwd_fn(*args)
 
