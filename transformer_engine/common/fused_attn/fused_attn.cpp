@@ -85,8 +85,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
-  if (((q_dtype == NVTEDType::kNVTEByte)
-          || (q_dtype == NVTEDType::kNVTEFloat8E4M3)
+  if (((q_dtype == NVTEDType::kNVTEFloat8E4M3)
           || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
       && (sm_arch_ >= 90)
       && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)

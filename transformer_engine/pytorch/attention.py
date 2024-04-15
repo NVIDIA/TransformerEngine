@@ -3504,9 +3504,9 @@ class DotProductAttention(torch.nn.Module):
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype]
-                if not isinstance(query_layer, Float8Tensor) else TE_DType[query_layer._data.dtype],
+                if not isinstance(query_layer, Float8Tensor) else query_layer._fp8_dtype,
                 TE_DType[key_layer.dtype]
-                if not isinstance(key_layer, Float8Tensor) else TE_DType[key_layer._data.dtype],
+                if not isinstance(key_layer, Float8Tensor) else key_layer._fp8_dtype,
                 QKVLayout[qkv_layout],
                 AttnBiasType[fu_core_attention_bias_type],
                 AttnMaskType[attn_mask_type],

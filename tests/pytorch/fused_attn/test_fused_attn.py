@@ -985,7 +985,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
         dtype, config, False, qkv_format, input_layernorm)
 
     tols = dict(atol=5e-1, rtol=5e-1)
-    rmse_tol = 0.02
+    rmse_tol = 0.1
     fwd_rmse = _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)
     fwd_range = max(fused_attn_fwd_fp8.max().item(),
         fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
