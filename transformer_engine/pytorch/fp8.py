@@ -202,11 +202,6 @@ class FP8GlobalStateManager:
             # `fp8_param_to_autocast`. This is used for keeping track of FP8 weights
             # in an autocasted region and cross reference them in `float8_tensor.py`
             # to perform the forward amax reduction.
-            fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
-            if fp8_meta_tensor_key not in fp8_meta:
-                # Handles non-parameter FP8 modules, e.g. DPA.
-                continue
-
             if forward and fp8_weights is not None:
                 autocast_key = cls.get_unique_autocast_key(
                                     fp8_meta["recipe"], fp8_meta["fp8_group"])
@@ -222,6 +217,7 @@ class FP8GlobalStateManager:
 
             key = cls.get_key_in_buffer(
                 forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
+            fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -599,10 +595,22 @@ def _default_sf_compute(
     fp8_max: float,
     margin: int,
 ) -> torch.Tensor:
-    """Default function to convert amax to scaling factor."""
+    """Default function to convert amax to scaling factor.
+    Computing the scaling factor requires consideration of the following scenarios:
+    1. amax == 0:
+       No action is possible, set scale = 1.
+    2. 0 < amax < tiny_amax
+       The amax is too tiny that the scale becomes infinite in FP32.
+       Set scale = FP32_max
+    3. tiny_amax <= amax < FP32_max:
+       Set scale = FP8_max (or scaled_max) / amax
+    4. When amax == inf or amax == nan:
+       No action is possible, set scale = 1.
+    """
     sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
+    sf = torch.where(torch.isfinite(sf), sf, torch.ones_like(sf) * torch.finfo(torch.float32).max)
     scale.copy_(sf)
     return scale
 
@@ -638,7 +646,7 @@ def _compute_scaling_factor(
             fp8_max,
             recipe.margin,
         )
-    return recipe.scaling_factor_compute_algo(amax, scale, fp8_max, recipe)
+    return recipe.scaling_factor_compute_algo(amax, scale, fp8_max, recipe.margin)
 
 
 def _amax_and_scale_update(
