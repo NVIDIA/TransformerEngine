@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/transpose.h>
 
 #include <algorithm>
@@ -105,9 +106,12 @@ template <size_t load_size, size_t store_size, typename Type>
 __global__ void
 __launch_bounds__(block_size)
 transpose_general_kernel(const Type * __restrict__ const input,
+                         const fp32 * const noop,
                          Type * __restrict__ const output,
                          const size_t row_length,
                          const size_t num_rows) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
   // Vectorized load/store sizes
   constexpr size_t nvec_in = load_size / sizeof(Type);
   constexpr size_t nvec_out = store_size / sizeof(Type);
@@ -201,6 +205,7 @@ transpose_general_kernel(const Type * __restrict__ const input,
 }  // namespace
 
 void transpose(const Tensor &input,
+               const Tensor &noop,
                Tensor *output_,
                cudaStream_t stream) {
   Tensor &output = *output_;
@@ -216,6 +221,23 @@ void transpose(const Tensor &input,
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
   NVTE_CHECK(input.data.dtype == output.data.dtype,
              "Input and output type must match.");
+
+  // Number of elements in tensor
+  auto numel = [] (const Tensor &tensor) -> size_t {
+    size_t acc = 1;
+    for (const auto& dim : tensor.data.shape) {
+      acc *= dim;
+    }
+    return acc;
+  };
+
+  if (noop.data.dptr != nullptr) {
+    NVTE_CHECK(numel(noop) == 1,
+               "Expected 1 element, ",
+               "but found ", numel(noop), ".");
+    NVTE_CHECK(noop.data.dtype == DType::kFloat32);
+    NVTE_CHECK(noop.data.dptr != nullptr);
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.data.dtype, Type,
     constexpr const char *type_name = TypeInfo<Type>::name;
@@ -270,6 +292,7 @@ void transpose(const Tensor &input,
       rtc_manager.launch(kernel_label,
                          num_blocks, block_size, 0, stream,
                          static_cast<const Type *>(input.data.dptr),
+                         static_cast<const fp32 *>(noop.data.dptr),
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
@@ -281,6 +304,7 @@ void transpose(const Tensor &input,
                               * DIVUP(num_rows, col_tile_size));
       transpose_general_kernel<load_size, store_size, Type><<<num_blocks, block_size, 0, stream>>>(
         static_cast<const Type *>(input.data.dptr),
+        static_cast<const fp32 *>(noop.data.dptr),
         static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
     }
@@ -294,7 +318,22 @@ void nvte_transpose(const NVTETensor input,
                     cudaStream_t stream) {
   NVTE_API_CALL(nvte_transpose);
   using namespace transformer_engine;
+  auto noop = Tensor();
   transpose(*reinterpret_cast<const Tensor*>(input),
+            noop,
+            reinterpret_cast<Tensor*>(output),
+            stream);
+}
+
+
+void nvte_transpose_with_noop(const NVTETensor input,
+                              const NVTETensor noop,
+                              NVTETensor output,
+                              cudaStream_t stream) {
+  NVTE_API_CALL(nvte_transpose_with_noop);
+  using namespace transformer_engine;
+  transpose(*reinterpret_cast<const Tensor*>(input),
+            *reinterpret_cast<const Tensor*>(noop),
             reinterpret_cast<Tensor*>(output),
             stream);
 }

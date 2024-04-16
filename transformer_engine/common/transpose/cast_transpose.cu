@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/transpose.h>
 
 #include <algorithm>
@@ -116,12 +117,15 @@ template <size_t load_size, size_t store_size, typename IType, typename OType>
 __global__ void
 __launch_bounds__(block_size)
 cast_transpose_general_kernel(const IType * __restrict__ const input,
+                              const CType * const noop,
                               OType * __restrict__  const output_c,
                               OType * __restrict__  const output_t,
                               const CType * __restrict__ const scale_ptr,
                               CType * __restrict__ const amax_ptr,
                               const size_t row_length,
                               const size_t num_rows) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
   // Vectorized load/store sizes
   constexpr size_t nvec_in = load_size / sizeof(IType);
   constexpr size_t nvec_out = store_size / sizeof(OType);
@@ -226,12 +230,25 @@ cast_transpose_general_kernel(const IType * __restrict__ const input,
 }  // namespace
 
 void cast_transpose(const Tensor &input,
+                    const Tensor &noop,
                     Tensor *cast_output_,
                     Tensor *transposed_output_,
                     cudaStream_t stream) {
   Tensor &cast_output = *cast_output_;
   Tensor &transposed_output = *transposed_output_;
 
+  // Check no-op flag
+  if (noop.data.dptr != nullptr) {
+    size_t numel = 1;
+    for (const auto& dim : noop.data.shape) {
+      numel *= dim;
+    }
+    NVTE_CHECK(numel == 1, "Expected 1 element, but found ", numel, ".");
+    NVTE_CHECK(noop.data.dtype == DType::kFloat32);
+    NVTE_CHECK(noop.data.dptr != nullptr);
+  }
+
+  // Check tensor dims
   CheckInputTensor(input, "cast_transpose_input");
   CheckOutputTensor(cast_output, "cast_output");
   CheckOutputTensor(transposed_output, "transposed_output");
@@ -241,7 +258,6 @@ void cast_transpose(const Tensor &input,
              "Transposed output must have 2 dimensions.");
   const size_t row_length = input.data.shape[1];
   const size_t num_rows = input.data.shape[0];
-
   NVTE_CHECK(cast_output.data.shape[0] == num_rows, "Wrong dimension of cast output.");
   NVTE_CHECK(cast_output.data.shape[1] == row_length, "Wrong dimension of cast output.");
   NVTE_CHECK(transposed_output.data.shape[0] == row_length,
@@ -249,6 +265,7 @@ void cast_transpose(const Tensor &input,
   NVTE_CHECK(transposed_output.data.shape[1] == num_rows,
              "Wrong dimension of transposed output.");
 
+  // Check tensor pointers
   NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
   NVTE_CHECK(cast_output.data.dptr != nullptr, "Cast output is not allocated.");
   NVTE_CHECK(transposed_output.data.dptr != nullptr, "Transposed output is not allocated.");
@@ -333,6 +350,7 @@ void cast_transpose(const Tensor &input,
         cast_transpose_general_kernel<load_size, store_size, InputType, OutputType>
           <<<num_blocks, block_size, 0, stream>>>(
             static_cast<const InputType *>(input.data.dptr),
+            reinterpret_cast<const CType *>(noop.data.dptr),
             static_cast<OutputType *>(cast_output.data.dptr),
             static_cast<OutputType *>(transposed_output.data.dptr),
             static_cast<const CType *>(cast_output.scale.dptr),
@@ -351,7 +369,23 @@ void nvte_cast_transpose(const NVTETensor input,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_cast_transpose);
   using namespace transformer_engine;
+  auto noop = Tensor();
   cast_transpose(*reinterpret_cast<const Tensor*>(input),
+                 noop,
+                 reinterpret_cast<Tensor*>(cast_output),
+                 reinterpret_cast<Tensor*>(transposed_output),
+                 stream);
+}
+
+void nvte_cast_transpose_with_noop(const NVTETensor input,
+                                   const NVTETensor noop,
+                                   NVTETensor cast_output,
+                                   NVTETensor transposed_output,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cast_transpose_with_noop);
+  using namespace transformer_engine;
+  cast_transpose(*reinterpret_cast<const Tensor*>(input),
+                 *reinterpret_cast<const Tensor*>(noop),
                  reinterpret_cast<Tensor*>(cast_output),
                  reinterpret_cast<Tensor*>(transposed_output),
                  stream);

@@ -14,7 +14,6 @@ from .. import cpp_extensions as tex
 
 from .base import (
     get_workspace,
-    _prepare_backward,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -41,8 +40,10 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
+from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 __all__ = ["LayerNormLinear"]
 
@@ -65,6 +66,7 @@ class _LayerNormLinear(torch.autograd.Function):
         use_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Union[torch.Tensor, None],
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
@@ -86,6 +88,7 @@ class _LayerNormLinear(torch.autograd.Function):
         primary_weights_in_fp8: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
+        ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
@@ -97,7 +100,11 @@ class _LayerNormLinear(torch.autograd.Function):
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
 
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        update_fp8_weights = (
+            is_first_microbatch is None
+            or is_first_microbatch
+            or skip_fp8_weight_update is not None
+        )
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -184,6 +191,9 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out = ln_out_total
 
         if fp8:
+            if _NVTE_DEBUG:
+                print('[LayerNormLinear]: using FP8 forward')
+
             bias_dtype = (
                 torch.bfloat16
                 if activation_dtype == torch.float32
@@ -195,7 +205,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 # Weight is already in FP8
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
-                weight_t_fp8 = None
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -213,6 +222,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=weight_fp8._data,
                         transpose_out=weight_t_fp8._data,
+                        noop_flag=skip_fp8_weight_update,
                     )
                 else:
                     tex.cast_to_fp8(
@@ -224,6 +234,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
                     weight_t_fp8 = None
 
+            if fp8_meta["recipe"].fp8_mha:
+                out_index, meta_tensor, output_te_dtype, output_dtype = (
+                    tex.FP8FwdTensors.GEMM1_OUTPUT,
+                    fp8_meta["scaling_fwd"],
+                    fp8_dtype_forward,
+                    torch.uint8)
+            else:
+                out_index, meta_tensor, output_te_dtype, output_dtype = (
+                    None, None, None, activation_dtype)
             out, _ = tex.fp8_gemm(
                 weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -233,7 +252,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
-                activation_dtype,
+                output_dtype,
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
@@ -241,8 +260,22 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_algo=ub_algo if ub_overlap_ag else None,
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
+                out_index=out_index,
+                fp8_meta_tensor=meta_tensor,
+                D_dtype=output_te_dtype,
             )
+            if output_dtype == torch.uint8:
+                out = Float8Tensor(data=out,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_OUTPUT,
+                    fp8_dtype=fp8_dtype_forward,
+                    dtype=activation_dtype,
+                )
         else:
+            if _NVTE_DEBUG:
+                print('[LayerNormLinear]: using non-FP8 forward')
+
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -294,6 +327,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out if weight.requires_grad else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -316,9 +350,12 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
+            ctx.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
             ctx.ub_name = ub_name
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.primary_weights_in_fp8 = primary_weights_in_fp8
+            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -328,7 +365,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
-
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp.shape)
@@ -342,9 +378,11 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
-        ):
+        if isinstance(grad_outputs[0], Float8Tensor):
+            ctx.fp8_meta["scaling_bwd"].scale_inv[
+                tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_outputs[0]._scale_inv
+
+        with torch.cuda.nvtx.range("_LayerNormLinear_backward"):
             (
                 inputmat,
                 ln_weight,
@@ -355,6 +393,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fwd_scale_inverses,
+                skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -362,11 +401,20 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             # Primary weights are in FP8.
-            if ctx.fp8 and weight_t_fp8 is None:
-                weight_t_fp8 = weight.transpose(
-                    update_cache="reuse_only" if ctx.is_first_microbatch is None else "lazy",
+            if ctx.primary_weights_in_fp8:
+                weight_t_fp8 = weight.transpose_2d(
+                    cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
                 )
+            elif ctx.fp8:
+                weight_t_fp8 = weight_t_fp8._data
 
+            if ctx.ub_overlap_rs_dgrad:
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_overlap_rs_dgrad = False
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1 or not weight.requires_grad:
@@ -416,10 +464,40 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.ub_bulk_wgrad: # allocate dgrad output
                 ub_obj_dgrad = get_ub(ctx.ub_name+"_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+            elif ctx.ub_overlap_rs_dgrad:
+                ub_obj_dgrad = get_ub(ctx.ub_name+"_dgrad")
+                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
+            if ctx.ub_bulk_dgrad:
+                ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
+                ub_obj = ub_obj_lnout
+            elif ctx.ub_overlap_rs_dgrad:
+                dim_size = list(grad_output.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = weight.size(1)
+                rs_out = torch.empty(
+                        dim_size, dtype=ctx.activation_dtype, device=grad_output.device)
+                if ub_obj_dgrad.is_p2p_overlap():
+                    if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
+                        ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                    else:
+                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                else:
+                    if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
+                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                    else:
+                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                ub_obj = ub_obj_dgrad
+            else:
+                ub_algo = None
+                ub_obj = None
+
             if ctx.fp8:
+                if _NVTE_DEBUG:
+                    print('[LayerNormLinear]: using FP8 backward')
+
                 fp8_dtype_forward = get_fp8_te_dtype(
                     ctx.fp8_meta["recipe"], fprop_tensor=True
                 )
@@ -428,7 +506,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 out_index, meta_tensor, out_te_type, out_type = (
                     None, None, None, ctx.activation_dtype)
-                if ctx.ub_bulk_wgrad and ub_obj_dgrad.is_fp8_ubuf():
+                if (ctx.ub_bulk_wgrad or ctx.ub_overlap_rs_dgrad) and ub_obj_dgrad.is_fp8_ubuf():
                     out_index = tex.FP8BwdTensors.GRAD_INPUT1
                     meta_tensor = ctx.fp8_meta["scaling_bwd"]
                     out_te_type = fp8_dtype_backward
@@ -437,11 +515,12 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
-                    weight_t_fp8._data,
+                    weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
-                    grad_output_c,
+                    grad_output_c._data
+                    if isinstance(grad_output_c, Float8Tensor) else grad_output_c,
                     ctx.fp8_meta["scaling_bwd"].scale_inv,
                     tex.FP8BwdTensors.GRAD_OUTPUT1,
                     fp8_dtype_backward,
@@ -449,14 +528,18 @@ class _LayerNormLinear(torch.autograd.Function):
                     get_workspace(),
                     out=dgrad,
                     use_split_accumulator=_2X_ACC_DGRAD,
-                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
-                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None,
+                    ub_algo=ub_algo,
+                    ub=ub_obj,
+                    extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                     out_index=out_index,
                     fp8_meta_tensor = meta_tensor,
                     D_dtype = out_te_type,
                 )
                 clear_tensor_data(grad_output_c)
             else:
+                if _NVTE_DEBUG:
+                    print('[LayerNormLinear]: using non-FP8 backward')
+
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
                     weight,
@@ -466,8 +549,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     out=dgrad,
                     layout="NN",
                     grad=True,
-                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
-                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
+                    ub_algo=ub_algo,
+                    ub=ub_obj,
+                    extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                 )
             if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
@@ -476,7 +560,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
-                if not ctx.ub_bulk_wgrad:
+                if not ctx.ub_bulk_wgrad and not ctx.ub_overlap_rs_dgrad:
                     if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
                         dgrad = dgrad + grad_outputs[1].view_as(dgrad)
                     dgrad, handle = reduce_scatter_along_first_dim(
@@ -504,7 +588,8 @@ class _LayerNormLinear(torch.autograd.Function):
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
-                            grad_output_t,
+                            grad_output_t._data
+                            if isinstance(grad_output_t, Float8Tensor) else grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT1,
                             fp8_dtype_backward,
@@ -569,7 +654,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            dgrad = dgrad.view(inputmat.shape)
+            if ctx.ub_overlap_rs_dgrad:
+                dgrad = rs_out.view(inputmat.shape)
+            else:
+                dgrad = dgrad.view(inputmat.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
@@ -611,6 +699,9 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
+        if ctx.is_first_module and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -619,6 +710,8 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
+            None,
             None,
             None,
             None,
@@ -758,6 +851,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_overlap_ag: bool = False,
+        ub_overlap_rs_dgrad: bool = False,
         ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -778,7 +872,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_overlap_ag = ub_overlap_ag
-        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag]):
+        self.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
+        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag, ub_overlap_rs_dgrad]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
@@ -927,7 +1022,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
@@ -946,6 +1040,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1041,6 +1136,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
+        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
@@ -1089,6 +1188,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
+                skip_fp8_weight_update,
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
@@ -1103,13 +1203,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.return_layernorm_output,
                 self.return_layernorm_output_gathered,
                 torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin,
+                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.normalization,
                 self.primary_weights_in_fp8,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
+                self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
             )

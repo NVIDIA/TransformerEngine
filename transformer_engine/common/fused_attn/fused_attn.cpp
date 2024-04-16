@@ -85,15 +85,25 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
-  if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
-          && (sm_arch_ >= 90)
-          && (max_seqlen_q == max_seqlen_kv)
-          && (num_attn_heads == num_gqa_groups)
-          && (max_seqlen_q <= 512)
-          && (head_dim == 64)
-          && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
-          && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-          && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)) {
+  if (((q_dtype == NVTEDType::kNVTEFloat8E4M3)
+          || (q_dtype == NVTEDType::kNVTEFloat8E5M2))
+      && (sm_arch_ >= 90)
+      && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
+      && (
+          ((cudnn_runtime_version >= 8900)
+              && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)
+              && (max_seqlen_q == max_seqlen_kv)
+              && (max_seqlen_q <= 512)
+              && (head_dim == 64)
+              && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK))
+          || ((cudnn_runtime_version >= 90100)
+              && (max_seqlen_q % 128 == 0)
+              && (max_seqlen_kv % 128 == 0)
+              && (head_dim == 128)
+              && ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+                  || (qkv_format == NVTE_QKV_Format::NVTE_SBHD))
+              && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+                  || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))))) {
     if (cudnn_runtime_version >= 8900) {
       backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
     } else {
@@ -269,7 +279,7 @@ void nvte_fused_attn_fwd_qkvpacked(
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_qkvpacked(
             b, h, max_seqlen, d,
-            is_training, attn_scale, dropout, qkv_layout,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_QKV, input_output_S, output_O,
             Aux_CTX_Tensors,
             input_cu_seqlens,
@@ -379,7 +389,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_qkvpacked(
                     b, h, max_seqlen, d,
-                    attn_scale, dropout, qkv_layout,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_QKV, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,
@@ -476,7 +486,18 @@ void nvte_fused_attn_fwd_kvpacked(
       "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+#if (CUDNN_VERSION >= 8900)
+    fused_attn_fp8_fwd_kvpacked(
+            b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+            input_Q, input_KV, input_output_S, output_O,
+            Aux_CTX_Tensors,
+            input_cu_seqlens_q, input_cu_seqlens_kv,
+            input_rng_state,
+            wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
+#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
@@ -580,7 +601,23 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTE_ERROR(err_msg);
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+#if (CUDNN_VERSION >= 8900)
+    const Tensor *input_M = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    fused_attn_fp8_bwd_kvpacked(
+                    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+                    input_Q, input_KV, input_O, input_dO,
+                    input_M, input_ZInv,
+                    input_S, input_output_dP,
+                    output_dQ, output_dKV,
+                    input_cu_seqlens_q, input_cu_seqlens_kv,
+                    input_rng_state,
+                    wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
+#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
@@ -662,8 +699,8 @@ void nvte_fused_attn_fwd(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(
-            b, h_q, max_seqlen_q, max_seqlen_kv, d,
-            is_training, attn_scale, dropout, qkv_layout,
+            b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
             input_Q, input_K, input_V, input_output_S, output_O,
             Aux_CTX_Tensors,
             input_cu_seqlens_q, input_cu_seqlens_kv,
@@ -775,8 +812,8 @@ void nvte_fused_attn_bwd(
     const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd(
-                    b, h_q, max_seqlen_q, max_seqlen_kv, d,
-                    attn_scale, dropout, qkv_layout,
+                    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+                    attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
                     input_Q, input_K, input_V, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,

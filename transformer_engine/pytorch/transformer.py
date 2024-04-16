@@ -261,6 +261,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad: bool = True,
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
+        ub_overlap_rs_dgrad: bool = False,
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
@@ -282,6 +283,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
         ub_overlap_ag = ub_tp_comm_overlap and ub_overlap_ag
         ub_overlap_rs = ub_tp_comm_overlap and ub_overlap_rs
+        ub_overlap_rs_dgrad = ub_tp_comm_overlap and ub_overlap_rs_dgrad
 
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
@@ -357,6 +359,7 @@ class TransformerLayer(torch.nn.Module):
             "ub_bulk_dgrad" : ub_bulk_dgrad,
             "ub_overlap_ag" : ub_overlap_ag,
             "ub_overlap_rs" : ub_overlap_rs,
+            "ub_overlap_rs_dgrad" : ub_overlap_rs_dgrad,
             "qkv_format" : self.attn_input_format,
         }
 
@@ -410,6 +413,7 @@ class TransformerLayer(torch.nn.Module):
             zero_centered_gamma=zero_centered_gamma,
             ub_bulk_wgrad=ub_bulk_wgrad,
             ub_bulk_dgrad=ub_bulk_dgrad,
+            ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             activation=activation,
@@ -468,6 +472,15 @@ class TransformerLayer(torch.nn.Module):
                 continue
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
+
+    def reset_fp8_meta_tensors(self) -> None:
+        """Set TP group"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "reset_fp8_meta_tensors"):
+                child.reset_fp8_meta_tensors()
 
     def set_context_parallel_group(
         self,
@@ -661,7 +674,8 @@ class TransformerLayer(torch.nn.Module):
 
         # MLP.
         mlp_outputs = self.layernorm_mlp(
-            hidden_states, is_first_microbatch=is_first_microbatch
+            hidden_states,
+            is_first_microbatch=is_first_microbatch,
         )
         if self.apply_residual_connection_post_layernorm:
             mlp_output, mlp_bias, residual = mlp_outputs
