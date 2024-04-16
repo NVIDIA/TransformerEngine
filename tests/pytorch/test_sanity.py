@@ -48,6 +48,7 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
     """Custom func to test recipe."""
     return torch.min(amax_history, dim=0).values
 
+
 @dataclass
 class ModelConfig:
     """Transformer model configuration"""
@@ -115,6 +116,12 @@ def _disable_wgrads(block):
         p.requires_grad = False
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
     # Initialize loss function and optimizer.
     loss_fn = torch.nn.MSELoss()
@@ -137,7 +144,7 @@ def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
     with torch.cuda.stream(s):
         for _ in range(3):
             optimizer.zero_grad(set_to_none=True)
-            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe, _graph=True):
                 out = block(static_input)
             loss = loss_fn(out, static_target)
             loss.backward()
@@ -148,7 +155,7 @@ def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
     g = torch.cuda.CUDAGraph()
     optimizer.zero_grad(set_to_none=True)
     with torch.cuda.graph(g):
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe, _graph=True):
             static_output = block(static_input)
         static_loss = loss_fn(static_output, static_target)
         static_loss.backward()
