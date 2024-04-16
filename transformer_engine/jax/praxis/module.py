@@ -131,6 +131,9 @@ class Linear(TransformerEngineBaseLayer):
     use_bias: bool = True
     bias_init: WeightInit = WeightInit.Constant(0.0)
     bias_axes: Tuple[str, ...] = ()
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     transpose_batch_sequence: bool = False
     sharding_type: ShardingType = ShardingType.SINGLE
@@ -147,6 +150,9 @@ class Linear(TransformerEngineBaseLayer):
             use_bias=self.use_bias,
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             bias_axes=self.bias_axes,
+            enable_low_rank_adaptation=self.enable_low_rank_adaptation,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             axis=self.axis,
             dtype=self.dtype,
             transpose_batch_sequence=self.transpose_batch_sequence)
@@ -174,6 +180,9 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     use_bias: bool = False
     bias_init: WeightInit = WeightInit.Constant(0.0)
     bias_axes: Tuple[str, ...] = ()
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     return_layernorm_output: bool = True
     axis: Union[Iterable[int], int] = -1
     transpose_batch_sequence: bool = False
@@ -201,6 +210,9 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             use_bias=self.use_bias,
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             bias_axes=self.bias_axes,
+            enable_low_rank_adaptation=self.enable_low_rank_adaptation,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             return_layernorm_output=self.return_layernorm_output,
             axis=self.axis,
             dtype=self.dtype,
@@ -232,6 +244,9 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     bias_init: WeightInit = WeightInit.Constant(0.0)
     bias_axes_1: Tuple[str, ...] = ()
     bias_axes_2: Tuple[str, ...] = ()
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ('relu',)
     intermediate_dropout_rate: float = 0.1
@@ -263,6 +278,9 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             bias_axes_1=self.bias_axes_1,
             bias_axes_2=self.bias_axes_2,
+            enable_low_rank_adaptation=self.enable_low_rank_adaptation,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             return_layernorm_output=self.return_layernorm_output,
             activations=self.activations,
             intermediate_dropout_rate=self.intermediate_dropout_rate,
