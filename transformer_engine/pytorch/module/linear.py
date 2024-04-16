@@ -380,7 +380,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        if isinstance(grad_output[0], Float8Tensor):
+        if isinstance(grad_output, Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[
                 tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_output._scale_inv
 
