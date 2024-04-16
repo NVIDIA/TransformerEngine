@@ -202,6 +202,11 @@ class FP8GlobalStateManager:
             # `fp8_param_to_autocast`. This is used for keeping track of FP8 weights
             # in an autocasted region and cross reference them in `float8_tensor.py`
             # to perform the forward amax reduction.
+            fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
+            if fp8_meta_tensor_key not in fp8_meta:
+                # Handles non-parameter FP8 modules, e.g. DPA.
+                continue
+
             if forward and fp8_weights is not None:
                 autocast_key = cls.get_unique_autocast_key(
                                     fp8_meta["recipe"], fp8_meta["fp8_group"])
@@ -217,7 +222,6 @@ class FP8GlobalStateManager:
 
             key = cls.get_key_in_buffer(
                 forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
-            fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
