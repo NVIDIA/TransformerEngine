@@ -381,7 +381,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        if isinstance(grad_output[0], Float8Tensor):
+        if isinstance(grad_output, Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[
                 tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_output._scale_inv
 
@@ -954,8 +954,6 @@ class Linear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-        is_first_module_in_mha: Optional[bool], default = False
-                      Whether to output in FP8. By default, Linear outputs in inp.dtype.
         """
 
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
