@@ -94,7 +94,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-        dummy_tensor: torch.Tensor, # pylint: disable=unused-argument
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
@@ -787,7 +786,6 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
-            None,
         )
 
 
@@ -1116,11 +1114,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         super().reset_parameters(defer_init=defer_init)
 
         if not defer_init:
-            # Materialize fp8 hook tensor
-            if self.dummy_tensor.device == torch.device('meta'):
-                self.dummy_tensor = torch.zeros_like(
-                    self.dummy_tensor, device='cuda', requires_grad=True)
-
             # Set parallelism attributes for layer norm parameters
             setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
             if self.normalization != "RMSNorm":
@@ -1264,7 +1257,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
-                self.dummy_tensor,
                 self.fsdp_group,
             )
             out = fwd_fn(*args)

@@ -942,11 +942,6 @@ class Linear(TransformerEngineBaseModule):
         super().reset_parameters(defer_init=defer_init)
 
         if not defer_init:
-            # Materialize fp8 hook tensor
-            if self.dummy_tensor.device == torch.device('meta'):
-                self.dummy_tensor = torch.zeros_like(
-                    self.dummy_tensor, device='cuda', requires_grad=True)
-
             # Set parallelism attributes for linear weights
             for weight in self.weight_names:
                 set_tensor_model_parallel_attributes(
@@ -1079,9 +1074,12 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_ag,
                 self.ub_name,
 <<<<<<< HEAD
+<<<<<<< HEAD
                 is_first_module_in_mha,
 =======
                 self.dummy_tensor,
+=======
+>>>>>>> d62330d (get rid of erroneous dummy tensor leftover from incorrect rebase)
                 self.fsdp_group,
 >>>>>>> ed64d7d (New TE wrapper for PyTorch FullyShardedDataParallel to make TE modules distribute their activations after the forward pass and gather them before the backward pass)
             )
