@@ -263,7 +263,7 @@ class _ViewFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx,
         grad: torch.Tensor,
-    ) -> Tuple[[torch.Tensor, None], ...]:
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -853,5 +853,8 @@ class Float8Tensor(torch.Tensor):
     _transpose_invalid = property(**_make_fp8_attr_property_funcs("transpose_invalid"))
     _scale_inv = property(**_make_fp8_attr_property_funcs("scale_inv"))
 
-    # Do not force the Float8Tensor type on the returned tensor
-    __torch_function__ = torch._C._disabled_torch_function_impl
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
