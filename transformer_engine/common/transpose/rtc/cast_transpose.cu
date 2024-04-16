@@ -24,12 +24,15 @@ constexpr size_t block_size = __BLOCK_SIZE__;
 __global__ void
 __launch_bounds__(block_size)
 cast_transpose_optimized_kernel(const IType * __restrict__ const input,
+                                const CType * const noop,
                                 OType * __restrict__  const output_c,
                                 OType * __restrict__  const output_t,
                                 const CType * __restrict__ const scale_ptr,
                                 CType * __restrict__ const amax_ptr,
                                 const size_t row_length,
                                 const size_t num_rows) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
   // Vectorized load/store sizes
   constexpr size_t nvec_in = load_size / sizeof(IType);
   constexpr size_t nvec_out = store_size / sizeof(OType);
