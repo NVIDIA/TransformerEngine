@@ -524,6 +524,17 @@ def _is_te_module(module):
     return is_te_module
 
 
+def _has_te_submodule(root_module):
+    """
+    Check if given root module contains any Transformer Engine submodules.
+    """
+    if isinstance(root_module, torch.nn.Module):
+        for submodule in root_module.children():
+            if _is_te_module(submodule) or _has_te_submodule(submodule):
+                return True
+    return False
+
+
 def checkpoint(
     function: Callable,
     *args: Tuple[torch.Tensor, ...],
@@ -591,7 +602,7 @@ def checkpoint(
     context_fn = kwargs.pop("context_fn", noop_context_fn)
     determinism_check = kwargs.pop("determinism_check", "default")
     debug = kwargs.pop("debug", False)
-    if isinstance(function, torch.nn.Module) and not _is_te_module(function):
+    if not _is_te_module(function) and not _has_te_submodule(function):
         return torch.utils.checkpoint.checkpoint(
             function,
             *args,
