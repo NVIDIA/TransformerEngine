@@ -786,9 +786,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     // Get communication and GEMM output chunk sizes
     const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
     const bool do_gelu = pre_gelu_out.numel() > 0;
-    const int output_chunk_bytes = (do_gelu
-                                    ? (n_chunk * m) * D.element_size()
-                                    : (n_chunk * m) * HALF_BYTES);
+    const int output_chunk_bytes = (n_chunk * m) * D.element_size();
     const int aux_chunk_bytes = do_gelu ? (n_chunk * m) * pre_gelu_out.element_size() : 0;
 
     // Get output and workspace data pointers

@@ -76,7 +76,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                    scaling_factor,      is_training,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType};
+                                   tensorType,          tensorType};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
@@ -147,7 +147,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             fe::graph::SDPA_attributes sdpa_options;
             sdpa_options = fe::graph::SDPA_attributes()
                             .set_name("flash_attention")
-                            .set_is_inference(!is_training)
+                            .set_is_inference(false)
                             .set_causal_mask(is_causal)
                             .set_attn_scale(attn_scale);
 
@@ -199,11 +199,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                     layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
             O->set_output(true).set_dim({b, h, s_q, d}).set_stride(o_stride);
 
-            if (is_training) {
-                Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
-                        .set_dim({b, h, s_q, 1})
-                        .set_stride({h * s_q, s_q, 1, 1});
-            }
+            Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
+                    .set_dim({b, h, s_q, 1})
+                    .set_stride({h * s_q, s_q, 1, 1});
 
             std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // K
@@ -211,7 +209,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
                     std::shared_ptr<fe::graph::Tensor_attributes> >  // O
             key_tensors_tuple = std::make_tuple(Q, K, V, attn_scale, O);
-            auto Stats_tuple = is_training ? std::make_tuple(Stats) : std::make_tuple(nullptr);
+            auto Stats_tuple = std::make_tuple(Stats);
             auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
             auto padding_tuple = is_padding ?
                 std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
@@ -258,11 +256,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             {K, devPtrK},
             {V, devPtrV},
             {attn_scale, &scaling_factor},
-            {O, devPtrO}};
-
-        if (is_training) {
-            variant_pack[Stats] = devPtrSoftmaxStats;
-        }
+            {O, devPtrO},
+            {Stats, devPtrSoftmaxStats}};
 
         if (is_bias) {
             variant_pack[bias] = devPtrBias;
@@ -321,7 +316,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                    scaling_factor,      true,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType};
+                                   tensorType,          tensorType};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,

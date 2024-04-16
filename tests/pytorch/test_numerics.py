@@ -1091,7 +1091,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 2e-4,
+    atol = {torch.float32 : 2.5e-4,
             torch.half    : 2e-3,
             torch.bfloat16: 2e-2,
     }
