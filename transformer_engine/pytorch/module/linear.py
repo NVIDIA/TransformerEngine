@@ -611,7 +611,7 @@ class _Linear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.is_first_module and not is_graph_capturing():
+        if ctx.fp8 and ctx.is_first_module and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
