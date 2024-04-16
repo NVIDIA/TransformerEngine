@@ -7,6 +7,7 @@
 #include "../extensions.h"
 #ifdef NVTE_WITH_USERBUFFERS
 #include "../comm_gemm_overlap.h"
+namespace te_ub = transformer_engine::userbuffers;
 #endif  // NVTE_WITH_USERBUFFERS
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -110,30 +111,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
 #ifdef NVTE_WITH_USERBUFFERS
-  py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
+  py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool>())
-    .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
-    .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
-    .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
-    .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs)
-    .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf)
-    .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
-    .def("is_atomic_gemm", &ubuf::UbufCommOverlap::is_atomic_gemm)
-    .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap);
+    .def("bulk_overlap", &te_ub::UbufCommOverlap::bulk_overlap)
+    .def("split_overlap_rs", &te_ub::UbufCommOverlap::split_overlap_rs)
+    .def("atomic_gemm_overlap_rs", &te_ub::UbufCommOverlap::atomic_gemm_overlap_rs)
+    .def("is_fp8_ubuf", &te_ub::UbufCommOverlap::is_fp8_ubuf)
+    .def("copy_input_to_ubuf", &te_ub::UbufCommOverlap::copy_input_to_ubuf)
+    .def("get_ubuf_output", &te_ub::UbufCommOverlap::get_ubuf_output)
+    .def("is_atomic_gemm", &te_ub::UbufCommOverlap::is_atomic_gemm)
+    .def("is_p2p_overlap", &te_ub::UbufCommOverlap::is_p2p_overlap)
+    .def("set_ubuf_scale_inv", &te_ub::UbufCommOverlap::set_ubuf_scale_inv);
 
-  py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
+  py::class_<te_ub::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool, bool, bool>())
-    .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
-    .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
-    .def("atomic_gemm_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
-    .def("atomic_gemm_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_rs)
-    .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output)
-    .def("is_fp8_ubuf", &ubuf::UbufP2PCommOverlap::is_fp8_ubuf)
-    .def("is_atomic_gemm", &ubuf::UbufP2PCommOverlap::is_atomic_gemm)
-    .def("is_p2p_overlap", &ubuf::UbufP2PCommOverlap::is_p2p_overlap)
-    .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv);
+    .def("split_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_ag)
+    .def("split_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_rs)
+    .def("atomic_gemm_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
+    .def("atomic_gemm_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::atomic_gemm_overlap_rs)
+    .def("copy_input_to_ubuf", &te_ub::UbufP2PCommOverlap::copy_input_to_ubuf)
+    .def("get_ubuf_output", &te_ub::UbufP2PCommOverlap::get_ubuf_output)
+    .def("is_fp8_ubuf", &te_ub::UbufP2PCommOverlap::is_fp8_ubuf)
+    .def("is_atomic_gemm", &te_ub::UbufP2PCommOverlap::is_atomic_gemm)
+    .def("is_p2p_overlap", &te_ub::UbufP2PCommOverlap::is_p2p_overlap)
+    .def("set_ubuf_scale_inv", &te_ub::UbufP2PCommOverlap::set_ubuf_scale_inv);
 #else  // NVTE_WITH_USERBUFFERS
   m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
   m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
