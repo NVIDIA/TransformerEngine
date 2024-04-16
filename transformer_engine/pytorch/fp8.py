@@ -598,14 +598,14 @@ def _default_sf_compute(
     """Default function to convert amax to scaling factor.
     Computing the scaling factor requires consideration of the following scenarios:
     1. amax == 0:
-       No action is possible, set scale = 1.
+       No action is possible, set scale to the previous scale (or 1).
     2. 0 < amax < tiny_amax
        The amax is too tiny that the scale becomes infinite in FP32.
        Set scale = FP32_max
     3. tiny_amax <= amax < FP32_max:
        Set scale = FP8_max (or scaled_max) / amax
     4. When amax == inf or amax == nan:
-       No action is possible, set scale = 1.
+       No action is possible, set scale to the previous scale (or 1).
     """
     sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
