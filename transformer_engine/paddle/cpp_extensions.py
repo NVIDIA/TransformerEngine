@@ -26,23 +26,34 @@ def gemm(
     accumulate: bool = False,
     layout: str = "TN",
     out: Optional[paddle.Tensor] = None,
+    out_dtype: Optional[paddle.dtype] = None,
     bias: Optional[paddle.Tensor] = None,
     use_bias: bool = False,
 ) -> Tuple[Union[paddle.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
+    print(f"accumulate: {accumulate}")
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
     if out is None:
-        out = paddle.empty(
-            shape=[
-                B.shape[1] if transb else B.shape[0],
-                A.shape[0] if transa else A.shape[1],
-            ],
-            dtype=dtype,
-        )
+        if accumulate:
+            out = paddle.zeros(
+                shape=[
+                    B.shape[1] if transb else B.shape[0],
+                    A.shape[0] if transa else A.shape[1],
+                ],
+                dtype=out_dtype if out_dtype is not None else dtype,
+            )
+        else:
+            out = paddle.empty(
+                shape=[
+                    B.shape[1] if transb else B.shape[0],
+                    A.shape[0] if transa else A.shape[1],
+                ],
+                dtype=out_dtype if out_dtype is not None else dtype,
+            )
 
     if gelu and not grad:
         gelu_input = paddle.empty_like(out, dtype=dtype)
@@ -122,13 +133,22 @@ def fp8_gemm(
         assert fp8_meta_tensor is not None and out_index is not None
 
     if out is None:
-        out = paddle.empty(
-            shape=[
-                B.shape[0],
-                A.shape[0],
-            ],
-            dtype=out_dtype,
-        )
+        if accumulate:
+            out = paddle.zeros(
+                shape=[
+                    B.shape[0],
+                    A.shape[0],
+                ],
+                dtype=out_dtype,
+            )
+        else:
+            out = paddle.empty(
+                shape=[
+                    B.shape[0],
+                    A.shape[0],
+                ],
+                dtype=out_dtype,
+            )
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = paddle.bfloat16 if bias is None else bias.dtype

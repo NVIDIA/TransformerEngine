@@ -306,6 +306,7 @@ def _linear_bwd_fp8(
             if inputmat_t_total is None:
                 inputmat_t_total = transpose(inputmat_total, fp8_dtype_backward)
                 clear_tensor_data(inputmat_total)
+
             wgrad, _ = fp8_gemm(
                 inputmat_t_total,
                 fwd_scale_inverses,
@@ -315,7 +316,7 @@ def _linear_bwd_fp8(
                 fp8_meta["scaling_bwd"].scale_inv,
                 grad_output_fp8_index,
                 fp8_dtype_backward,
-                activation_dtype,
+                "float32" if fuse_wgrad_accumulation else activation_dtype,
                 get_workspace(),
                 accumulate=accumulate_wgrad_into_param_main_grad,
                 out=weight.main_grad if fuse_wgrad_accumulation else None,
@@ -332,8 +333,12 @@ def _linear_bwd_fp8(
                 accumulate=accumulate_wgrad_into_param_main_grad,
                 layout="NT",
                 out=weight.main_grad if fuse_wgrad_accumulation else None,
+                out_dtype="float32" if fuse_wgrad_accumulation else None,
             )
             clear_tensor_data(inputmat_total)
+
+        if fuse_wgrad_accumulation:
+            weight.main_grad = wgrad
 
     if parallel_mode == "column" and tensor_parallel and handle is not None:
         handle.wait()
@@ -399,8 +404,12 @@ def _linear_bwd_non_fp8(
             accumulate=accumulate_wgrad_into_param_main_grad,
             layout="NT",
             out=weight.main_grad if fuse_wgrad_accumulation else None,
+            out_dtype="float32" if fuse_wgrad_accumulation else None,
             use_bias=requires_bgrad,
         )
+        if fuse_wgrad_accumulation:
+            weight.main_grad = wgrad
+
     elif requires_bgrad:
         bgrad = grad_output.sum(axis=0)
 
