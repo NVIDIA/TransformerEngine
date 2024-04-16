@@ -8,6 +8,7 @@
 
 #include "../common.h"
 #include "utils.h"
+#include "../util/system.h"
 #include "fused_attn_fp8.h"
 
 namespace transformer_engine {
@@ -984,7 +985,7 @@ static cudnn_frontend::Tensor createdSQBMM(
   return After_dSTranspose_Q;
 }
 
-// fused attention FWD FP8
+// fused attention FWD FP8 with FE 0.9
 void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             bool isTraining, float attnScale,
             float dropoutProbability, NVTE_QKV_Layout layout,
@@ -1295,7 +1296,7 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
   }
 }
 
-// fused attention BWD FP8
+// fused attention BWD FP8 with FE 0.9
 void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             float attnScale, float dropoutProbability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
@@ -1846,6 +1847,707 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
   }
 }
 
+// fused attention FWD FP8 with FE 1.0+
+void fused_attn_fp8_fwd_impl_v1(int64_t b, int64_t h, int64_t hg,
+            int64_t s_q, int64_t s_kv, int64_t d,
+            bool is_training, float scaling_factor,
+            float dropout_probability, NVTE_QKV_Layout layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+            void* devPtrQ, void* devPtrK, void* devPtrV,
+            void* devPtrM, void* devPtrZInv,
+            void* devPtrO,
+            void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+            void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
+            void* devPtrAmaxO, void* devPtrAmaxS,
+            void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
+            void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+            cudnn_frontend::DataType_t fwd_tensor_type,
+            void* workspace,
+            size_t* workspace_size,
+            cudaStream_t stream,
+            cudnnHandle_t handle) {
+    using namespace transformer_engine;
+    bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+    bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_dropout = (is_training && dropout_probability != 0.0f);
+    auto bias_b = b;
+    auto bias_h = h;
+    NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
+    NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+    NVTE_CHECK(~is_padding,
+        "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
+
+    try {
+        FADescriptor_v1 descriptor{b,                   h,
+                                   hg,                  s_q,
+                                   s_kv,                d,
+                                   bias_b,              bias_h,
+                                   scaling_factor,      is_training,
+                                   dropout_probability, layout,
+                                   bias_type,           mask_type,
+                                   fwd_tensor_type,     fwd_tensor_type};
+
+        namespace fe = cudnn_frontend;
+        using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // K
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // V
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // O
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // Stats
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
+              std::shared_ptr<fe::graph::Tensor_attributes> >;  // dropout_offset
+
+        using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
+        static thread_local CacheType sdpa_fp8_fprop_cache;
+
+        // Get plan from cache if cache is available, otherwise create one
+        auto get_graph = [&](CacheType &cache, const FADescriptor_v1 &descriptor)
+            -> graph_and_tensors {
+            // if hit, return
+            auto it = cache.find(descriptor);
+            if (it != cache.end()) {
+                auto graph = it->second;
+                return graph;
+            }
+
+            // otherwise, build the op_graph and the plan. Then update cache
+            auto mha_graph = std::make_shared<fe::graph::Graph>();
+            mha_graph->set_io_data_type(fwd_tensor_type)
+                    .set_intermediate_data_type(fe::DataType_t::FLOAT)
+                    .set_compute_data_type(fe::DataType_t::FLOAT);
+
+            std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_s, scale_s, scale_o;
+            std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
+            std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
+
+            std::vector<int64_t> q_stride(4);
+            std::vector<int64_t> k_stride(4);
+            std::vector<int64_t> v_stride(4);
+            generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+            Q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Q")
+                            .set_dim({b, h, s_q, d})
+                            .set_stride(q_stride));
+            K = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("K")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(k_stride));
+            V = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("V")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(v_stride));
+
+            attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("attn_scale")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_is_pass_by_value(true)
+                            .set_data_type(fe::DataType_t::FLOAT));
+
+            descale_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Descale_q")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+            descale_k = mha_graph->tensor_like(descale_q, "Descale_q");
+            descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
+            descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
+            scale_s   = mha_graph->tensor_like(descale_q, "Scale_S");
+            scale_o   = mha_graph->tensor_like(descale_q, "Scale_O");
+
+            fe::graph::SDPA_fp8_attributes sdpa_options;
+            sdpa_options = fe::graph::SDPA_fp8_attributes()
+                            .set_name("sdpa_fp8")
+                            .set_is_inference(false)
+                            .set_causal_mask(is_causal)
+                            .set_attn_scale(attn_scale);
+
+            // sdpa_options.set_alibi_mask(is_alibi);
+            // if (is_bias) {
+            //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("bias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     sdpa_options.set_bias(bias);
+            // }
+
+            // if (is_padding) {
+            //     seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_q")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_kv")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     sdpa_options.set_padding_mask(is_padding)
+            //                     .set_seq_len_q(seq_q)
+            //                     .set_seq_len_kv(seq_kv);
+            // }
+
+            // if (is_dropout) {
+            //     dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Seed")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Offset")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     sdpa_options.set_dropout(
+            //                     dropout_probability, dropout_seed, dropout_offset);
+            // }
+
+            auto [O, Stats, amax_s, amax_o] = mha_graph->sdpa_fp8(
+                Q, K, V, descale_q, descale_k, descale_v, descale_s,
+                scale_s, scale_o, sdpa_options);
+
+            std::vector<int64_t> o_stride(4);
+            generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            O->set_output(true).set_dim({b, h, s_q, d}).set_stride(o_stride);
+            amax_o->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+            amax_s->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+
+            Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
+                    .set_dim({b, h, s_q, 1})
+                    .set_stride({h * s_q, s_q, 1, 1});
+
+            std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // K
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // V
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_o
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // O
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_s
+                    std::shared_ptr<fe::graph::Tensor_attributes> >  // amax_o
+            key_tensors_tuple = std::make_tuple(Q, K, V, descale_q, descale_k, descale_v,
+                descale_s, scale_s, scale_o, attn_scale, O, amax_s, amax_o);
+            auto Stats_tuple = std::make_tuple(Stats);
+            auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
+            auto padding_tuple = is_padding ?
+                std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
+            auto dropout_tuple = is_dropout ?
+                std::make_tuple(dropout_seed, dropout_offset) : std::make_tuple(nullptr, nullptr);
+
+            NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+            NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+            NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+
+            auto return_tuple = std::tuple_cat(
+                std::make_tuple(mha_graph), key_tensors_tuple,
+                Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
+            cache.insert({descriptor, return_tuple});
+
+            return return_tuple;
+        };
+
+        auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s,
+            scale_s, scale_o, attn_scale, O, amax_s, amax_o, Stats,
+            bias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
+                sdpa_fp8_fprop_cache, descriptor);
+
+        auto plan_workspace_size = mha_graph->get_workspace_size();
+
+        // Exit to request upper level API to allocate memory if needed
+        size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+        if (workspace == nullptr) {
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+            return;
+        }
+
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+        // Build variant pack
+        std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
+            {Q, devPtrQ},
+            {K, devPtrK},
+            {V, devPtrV},
+            {descale_q, devPtrDescaleQ},
+            {descale_k, devPtrDescaleK},
+            {descale_v, devPtrDescaleV},
+            {descale_s, devPtrDescaleS},
+            {scale_s, devPtrScaleS},
+            {scale_o, devPtrScaleO},
+            {attn_scale, &scaling_factor},
+            {O, devPtrO},
+            {amax_s, devPtrAmaxS},
+            {amax_o, devPtrAmaxO},
+            {Stats, devPtrM}};
+
+        // if (is_bias) {
+        //     variant_pack[bias] = devPtrBias;
+        // }
+
+        // if (is_padding) {
+        //     constexpr size_t nthreads_per_block = 128;
+        //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ)
+        //         + b * sizeof(int32_t);
+        //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+        //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        //         static_cast<int32_t *>(devActualSeqlenQ),
+        //         static_cast<int32_t *>(devActualSeqlenKV));
+        //     variant_pack[seq_q]  = devActualSeqlenQ;
+        //     variant_pack[seq_kv] = devActualSeqlenKV;
+        // }
+
+        // if (is_dropout) {
+        //     variant_pack[dropout_seed] = devPtrDropoutSeed;
+        //     variant_pack[dropout_offset] = devPtrDropoutOffset;
+        // }
+        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    } catch (cudnn_frontend::cudnnException &e) {
+        NVTE_ERROR(e.what());
+    }
+}
+
+// fused attention BWD FP8 with FE 1.0+
+void fused_attn_fp8_bwd_impl_v1(int64_t b, int64_t h, int64_t hg,
+            int64_t s_q, int64_t s_kv, int64_t d,
+            float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+            void* devPtrQ, void* devPtrK, void* devPtrV,
+            void* devPtrM, void* devPtrZInv,
+            void* devPtrO, void* devPtrdO,
+            void* devPtrdQ, void* devPtrdK, void* devPtrdV,
+            void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+            void* devPtrDescaleO, void* devPtrDescaledO,
+            void* devPtrDescaleS, void* devPtrDescaledP,
+            void* devPtrScaleS, void* devPtrScaledP,
+            void* devPtrScaledQ, void* devPtrScaledK, void* devPtrScaledV,
+            void* devPtrAmaxdP,
+            void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV,
+            void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
+            void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+            cudnn_frontend::DataType_t fwd_tensor_type,
+            cudnn_frontend::DataType_t bwd_tensor_type,
+            void* workspace,
+            size_t* workspace_size,
+            cudaStream_t stream,
+            cudnnHandle_t handle) {
+    using namespace transformer_engine;
+    bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+    bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+    bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+        || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+    bool is_dropout = (dropout_probability != 0.0f);
+    auto bias_b = b;
+    auto bias_h = h;
+    NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
+    NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+    NVTE_CHECK(~is_padding,
+        "FP8 fused attention does not support padding/padding_causal mask yet!");
+    NVTE_CHECK(~is_dropout, "FP8 fused attention does not support dropout yet!");
+
+    try {
+        FADescriptor_v1 descriptor{b,                   h,
+                                   hg,                  s_q,
+                                   s_kv,                d,
+                                   bias_b,              bias_h,
+                                   scaling_factor,      true,
+                                   dropout_probability, layout,
+                                   bias_type,           mask_type,
+                                   fwd_tensor_type,     bwd_tensor_type};
+
+        namespace fe = cudnn_frontend;
+        using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // k
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // v
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // stats
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dO
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_o
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_dO
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_dP
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dQ
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dK
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dV
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dP
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dQ
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dV
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dQ
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dK
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dV
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dP
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dBias
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
+              std::shared_ptr<fe::graph::Tensor_attributes> >;  // dropout_offset
+
+        using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
+        static thread_local CacheType sdpa_fp8_bprop_cache;
+
+        // Get plan from cache if cache is available, otherwise create one
+        auto get_graph = [&](CacheType &cache, const FADescriptor_v1 &descriptor)
+            -> graph_and_tensors {
+            // if hit, return
+            auto it = cache.find(descriptor);
+            if (it != cache.end()) {
+                auto graph = it->second;
+                return graph;
+            }
+
+            // otherwise, build the op_graph and the plan. Then update cache
+            auto mha_graph = std::make_shared<fe::graph::Graph>();
+
+            mha_graph->set_io_data_type(fwd_tensor_type)
+                    .set_intermediate_data_type(fe::DataType_t::FLOAT)
+                    .set_compute_data_type(fe::DataType_t::FLOAT);
+
+            std::shared_ptr<fe::graph::Tensor_attributes> q, k, v, o, dO, stats, attn_scale;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_s, descale_o;
+            std::shared_ptr<fe::graph::Tensor_attributes> descale_dP, descale_dO;
+            std::shared_ptr<fe::graph::Tensor_attributes> scale_s, scale_dP;
+            std::shared_ptr<fe::graph::Tensor_attributes> scale_dQ, scale_dK, scale_dV;
+            std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
+            std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
+
+            std::vector<int64_t> q_stride(4);
+            std::vector<int64_t> k_stride(4);
+            std::vector<int64_t> v_stride(4);
+            std::vector<int64_t> o_stride(4);
+            generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+            generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
+                    layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Q")
+                            .set_dim({b, h, s_q, d})
+                            .set_stride(q_stride));
+            k = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("K")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(k_stride));
+            v = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("V")
+                            .set_dim({b, hg, s_kv, d})
+                            .set_stride(v_stride));
+            o = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("O")
+                            .set_dim({b, h, s_q, d})
+                            .set_stride(o_stride));
+            dO = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("dO")
+                            .set_dim({b, h, s_q, d})
+                            .set_stride(o_stride));
+            stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("stats")
+                            .set_dim({b, h, s_q, 1})
+                            .set_stride({h * s_q, s_q, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+
+            attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("attn_scale")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_is_pass_by_value(true)
+                            .set_data_type(fe::DataType_t::FLOAT));
+
+            descale_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                            .set_name("Descale_q")
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+            descale_k  = mha_graph->tensor_like(descale_q, "Descale_q");
+            descale_v  = mha_graph->tensor_like(descale_q, "Descale_V");
+            descale_s  = mha_graph->tensor_like(descale_q, "Descale_S");
+            descale_o  = mha_graph->tensor_like(descale_q, "Descale_O");
+            descale_dP = mha_graph->tensor_like(descale_q, "Descale_dP");
+            descale_dO = mha_graph->tensor_like(descale_q, "Descale_dO");
+            scale_s    = mha_graph->tensor_like(descale_q, "Scale_S");
+            scale_dP   = mha_graph->tensor_like(descale_q, "Scale_dP");
+            scale_dQ   = mha_graph->tensor_like(descale_q, "Scale_dQ");
+            scale_dK   = mha_graph->tensor_like(descale_q, "Scale_dK");
+            scale_dV   = mha_graph->tensor_like(descale_q, "Scale_dV");
+
+            fe::graph::SDPA_fp8_backward_attributes sdpa_backward_options;
+            sdpa_backward_options = fe::graph::SDPA_fp8_backward_attributes()
+                            .set_name("sdpa_fp8_backward")
+                            .set_causal_mask(is_causal)
+                            .set_attn_scale(attn_scale);
+
+            // sdpa_backward_options.set_alibi_mask(is_alibi);
+
+            // if (is_bias) {
+            //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("bias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("dBias")
+            //                     .set_dim({bias_b, bias_h, s_q, s_kv})
+            //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+            //     sdpa_backward_options.set_bias(bias);
+            //     // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
+            //     // are not supported for dbias calculation but they are
+            //     // supported for forward bias calculation
+            //     if ((bias_b == 1) && (bias_h == h)) {
+            //       sdpa_backward_options.set_dbias(dBias);
+            //     }
+            // }
+
+            // if (is_padding) {
+            //     seq_q  = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_q")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("seq_kv")
+            //                     .set_dim({b, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT32));
+            //     sdpa_backward_options.set_padding_mask(is_padding)
+            //                     .set_seq_len_q(seq_q)
+            //                     .set_seq_len_kv(seq_kv);
+            // }
+
+            // if (is_dropout) {
+            //     dropout_seed = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Seed")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+            //                     .set_name("Offset")
+            //                     .set_dim({1, 1, 1, 1})
+            //                     .set_stride({1, 1, 1, 1})
+            //                     .set_data_type(fe::DataType_t::INT64));
+            //     sdpa_backward_options.set_dropout(
+            //                     dropout_probability, dropout_seed, dropout_offset);
+            // }
+
+            auto [dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP] = mha_graph->sdpa_fp8_backward(
+                q, k, v, o, dO, stats,
+                descale_q, descale_k, descale_v,
+                descale_o, descale_dO, descale_s, descale_dP,
+                scale_s, scale_dQ, scale_dK, scale_dV, scale_dP,
+                sdpa_backward_options);
+
+            dQ->set_output(true)
+                    .set_dim({b, h, s_q, d})
+                    .set_stride(q_stride);
+            dK->set_output(true)
+                    .set_dim({b, hg, s_kv, d})
+                    .set_stride(k_stride);
+            dV->set_output(true)
+                    .set_dim({b, hg, s_kv, d})
+                    .set_stride(v_stride);
+            amax_dQ->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dK->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dV->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+            amax_dP->set_output(true)
+                    .set_dim({1, 1, 1, 1})
+                    .set_data_type(fe::DataType_t::FLOAT);
+
+            dO->set_data_type(bwd_tensor_type);
+            dQ->set_data_type(bwd_tensor_type);
+            dK->set_data_type(bwd_tensor_type);
+            dV->set_data_type(bwd_tensor_type);
+
+            std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // k
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // v
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // o
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // stats
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // dO
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_q
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_k
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_v
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_o
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_dO
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // descale_dP
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dQ
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dK
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dV
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_s
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // scale_dP
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // dQ
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // dV
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dQ
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dK
+                    std::shared_ptr<fe::graph::Tensor_attributes>,  // amax_dV
+                    std::shared_ptr<fe::graph::Tensor_attributes> >  // amax_dP
+            key_tensors_tuple = std::make_tuple(
+                q, k, v, o, stats, dO, attn_scale,
+                descale_q, descale_k, descale_v,
+                descale_o, descale_dO, descale_s, descale_dP,
+                scale_s, scale_dQ, scale_dK, scale_dV, scale_dP,
+                dQ, dK, dV,
+                amax_dQ, amax_dK, amax_dV, amax_dP);
+            auto bias_tuple = is_bias ?
+                std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
+            auto padding_tuple = is_padding ?
+                std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
+            auto dropout_tuple = is_dropout ?
+                std::make_tuple(dropout_seed, dropout_offset) : std::make_tuple(nullptr, nullptr);
+
+            NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+            NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+            NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
+            NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+
+            auto return_tuple = std::tuple_cat(
+                std::make_tuple(mha_graph), key_tensors_tuple,
+                bias_tuple, padding_tuple, dropout_tuple);
+            cache.insert({descriptor, return_tuple});
+
+            return return_tuple;
+        };
+
+        auto [mha_graph, q, k, v, o, stats, dO, attn_scale,
+            descale_q, descale_k, descale_v,
+            descale_o, descale_dO, descale_s, descale_dP,
+            scale_s, scale_dQ, scale_dK, scale_dV, scale_dP,
+            dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP,
+            bias, dBias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
+            sdpa_fp8_bprop_cache, descriptor);
+
+        auto plan_workspace_size = mha_graph->get_workspace_size();
+
+        // Exit to request upper level API to allocate memory if needed
+        size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+        if (workspace == nullptr) {
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+            return;
+        }
+
+        // cuDNN stream check needs to be moved here to support dummy kernel calls with
+        // null streams for sizing the cuDNN workspace.
+        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+        // build variant pack
+        std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
+            {q, devPtrQ},
+            {k, devPtrK},
+            {v, devPtrV},
+            {o, devPtrO},
+            {stats, devPtrM},
+            {dO, devPtrdO},
+            {attn_scale, &scaling_factor},
+            {descale_q, devPtrDescaleQ},
+            {descale_k, devPtrDescaleK},
+            {descale_v, devPtrDescaleV},
+            {descale_o, devPtrDescaleO},
+            {descale_dO, devPtrDescaledO},
+            {descale_s, devPtrDescaleS},
+            {descale_dP, devPtrDescaledP},
+            {scale_s, devPtrScaleS},
+            {scale_dQ, devPtrScaledQ},
+            {scale_dK, devPtrScaledK},
+            {scale_dV, devPtrScaledV},
+            {scale_dP, devPtrScaledP},
+            {dQ, devPtrdQ},
+            {dK, devPtrdK},
+            {dV, devPtrdV},
+            {amax_dQ, devPtrAmaxdQ},
+            {amax_dK, devPtrAmaxdK},
+            {amax_dV, devPtrAmaxdV},
+            {amax_dP, devPtrAmaxdP},
+        };
+
+        // if (is_bias) {
+        //     variant_pack[bias] = devPtrBias;
+        //     if ((bias_b == 1) && (bias_h == h)) {
+        //       variant_pack[dBias] = devPtrdBias;
+        //     } else {
+        //       variant_pack[dBias] = nullptr;
+        //     }
+        // }
+
+        // if (is_padding) {
+        //     constexpr size_t nthreads_per_block = 128;
+        //     const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        //     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        //     void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ)
+        //         + b * sizeof(int32_t);
+        //     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+        //         b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        //         static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        //         static_cast<int32_t *>(devActualSeqlenQ),
+        //         static_cast<int32_t *>(devActualSeqlenKV));
+        //     variant_pack[seq_q]  = devActualSeqlenQ;
+        //     variant_pack[seq_kv] = devActualSeqlenKV;
+        // }
+
+        // if (is_dropout) {
+        //     variant_pack[dropout_seed] = devPtrDropoutSeed;
+        //     variant_pack[dropout_offset] = devPtrDropoutOffset;
+        // }
+
+        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    } catch (cudnn_frontend::cudnnException &e) {
+        NVTE_ERROR(e.what());
+    }
+}
+
 #endif
 
 }  // namespace fused_attn
@@ -1853,9 +2555,10 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
 #if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with packed QKV
 void fused_attn_fp8_fwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
             Tensor *input_output_S,
             Tensor *output_O,
@@ -1866,11 +2569,18 @@ void fused_attn_fp8_fwd_qkvpacked(
             cudaStream_t stream,
             cudnnHandle_t handle) {
   using namespace transformer_engine;
-  // QKV shape is [total_seqs, 3, h, d]
+  const DType QKV_type = input_QKV->data.dtype;
   void* devPtrQKV = input_QKV->data.dptr;
-  void* devPtrQ = reinterpret_cast<void *>(devPtrQKV);
-  void* devPtrK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + h * d);
-  void* devPtrV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + 2 * h * d);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+      stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+      stride = typeToSize(QKV_type) * head_dim;
+  }
+  void *devPtrQ = static_cast<void *>(devPtrQKV);
+  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
   void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
   void* devPtrDescaleK = input_QKV->scale_inv.dptr;
   void* devPtrDescaleV = input_QKV->scale_inv.dptr;
@@ -1882,21 +2592,19 @@ void fused_attn_fp8_fwd_qkvpacked(
   void* devPtrM = nullptr;
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
-    if (is_training) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-      Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-      Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
-      output_M->data.dptr = nullptr;
-      output_M->data.shape = {b, h, max_seqlen, 1};
-      output_M->data.dtype = DType::kFloat32;
-      output_ZInv->data.dptr = nullptr;
-      output_ZInv->data.shape = {b, h, max_seqlen, 1};
-      output_ZInv->data.dtype = DType::kFloat32;
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-    }
+    Aux_CTX_Tensors->size = 3;
+    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    output_M->data.dptr = nullptr;
+    output_M->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+    output_M->data.dtype = DType::kFloat32;
+    output_ZInv->data.dptr = nullptr;
+    output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+    output_ZInv->data.dtype = DType::kFloat32;
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
     Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
     Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
@@ -1919,11 +2627,27 @@ void fused_attn_fp8_fwd_qkvpacked(
   void* devPtrDropoutOffset = reinterpret_cast<void *>(
                   reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-  const DType QKV_type = input_QKV->data.dtype;
   size_t workspace_size = 0;
 
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_fwd_impl_v1(
+                  batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
+                  is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleS, devPtrScaleS, devPtrScaleO,
+                  devPtrAmaxO, devPtrAmaxS,
+                  devPtrcuSeqlens, devPtrcuSeqlens,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -1935,6 +2659,9 @@ void fused_attn_fp8_fwd_qkvpacked(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1950,8 +2677,9 @@ void fused_attn_fp8_fwd_qkvpacked(
 }
 // fused attention BWD FP8 with packed QKV
 void fused_attn_fp8_bwd_qkvpacked(
-            size_t b, size_t h, size_t max_seqlen, size_t d,
+            size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_QKV,
             const Tensor *input_O,
             const Tensor *input_dO,
@@ -1966,11 +2694,19 @@ void fused_attn_fp8_bwd_qkvpacked(
             cudaStream_t stream,
             cudnnHandle_t handle) {
   using namespace transformer_engine;
-  // QKV shape is [total_seqs, 3, h, d]
+  const DType QKV_type = input_QKV->data.dtype;
+  const DType dQKV_type = output_dQKV->data.dtype;
   void* devPtrQKV = input_QKV->data.dptr;
-  void* devPtrQ = reinterpret_cast<void *>(devPtrQKV);
-  void* devPtrK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + h * d);
-  void* devPtrV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + 2 * h * d);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+      stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+      stride = typeToSize(QKV_type) * head_dim;
+  }
+  void *devPtrQ = devPtrQKV;
+  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
   void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
   void* devPtrDescaleK = input_QKV->scale_inv.dptr;
   void* devPtrDescaleV = input_QKV->scale_inv.dptr;
@@ -1985,15 +2721,14 @@ void fused_attn_fp8_bwd_qkvpacked(
 
   void* devPtrScaleS = input_S->scale.dptr;
   void* devPtrDescaleS = input_S->scale_inv.dptr;
-  void* devPtrAmaxdS = input_output_dP->amax.dptr;
-  void* devPtrScaledS = input_output_dP->scale.dptr;
-  void* devPtrDescaledS = input_output_dP->scale_inv.dptr;
+  void* devPtrAmaxdP = input_output_dP->amax.dptr;
+  void* devPtrScaledP = input_output_dP->scale.dptr;
+  void* devPtrDescaledP = input_output_dP->scale_inv.dptr;
 
-  // dQKV shape is [total_seqs, 3, h, d]
-  void* devPtrdQKV = output_dQKV->data.dptr;
-  void* devPtrdQ = reinterpret_cast<void *>(devPtrdQKV);
-  void* devPtrdK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrdQKV) + h * d);
-  void* devPtrdV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrdQKV) + 2 * h * d);
+  void *devPtrdQKV = output_dQKV->data.dptr;
+  void *devPtrdQ = devPtrdQKV;
+  void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride);
+  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
   void* devPtrAmaxdQ = output_dQKV->amax.dptr;
   void* devPtrAmaxdK = output_dQKV->amax.dptr;
   void* devPtrAmaxdV = output_dQKV->amax.dptr;
@@ -2008,11 +2743,33 @@ void fused_attn_fp8_bwd_qkvpacked(
   void* devPtrDropoutOffset = reinterpret_cast<void *>(
                   reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-  const DType QKV_type = input_QKV->data.dtype;
   size_t workspace_size = 0;
 
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_bwd_impl_v1(
+                  batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim,
+                  attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO, devPtrdO,
+                  devPtrdQ, devPtrdK, devPtrdV,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleO, devPtrDescaledO,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
+                  devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+                  devPtrAmaxdP,
+                  devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
+                  devPtrcuSeqlens, devPtrcuSeqlens,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  get_cudnn_fe_dtype(dQKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, h, max_seqlen, max_seqlen, d,
+                  batch, num_attn_heads, max_seqlen, max_seqlen, head_dim,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2020,15 +2777,278 @@ void fused_attn_fp8_bwd_qkvpacked(
                   devPtrdQ, devPtrdK, devPtrdV,
                   devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
                   devPtrDescaleO, devPtrDescaledO,
-                  devPtrDescaleS, devPtrDescaledS,
-                  devPtrScaleS, devPtrScaledS,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
                   devPtrScaledQ, devPtrScaledK, devPtrScaledV,
-                  devPtrAmaxdS,
+                  devPtrAmaxdP,
                   devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
                   devPtrcuSeqlens, devPtrcuSeqlens,
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+}
+// fused attention FWD FP8 with packed KV
+void fused_attn_fp8_fwd_kvpacked(
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
+            bool is_training, float attn_scale,
+            float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+            const Tensor *input_Q,
+            const Tensor *input_KV,
+            Tensor *input_output_S,
+            Tensor *output_O,
+            NVTETensorPack* Aux_CTX_Tensors,
+            const Tensor *cu_seqlens_q,
+            const Tensor *cu_seqlens_kv,
+            const Tensor *rng_state,
+            Tensor *workspace,
+            cudaStream_t stream,
+            cudnnHandle_t handle) {
+  using namespace transformer_engine;
+  const DType QKV_type = input_Q->data.dtype;
+  void* devPtrQ = input_Q->data.dptr;
+  void *devPtrKV = input_KV->data.dptr;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      stride = typeToSize(QKV_type) * head_dim;
+  }
+  void *devPtrK = devPtrKV;
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
+  void* devPtrDescaleQ = input_Q->scale_inv.dptr;
+  void* devPtrDescaleK = input_KV->scale_inv.dptr;
+  void* devPtrDescaleV = input_KV->scale_inv.dptr;
+
+  void* devPtrO = output_O->data.dptr;
+  void* devPtrAmaxO = output_O->amax.dptr;
+  void* devPtrScaleO = output_O->scale.dptr;
+
+  void* devPtrM = nullptr;
+  void* devPtrZInv = nullptr;
+  if (Aux_CTX_Tensors->size == 0) {
+    Aux_CTX_Tensors->size = 3;
+    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    output_M->data.dptr = nullptr;
+    output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    output_M->data.dtype = DType::kFloat32;
+    output_ZInv->data.dptr = nullptr;
+    output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    output_ZInv->data.dtype = DType::kFloat32;
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+  } else if (Aux_CTX_Tensors->size == 3) {
+    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    devPtrM = output_M->data.dptr;
+    devPtrZInv = output_ZInv->data.dptr;
+    output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
+
+  void* devPtrAmaxS = input_output_S->amax.dptr;
+  void* devPtrScaleS = input_output_S->scale.dptr;
+  void* devPtrDescaleS = input_output_S->scale_inv.dptr;
+
+  void* devPtrcuSeqlensQ = reinterpret_cast<void *>(
+                  reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
+  void* devPtrcuSeqlensKV = reinterpret_cast<void *>(
+                  reinterpret_cast<int32_t*>(cu_seqlens_kv->data.dptr));
+  void* devPtrDropoutSeed = reinterpret_cast<void *>(
+                  reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+  void* devPtrDropoutOffset = reinterpret_cast<void *>(
+                  reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+  size_t workspace_size = 0;
+
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_fwd_impl_v1(
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
+                  is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleS, devPtrScaleS, devPtrScaleO,
+                  devPtrAmaxO, devPtrAmaxS,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+  fused_attn::fused_attn_fp8_fwd_impl(
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
+                  is_training, attn_scale, p_dropout, qkv_layout,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleS, devPtrScaleS, devPtrScaleO,
+                  devPtrAmaxO, devPtrAmaxS,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_dtype(QKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+}
+// fused attention BWD FP8 with packed KV
+void fused_attn_fp8_bwd_kvpacked(
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
+            float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+            const Tensor *input_Q,
+            const Tensor *input_KV,
+            const Tensor *input_O,
+            const Tensor *input_dO,
+            const Tensor *input_M,
+            const Tensor *input_ZInv,
+            const Tensor *input_S,
+            Tensor *input_output_dP,
+            const Tensor *output_dQ,
+            const Tensor *output_dKV,
+            const Tensor *cu_seqlens_q,
+            const Tensor *cu_seqlens_kv,
+            const Tensor *rng_state,
+            Tensor *workspace,
+            cudaStream_t stream,
+            cudnnHandle_t handle) {
+  using namespace transformer_engine;
+  const DType QKV_type = input_Q->data.dtype;
+  const DType dQKV_type = output_dQ->data.dtype;
+  void *devPtrQ = input_Q->data.dptr;
+  void *devPtrKV = input_KV->data.dptr;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      stride = typeToSize(QKV_type) * head_dim;
+  }
+  void *devPtrK = devPtrKV;
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
+  void* devPtrDescaleQ = input_Q->scale_inv.dptr;
+  void* devPtrDescaleK = input_KV->scale_inv.dptr;
+  void* devPtrDescaleV = input_KV->scale_inv.dptr;
+
+  void* devPtrO = input_O->data.dptr;
+  void* devPtrDescaleO = input_O->scale_inv.dptr;
+  void* devPtrdO = input_dO->data.dptr;
+  void* devPtrDescaledO = input_dO->scale_inv.dptr;
+
+  void* devPtrM = input_M->data.dptr;
+  void* devPtrZInv = input_ZInv->data.dptr;
+
+  void* devPtrScaleS = input_S->scale.dptr;
+  void* devPtrDescaleS = input_S->scale_inv.dptr;
+  void* devPtrAmaxdP = input_output_dP->amax.dptr;
+  void* devPtrScaledP = input_output_dP->scale.dptr;
+  void* devPtrDescaledP = input_output_dP->scale_inv.dptr;
+
+  void *devPtrdQ = output_dQ->data.dptr;
+  void *devPtrdKV = output_dKV->data.dptr;
+  void *devPtrdK = devPtrdKV;
+  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
+  void* devPtrAmaxdQ = output_dQ->amax.dptr;
+  void* devPtrAmaxdK = output_dKV->amax.dptr;
+  void* devPtrAmaxdV = output_dKV->amax.dptr;
+  void* devPtrScaledQ = output_dQ->scale.dptr;
+  void* devPtrScaledK = output_dKV->scale.dptr;
+  void* devPtrScaledV = output_dKV->scale.dptr;
+
+  void* devPtrcuSeqlensQ = reinterpret_cast<void *>(
+                  reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
+  void* devPtrcuSeqlensKV = reinterpret_cast<void *>(
+                  reinterpret_cast<int32_t*>(cu_seqlens_kv->data.dptr));
+  void* devPtrDropoutSeed = reinterpret_cast<void *>(
+                  reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+  void* devPtrDropoutOffset = reinterpret_cast<void *>(
+                  reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+  size_t workspace_size = 0;
+
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_bwd_impl_v1(
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
+                  attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO, devPtrdO,
+                  devPtrdQ, devPtrdK, devPtrdV,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleO, devPtrDescaledO,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
+                  devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+                  devPtrAmaxdP,
+                  devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  get_cudnn_fe_dtype(dQKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+  fused_attn::fused_attn_fp8_bwd_impl(
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
+                  attn_scale, p_dropout, qkv_layout,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO, devPtrdO,
+                  devPtrdQ, devPtrdK, devPtrdV,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleO, devPtrDescaledO,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
+                  devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+                  devPtrAmaxdP,
+                  devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_dtype(QKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -2044,9 +3064,11 @@ void fused_attn_fp8_bwd_qkvpacked(
 }
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             bool is_training, float attn_scale,
             float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q,
             const Tensor *input_K,
             const Tensor *input_V,
@@ -2074,21 +3096,19 @@ void fused_attn_fp8_fwd(
   void* devPtrM = nullptr;
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
-    if (is_training) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-      Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-      Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
-      output_M->data.dptr = nullptr;
-      output_M->data.shape = {b, h, max_seqlen_q, 1};
-      output_M->data.dtype = DType::kFloat32;
-      output_ZInv->data.dptr = nullptr;
-      output_ZInv->data.shape = {b, h, max_seqlen_q, 1};
-      output_ZInv->data.dtype = DType::kFloat32;
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-    }
+    Aux_CTX_Tensors->size = 3;
+    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    output_M->data.dptr = nullptr;
+    output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    output_M->data.dtype = DType::kFloat32;
+    output_ZInv->data.dptr = nullptr;
+    output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    output_ZInv->data.dtype = DType::kFloat32;
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
     Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
     Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
@@ -2116,8 +3136,25 @@ void fused_attn_fp8_fwd(
   const DType QKV_type = input_Q->data.dtype;
   size_t workspace_size = 0;
 
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_fwd_impl_v1(
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
+                  is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleS, devPtrScaleS, devPtrScaleO,
+                  devPtrAmaxO, devPtrAmaxS,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2129,6 +3166,9 @@ void fused_attn_fp8_fwd(
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -2144,8 +3184,10 @@ void fused_attn_fp8_fwd(
 }
 // fused attention BWD FP8 with separate Q, K, V
 void fused_attn_fp8_bwd(
-            size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
+            size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+            size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
             const Tensor *input_Q,
             const Tensor *input_K,
             const Tensor *input_V,
@@ -2182,9 +3224,9 @@ void fused_attn_fp8_bwd(
 
   void* devPtrScaleS = input_S->scale.dptr;
   void* devPtrDescaleS = input_S->scale_inv.dptr;
-  void* devPtrAmaxdS = input_output_dP->amax.dptr;
-  void* devPtrScaledS = input_output_dP->scale.dptr;
-  void* devPtrDescaledS = input_output_dP->scale_inv.dptr;
+  void* devPtrAmaxdP = input_output_dP->amax.dptr;
+  void* devPtrScaledP = input_output_dP->scale.dptr;
+  void* devPtrDescaledP = input_output_dP->scale_inv.dptr;
 
   void* devPtrdQ = output_dQ->data.dptr;
   void* devPtrdK = output_dK->data.dptr;
@@ -2206,10 +3248,34 @@ void fused_attn_fp8_bwd(
                   reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
   const DType QKV_type = input_Q->data.dtype;
+  const DType dQKV_type = output_dQ->data.dtype;
   size_t workspace_size = 0;
 
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD)
+    || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  fused_attn::fused_attn_fp8_bwd_impl_v1(
+                  batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim,
+                  attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
+                  devPtrQ, devPtrK, devPtrV,
+                  devPtrM, devPtrZInv,
+                  devPtrO, devPtrdO,
+                  devPtrdQ, devPtrdK, devPtrdV,
+                  devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+                  devPtrDescaleO, devPtrDescaledO,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
+                  devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+                  devPtrAmaxdP,
+                  devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
+                  devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+                  devPtrDropoutSeed, devPtrDropoutOffset,
+                  get_cudnn_fe_dtype(QKV_type),
+                  get_cudnn_fe_dtype(dQKV_type),
+                  workspace->data.dptr, &workspace_size, stream, handle);
+  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, h, max_seqlen_q, max_seqlen_kv, d,
+                  batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2217,15 +3283,18 @@ void fused_attn_fp8_bwd(
                   devPtrdQ, devPtrdK, devPtrdV,
                   devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
                   devPtrDescaleO, devPtrDescaledO,
-                  devPtrDescaleS, devPtrDescaledS,
-                  devPtrScaleS, devPtrScaledS,
+                  devPtrDescaleS, devPtrDescaledP,
+                  devPtrScaleS, devPtrScaledP,
                   devPtrScaledQ, devPtrScaledK, devPtrScaledV,
-                  devPtrAmaxdS,
+                  devPtrAmaxdP,
                   devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
                   devPtrcuSeqlensQ, devPtrcuSeqlensKV,
                   devPtrDropoutSeed, devPtrDropoutOffset,
                   get_cudnn_dtype(QKV_type),
                   workspace->data.dptr, &workspace_size, stream, handle);
+  } else {
+    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
