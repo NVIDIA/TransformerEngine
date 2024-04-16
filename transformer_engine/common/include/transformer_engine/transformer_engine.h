@@ -359,7 +359,7 @@ class TensorWrapper {
   size_t numel() const noexcept {
     if (tensor_ == nullptr) return 0;
     auto shape_ = shape();
-    return std::reduce(shape_.data, shape_.data+shape_.ndim, (size_t)1, std::multiplies<size_t>{});
+    return std::reduce(shape_.data, shape_.data+shape_.ndim, 1, std::multiplies<size_t>{});
   }
 
   /*! \brief Get the tensor's element size in bytes.

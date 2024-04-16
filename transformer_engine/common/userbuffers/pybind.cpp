@@ -22,7 +22,6 @@ namespace transformer_engine {
 namespace userbuffers {
 
 PYBIND11_MODULE(transformer_engine_userbuffers, m) {
-
   py::enum_<UbufCommType>(m, "UbufCommType", py::module_local())
     .value("RS", UbufCommType::RS)
     .value("AG", UbufCommType::AG);
@@ -57,8 +56,8 @@ PYBIND11_MODULE(transformer_engine_userbuffers, m) {
 
   py::class_<UbufExecutorP2P, UbufExecutorBase>(m, "UbufExecutorP2P", py::module_local())
     .def(py::init<int, int, int, int, int, int, int, int, int, int, bool, bool, bool>());
-} // PYBIND11_MODULE
+}  // PYBIND11_MODULE
 
-} // namespace userbuffers
+}  // namespace userbuffers
 
-} // namespace transformer_engine
+}  // namespace transformer_engine

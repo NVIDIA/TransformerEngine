@@ -44,32 +44,25 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   DLDataType dl_dtype{};
   dl_dtype.lanes = 1;
   dl_type.bits = sizeof(T) * 8;
-  switch (typeid(T)) {
-    case typeid(long double):
-    case typeid(double):
-    case typeid(float):
-    case typeid(half):
+  switch (typeid(static_cast<T>(1))) {
+    case typeid(static_cast<double>(1)):
+    case typeid(static_cast<float>(1)):
+    case typeid(static_cast<half>(1)):
       dl_dtype.code = kDLFloat;
       break;
 
-    case typeid(nv_bfloat16):
+    case typeid(static_cast<nv_bfloat16>(1)):
       dl_dtype.code = kDLBfloat;
       break;
 
-    case typeid(bool):
+    case typeid(static_cast<bool>(1)):
       dl_dtype.code = kDLBool;
       break;
 
-    case typeid(int8_t):
-    case typeid(short int):
-    case typeid(int16_t):
-    case typeid(int):
-    case typeid(int32_t):
-    case typeid(long):
-    case typeid(long int):
-    case typeid(int64_t):
-    case typeid(long long):
-    case typeid(long long int):
+    case typeid(static_cast<int8_t>(1)):
+    case typeid(static_cast<int16_t>(1)):
+    case typeid(static_cast<int32_t>(1)):
+    case typeid(static_cast<int64_t>(1)):
       dl_dtype.code = kDLInt;
       break;
 
@@ -82,7 +75,7 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   return dl_dtype;
 }
 
-static void dlpack_capsule_deleter(PyObject *self){
+static void dlpack_capsule_deleter(PyObject *self) {
   if (PyCapsule_IsValid(self, "used_dltensor")) {
     return;   // data in capsule is in-use so we cannot delete it
   }
@@ -130,7 +123,7 @@ py::capsule buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1, int 
   return py::capsule(&dlmt, "dltensor", &dlpack_capsule_deleter);
 }
 
-int64_t dlpack_to_buffer(py::capsule &capsule, void **buffer) {
+int64_t dlpack_to_buffer(const py::capsule &capsule, void **buffer) {
   if (strcmp(capsule.name(), "used_dltensor") != 0) {
     // something else is already using the data in the capsule
     return -1;

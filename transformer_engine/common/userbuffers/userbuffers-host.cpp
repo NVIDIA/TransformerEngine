@@ -80,7 +80,7 @@ int pipe_rank(communicator *comm, int step) {
 
 int create_communicator_grouped2(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
@@ -232,7 +232,8 @@ int create_communicator_grouped2(communicator **comm
                                       // pipenodes=1 and tensornodes=1
   // mpi communicator only needed for SHARP which is always
   // allreduce1/data-parallel
-  MPI_Comm_split((*comm)->comm_world, mylocal + numlocal * datanodegroup_id, rank, &(*comm)->comm_inter);
+  MPI_Comm_split((*comm)->comm_world, mylocal + numlocal * datanodegroup_id,
+                 rank, &(*comm)->comm_inter);
   // different rails from same group are in different subcommunicators
   int mynode, numnodes;
   MPI_Comm_size((*comm)->comm_inter, &numnodes);
@@ -371,28 +372,28 @@ int create_communicator_grouped2(communicator **comm
 }
 int create_communicator_grouped(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-  , myrank, numranks,mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+  , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
 #endif
   , pipegpus, pipenodes, 1, 1);
 }
 
 int create_communicator(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 ) {
   return create_communicator_grouped2(comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-  , myrank, numranks,mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+  , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
 #endif
   , 1, 1, 1, 1);
 }

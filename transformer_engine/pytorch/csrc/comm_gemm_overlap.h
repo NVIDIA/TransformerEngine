@@ -79,9 +79,9 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
   UbufCommOverlap(
     torch::Tensor sample, int world_rank, int world_size, int tp_rank, int tp_size,
     int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
-    bool set_sm_margin, bool atomic_gemm
-  ) : UbufExecutor(world_rank, world_size, tp_rank, tp_size, 0, 1, num_splits, num_max_streams,
-                   comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+    bool set_sm_margin, bool atomic_gemm)
+  : UbufExecutor(world_rank, world_size, tp_rank, tp_size, 0, 1, num_splits, num_max_streams,
+                 comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
     // Allocate and register extra userbuffers
     void *ubuf_ptr;
     size_t ubuf_bytes = sample.numel() * sample.element_size();
@@ -113,7 +113,6 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
                at::Tensor D_amax, at::Tensor bias, transformer_engine::DType bias_type,
                at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize,
                bool accumulate, bool use_split_accumulator, int comm_type, at::Tensor rs_output) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -131,14 +130,16 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     UbufCommType comm_type_ = static_cast<UbufCommType>(comm_type);
     if (comm_type_ == UbufCommType::AG) {
-      UbufExecutor::bulk_gemm_overlap_ag((cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
-                                         D_, pre_gelu_out_, workspace_, ubuf_,
-                                         grad, accumulate, use_split_accumulator);
+      UbufExecutor::bulk_gemm_overlap_ag(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_,
+      grad, accumulate, use_split_accumulator);
     } else {
       TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
-      UbufExecutor::bulk_gemm_overlap_rs((cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
-                                         D_, pre_gelu_out_, workspace_, ubuf_, rs_out_,
-                                         grad, accumulate, use_split_accumulator);
+      UbufExecutor::bulk_gemm_overlap_rs(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
+      grad, accumulate, use_split_accumulator);
     }
 
     // Get the current userbuf offset
@@ -153,8 +154,7 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
                                                          : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     torch::Tensor output_tensor = torch::from_blob(
-      reinterpret_cast<void *>(ubuf_wt_ptr), {output_c_dim0, output_c_dim1}, _ubuf.options()
-    );
+      reinterpret_cast<void *>(ubuf_wt_ptr), {output_c_dim0, output_c_dim1}, _ubuf.options());
 
     return {D, output_tensor};
   }  // bulk_overlap
@@ -172,7 +172,6 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                               at::Tensor rs_output) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -190,9 +189,10 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
     TensorWrapper counters_ = torch_tensor_to_te(_counters);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutor::atomic_gemm_overlap_rs((cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
-                                         D_, pre_gelu_out_, workspace_, ubuf_, rs_out_, counters_,
-                                         grad, accumulate, use_split_accumulator);
+    UbufExecutor::atomic_gemm_overlap_rs(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_, &counters_,
+      grad, accumulate, use_split_accumulator);
     return;
   }  // split_overlap_rs
 
@@ -208,7 +208,6 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -225,9 +224,10 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutor::split_gemm_overlap_rs((cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
-                                        D_, pre_gelu_out_, workspace_, ubuf_, rs_out_,
-                                        grad, accumulate, use_split_accumulator, gemm_overlap);
+    UbufExecutor::split_gemm_overlap_rs(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
+      grad, accumulate, use_split_accumulator, gemm_overlap);
 
     return;
   }  // split_overlap_rs
@@ -253,8 +253,9 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     NVTE_CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_d2dcopy, 0));
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input.data_ptr(), input.numel() * input.element_size(),
-                                    cudaMemcpyDeviceToDevice, _stream_comm));
+    NVTE_CHECK_CUDA(
+      cudaMemcpyAsync(ubuf_ptr, input.data_ptr(), input.numel() * input.element_size(),
+                      cudaMemcpyDeviceToDevice, _stream_comm));
   }
 
   torch::Tensor &get_ubuf_output(int comm_type) {
@@ -267,8 +268,7 @@ class UbufCommOverlap : torch::CustomClassHolder, public UbufExecutor {
     int output_c_dim0 = (comm_type_ == UbufCommType::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     torch::Tensor output_tensor = torch::from_blob(
-      ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options()
-    );
+      ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
     return output_tensor;
   }
 
@@ -293,11 +293,10 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
   UbufP2PCommOverlap(
     torch::Tensor sample, int world_rank, int world_size, int tp_rank, int tp_size,
     int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
-    bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter
-  ) : UbufExecutorP2P(world_rank, world_size, tp_rank, tp_size, 0, 1,
-                      num_splits, num_max_streams, comm_cga_size, num_comm_sm,
-                      set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter) {
-
+    bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter)
+  : UbufExecutorP2P(world_rank, world_size, tp_rank, tp_size, 0, 1,
+                    num_splits, num_max_streams, comm_cga_size, num_comm_sm,
+                    set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter) {
     size_t ubuf_bytes = sample.numel() * sample.element_size();
     size_t ubuf_chunk_bytes = ubuf_bytes / tp_size;
     if (is_reduce_scatter)
@@ -306,8 +305,7 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
     void *ubuf_ptr;
     UbufExecutorP2P::register_gpu_buffer(ubuf_ptr, ubuf_bytes, true);
     _ubuf = torch::from_blob(
-      ubuf_ptr, {sample.size(0) / tp_size * _num_ubuf_chunks, sample.size(1)}, sample.options()
-    );
+      ubuf_ptr, {sample.size(0) / tp_size * _num_ubuf_chunks, sample.size(1)}, sample.options());
 
     // Create tensor chunks for easy management
     char *ubuf_byte_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
@@ -349,7 +347,6 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
       at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
       size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -375,9 +372,10 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
     TensorWrapper D_buffer_ = torch_tensor_to_te(D_buffer);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutorP2P::atomic_gemm_overlap_ag((cudaStream_t)stream_main,
-      A_, transa, B_, transb, bias_, D_, pre_gelu_out_, workspace_, ubuf_, counters_,
-      B_copy_, D_buffer_, grad, accumulate, use_split_accumulator);
+    UbufExecutorP2P::atomic_gemm_overlap_ag(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &counters_, &B_copy_, &D_buffer_,
+      grad, accumulate, use_split_accumulator);
 
     // Return the last N rows of D_buffer
     torch::Tensor D_return = D_buffer.narrow(0, n_chunk, n);
@@ -398,7 +396,6 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
                                  bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -415,8 +412,9 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
     TensorWrapper B_copy_ = torch_tensor_to_te(B_copy);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutorP2P::split_gemm_overlap_ag((cudaStream_t)stream_main,
-      A_, transa, B_, transb, bias_, D_, pre_gelu_out_, workspace_, ubuf_, B_copy_,
+    UbufExecutorP2P::split_gemm_overlap_ag(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &B_copy_,
       grad, accumulate, use_split_accumulator);
 
     return D;
@@ -434,7 +432,6 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -452,8 +449,9 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutorP2P::atomic_gemm_overlap_rs((cudaStream_t)stream_main,
-      A_, transa, B_, transb, bias_, D_, pre_gelu_out_, workspace_, ubuf_, counters_, rs_out_,
+    UbufExecutorP2P::atomic_gemm_overlap_rs(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &counters_, &rs_out_,
       grad, accumulate, use_split_accumulator);
   }
 
@@ -469,7 +467,6 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-
     if (A_scale_inverse.numel())
       A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -486,8 +483,9 @@ class UbufP2PCommOverlap : torch::CustomClassHolder, public UbufExecutorP2P {
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    UbufExecutorP2P::split_gemm_overlap_rs((cudaStream_t)stream_main,
-      A_, transa, B_, transb, bias_, D_, pre_gelu_out_, workspace_, ubuf_, rs_out_,
+    UbufExecutorP2P::split_gemm_overlap_rs(
+      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
       grad, accumulate, use_split_accumulator);
   }
 

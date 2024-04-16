@@ -9,9 +9,9 @@
 
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
 typedef char *ExtComm;
-const static ExtComm EXT_COMM_WORLD = "world";
-const static ExtComm EXT_COMM_INTRA = "intra";
-const static ExtComm EXT_COMM_INTER = "inter";
+static const ExtComm EXT_COMM_WORLD = "world";
+static const ExtComm EXT_COMM_INTRA = "intra";
+static const ExtComm EXT_COMM_INTER = "inter";
 #else
 #include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
 
@@ -19,11 +19,11 @@ typedef MPI_Comm ExtComm;
 
 void ub_allgather(void *global, void *local, size_t bytes, ExtComm comm) {
   MPI_Allgather(local, bytes, MPI_BYTE, global, bytes, MPI_BYTE, c);
-};
+}
 
 void ub_barrier(ExtComm c) {
   MPI_Barrier(c);
-};
+}
 
 #endif
 
@@ -172,7 +172,7 @@ void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
 int create_communicator(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
@@ -181,14 +181,14 @@ int create_communicator(communicator **comm
 
 int create_communicator_grouped(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes);
 int create_communicator_grouped2(communicator **comm
 #ifdef UBUF_EXTERNAL_BOOTSTRAP
-, int myrank, int numranks,int mylocal, int numlocal, int mynode, int numnodes
+, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
