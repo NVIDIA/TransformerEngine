@@ -105,96 +105,103 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
-def dot_product_attention(query: Array,
-                          key: Array,
-                          value: Array,
-                          transpose_batch_sequence: bool,
-                          bias: Optional[Array] = None,
-                          dropout_rng: Optional[PRNGKey] = None,
-                          dropout_rate: float = 0.,
-                          deterministic: bool = False,
-                          dtype: DType = jnp.float32,
-                          float32_logits: bool = False):
+class DotProductAttention(nn.Module):
+    transpose_batch_sequence: bool = True
+    dropout_rate: float = 0.
+    dtype: DType = jnp.float32
+    float32_logits: bool = False
     """Computes dot-product attention given query, key, and value.
 
-  This is the core function for applying attention based on
-  https://arxiv.org/abs/1706.03762. It calculates the attention weights given
-  query and key and combines the values using the attention weights.
+    This is the core function for applying attention based on
+    https://arxiv.org/abs/1706.03762. It calculates the attention weights given
+    query and key and combines the values using the attention weights.
 
-  Args:
-    query: queries for calculating attention with shape of `[batch, q_length,
-      num_heads, qk_depth_per_head]`.
-    key: keys for calculating attention with shape of `[batch, kv_length,
-      num_gqa_groups, qk_depth_per_head]`.
-    value: values to be used in attention with shape of `[batch, kv_length,
-      num_gqa_groups, v_depth_per_head]`.
-    bias: bias for the attention weights. This should be broadcastable to the
-      shape `[batch, num_heads, q_length, kv_length]` This can be used for
-      incorporating causal masks, padding masks, proximity bias, etc.
-    dropout_rng: JAX PRNGKey: to be used for dropout
-    dropout_rate: dropout rate
-    deterministic: bool, deterministic or not (to apply dropout)
-    dtype: the dtype of the computation (default: float32)
-    float32_logits: bool, if True then compute logits in float32 to avoid
-      numerical issues with bfloat16.
+    Args:
+        dropout_rate: dropout rate
+        dtype: the dtype of the computation (default: float32)
+        float32_logits: bool, if True then compute logits in float32 to avoid
+        numerical issues with bfloat16.
+    """
 
-  Returns:
-    Output of shape `[batch, length, num_heads, v_depth_per_head]`.
-  """
-    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
-    batch_dim = 1 if transpose_batch_sequence else 0
-    assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
-        'q, k, v batch dims must match.')
-    sequence_dim = 0 if transpose_batch_sequence else 1
-    assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 bias: Optional[Array] = None,
+                 deterministic: bool = False):
+        """
+        Args:
+            query: queries for calculating attention with shape of `[batch, q_length,
+            num_heads, qk_depth_per_head]`.
+            key: keys for calculating attention with shape of `[batch, kv_length,
+            num_gqa_groups, qk_depth_per_head]`.
+            value: values to be used in attention with shape of `[batch, kv_length,
+            num_gqa_groups, v_depth_per_head]`.
+            bias: bias for the attention weights. This should be broadcastable to the
+            shape `[batch, num_heads, q_length, kv_length]` This can be used for
+            incorporating causal masks, padding masks, proximity bias, etc.
+            dropout_rng: JAX PRNGKey: to be used for dropout
+            deterministic: bool, deterministic or not (to apply dropout)
+        Returns:
+            Output of shape `[batch, length, num_heads, v_depth_per_head]`.
+        """
+        assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
+        batch_dim = 1 if self.transpose_batch_sequence else 0
+        assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
+            'q, k, v batch dims must match.')
+        sequence_dim = 0 if self.transpose_batch_sequence else 1
+        assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
+        assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
+        assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
-    # Casting logits and softmax computation for float32 for model stability.
-    if float32_logits:
-        query = query.astype(jnp.float32)
-        key = key.astype(jnp.float32)
+        # Casting logits and softmax computation for float32 for model stability.
+        if self.float32_logits:
+            query = query.astype(jnp.float32)
+            key = key.astype(jnp.float32)
 
-    # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
-    h_q, h_kv = query.shape[-2], key.shape[-2]
-    assert (h_q % h_kv == 0) and (h_q >= h_kv)
-    group_size = h_q // h_kv
-    grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
+        # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
+        h_q, h_kv = query.shape[-2], key.shape[-2]
+        assert (h_q % h_kv == 0) and (h_q >= h_kv)
+        group_size = h_q // h_kv
+        grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
 
-    if transpose_batch_sequence:
-        attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
-    else:
-        attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
+        if self.transpose_batch_sequence:
+            attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
+        else:
+            attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
 
-    # reshape back to normal DPA shape for bias/softmax/dropout
-    b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
-    attn_weights_without_groups_shape = (b, h * g, q, k)
-    attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
+        # reshape back to normal DPA shape for bias/softmax/dropout
+        b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
+        attn_weights_without_groups_shape = (b, h * g, q, k)
+        attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
-    # Apply attention bias: masking, dropout, proximity bias, etc.
-    if bias is not None:
-        attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+        # Apply attention bias: masking, dropout, proximity bias, etc.
+        if bias is not None:
+            attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
-    # Normalize the attention weights across `kv_length` dimension.
-    attn_weights = jax_nn.softmax(attn_weights).astype(dtype)
+        # Normalize the attention weights across `kv_length` dimension.
+        attn_weights = jax_nn.softmax(attn_weights).astype(self.dtype)
 
-    # Apply attention dropout.
-    if not deterministic and dropout_rate > 0.:
-        keep_prob = 1.0 - dropout_rate
-        # T5 broadcasts along the "length" dim, but unclear which one that
-        # corresponds to in positional dimensions here, assuming query dim.
-        dropout_shape = list(attn_weights.shape)
-        keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-        multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
-        attn_weights = attn_weights * multiplier
+        # Apply attention dropout.
+        if not deterministic and self.dropout_rate > 0.:
+            keep_prob = 1.0 - self.dropout_rate
+            # T5 broadcasts along the "length" dim, but unclear which one that
+            # corresponds to in positional dimensions here, assuming query dim.
+            dropout_shape = list(attn_weights.shape)
+            dropout_rng = self.make_rng('dropout')
+            keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
+            multiplier = (keep.astype(attn_weights.dtype) /
+                          jnp.asarray(keep_prob, dtype=self.dtype))
+            attn_weights = attn_weights * multiplier
 
-    attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+        attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
-    # Take the linear combination of `value`.
-    if transpose_batch_sequence:
-        return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
+        # Take the linear combination of `value`.
+        if self.transpose_batch_sequence:
+            return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
 
-    return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
+        return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
 class DenseGeneral(nn.Module):
@@ -656,21 +663,15 @@ class MultiHeadAttention(nn.Module):
         if bias is not None:
             attention_bias = combine_biases(attention_bias, bias)
 
-        dropout_rng = None
-        if not deterministic and self.dropout_rate > 0.:
-            dropout_rng = self.make_rng('dropout')
-
         # Apply attention.
-        x = dot_product_attention(query,
-                                  key,
-                                  value,
-                                  transpose_batch_sequence=self.transpose_batch_sequence,
-                                  bias=attention_bias,
-                                  dropout_rng=dropout_rng,
-                                  dropout_rate=self.dropout_rate,
-                                  deterministic=deterministic,
-                                  dtype=self.dtype,
-                                  float32_logits=self.float32_logits)
+        x = DotProductAttention(transpose_batch_sequence=self.transpose_batch_sequence,
+                                dropout_rate=self.dropout_rate,
+                                dtype=self.dtype,
+                                float32_logits=self.float32_logits)(query,
+                                                                    key,
+                                                                    value,
+                                                                    bias=attention_bias,
+                                                                    deterministic=deterministic)
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -862,7 +863,11 @@ class EncoderLayer(nn.Module):
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
     head_dim: int = 64
-    dropout_rate: float = 0.1
+    hidden_dropout: float = 0.1
+    # hidden_dropout_dims: Sequence[int] = ()
+    attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    # intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
@@ -924,7 +929,7 @@ class EncoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
@@ -936,7 +941,7 @@ class EncoderLayer(nn.Module):
                                                  encoder_mask,
                                                  encoder_bias,
                                                  deterministic=deterministic)
-        x = nn.Dropout(rate=self.dropout_rate,
+        x = nn.Dropout(rate=self.hidden_dropout,
                        broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
@@ -959,12 +964,12 @@ class EncoderLayer(nn.Module):
             transpose_batch_sequence=self.transpose_batch_sequence,
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
-            intermediate_dropout_rate=self.dropout_rate,
+            intermediate_dropout_rate=self.intermediate_dropout,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(y, deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate,
+        y = nn.Dropout(rate=self.hidden_dropout,
                        broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
@@ -986,7 +991,11 @@ class DecoderLayer(nn.Module):
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
     head_dim: int = 64
-    dropout_rate: float = 0.1
+    hidden_dropout: float = 0.1
+    # hidden_dropout_dims: Sequence[int] = ()
+    attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    # intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
@@ -1056,7 +1065,7 @@ class DecoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
@@ -1069,7 +1078,7 @@ class DecoderLayer(nn.Module):
                                                       decoder_bias,
                                                       deterministic=deterministic,
                                                       decode=decode)
-        x = nn.Dropout(rate=self.dropout_rate,
+        x = nn.Dropout(rate=self.hidden_dropout,
                        broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
@@ -1091,7 +1100,7 @@ class DecoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
@@ -1102,7 +1111,7 @@ class DecoderLayer(nn.Module):
                                                                  encoded,
                                                                  encoder_decoder_mask,
                                                                  deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate,
+        y = nn.Dropout(rate=self.hidden_dropout,
                        broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
         y = y + residual
 
@@ -1118,12 +1127,12 @@ class DecoderLayer(nn.Module):
             transpose_batch_sequence=self.transpose_batch_sequence,
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
-            intermediate_dropout_rate=self.dropout_rate,
+            intermediate_dropout_rate=self.intermediate_dropout,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(z, deterministic=deterministic)
-        z = nn.Dropout(rate=self.dropout_rate,
+        z = nn.Dropout(rate=self.hidden_dropout,
                        broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)

@@ -47,7 +47,6 @@ def loss_fn(diff_xs, no_diff_xs, params, others, model, rngs):
     return jnp.mean(output)
 
 
-# TODO(rewang): RNGKey?
 def generate_test_rngs():
     data_rng = jax.random.PRNGKey(0)
     init_rng = {'params': jax.random.PRNGKey(1), 'dropout': jax.random.PRNGKey(2)}
@@ -78,7 +77,10 @@ def assert_tree_like_close(expected, actual, rtol=1e-05, atol=1e-08):
                         err_msg=f'Value of expected{key_str} and actual{key_str} is not close')
 
 
-DATA_SHAPE = [(32, 128, 1024), (32, 512, 1024)]    # (batch, seqlen, emb_dim)
+DATA_SHAPE = [    # (batch, seqlen, emb_dim)
+    pytest.param((32, 128, 1024), id='32-128-1024'),
+    pytest.param((32, 512, 1024), id='32-512-1024'),
+]
 DTYPE = [jnp.float32, jnp.bfloat16]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
@@ -86,22 +88,26 @@ _KEY_OF_RESIDUAL_POST_LAYERNORM = "apply_residual_connection_post_layernorm"
 _KEY_OF_OUTPUT_LAYERNORM = "output_layernorm"
 _KEY_OF_DROP_PATH = "drop_path"
 _KEY_OF_FUSE_QKV_PARAMS = "fuse_qkv_params"
-_KEY_OF_DROPOUT_RATE = "dropout_rate"
+_KEY_OF_HIDDEN_DROPOUT = "hidden_dropout"
+_KEY_OF_ATTENTION_DROPOUT = "attention_dropout"
+_KEY_OF_INTERMEDIATE_DROPOUT = "intermediate_dropout"
 _KEY_OF_MLP_ACTIVATIONS = "mlp_activations"
 _KEY_OF_FUSE_MLP_WI = "fuse_mlp_wi"
-_KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
-_KEY_OF_ZERO_CENTERED_GAMMA = 'zero_centered_gamma'
-_KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
+_KEY_OF_LAYERNORM_TYPE = "layernorm_type"
+_KEY_OF_ZERO_CENTERED_GAMMA = "zero_centered_gamma"
+_KEY_OF_TRANSPOSE_BS = "transpose_batch_sequence"
 _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
-_KEY_OF_NUM_HEADS = 'num_attention_heads'
-_KEY_OF_NUM_GQA_GROUPS = 'num_gqa_groups'
+_KEY_OF_NUM_HEADS = "num_attention_heads"
+_KEY_OF_NUM_GQA_GROUPS = "num_gqa_groups"
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 _KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_NUM_HEADS: 8,
-    _KEY_OF_DROPOUT_RATE: 0,
+    _KEY_OF_HIDDEN_DROPOUT: 0,
+    _KEY_OF_ATTENTION_DROPOUT: 0,
+    _KEY_OF_INTERMEDIATE_DROPOUT: 0,
 }
 
 ATTRS = [{
@@ -129,20 +135,19 @@ ATTRS = [{
     _KEY_OF_FUSE_QKV_PARAMS: False
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.8,
+    _KEY_OF_HIDDEN_DROPOUT: 0.8,
+    _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
 }, {
@@ -151,7 +156,6 @@ ATTRS = [{
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu',)),
     _KEY_OF_FUSE_MLP_WI: True
 }, {
@@ -184,28 +188,24 @@ ATTRS = [{
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "alternate"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "alternate"
@@ -216,12 +216,13 @@ ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
 def sync_params_values(dst, src, transformations, sep='/'):
     """
+    This function will reconstuct a tree with dst's tree_def/shape and src's value.
+    transformations is a map that records the key mappings between dst and src.
     transformations = {
         # dst key map 0: src key map 0,
         # dst key map 1: src key map 1,
         ...
     }
-    Copy the values from src to dst and retain the dst's shape
     """
     src_values = {}
     for key, value in jax.tree_util.tree_leaves_with_path(src):
@@ -230,13 +231,6 @@ def sync_params_values(dst, src, transformations, sep='/'):
 
     flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
     synced_dst_values = []
-
-    src_keys = [
-        jax.tree_util.keystr(key) for key, value in jax.tree_util.tree_leaves_with_path(src)
-    ]
-    dst_keys = [jax.tree_util.keystr(key) for key, value in flatten_dst]
-    print(f'{src_keys=}')
-    print(f'{dst_keys=}')
 
     for key, value in flatten_dst:
         normalized_key = sep.join(x.key for x in key)
@@ -288,14 +282,9 @@ class TestEncoderLayer:
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'dropout_rate':
-                te_layer_attrs['attention_dropout'] = v
-                te_layer_attrs['hidden_dropout'] = v
-                te_layer_attrs['intermediate_dropout'] = v
-            elif k == 'fuse_mlp_wi':
+            if k == 'fuse_mlp_wi':
                 continue
-            else:
-                te_layer_attrs[k] = v
+            te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
@@ -315,8 +304,7 @@ class TestEncoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
-            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -336,14 +324,9 @@ class TestEncoderLayer:
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'dropout_rate':
-                te_layer_attrs['attention_dropout'] = v
-                te_layer_attrs['hidden_dropout'] = v
-                te_layer_attrs['intermediate_dropout'] = v
-            elif k == 'fuse_mlp_wi':
+            if k == 'fuse_mlp_wi':
                 continue
-            else:
-                te_layer_attrs[k] = v
+            te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
@@ -377,12 +360,11 @@ class TestEncoderLayer:
         test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
                                                        test_layer, apply_rng)
 
-        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
-            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-            assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
 
-            _, restructed_ref_wgrads = TestEncoderLayer.sync_params(ref_wgrads, test_wgrads)
-            assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
+        _, restructed_ref_wgrads = TestEncoderLayer.sync_params(ref_wgrads, test_wgrads)
+        assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -474,14 +456,9 @@ class TestDecoderLayer:
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'dropout_rate':
-                te_layer_attrs['attention_dropout'] = v
-                te_layer_attrs['hidden_dropout'] = v
-                te_layer_attrs['intermediate_dropout'] = v
-            elif k == 'fuse_mlp_wi':
+            if k == 'fuse_mlp_wi':
                 continue
-            else:
-                te_layer_attrs[k] = v
+            te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
@@ -500,8 +477,7 @@ class TestDecoderLayer:
         ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
         test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
-            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
@@ -523,14 +499,9 @@ class TestDecoderLayer:
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'dropout_rate':
-                te_layer_attrs['attention_dropout'] = v
-                te_layer_attrs['hidden_dropout'] = v
-                te_layer_attrs['intermediate_dropout'] = v
-            elif k == 'fuse_mlp_wi':
+            if k == 'fuse_mlp_wi':
                 continue
-            else:
-                te_layer_attrs[k] = v
+            te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
@@ -564,12 +535,11 @@ class TestDecoderLayer:
         test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
                                                        test_layer, apply_rng)
 
-        if attrs[_KEY_OF_DROPOUT_RATE] == 0.:    # Skip elementwise checking for dropout
-            assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-            assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
 
-            _, restructed_ref_wgrads = TestDecoderLayer.sync_params(ref_wgrads, test_wgrads)
-            assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
+        _, restructed_ref_wgrads = TestDecoderLayer.sync_params(ref_wgrads, test_wgrads)
+        assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
         del data_rng, init_rng, apply_rng
 
