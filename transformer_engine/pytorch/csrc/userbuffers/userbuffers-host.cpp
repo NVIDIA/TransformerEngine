@@ -19,23 +19,24 @@
 #include <string.h>
 #include <unistd.h>
 #define MULTICAST_GB_TOTAL 512
+#include "nvml.h"
 
-static int oob_bcast(void *comm_context, void *buf, int size, int root) {
-  MPI_Bcast(buf, size, MPI_BYTE, root,
-            (reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
-
-static int oob_barrier(void *comm_context) {
-  MPI_Barrier((reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
-
-static int oob_gather(void *comm_context, int root, void *sbuf, void *rbuf, int len) {
-  MPI_Gather(sbuf, len, MPI_BYTE, rbuf, len, MPI_BYTE, root,
-             (reinterpret_cast<communicator *>(comm_context))->comm_inter);
-  return 0;
-}
+//static int oob_bcast(void *comm_context, void *buf, int size, int root) {
+//  MPI_Bcast(buf, size, MPI_BYTE, root,
+//            (reinterpret_cast<communicator *>(comm_context))->comm_inter);
+//  return 0;
+//}
+//
+//static int oob_barrier(void *comm_context) {
+//  MPI_Barrier((reinterpret_cast<communicator *>(comm_context))->comm_inter);
+//  return 0;
+//}
+//
+//static int oob_gather(void *comm_context, int root, void *sbuf, void *rbuf, int len) {
+//  MPI_Gather(sbuf, len, MPI_BYTE, rbuf, len, MPI_BYTE, root,
+//             (reinterpret_cast<communicator *>(comm_context))->comm_inter);
+//  return 0;
+//}
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
@@ -81,18 +82,65 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                              \
   } while (0);
 
-int pipe_rank(communicator *comm, int step) {
-  int mynode = comm->myrank / comm->nvsize;
-  int mylocal = comm->nvrank;
-  int numlocal = comm->nvsize;
+//int pipe_rank(communicator *comm, int step) {
+//  int mynode = comm->myrank / comm->nvsize;
+//  int mylocal = comm->nvrank;
+//  int numlocal = comm->nvsize;
+//
+//  int newlocal1 = mylocal + step * comm->ar_nvsize * comm->ar2_nvsize;
+//  int newlocal = (numlocal + (newlocal1 % numlocal)) % numlocal;
+//  int newnode = mynode;
+//  newnode += (newlocal1 - newlocal) / numlocal * comm->num_nodes * comm->num2_nodes;
+//  int allnodes = comm->nranks / comm->nvsize;
+//  newnode = (allnodes + (newnode % allnodes)) % allnodes;
+//  return newnode * numlocal + newlocal;
+//}
 
-  int newlocal1 = mylocal + step * comm->ar_nvsize * comm->ar2_nvsize;
-  int newlocal = (numlocal + (newlocal1 % numlocal)) % numlocal;
-  int newnode = mynode;
-  newnode += (newlocal1 - newlocal) / numlocal * comm->num_nodes * comm->num2_nodes;
-  int allnodes = comm->nranks / comm->nvsize;
-  newnode = (allnodes + (newnode % allnodes)) % allnodes;
-  return newnode * numlocal + newlocal;
+#define NVMLCHECK(cmd)                                                                             \
+  do {                                                                                             \
+    nvmlReturn_t e = cmd;                                                                          \
+    if (e != NVML_SUCCESS) {                                                                       \
+      printf("Failed: NVML error %s:%d '%s'\n", __FILE__, __LINE__, nvmlErrorString(e));           \
+      exit(EXIT_FAILURE);                                                                          \
+    }                                                                                              \
+  } while (0)
+
+static int check_nvml(communicator **comm) {
+  int gpu_device;
+  int flag = 0;
+  CUdevice current_gpu;
+  CUDACHECK(cudaGetDevice(&gpu_device));
+  CUCHECK(cuDeviceGet(&current_gpu, gpu_device));
+  CUCHECK(cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, current_gpu));
+  if (!flag) {
+    UB_PRINT("CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED is not detected [%d]\n", flag);
+    return 0;
+  }
+
+  // Check device count
+  unsigned int nvml_device_count;
+  NVMLCHECK(nvmlDeviceGetCount_v2(&nvml_device_count));
+  if (!nvml_device_count) {
+    UB_PRINT("No NVML devices found [%d]\n", nvml_device_count);
+    return 1; // No nvml devices found
+  }
+
+  // Get device handle for the last device
+  // TODO: Check all devices
+  nvmlDevice_t nvml_device;
+  NVMLCHECK(nvmlDeviceGetHandleByIndex_v2(nvml_device_count - 1, &nvml_device));
+
+  // Get fabric info
+  nvmlGpuFabricInfoV_t fabric_info = { .version = nvmlGpuFabricInfo_v2,
+                                      .state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED };
+  NVMLCHECK(nvmlDeviceGetGpuFabricInfoV(nvml_device, &fabric_info));
+
+  UB_PRINT("MNNVL nvmlGpuFabricInfoV_t fabric UUID %lx.%lx (%s) cliqueId 0x%x state %d healthMask 0x%x",
+            ((long *)&fabric_info.clusterUuid)[0], ((long *)&fabric_info.clusterUuid)[1], fabric_info.clusterUuid,
+            fabric_info.cliqueId, fabric_info.state, fabric_info.healthMask);
+
+  (*comm)->nvml_fabric_info = fabric_info;
+  return 1;
 }
 
 int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
@@ -221,7 +269,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   int datanodes = allnodes / pipenodes / tensornodes;
   int pipenodegroup_id = myrank / numlocal / (datanodes * tensornodes);
 
-  (*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
+  //(*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
 
   CUDACHECK(cudaFree(0));
   int datanodegroup_id =
@@ -243,7 +291,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->num2_nodes = tensornodes;
   (*comm)->my2_node = (mynode / datanodes) % tensornodes;
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
-  (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
+  //(*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
   (*comm)->minblock = 1024 * 2 * 1024;
@@ -276,11 +324,10 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     }
 
     printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
-           "%dx%d PIPE_ID %d/%d\n",
+           "%dx%d\n",
            myrank, nranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
            (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
-           (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
-           pipegpus * pipenodes);
+           (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize);
 
     CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(sizeof(CUmemFabricHandle));
     //if ((*comm)->ar2_nvrank == 0) {
@@ -385,11 +432,10 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 
   if (getenv("NVTE_UBDEBUG"))
     printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
-           "%dx%d PIPE_ID %d/%d\n",
+           "%dx%d\n",
            myrank, nranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
            (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
-           (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
-           pipegpus * pipenodes);
+           (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize);
   fflush(NULL);
 
   return 0;
