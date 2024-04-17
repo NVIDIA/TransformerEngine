@@ -332,17 +332,22 @@ class FP8Helper:
                 assert meta.dtype == jnp.float32
             return [jax.lax.convert_element_type(meta, FlaxFloatMeta32) for meta in metas]
 
+        # Make functions to be a vaild JAX type
+        partial_identical_fun = jax.tree_util.Partial(identical_fun)
+        partial_fm32_to_fp32_fun = jax.tree_util.Partial(fm32_to_fp32_fun)
+        partial_fp32_to_fm32_fun = jax.tree_util.Partial(fp32_to_fm32_fun)
+
         if len(args) < 1:
-            return identical_fun, identical_fun
+            return partial_identical_fun, partial_identical_fun
 
         original_dtype = args[0].dtype
         for arg in args:
             assert arg.dtype == original_dtype
 
         if original_dtype == FlaxFloatMeta32:
-            return fm32_to_fp32_fun, fp32_to_fm32_fun
+            return partial_fm32_to_fp32_fun, partial_fp32_to_fm32_fun
 
-        return identical_fun, identical_fun
+        return partial_identical_fun, partial_identical_fun
 
     @staticmethod
     def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
