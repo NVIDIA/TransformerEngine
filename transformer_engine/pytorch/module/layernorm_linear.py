@@ -356,8 +356,8 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
-            ctx.reduce_and_update_bwd_fp8_tensors = ctx.fp8
-            if requires_grad(inp, ln_weight, ln_bias, weight, bias):
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
                     ctx.reduce_and_update_bwd_fp8_tensors or
                     FP8GlobalStateManager.is_first_fp8_module())
