@@ -64,7 +64,7 @@ def train(enable_master_grad, fuse_wgrad_accumulation=False):
 
     loss_list = []
     for step_id in range(16):
-        inp = paddle.uniform([2, 1024, 4096]).astype('float32')
+        inp = paddle.uniform([2, 1024, 4096], dtype='float32')
         inp.stop_gradient = False
         with te.fp8_autocast(enabled=True):
             out = model(inp)
