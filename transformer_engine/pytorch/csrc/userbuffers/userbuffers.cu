@@ -53,23 +53,6 @@
 // If we expect that producer will be 2B+ messages behind consumer
 #define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
 
-// Strip the path from a full filename
-#define FILENAME(file) ({ \
-    const char* filename = file; \
-    const char* basename = filename; \
-    for (const char* ptr = filename; *ptr != '\0'; ptr++) { \
-        if (*ptr == '/' || *ptr == '\\') { \
-            basename = ptr + 1; \
-        } \
-    } \
-    basename; \
-})
-
-// Printf to provide enough information so it is easier to attribute failures
-#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__),              \
-                                                                  __FUNCTION__,                    \
-                                                                  __LINE__, __VA_ARGS__)
-
 // Report and error on timeout
 #define CHECK_TIMEOUT(t, timeout) ((clock64() - (t)) > timeout)
 
