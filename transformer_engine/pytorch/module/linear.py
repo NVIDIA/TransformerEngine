@@ -26,6 +26,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     init_method_constant,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -363,7 +364,11 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.is_input_fp8 = is_input_fp8
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
-            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(inp, weight, bias):
+                ctx.reduce_and_update_bwd_fp8_tensors = (
+                    ctx.reduce_and_update_bwd_fp8_tensors or
+                    FP8GlobalStateManager.is_first_fp8_module())
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -381,7 +386,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        if isinstance(grad_output[0], Float8Tensor):
+        if isinstance(grad_output, Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[
                 tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_output._scale_inv
 
@@ -611,7 +616,7 @@ class _Linear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.is_first_module and not is_graph_capturing():
+        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
@@ -954,8 +959,6 @@ class Linear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-        is_first_module_in_mha: Optional[bool], default = False
-                      Whether to output in FP8. By default, Linear outputs in inp.dtype.
         """
 
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
