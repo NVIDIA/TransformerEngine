@@ -26,7 +26,7 @@ from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
-from ..fused_attn import self_fused_attn, cross_fused_attn, fused_attn
+from ..fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -190,16 +190,19 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
 
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxType"""
+            # mask is ignored for no_mask and causal_mask
+            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+                mask = None
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
                 if mask is not None:
-                    return SoftmaxType.SCALED_MASKED
-                return SoftmaxType.SCALED
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
+                    return SoftmaxType.SCALED_MASKED, mask
+                return SoftmaxType.SCALED, mask
+            raise ValueError(f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+                             "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}")
 
-        softmax_type = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(softmax_type=softmax_type,
                                scale_factor=fused_scale_factor)(attn_weights, mask,
@@ -266,15 +269,15 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
             qkv_packed = query
             if self.transpose_batch_sequence:
                 qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
-            x = self_fused_attn(qkv_packed,
-                                bias,
-                                mask,
-                                seed,
-                                attn_mask_type=self.attn_mask_type,
-                                attn_bias_type=self.attn_bias_type,
-                                scaling_factor=scale_factor,
-                                dropout_probability=self.attention_dropout,
-                                is_training=not deterministic)
+            x = fused_attn_qkvpacked(qkv_packed,
+                                     bias,
+                                     mask,
+                                     seed,
+                                     attn_mask_type=self.attn_mask_type,
+                                     attn_bias_type=self.attn_bias_type,
+                                     scaling_factor=scale_factor,
+                                     dropout_probability=self.attention_dropout,
+                                     is_training=not deterministic)
         elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
             """kvpacked format, treat
             query: query tensor, shape = [..., h, d]
@@ -285,16 +288,16 @@ class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
-            x = cross_fused_attn(query,
-                                 kv_packed,
-                                 bias,
-                                 mask,
-                                 seed,
-                                 attn_mask_type=self.attn_mask_type,
-                                 attn_bias_type=self.attn_bias_type,
-                                 scaling_factor=scale_factor,
-                                 dropout_probability=self.attention_dropout,
-                                 is_training=not deterministic)
+            x = fused_attn_kvpacked(query,
+                                    kv_packed,
+                                    bias,
+                                    mask,
+                                    seed,
+                                    attn_mask_type=self.attn_mask_type,
+                                    attn_bias_type=self.attn_bias_type,
+                                    scaling_factor=scale_factor,
+                                    dropout_probability=self.attention_dropout,
+                                    is_training=not deterministic)
         elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
@@ -358,11 +361,27 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
     attention_dropout: float, default = 0.0
         Dropout probability for the dropout op after the softmax.
     attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the self attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     attn_bias_type: Optional[str], default = None
-        Type of the attention bias passed in the self attention.
+        Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
         When default is present, the type is automatically decided by the MHA's bias parameter.
         Where it is :attr:`post_scale_bias` if there is bias. Otherwise :attr:`no_bias` is used.
@@ -438,6 +457,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means to mask out the corresponding values.
+            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *:
@@ -617,6 +637,53 @@ def rotary_pos_emb(x: Array,
     return consecutive_impl()
 
 
+class LoRAScope:    # pylint: disable=too-few-public-methods
+    """LoRA Scope"""
+
+    def __init__(self, qkv_proj=False, output_proj=False, mlp=False):
+        self.qkv_proj = qkv_proj
+        self.output_proj = output_proj
+        self.mlp = mlp
+
+    def __eq__(self, other):
+        return (self.qkv_proj, self.output_proj, self.mlp) == \
+               (other.qkv_proj, other.output_proj, other.mlp)
+
+
+def _canonicalize_lora_scope(scope):
+
+    SCOPE_NONE = 'none'
+    SCOPE_ALL = 'all'
+    SCOPE_QKV_PROJ = 'qkv_proj'
+    SCOPE_OUTPUT_PROJ = 'output_proj'
+    SCOPE_MLP = 'mlp'
+    SCOPE_EX_QKV_PROJ = 'exclude_qkv_proj'
+    SCOPE_EX_OUTPUT_PROJ = 'exclude_output_proj'
+    SCOPE_EX_MLP = 'exclude_mlp'
+
+    scope = SCOPE_NONE if scope is None else scope
+
+    scope = scope.lower()
+
+    assert scope in [
+        SCOPE_NONE, SCOPE_ALL, SCOPE_QKV_PROJ, SCOPE_OUTPUT_PROJ, SCOPE_MLP, SCOPE_EX_QKV_PROJ,
+        SCOPE_EX_OUTPUT_PROJ, SCOPE_EX_MLP
+    ]
+
+    lora_scope = LoRAScope()
+
+    if scope in [SCOPE_ALL, SCOPE_QKV_PROJ, SCOPE_EX_OUTPUT_PROJ, SCOPE_EX_MLP]:
+        lora_scope.qkv_proj = True
+
+    if scope in [SCOPE_ALL, SCOPE_OUTPUT_PROJ, SCOPE_EX_QKV_PROJ, SCOPE_EX_MLP]:
+        lora_scope.output_proj = True
+
+    if scope in [SCOPE_ALL, SCOPE_MLP, SCOPE_EX_QKV_PROJ, SCOPE_EX_OUTPUT_PROJ]:
+        lora_scope.mlp = True
+
+    return lora_scope
+
+
 class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Multi-head Attention (MHA), including Query,
@@ -639,9 +706,25 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     attention_dropout: float, default = 0.0
         Dropout probability for the dropout op after the softmax.
     attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -687,6 +770,15 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         Indicate the method to coupled the coordinates. It should be one of
         ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
         , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+    low_rank_adaptation_scope: str, default = 'none'
+        Indicate the scope to apply low rank adaptation. It should be one of
+        ['none', 'all', 'qkv_proj', 'output_proj', 'exclude_qkv_proj', 'exclude_output_proj']
+    low_rank_adaptation_dim: int, default = 32
+        The dimension for low rank adaptation, only used when
+        :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
@@ -741,6 +833,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     rotary_pos_emb_group_method: str = 'consecutive'
+    low_rank_adaptation_scope: str = 'none'
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
@@ -809,6 +904,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means mask out the corresponding values.
+            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
@@ -877,6 +973,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         inputs_q = with_sharding_constraint_by_logical_axes(inputs_q, inputs_logical_axes_maybe_sp)
 
+        lora_scope = _canonicalize_lora_scope(self.low_rank_adaptation_scope)
+
         if self.fuse_qkv_params:
             if is_qkvpack:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
@@ -895,6 +993,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
                     bias_axes=(W_JOINED_AXES, W_TP_AXES),
+                    enable_low_rank_adaptation=lora_scope.qkv_proj,
+                    low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                    low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
                     name='qkv',
@@ -917,6 +1018,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
                     bias_axes=(W_TP_AXES,),
+                    enable_low_rank_adaptation=lora_scope.qkv_proj,
+                    low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                    low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     dtype=self.dtype,
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
@@ -935,6 +1039,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                        use_bias=self.use_bias,
                                        bias_init=self.bias_init,
                                        bias_axes=(W_JOINED_AXES, W_TP_AXES),
+                                       enable_low_rank_adaptation=lora_scope.qkv_proj,
+                                       low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                                       low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, 'combined_kv_proj')
@@ -949,6 +1056,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
                 bias_axes=(W_TP_AXES,),
+                enable_low_rank_adaptation=lora_scope.qkv_proj,
+                low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype)
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=self.input_layernorm,
@@ -965,6 +1075,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
                 bias_axes=(W_TP_AXES,),
+                enable_low_rank_adaptation=lora_scope.qkv_proj,
+                low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
@@ -1105,6 +1218,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                            use_bias=self.use_bias,
                            bias_init=self.bias_init,
                            bias_axes=(W_NO_SHARD_AXES,),
+                           enable_low_rank_adaptation=lora_scope.output_proj,
+                           low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                           low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                            dtype=self.dtype,
                            name='out')(x)
         out = checkpoint_name(out, 'out_proj')
@@ -1299,9 +1415,25 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         is added after self-attention.this can be used for structures like `T5`
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     self_attn_mask_type: str, default = 'causal'
-        Type of the attention mask passed into softmax operation in the self attention.
-        Available options: {'no_mask', 'padding', 'causal', 'causal_padding'}
-        Introduced in v0.10.0.
+        This parameter specifies the type of attention mask to be applied during the softmax
+        operation in the self attention.
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+
+        Each described below:
+
+        * no_mask: No attention mask is applied. This means the self attention will consider the
+          full sequence without any restrictions.
+        * padding: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+          :attr:`__call__` method to specify the padding positions.
+        * causal: An upper triangular mask is applied to the softmax inputs,
+          ensuring that the prediction for a certain position is only dependent on known outputs
+          from positions before it.
+        * causal_padding / padding_causal: A combination of both causal and padding masks.
+          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+
+        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+
     self_attn_bias_type: Optional[str], default = None
         Type of the attention bias passed into the self attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -1326,6 +1458,16 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         Indicate the method to coupled the coordinates. It should be one of
         ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
         , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+    low_rank_adaptation_scope: str, default = 'none'
+        Indicate the scope to apply low rank adaptation. It should be one of
+        ['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
+         'exclude_output_proj', 'exclude_mlp']
+    low_rank_adaptation_dim: int, default = 32
+        The dimension for low rank adaptation, only used when
+        :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
 
@@ -1381,6 +1523,9 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
     rotary_pos_emb_group_method: str = 'consecutive'
+    low_rank_adaptation_scope: str = 'none'
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -1420,9 +1565,12 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             :attr:`layer_type=TransformerLayerType.DECODER`.
         attention_mask : jax.numpy.ndarray, default = None
             Boolean tensor used to mask out self-attention softmax input.
+            :attr:`True` means mask out the corresponding values.
+            Ignored when :attr:`self.self_attn_mask_type` is either 'no_mask' or 'causal'.
         encoder_decoder_mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.
+            :attr:`True` means mask out the corresponding values.
         deterministic: bool, default = False
             Disable dropout layers if set to True.
         decode: bool, default = False
@@ -1523,6 +1671,9 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
             rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=self.low_rank_adaptation_scope,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             fuse_qkv_params=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
@@ -1590,6 +1741,9 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                 rotary_pos_emb_windows=self.rotary_pos_emb_windows,
                 rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+                low_rank_adaptation_scope=self.low_rank_adaptation_scope,
+                low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+                low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,
@@ -1618,6 +1772,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         mlp_input = with_sharding_constraint_by_logical_axes(
             mlp_input, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
+        lora_scope = _canonicalize_lora_scope(self.low_rank_adaptation_scope)
+
         # MlpBlock
         residual = mlp_input
         z, ln_out = LayerNormMLP(
@@ -1641,6 +1797,9 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             bias_init=self.bias_init,
             bias_axes_1=(W_JOINED_AXES, W_TP_AXES),
             bias_axes_2=(W_NO_SHARD_AXES,),
+            enable_low_rank_adaptation=lora_scope.mlp,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             layernorm_input_axes=(*generate_batch_seqlen_logical_axes(), HIDDEN_AXES),
             dot_1_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES),
             dot_2_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_TP_AXES),

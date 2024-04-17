@@ -730,8 +730,13 @@ class TestDotProductAttn(TestLayer):
     def input_getter(self, shape, dtype):
         key = jax.random.PRNGKey(seed=1234)
         q_key, k_key, v_key = jax.random.split(key, 3)
-        return list(map(partial(jax.random.normal, shape=shape, dtype=dtype),
-                        [q_key, k_key, v_key]))
+        b, s, *_ = shape
+        if self.attrs[DotProductAttnAttr.TRANSPOSE_BS]:
+            b, s = s, b
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, k_key, v_key]), mask
+        ]
 
     def get_layer_name(self):
         return 'dot_product_attn'
@@ -765,6 +770,7 @@ class TestDotProductAttn(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', DotProductAttnAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -778,6 +784,7 @@ class MultiHeadAttnAttr:
     NUM_GQA_GROUPS = 'num_gqa_groups'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
     ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -847,15 +854,33 @@ class MultiHeadAttnAttr:
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
         ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        LORA_SCOPE: 'all'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        LORA_SCOPE: 'all'
     }]
 
 
 class TestMultiHeadAttn(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        s, b, *_ = shape
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [*map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask]
 
     def get_layer_name(self):
         return 'multi_head_attn'
@@ -875,6 +900,7 @@ class TestMultiHeadAttn(TestLayer):
         attn_mask_type = attrs[MultiHeadAttnAttr.ATTN_MASK_TYPE]
         enable_rotary_pos_emb = attrs[MultiHeadAttnAttr.ENABLE_ROPE]
         rotary_pos_emb_group_method = attrs[MultiHeadAttnAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(MultiHeadAttnAttr.LORA_SCOPE, 'none')
         fuse_qkv_params = True
         transpose_batch_sequence = True
         scale_attn_logits = False
@@ -897,6 +923,7 @@ class TestMultiHeadAttn(TestLayer):
                                      attn_mask_type=attn_mask_type,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
                                      rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      fuse_qkv_params=fuse_qkv_params,
                                      transpose_batch_sequence=transpose_batch_sequence,
                                      scale_attn_logits=scale_attn_logits,
@@ -918,6 +945,7 @@ class TestMultiHeadAttn(TestLayer):
             attn_mask_type=attn_mask_type,
             enable_rotary_pos_emb=enable_rotary_pos_emb,
             rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=low_rank_adaptation_scope,
             fuse_qkv_params=fuse_qkv_params,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
@@ -961,6 +989,7 @@ class TransformerLayerAttr:
     TRANSPOSE_BS = 'transpose_batch_sequence'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
     ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -1109,6 +1138,16 @@ class TransformerLayerAttr:
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
@@ -1177,15 +1216,31 @@ class TransformerLayerAttr:
         ENABLE_ROPE: True,
         ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
     }]
 
 
 class TestTransformer(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        b, s, *_ = shape
+        if self.attrs[TransformerLayerAttr.TRANSPOSE_BS]:
+            b, s = s, b
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask, mask
+        ]
 
     def get_layer_name(self):
         return 'transformerlayer'
@@ -1205,6 +1260,7 @@ class TestTransformer(TestLayer):
         layer_type = attrs[TransformerLayerAttr.LYR_TYPE]
         enable_rotary_pos_emb = attrs[TransformerLayerAttr.ENABLE_ROPE]
         rotary_pos_emb_group_method = attrs[TransformerLayerAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(TransformerLayerAttr.LORA_SCOPE, 'none')
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
                                                dtype=dtype,
@@ -1243,6 +1299,7 @@ class TestTransformer(TestLayer):
                                      enable_relative_embedding=enable_relative_embedding,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
                                      rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      relative_embedding=relative_embedding,
                                      drop_path=drop_path,
                                      transpose_batch_sequence=transpose_batch_sequence)
@@ -1268,6 +1325,7 @@ class TestTransformer(TestLayer):
                            rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                            enable_relative_embedding=enable_relative_embedding,
                            relative_embedding=relative_embedding_flax_module,
+                           low_rank_adaptation_scope=low_rank_adaptation_scope,
                            drop_path=drop_path,
                            transpose_batch_sequence=transpose_batch_sequence)
 
@@ -1277,6 +1335,7 @@ class TestTransformer(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', TransformerLayerAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -1292,7 +1351,7 @@ class TestTransformer(TestLayer):
                                   fp8_format,
                                   rtol=1e-05,
                                   atol=1e-08):
-
+        self.attrs = attrs
         ds = DelayedScaling(fp8_format=fp8_format)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
