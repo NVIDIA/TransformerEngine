@@ -13,7 +13,7 @@ from .cpp_extensions import cast_fp8, cast_transpose, transpose
 from .cpp_extensions import rmsnorm_fwd, rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd, layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot
-from .fp8 import FP8Helper, FlaxFloatMeta32, FP8MetaPackage
+from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
 
 
@@ -162,10 +162,9 @@ def _layernorm_fp8_dot_fwd_rule(
     k_contracting_dims = (0,)
     assert x.shape[-1] == kernel.shape[0]
 
-    is_fp8_meta_fm32 = amax.dtype == FlaxFloatMeta32
-    if is_fp8_meta_fm32:
-        fp8_max, amax, scale, scale_inv = \
-            FP8Helper.convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv)
+    maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
+    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
     amax = FP8Helper.update_amax_history(amax)
@@ -222,7 +221,7 @@ def _layernorm_fp8_dot_fwd_rule(
 
     ctx = (ln_out, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, x_contracting_dims,
-           k_contracting_dims, is_fp8_meta_fm32)
+           k_contracting_dims, maybe_fp32_to_fm32)
 
     return output, ctx
 
@@ -240,7 +239,7 @@ def _layernorm_fp8_dot_bwd_rule(
     ln_out_, casted_kernel, fp8_max, amax, scale, scale_inv, \
     updated_x_amax, updated_kernel_amax, \
     x_shape, kernel_shape, mu, rsigma, x, gamma, \
-    x_contracting_dims, k_contracting_dims, is_fp8_meta_fm32 = ctx
+    x_contracting_dims, k_contracting_dims, maybe_fp32_to_fm32 = ctx
 
     ln_out_t = transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
@@ -288,9 +287,7 @@ def _layernorm_fp8_dot_bwd_rule(
     amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax[0])
     amax = amax.at[gemm_grad_idx, 0].set(updated_grad_amax[0])
 
-    if is_fp8_meta_fm32:
-        fp8_max, amax, scale, scale_inv = \
-            FP8Helper.convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv)
+    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
 
     return dx, wgrad, \
            dgamma, dbeta, \

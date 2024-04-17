@@ -314,32 +314,35 @@ class FP8Helper:
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
 
     @staticmethod
-    def convert_fp8_meta_fm32tofp32(fp8_max, amax, scale, scale_inv):
-        """Convert FP8 meta from FM32 to FP32"""
-        assert fp8_max.dtype == FlaxFloatMeta32
-        assert amax.dtype == FlaxFloatMeta32
-        assert scale.dtype == FlaxFloatMeta32
-        assert scale_inv.dtype == FlaxFloatMeta32
+    def generate_fp8_meta_dtype_converter_pair(*args):
+        """
+        Generate a pair of conversion fun in-between fm32 and fp32.
+        """
 
-        fp8_max = jax.lax.convert_element_type(fp8_max, jnp.float32)
-        amax = jax.lax.convert_element_type(amax, jnp.float32)
-        scale = jax.lax.convert_element_type(scale, jnp.float32)
-        scale_inv = jax.lax.convert_element_type(scale_inv, jnp.float32)
-        return fp8_max, amax, scale, scale_inv
+        def identical_fun(*metas):
+            return metas
 
-    @staticmethod
-    def convert_fp8_meta_fp32tofm32(fp8_max, amax, scale, scale_inv):
-        """Convert FP8 meta from FP32 to FM32"""
-        assert fp8_max.dtype == jnp.float32
-        assert amax.dtype == jnp.float32
-        assert scale.dtype == jnp.float32
-        assert scale_inv.dtype == jnp.float32
+        def fm32_to_fp32_fun(*metas):
+            for meta in metas:
+                assert meta.dtype == FlaxFloatMeta32
+            return [jax.lax.convert_element_type(meta, jnp.float32) for meta in metas]
 
-        fp8_max = jax.lax.convert_element_type(fp8_max, FlaxFloatMeta32)
-        amax = jax.lax.convert_element_type(amax, FlaxFloatMeta32)
-        scale = jax.lax.convert_element_type(scale, FlaxFloatMeta32)
-        scale_inv = jax.lax.convert_element_type(scale_inv, FlaxFloatMeta32)
-        return fp8_max, amax, scale, scale_inv
+        def fp32_to_fm32_fun(*metas):
+            for meta in metas:
+                assert meta.dtype == jnp.float32
+            return [jax.lax.convert_element_type(meta, FlaxFloatMeta32) for meta in metas]
+
+        if len(args) < 1:
+            return identical_fun, identical_fun
+
+        original_dtype = args[0].dtype
+        for arg in args:
+            assert arg.dtype == original_dtype
+
+        if original_dtype == FlaxFloatMeta32:
+            return fm32_to_fp32_fun, fp32_to_fm32_fun
+
+        return identical_fun, identical_fun
 
     @staticmethod
     def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
