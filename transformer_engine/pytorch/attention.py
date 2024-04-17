@@ -16,6 +16,7 @@ from pkg_resources import packaging
 
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import load
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.cpp_extensions import (
@@ -102,6 +103,13 @@ _alibi_cache = {
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
 
+cuda = load(
+    name='attention_copy',
+    sources=['attention_copy.cu'],
+    verbose=True
+)
+
+
 class InferenceParams: # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
@@ -121,6 +129,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         self.sequence_len_offset = 0
         self.batch_size_offset = 0
         self.key_value_memory_dict = {}
+        self.thd = False
 
     def swap_key_value_dict(self, batch_indices):
         """
@@ -3229,6 +3238,7 @@ class DotProductAttention(torch.nn.Module):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+        self.channels = channels
 
 
         self.hidden_size_per_attention_head = channels // num_attention_heads
@@ -3486,6 +3496,7 @@ class DotProductAttention(torch.nn.Module):
                                produced)
         """
 
+
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'DotProductAttention only supports CUDA tensors.'
@@ -3529,21 +3540,44 @@ class DotProductAttention(torch.nn.Module):
             (inference_key_memory, inference_value_memory,
             ) = inference_params.key_value_memory_dict[self.layer_number]
 
-            batch_start = inference_params.batch_size_offset
-            batch_end = batch_start + key_layer.size(1)
-            assert batch_end <= inference_key_memory.size(1)
 
-            sequence_start = inference_params.sequence_len_offset
-            sequence_end = sequence_start + key_layer.size(0)
-            assert sequence_end <= inference_key_memory.size(0)
+            if not inference_params.thd:
+                batch_start = inference_params.batch_size_offset
+                batch_end = batch_start + key_layer.size(1)
+                assert batch_end <= inference_key_memory.size(1)
 
-            # Copy keys and values into KV-cache
-            inference_key_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
-            inference_value_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
-            key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-            value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+                sequence_start = inference_params.sequence_len_offset
+                sequence_end = sequence_start + key_layer.size(0)
+                assert sequence_end <= inference_key_memory.size(0)
+
+                # Copy keys and values into KV-cache
+                inference_key_memory[
+                    sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
+                inference_value_memory[
+                    sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
+                key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
+                value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+            else:
+                cuda.attention_copy(inference_key_memory, inference_params.seq_len + 1, key_layer, inference_params.max_batch_size, self.channels)
+                cuda.attention_copy(inference_value_memory, inference_params.seq_len + 1, value_layer, inference_params.max_batch_size, self.channels)
+
+                q = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3])
+                k = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3])
+                v = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3])
+
+                q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), 
+
+                out, _, _ = fused_attn_fwd(
+                    False, 1, key_layer.shape[1], inference_params.seq_len, inference_params.seq_len, 
+                    q, k, v,
+                    TE_DType[q.dtype], FusedAttnBackend["F16_max512_seqlen"],
+                    qkv_layout="t3hd", attn_bias_type=core_attention_bias_type,
+                    attn_bias=core_attention_bias, fast_zero_fill=fast_zero_fill
+                )
+                print("xd")
+                exit()
+                return out
+
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
@@ -4359,6 +4393,8 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
+
+
         if attn_mask_type is not None:
             window_size = check_set_window_size(attn_mask_type, window_size)
         if attn_mask_type is None:
@@ -4420,7 +4456,6 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     is_first_module_in_mha=True, # specific to FP8 MHA
                 )
-
             num_queries_per_key_value = (self.num_attention_heads_per_partition //
                                          self.num_gqa_groups_per_partition)
             if self.qkv_weight_interleaved:

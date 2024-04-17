@@ -835,20 +835,7 @@ def fused_attn_fwd(
     if fused_attention_backend == FusedAttnBackend["FP8"]:
         rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
-
-        assert (d_scale_qkv is not None
-                ), "d_scale_qkv is required as an input for FP8 fused attention."
-        assert (d_scale_s is not None
-                ), "q_scale_s is required as an input for FP8 fused attention."
-        assert (q_scale_s is not None
-                ), "q_scale_s is required as an input for FP8 fused attention."
-        assert (q_scale_o is not None
-                ), "q_scale_o is required as an input for FP8 fused attention."
-        assert (amax_s is not None
-                ), "amax_s is required as an input for FP8 fused attention."
-        assert (amax_o is not None
-                ), "amax_o is required as an input for FP8 fused attention."
-
+    
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
@@ -994,6 +981,9 @@ def fused_attn_bwd(
                 ), "aux_ctx_tensors must contain rng_state as its last element."
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
+        print("rr")
+        print(d_scale_qkv)
+        exit()
         assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."
         assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
         assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
