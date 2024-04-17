@@ -25,6 +25,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     init_method_constant,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -320,7 +321,11 @@ class _Linear(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
-            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(inp, weight, bias):
+                ctx.reduce_and_update_bwd_fp8_tensors = (
+                    ctx.reduce_and_update_bwd_fp8_tensors or
+                    FP8GlobalStateManager.is_first_fp8_module())
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -530,7 +535,7 @@ class _Linear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.is_first_module and not is_graph_capturing():
+        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
