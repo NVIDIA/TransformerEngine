@@ -291,8 +291,9 @@ class MlpBlock(nn.Module):
     activations: Sequence[Union[str, Callable]] = ('relu',)
     kernel_init: Initializer = None
     intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
     dtype: Any = jnp.float32
-    fuse_wi: bool = False
+    fuse_wi: bool = True
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -331,10 +332,10 @@ class MlpBlock(nn.Module):
 
         # Take elementwise product of above intermediate activations.
         x = functools.reduce(operator.mul, activations)
-        dropout_broadcast_dims = (0,) if self.transpose_batch_sequence else (1,)
         # Apply dropout and final dense output projection.
-        x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=dropout_broadcast_dims)(
-            x, deterministic=deterministic)    # Broadcast along length.
+        x = nn.Dropout(rate=self.intermediate_dropout_rate,
+                       broadcast_dims=self.intermediate_dropout_dims)(
+                           x, deterministic=deterministic)    # Broadcast along length.
         if self.transpose_batch_sequence:
             x = nn_partitioning.with_sharding_constraint(x, ('length', 'batch', 'mlp'))
         else:
@@ -864,10 +865,10 @@ class EncoderLayer(nn.Module):
     num_gqa_groups: int | None = None
     head_dim: int = 64
     hidden_dropout: float = 0.1
-    # hidden_dropout_dims: Sequence[int] = ()
+    hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
     intermediate_dropout: float = 0.1
-    # intermediate_dropout_dims: Sequence[int] = ()
+    intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
@@ -883,7 +884,8 @@ class EncoderLayer(nn.Module):
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
-    fuse_mlp_wi: bool = False
+    fuse_mlp_wi: bool = True
+    self_attn_mask_type: Any = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -892,6 +894,7 @@ class EncoderLayer(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
+        del self.self_attn_mask_type    # dummy, just align to TE's impl
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -942,7 +945,7 @@ class EncoderLayer(nn.Module):
                                                  encoder_bias,
                                                  deterministic=deterministic)
         x = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
+                       broadcast_dims=self.hidden_dropout_dims)(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -965,12 +968,13 @@ class EncoderLayer(nn.Module):
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.intermediate_dropout,
+            intermediate_dropout_dims=self.intermediate_dropout_dims,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(y, deterministic=deterministic)
         y = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
+                       broadcast_dims=self.hidden_dropout_dims)(y, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
             y = nn.Dropout(rate=self.drop_path,
@@ -992,10 +996,10 @@ class DecoderLayer(nn.Module):
     num_gqa_groups: int | None = None
     head_dim: int = 64
     hidden_dropout: float = 0.1
-    # hidden_dropout_dims: Sequence[int] = ()
+    hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
     intermediate_dropout: float = 0.1
-    # intermediate_dropout_dims: Sequence[int] = ()
+    intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
@@ -1011,7 +1015,8 @@ class DecoderLayer(nn.Module):
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
-    fuse_mlp_wi: bool = False
+    fuse_mlp_wi: bool = True
+    self_attn_mask_type: Any = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1027,7 +1032,7 @@ class DecoderLayer(nn.Module):
                  deterministic=False,
                  decode=False,
                  max_decode_length=None):
-
+        del self.self_attn_mask_type    # dummy, just align to TE's impl
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -1079,7 +1084,7 @@ class DecoderLayer(nn.Module):
                                                       deterministic=deterministic,
                                                       decode=decode)
         x = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
+                       broadcast_dims=self.hidden_dropout_dims)(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -1112,7 +1117,7 @@ class DecoderLayer(nn.Module):
                                                                  encoder_decoder_mask,
                                                                  deterministic=deterministic)
         y = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
+                       broadcast_dims=self.hidden_dropout_dims)(y, deterministic=deterministic)
         y = y + residual
 
         # MLP block.
@@ -1128,12 +1133,13 @@ class DecoderLayer(nn.Module):
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.intermediate_dropout,
+            intermediate_dropout_dims=self.intermediate_dropout_dims,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(z, deterministic=deterministic)
         z = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
+                       broadcast_dims=self.hidden_dropout_dims)(z, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)
             z = nn.Dropout(rate=self.drop_path,

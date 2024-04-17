@@ -91,8 +91,9 @@ _KEY_OF_FUSE_QKV_PARAMS = "fuse_qkv_params"
 _KEY_OF_HIDDEN_DROPOUT = "hidden_dropout"
 _KEY_OF_ATTENTION_DROPOUT = "attention_dropout"
 _KEY_OF_INTERMEDIATE_DROPOUT = "intermediate_dropout"
+_KEY_OF_HIDDEN_DROPOUT_DIMS = "hidden_dropout_dims"
+_KEY_OF_INTERMEDIATE_DROPOUT_DIMS = "intermediate_dropout_dims"
 _KEY_OF_MLP_ACTIVATIONS = "mlp_activations"
-_KEY_OF_FUSE_MLP_WI = "fuse_mlp_wi"
 _KEY_OF_LAYERNORM_TYPE = "layernorm_type"
 _KEY_OF_ZERO_CENTERED_GAMMA = "zero_centered_gamma"
 _KEY_OF_TRANSPOSE_BS = "transpose_batch_sequence"
@@ -101,6 +102,7 @@ _KEY_OF_NUM_HEADS = "num_attention_heads"
 _KEY_OF_NUM_GQA_GROUPS = "num_gqa_groups"
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 _KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
+_KEY_OF_SELF_ATTN_MASK_TYPE = "self_attn_mask_type"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -108,6 +110,7 @@ BASE_ATTRS = {
     _KEY_OF_HIDDEN_DROPOUT: 0,
     _KEY_OF_ATTENTION_DROPOUT: 0,
     _KEY_OF_INTERMEDIATE_DROPOUT: 0,
+    _KEY_OF_SELF_ATTN_MASK_TYPE: "padding_causal",
 }
 
 ATTRS = [{
@@ -136,20 +139,17 @@ ATTRS = [{
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_HIDDEN_DROPOUT: 0.8,
     _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_NUM_HEADS: 8,
     _KEY_OF_NUM_GQA_GROUPS: 4,
@@ -157,7 +157,6 @@ ATTRS = [{
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_MLP_ACTIVATIONS: (('gelu',)),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
@@ -188,27 +187,28 @@ ATTRS = [{
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "alternate"
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_FUSE_MLP_WI: True,
     _KEY_OF_ENABLE_ROPE: True,
     _KEY_OF_ROPE_GROUP_METHOD: "alternate"
+}, {
+    _KEY_OF_HIDDEN_DROPOUT_DIMS: (0,),
+    _KEY_OF_INTERMEDIATE_DROPOUT_DIMS: (1,),
+}, {
+    _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -218,10 +218,12 @@ def sync_params_values(dst, src, transformations, sep='/'):
     """
     This function will reconstuct a tree with dst's tree_def/shape and src's value.
     transformations is a map that records the key mappings between dst and src.
+    If no dst key found in the transformerations, it will fall back the src key to dst key.
     transformations = {
-        # dst key map 0: src key map 0,
-        # dst key map 1: src key map 1,
+        dst key map 0: src key map 0,
+        dst key map 1: src key map 1,
         ...
+        # if dst key = src key, we don't need to add it
     }
     """
     src_values = {}
@@ -234,7 +236,11 @@ def sync_params_values(dst, src, transformations, sep='/'):
 
     for key, value in flatten_dst:
         normalized_key = sep.join(x.key for x in key)
-        synced_dst_values.append(src_values[transformations[normalized_key]])
+        if normalized_key in transformations:
+            corresponding_src_key = transformations[normalized_key]
+        else:
+            corresponding_src_key = normalized_key
+        synced_dst_values.append(src_values[corresponding_src_key])
 
     synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
 
@@ -246,22 +252,14 @@ class TestEncoderLayer:
     @staticmethod
     def sync_params(ref, target):
         transformations = {
-            'attention/out/kernel': 'attention/out/kernel',
-            'attention/qkv/kernel': 'attention/qkv/kernel',
             'attention/qkv/scale': 'pre_attention_layer_norm/scale',
             'attention/qkv/ln_bias': 'pre_attention_layer_norm/ln_bias',
-            'attention/kv/kernel': 'attention/kv/kernel',
-            'attention/query/kernel': 'attention/query/kernel',
-            'attention/key/kernel': 'attention/key/kernel',
-            'attention/value/kernel': 'attention/value/kernel',
             'attention/query/scale': 'pre_attention_layer_norm/scale',
             'attention/query/ln_bias': 'pre_attention_layer_norm/ln_bias',
             'mlp/wi_kernel': 'mlp/wi/kernel',
             'mlp/wo_kernel': 'mlp/wo/kernel',
             'mlp/scale': 'pre_mlp_layer_norm/scale',
             'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
-            'output_layernorm/scale': 'output_layernorm/scale',
-            'relpos_bias/rel_embedding': 'relpos_bias/rel_embedding',
         }
         target = sync_params_values(target, ref, transformations)
         return ref, target
@@ -271,26 +269,25 @@ class TestEncoderLayer:
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
-        sequence_dim = 0 if transpose_batch_sequence else 1
 
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        ref_masks = (1 - padded_mask,)
-        test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
+        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
+        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+            ref_masks = (1 - causal_mask,)
+            test_masks = (None, causal_mask)    # The second arg of Transformer is encoded tokens.
+        else:
+            ref_masks = (1 - padded_mask,)
+            test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'fuse_mlp_wi':
-                continue
             te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
-                            hidden_dropout_dims=(sequence_dim,),
-                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
-                            self_attn_mask_type='padding',
                             dtype=dtype,
                             **te_layer_attrs)
 
@@ -313,26 +310,25 @@ class TestEncoderLayer:
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
-        sequence_dim = 0 if transpose_batch_sequence else 1
 
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        ref_masks = (1 - padded_mask,)
-        test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
+        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
+        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+            ref_masks = (1 - causal_mask,)
+            test_masks = (None, causal_mask)    # The second arg of Transformer is encoded tokens.
+        else:
+            ref_masks = (1 - padded_mask,)
+            test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'fuse_mlp_wi':
-                continue
             te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
-                            hidden_dropout_dims=(sequence_dim,),
-                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
-                            self_attn_mask_type='padding',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
@@ -390,7 +386,7 @@ class TestEncoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
+        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-5, atol=2e-4)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
@@ -399,7 +395,7 @@ class TestEncoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward_backward_with_fp8(self, data_shape, dtype, fp8_format, attrs):
         FP8Helper.initialize(fp8_format=fp8_format)
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-04, atol=1e-03)
+        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
 
 
@@ -408,32 +404,18 @@ class TestDecoderLayer:
     @staticmethod
     def sync_params(ref, target):
         transformations = {
-            'encoder_decoder_attention/out/kernel': 'encoder_decoder_attention/out/kernel',
-            'encoder_decoder_attention/qkv/kernel': 'encoder_decoder_attention/qkv/kernel',
             'encoder_decoder_attention/qkv/scale': 'pre_cross_attention_layer_norm/scale',
             'encoder_decoder_attention/qkv/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
-            'encoder_decoder_attention/kv/kernel': 'encoder_decoder_attention/kv/kernel',
-            'encoder_decoder_attention/query/kernel': 'encoder_decoder_attention/query/kernel',
-            'encoder_decoder_attention/key/kernel': 'encoder_decoder_attention/key/kernel',
-            'encoder_decoder_attention/value/kernel': 'encoder_decoder_attention/value/kernel',
             'encoder_decoder_attention/query/scale': 'pre_cross_attention_layer_norm/scale',
             'encoder_decoder_attention/query/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
-            'self_attention/out/kernel': 'self_attention/out/kernel',
-            'self_attention/qkv/kernel': 'self_attention/qkv/kernel',
             'self_attention/qkv/scale': 'pre_self_attention_layer_norm/scale',
             'self_attention/qkv/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
-            'self_attention/kv/kernel': 'self_attention/kv/kernel',
-            'self_attention/query/kernel': 'self_attention/query/kernel',
-            'self_attention/key/kernel': 'self_attention/key/kernel',
-            'self_attention/value/kernel': 'self_attention/value/kernel',
             'self_attention/query/scale': 'pre_self_attention_layer_norm/scale',
             'self_attention/query/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
             'mlp/wi_kernel': 'mlp/wi/kernel',
             'mlp/wo_kernel': 'mlp/wo/kernel',
             'mlp/scale': 'pre_mlp_layer_norm/scale',
             'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
-            'output_layernorm/scale': 'output_layernorm/scale',
-            'relpos_bias/rel_embedding': 'relpos_bias/rel_embedding',
         }
         target = sync_params_values(target, ref, transformations)
         return ref, target
@@ -443,7 +425,6 @@ class TestDecoderLayer:
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
-        sequence_dim = 0 if transpose_batch_sequence else 1
 
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape,
@@ -451,20 +432,19 @@ class TestDecoderLayer:
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        ref_masks = (1 - causal_mask, 1 - padded_mask)
-        test_masks = (causal_mask, padded_mask)
+        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+            ref_masks = (1 - causal_mask, 1 - padded_mask)
+            test_masks = (causal_mask, padded_mask)
+        else:
+            ref_masks = (1 - padded_mask, 1 - padded_mask)
+            test_masks = (padded_mask, padded_mask)
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'fuse_mlp_wi':
-                continue
             te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
-                            hidden_dropout_dims=(sequence_dim,),
-                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
-                            self_attn_mask_type='padding_causal',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
@@ -486,7 +466,6 @@ class TestDecoderLayer:
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
-        sequence_dim = 0 if transpose_batch_sequence else 1
 
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape,
@@ -494,20 +473,19 @@ class TestDecoderLayer:
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        ref_masks = (1 - causal_mask, 1 - padded_mask)
-        test_masks = (causal_mask, padded_mask)
+        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+            ref_masks = (1 - causal_mask, 1 - padded_mask)
+            test_masks = (causal_mask, padded_mask)
+        else:
+            ref_masks = (1 - padded_mask, 1 - padded_mask)
+            test_masks = (padded_mask, padded_mask)
 
         te_layer_attrs = {}
         for k, v in attrs.items():
-            if k == 'fuse_mlp_wi':
-                continue
             te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
-                            hidden_dropout_dims=(sequence_dim,),
-                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
-                            self_attn_mask_type='padding_causal',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
