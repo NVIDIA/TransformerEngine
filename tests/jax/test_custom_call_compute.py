@@ -173,20 +173,21 @@ class TestFP8Dot:
         assert_allclose(primitive_a_grad, ref_a_grad, dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
-
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
                                        (16384, 1024, 1024)])
-    @pytest.mark.parametrize('activation_type, use_bias', [(('gelu', ), True),
-                                                           (('gelu', 'linear'), False) ])
-    def test_grad_fused_layernorm_fp8_mlp(self, m, n, k, activation_type: Sequence[Union[str, Callable]], use_bias: bool):
+    @pytest.mark.parametrize('activation_type', [('gelu', ),
+                                                 ('gelu', 'linear')])
+    @pytest.mark.parametrize('use_bias', [True, False])
+    def test_grad_fused_layernorm_fp8_mlp(self, m, n, k,
+                                          activation_type: Sequence[Union[str, Callable]],
+                                          use_bias: bool):
         """  N/a """
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 6)
-        """ activations = ('gelu',) """
 
         activation_dict = {
-            ('gelu', ) : jax.nn.gelu
+            ('gelu', ): jax.nn.gelu
         }
 
         a = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)

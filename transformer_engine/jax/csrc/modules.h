@@ -154,6 +154,12 @@ pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size
 void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
 
+pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype);
+
+void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
+
 void GatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void GatedGeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);

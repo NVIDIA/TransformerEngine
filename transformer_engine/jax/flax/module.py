@@ -669,7 +669,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
 
 class LayerNormMLP(TransformerEngineBase):
-    """
+    r"""
     Applies layer normalization on the input followed by the MLP module,
     consisting of 2 successive linear transformations, separated by given activations.
 
@@ -847,10 +847,8 @@ class LayerNormMLP(TransformerEngineBase):
         is_gated = normalize_acts in gated_act_pool
         is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
-
-        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented\
-                and (self.intermediate_dropout_rate < 1e-3) \
-                and ((is_gated and not self.use_bias) or (not is_gated and self.use_bias))
+        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented and\
+                                self.intermediate_dropout_rate < 1e-3
 
         # LayerNorm
         if self.enable_layernorm:
