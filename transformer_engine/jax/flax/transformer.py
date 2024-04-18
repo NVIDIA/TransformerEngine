@@ -1103,7 +1103,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
 
-            # No changes to memory layout, should trigger bicast only (Ideally no Perf impact)
+            # No changes to memory layout, should trigger bitcast only (Ideally no Perf impact)
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
 

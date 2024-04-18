@@ -377,7 +377,6 @@ def apply_rotary_pos_emb_consecutive(
     min_timescale: int = 1,
     max_timescale: int = 10000,
 ):
-
     embedding_dim = inputs.shape[-1]
     half_embedding_dim = embedding_dim // 2
     fraction = 2 * jnp.arange(0, half_embedding_dim) / embedding_dim
@@ -561,6 +560,8 @@ class MultiHeadAttention(nn.Module):
             else:
                 apply_rotary_pos_emb = apply_rotary_pos_emb_consecutive
 
+            query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
             query = apply_rotary_pos_emb(query, position)
             key = apply_rotary_pos_emb(key, position)
 
@@ -1223,6 +1224,21 @@ def assert_allclose(
 
     # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
+
+
+def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
+    flatten_expected, _ = jax.tree_util.tree_flatten_with_path(expected)
+    flatten_actual, _ = jax.tree_util.tree_flatten_with_path(actual)
+
+    for (expected_path, expected_value), (actual_path,
+                                          actual_value) in zip(flatten_expected, flatten_actual):
+        assert expected_path == actual_path
+        key_str = jax.tree_util.keystr(expected_path)
+        assert_allclose(expected_value,
+                        actual_value,
+                        rtol=rtol,
+                        atol=atol,
+                        err_msg=f'Value of expected{key_str} and actual{key_str} is not close')
 
 
 def dtype_tols(

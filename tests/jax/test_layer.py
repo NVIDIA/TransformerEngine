@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from utils import assert_allclose
+from utils import assert_allclose, assert_tree_like_allclose
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
 
@@ -41,17 +41,17 @@ def clear_live_arrays():
         arr.delete()
 
 
-# TODO(rewang): As the base functions?
 def loss_fn(diff_xs, no_diff_xs, params, others, model, rngs):
     output = model.apply({"params": params, **others}, *diff_xs, *no_diff_xs, rngs=rngs)
-    return jnp.mean(output)
+    return jnp.mean(output, dtype=jnp.float32).astype(output.dtype)
 
 
 def generate_test_rngs():
-    data_rng = jax.random.PRNGKey(0)
-    init_rng = {'params': jax.random.PRNGKey(1), 'dropout': jax.random.PRNGKey(2)}
-    apply_rng = {'dropout': jax.random.PRNGKey(3)}
-    return data_rng, init_rng, apply_rng
+    root_rng = jax.random.PRNGKey(0)
+    params_rng, init_dropout_rng, apply_dropout_rng = jax.random.split(root_rng, 3)
+    init_rng = {'params': params_rng, 'dropout': init_dropout_rng}
+    apply_rng = {'dropout': apply_dropout_rng}
+    return init_rng, apply_rng
 
 
 def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
@@ -60,21 +60,6 @@ def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
     others, params = flax.core.pop(variables, 'params')
     del variables
     return layer, params, others
-
-
-def assert_tree_like_close(expected, actual, rtol=1e-05, atol=1e-08):
-    flatten_expected, _ = jax.tree_util.tree_flatten_with_path(expected)
-    flatten_actual, _ = jax.tree_util.tree_flatten_with_path(actual)
-
-    for (expected_path, expected_value), (actual_path,
-                                          actual_value) in zip(flatten_expected, flatten_actual):
-        assert expected_path == actual_path
-        key_str = jax.tree_util.keystr(expected_path)
-        assert_allclose(expected_value,
-                        actual_value,
-                        rtol=rtol,
-                        atol=atol,
-                        err_msg=f'Value of expected{key_str} and actual{key_str} is not close')
 
 
 DATA_SHAPE = [    # (batch, seqlen, emb_dim)
@@ -103,6 +88,7 @@ _KEY_OF_NUM_GQA_GROUPS = "num_gqa_groups"
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 _KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
 _KEY_OF_SELF_ATTN_MASK_TYPE = "self_attn_mask_type"
+_KEY_OF_USE_BIAS = "use_bias"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -138,25 +124,25 @@ ATTRS = [{
     _KEY_OF_FUSE_QKV_PARAMS: False
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
+    _KEY_OF_MLP_ACTIVATIONS: ('gelu', 'linear'),
 }, {
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_HIDDEN_DROPOUT: 0.8,
     _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
-    _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
+    _KEY_OF_MLP_ACTIVATIONS: ('gelu', 'linear'),
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
+    _KEY_OF_MLP_ACTIVATIONS: ('gelu', 'linear'),
 }, {
     _KEY_OF_NUM_HEADS: 8,
     _KEY_OF_NUM_GQA_GROUPS: 4,
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_MLP_ACTIVATIONS: (('gelu',)),
+    _KEY_OF_MLP_ACTIVATIONS: ('gelu',),
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
@@ -211,6 +197,9 @@ ATTRS = [{
     _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
 }]
 
+# TODO(rewang): Add GQA + RoPE
+# TODO(rewang): attention dropout
+
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
 
@@ -247,102 +236,59 @@ def sync_params_values(dst, src, transformations, sep='/'):
     return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
 
 
-class TestEncoderLayer:
+class BaseRunner:
+    layer_type = None
+    reference_layer = None
+    transformations = None
 
-    @staticmethod
-    def sync_params(ref, target):
-        transformations = {
-            'attention/qkv/scale': 'pre_attention_layer_norm/scale',
-            'attention/qkv/ln_bias': 'pre_attention_layer_norm/ln_bias',
-            'attention/query/scale': 'pre_attention_layer_norm/scale',
-            'attention/query/ln_bias': 'pre_attention_layer_norm/ln_bias',
-            'mlp/wi_kernel': 'mlp/wi/kernel',
-            'mlp/wo_kernel': 'mlp/wo/kernel',
-            'mlp/scale': 'pre_mlp_layer_norm/scale',
-            'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
-        }
-        target = sync_params_values(target, ref, transformations)
+    def sync_params(self, ref, target):
+        """
+        Copy the reference params to target
+        """
+        target = sync_params_values(target, ref, self.transformations)
         return ref, target
 
-    def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
-        batch, seqlen = data_shape[:2]
-        if transpose_batch_sequence:
-            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+    def test_forward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
 
-        data_rng, init_rng, apply_rng = generate_test_rngs()
-        inputs = (jax.random.normal(data_rng, data_shape, dtype),)
+        (ref_inputs, test_inputs), (ref_masks,
+                                    test_masks) = self.generate_inputs(data_shape, dtype, attrs)
 
-        padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
-            ref_masks = (1 - causal_mask,)
-            test_masks = (None, causal_mask)    # The second arg of Transformer is encoded tokens.
-        else:
-            ref_masks = (1 - padded_mask,)
-            test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
+        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **attrs)
 
-        te_layer_attrs = {}
-        for k, v in attrs.items():
-            te_layer_attrs[k] = v
-        ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer,
-                            layer_type=TransformerLayerType.ENCODER,
-                            dtype=dtype,
-                            **te_layer_attrs)
-
-        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
+        init_rng, apply_rng = generate_test_rngs()
+        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, ref_inputs,
                                                            ref_masks)
-        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
+        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, test_inputs,
                                                               test_masks)
+        ref_params, test_params = self.sync_params(ref_params, test_params)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
-
-        ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
-        test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
+        ref_out = loss_fn(ref_inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
+        test_out = loss_fn(test_inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
-        del data_rng, init_rng, apply_rng
+    def test_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        (ref_inputs, test_inputs), (ref_masks,
+                                    test_masks) = self.generate_inputs(data_shape, dtype, attrs)
 
-    def forward_backward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
-        batch, seqlen = data_shape[:2]
-        if transpose_batch_sequence:
-            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **attrs)
 
-        data_rng, init_rng, apply_rng = generate_test_rngs()
-        inputs = (jax.random.normal(data_rng, data_shape, dtype),)
-
-        padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
-            ref_masks = (1 - causal_mask,)
-            test_masks = (None, causal_mask)    # The second arg of Transformer is encoded tokens.
-        else:
-            ref_masks = (1 - padded_mask,)
-            test_masks = (None, padded_mask)    # The second arg of Transformer is encoded tokens.
-
-        te_layer_attrs = {}
-        for k, v in attrs.items():
-            te_layer_attrs[k] = v
-        ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer,
-                            layer_type=TransformerLayerType.ENCODER,
-                            dtype=dtype,
-                            **te_layer_attrs)
-        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
+        init_rng, apply_rng = generate_test_rngs()
+        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, ref_inputs,
                                                            ref_masks)
-        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
+        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, test_inputs,
                                                               test_masks)
 
-        ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params)
+        ref_params, test_params = self.sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):
                 _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
-                                                 has_aux=False)(inputs, test_masks, test_params,
-                                                                test_others, test_layer, apply_rng)
+                                                 has_aux=False)(test_inputs, test_masks,
+                                                                test_params, test_others,
+                                                                test_layer, apply_rng)
                 _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
                 test_others = FP8Helper.update_collections(
                     {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others)
@@ -351,206 +297,134 @@ class TestEncoderLayer:
 
         grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 2), has_aux=False)
 
-        ref_out, (ref_dgrads, ref_wgrads) = grad_fn(inputs, ref_masks, ref_params, ref_others,
+        ref_out, (ref_dgrads, ref_wgrads) = grad_fn(ref_inputs, ref_masks, ref_params, ref_others,
                                                     ref_layer, apply_rng)
-        test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
-                                                       test_layer, apply_rng)
+        test_out, (test_dgrads, test_wgrads) = grad_fn(test_inputs, test_masks, test_params,
+                                                       test_others, test_layer, apply_rng)
 
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
+        assert_tree_like_allclose(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
 
-        _, restructed_ref_wgrads = TestEncoderLayer.sync_params(ref_wgrads, test_wgrads)
-        assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
-
-        del data_rng, init_rng, apply_rng
-
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward(self, data_shape, dtype, attrs):
-        FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
-
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_with_fp8(self, data_shape, dtype, fp8_format, attrs):
-        FP8Helper.initialize(fp8_format=fp8_format)
-        self.forward_runner(data_shape, dtype, attrs, rtol=1e-04, atol=1e-03)
-        FP8Helper.finalize()
-
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_backward(self, data_shape, dtype, attrs):
-        FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-5, atol=2e-4)
-
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_backward_with_fp8(self, data_shape, dtype, fp8_format, attrs):
-        FP8Helper.initialize(fp8_format=fp8_format)
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
-        FP8Helper.finalize()
+        _, restructed_ref_wgrads = self.sync_params(ref_wgrads, test_wgrads)
+        assert_tree_like_allclose(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
 
-class TestDecoderLayer:
+class EncoderRunner(BaseRunner):
+    layer_type = TransformerLayerType.ENCODER
+    reference_layer = RefEncoderLayer
+    transformations = {
+        'attention/qkv/scale': 'pre_attention_layer_norm/scale',
+        'attention/qkv/ln_bias': 'pre_attention_layer_norm/ln_bias',
+        'attention/query/scale': 'pre_attention_layer_norm/scale',
+        'attention/query/ln_bias': 'pre_attention_layer_norm/ln_bias',
+        'mlp/wi_kernel': 'mlp/wi/kernel',
+        'mlp/wo_kernel': 'mlp/wo/kernel',
+        'mlp/scale': 'pre_mlp_layer_norm/scale',
+        'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
+    }
 
-    @staticmethod
-    def sync_params(ref, target):
-        transformations = {
-            'encoder_decoder_attention/qkv/scale': 'pre_cross_attention_layer_norm/scale',
-            'encoder_decoder_attention/qkv/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
-            'encoder_decoder_attention/query/scale': 'pre_cross_attention_layer_norm/scale',
-            'encoder_decoder_attention/query/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
-            'self_attention/qkv/scale': 'pre_self_attention_layer_norm/scale',
-            'self_attention/qkv/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
-            'self_attention/query/scale': 'pre_self_attention_layer_norm/scale',
-            'self_attention/query/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
-            'mlp/wi_kernel': 'mlp/wi/kernel',
-            'mlp/wo_kernel': 'mlp/wo/kernel',
-            'mlp/scale': 'pre_mlp_layer_norm/scale',
-            'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
-        }
-        target = sync_params_values(target, ref, transformations)
-        return ref, target
-
-    def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+    def generate_inputs(self, data_shape, dtype, attrs):
+        """
+        Return (ref_diffable, test_diffable), (ref_nondiffable, test_nondiffable)
+        """
+        transpose_batch_sequence = attrs[_KEY_OF_TRANSPOSE_BS]
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
 
-        data_rng, init_rng, apply_rng = generate_test_rngs()
-        inputs = (jax.random.normal(data_rng, data_shape,
-                                    dtype), jax.random.normal(data_rng, data_shape, dtype))
+        data_rng = jax.random.PRNGKey(2024)
+        inputs = (jax.random.normal(data_rng, data_shape, dtype),)
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
         if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
-            ref_masks = (1 - causal_mask, 1 - padded_mask)
-            test_masks = (causal_mask, padded_mask)
+            mask = causal_mask
         else:
-            ref_masks = (1 - padded_mask, 1 - padded_mask)
-            test_masks = (padded_mask, padded_mask)
+            mask = padded_mask
 
-        te_layer_attrs = {}
-        for k, v in attrs.items():
-            te_layer_attrs[k] = v
-        ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer,
-                            layer_type=TransformerLayerType.DECODER,
-                            dtype=dtype,
-                            **te_layer_attrs)
-        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
-                                                           ref_masks)
-        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
-                                                              test_masks)
+        ref_masks = (1 - mask,)
+        test_masks = (None, mask)    # The second arg of Transformer is encoded tokens.
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
+        return (inputs, inputs), (ref_masks, test_masks)
 
-        ref_out = loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer, apply_rng)
-        test_out = loss_fn(inputs, test_masks, test_params, test_others, test_layer, apply_rng)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+class DecoderRunner(BaseRunner):
+    layer_type = TransformerLayerType.DECODER
+    reference_layer = RefDecoderLayer
+    transformations = {
+        'encoder_decoder_attention/qkv/scale': 'pre_cross_attention_layer_norm/scale',
+        'encoder_decoder_attention/qkv/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
+        'encoder_decoder_attention/query/scale': 'pre_cross_attention_layer_norm/scale',
+        'encoder_decoder_attention/query/ln_bias': 'pre_cross_attention_layer_norm/ln_bias',
+        'self_attention/qkv/scale': 'pre_self_attention_layer_norm/scale',
+        'self_attention/qkv/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
+        'self_attention/query/scale': 'pre_self_attention_layer_norm/scale',
+        'self_attention/query/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
+        'mlp/wi_kernel': 'mlp/wi/kernel',
+        'mlp/wo_kernel': 'mlp/wo/kernel',
+        'mlp/scale': 'pre_mlp_layer_norm/scale',
+        'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
+    }
 
-        del data_rng, init_rng, apply_rng
-
-    def forward_backward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+    def generate_inputs(self, data_shape, dtype, attrs):
+        """
+        Return (ref_diffable, test_diffable), (ref_nondiffable, test_nondiffable)
+        """
+        transpose_batch_sequence = attrs[_KEY_OF_TRANSPOSE_BS]
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
 
-        data_rng, init_rng, apply_rng = generate_test_rngs()
-        inputs = (jax.random.normal(data_rng, data_shape,
-                                    dtype), jax.random.normal(data_rng, data_shape, dtype))
+        data_rng = jax.random.PRNGKey(0)
+        data_rng_0, data_rng_1 = jax.random.split(data_rng, 2)
+        inputs = (jax.random.normal(data_rng_0, data_shape,
+                                    dtype), jax.random.normal(data_rng_1, data_shape, dtype))
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
         if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
-            ref_masks = (1 - causal_mask, 1 - padded_mask)
-            test_masks = (causal_mask, padded_mask)
+            self_mask = causal_mask
         else:
-            ref_masks = (1 - padded_mask, 1 - padded_mask)
-            test_masks = (padded_mask, padded_mask)
+            self_mask = padded_mask
 
-        te_layer_attrs = {}
-        for k, v in attrs.items():
-            te_layer_attrs[k] = v
-        ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer,
-                            layer_type=TransformerLayerType.DECODER,
-                            dtype=dtype,
-                            **te_layer_attrs)
-        ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
-                                                           ref_masks)
-        test_layer, test_params, test_others = generate_layer(layer_cls, init_rng, inputs,
-                                                              test_masks)
+        ref_masks = (1 - self_mask, 1 - padded_mask)
+        test_masks = (self_mask, padded_mask)
 
-        ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params)
+        return (inputs, inputs), (ref_masks, test_masks)
 
-        if FP8Helper.is_fp8_enabled():
-            for _ in range(4):
-                _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
-                                                 has_aux=False)(inputs, test_masks, test_params,
-                                                                test_others, test_layer, apply_rng)
-                _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
-                test_others = FP8Helper.update_collections(
-                    {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others)
-                test_others = FP8Helper.update_fp8_metas(test_others)
-                del tmp_grad, fp8_meta_grad
 
-        grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 2), has_aux=False)
+@pytest.mark.parametrize('data_shape', DATA_SHAPE)
+@pytest.mark.parametrize('dtype', DTYPE)
+@pytest.mark.parametrize('attrs', ATTRS)
+class BaseTester():
+    runner = BaseRunner
 
-        ref_out, (ref_dgrads, ref_wgrads) = grad_fn(inputs, ref_masks, ref_params, ref_others,
-                                                    ref_layer, apply_rng)
-        test_out, (test_dgrads, test_wgrads) = grad_fn(inputs, test_masks, test_params, test_others,
-                                                       test_layer, apply_rng)
-
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_tree_like_close(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
-
-        _, restructed_ref_wgrads = TestDecoderLayer.sync_params(ref_wgrads, test_wgrads)
-        assert_tree_like_close(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
-
-        del data_rng, init_rng, apply_rng
-
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
+        self.runner().test_forward(data_shape, dtype, attrs, rtol=1e-5, atol=1e-5)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_with_fp8(self, data_shape, dtype, fp8_format, attrs):
-        FP8Helper.initialize(fp8_format=fp8_format)
-        self.forward_runner(data_shape, dtype, attrs, rtol=1e-04, atol=3e-02)
-        FP8Helper.finalize()
-
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_backward(self, data_shape, dtype, attrs):
+    def test_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=3e-04)
+        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-5, atol=1e-5)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('data_shape', DATA_SHAPE)
-    @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
-    @pytest.mark.parametrize('attrs', ATTRS)
-    def test_forward_backward_with_fp8(self, data_shape, dtype, fp8_format, attrs):
+    def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
         FP8Helper.initialize(fp8_format=fp8_format)
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-04, atol=3e-02)
+        self.runner().test_forward(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
+    def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
+        FP8Helper.initialize(fp8_format=fp8_format)
+        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
+        FP8Helper.finalize()
+
+
+class TestEncoderLayer(BaseTester):
+    runner = EncoderRunner
+
+
+class TestDecoderLayer(BaseTester):
+    runner = DecoderRunner
