@@ -107,6 +107,7 @@ def combine_biases(*masks: Optional[Array]):
 
 class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
+    scale_attn_logits: bool = True
     dropout_rate: float = 0.
     dtype: DType = jnp.float32
     float32_logits: bool = False
@@ -154,6 +155,11 @@ class DotProductAttention(nn.Module):
         assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
         assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
         assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
+
+        if self.scale_attn_logits:
+            head_dim = query.shape[-1]
+            depth_scaling = jnp.sqrt(head_dim).astype(self.dtype)
+            query = query / depth_scaling
 
         # Casting logits and softmax computation for float32 for model stability.
         if self.float32_logits:
@@ -260,8 +266,9 @@ class DenseGeneral(nn.Module):
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    self.features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
         else:
             bias = None
 
@@ -292,6 +299,7 @@ class MlpBlock(nn.Module):
     kernel_init: Initializer = None
     intermediate_dropout_rate: float = 0.1
     intermediate_dropout_dims: Sequence[int] = ()
+    use_bias: bool = False
     dtype: Any = jnp.float32
     fuse_wi: bool = True
 
@@ -314,6 +322,8 @@ class MlpBlock(nn.Module):
                              dtype=self.dtype,
                              kernel_init=self.kernel_init,
                              kernel_axes=('embed', 'mlp'),
+                             use_bias=self.use_bias,
+                             bias_axes=('mlp'),
                              name=dense_name)(inputs)
             x = jnp.split(x, num_activations, axis=-1)
             for idx, act_fn in enumerate(self.activations):
@@ -326,6 +336,8 @@ class MlpBlock(nn.Module):
                                  dtype=self.dtype,
                                  kernel_init=self.kernel_init,
                                  kernel_axes=('embed', 'mlp'),
+                                 use_bias=self.use_bias,
+                                 bias_axes=('mlp'),
                                  name=dense_name)(inputs)
                 x = _convert_to_activation_function(act_fn)(x)
                 activations.append(x)
@@ -344,6 +356,8 @@ class MlpBlock(nn.Module):
                               dtype=self.dtype,
                               kernel_init=self.kernel_init,
                               kernel_axes=('mlp', 'embed'),
+                              use_bias=self.use_bias,
+                              bias_axes=('embed'),
                               name='wo')(x)
         return output
 
@@ -436,6 +450,7 @@ class MultiHeadAttention(nn.Module):
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv: bool = True
+    use_bias: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -485,12 +500,16 @@ class MultiHeadAttention(nn.Module):
                                          axis=-1,
                                          features=self.num_heads * self.head_dim,
                                          kernel_axes=('embed', 'joined_kv'),
+                                         use_bias=self.use_bias,
+                                         bias_axes=('joined_kv'),
                                          dtype=self.dtype)
 
         kv_projection = functools.partial(DenseGeneral,
                                           axis=-1,
                                           features=self.num_gqa_groups * self.head_dim,
                                           kernel_axes=('embed', 'joined_kv'),
+                                          use_bias=self.use_bias,
+                                          bias_axes=('joined_kv'),
                                           dtype=self.dtype)
 
         # NOTE: T5 does not explicitly rescale the attention logits by
@@ -526,26 +545,27 @@ class MultiHeadAttention(nn.Module):
                                         features=self.num_heads * self.head_dim * 3,
                                         kernel_axes=('embed', 'joined_kv'),
                                         kernel_init=qkv_init,
+                                        use_bias=self.use_bias,
+                                        bias_axes=('joined_kv'),
                                         name='qkv',
                                         dtype=self.dtype)(inputs_kv)
                 query, key, value = jnp.split(
                     qkv_proj, [self.num_heads * self.head_dim, self.num_heads * self.head_dim * 2],
                     axis=-1)
-                if self.scale_attn_logits:
-                    query = query / depth_scaling
             else:
-                query = q_projection(kernel_init=query_init, name='query')( \
-                        (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
+                query = q_projection(kernel_init=query_init, name='query')(inputs_q)
+
                 kv_proj = DenseGeneral(axis=-1,
                                        features=self.num_gqa_groups * self.head_dim * 2,
                                        kernel_axes=('embed', 'joined_kv'),
                                        kernel_init=self.kernel_init,
+                                       use_bias=self.use_bias,
+                                       bias_axes=('joined_kv'),
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 key, value = jnp.split(kv_proj, [self.num_gqa_groups * self.head_dim], axis=-1)
         else:
-            query = q_projection(kernel_init=query_init, name='query')( \
-                    (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
+            query = q_projection(kernel_init=query_init, name='query')(inputs_q)
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
@@ -667,6 +687,7 @@ class MultiHeadAttention(nn.Module):
 
         # Apply attention.
         x = DotProductAttention(transpose_batch_sequence=self.transpose_batch_sequence,
+                                scale_attn_logits=self.scale_attn_logits,
                                 dropout_rate=self.dropout_rate,
                                 dtype=self.dtype,
                                 float32_logits=self.float32_logits)(query,
@@ -688,6 +709,8 @@ class MultiHeadAttention(nn.Module):
             axis=-1,
             kernel_init=self.kernel_init,
             kernel_axes=('joined_kv', 'embed'),
+            use_bias=self.use_bias,
+            bias_axes=('embed'),
             dtype=self.dtype,
             name='out')(x)
         return out
@@ -876,6 +899,7 @@ class EncoderLayer(nn.Module):
     scaled_query_init: bool = True
     mlp_dim: int = 2048
     mlp_activations: Sequence[str] = ('relu',)
+    use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     layernorm_type: str = 'layernorm'
@@ -940,6 +964,7 @@ class EncoderLayer(nn.Module):
                                fuse_qkv=self.fuse_qkv_params,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+                               use_bias=self.use_bias,
                                name='attention')(x,
                                                  x,
                                                  encoder_mask,
@@ -970,6 +995,7 @@ class EncoderLayer(nn.Module):
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_dropout_dims=self.intermediate_dropout_dims,
+            use_bias=self.use_bias,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
@@ -1007,6 +1033,7 @@ class DecoderLayer(nn.Module):
     scaled_query_init: bool = True
     mlp_dim: int = 2048
     mlp_activations: Sequence[str] = ('relu',)
+    use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
@@ -1078,6 +1105,7 @@ class DecoderLayer(nn.Module):
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
+                               use_bias=self.use_bias,
                                name='self_attention')(x,
                                                       x,
                                                       decoder_mask,
@@ -1113,6 +1141,7 @@ class DecoderLayer(nn.Module):
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
+                               use_bias=self.use_bias,
                                name='encoder_decoder_attention')(y,
                                                                  encoded,
                                                                  encoder_decoder_mask,
@@ -1135,6 +1164,7 @@ class DecoderLayer(nn.Module):
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_dropout_dims=self.intermediate_dropout_dims,
+            use_bias=self.use_bias,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',

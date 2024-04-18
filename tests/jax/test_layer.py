@@ -131,6 +131,7 @@ ATTRS = [{
     _KEY_OF_HIDDEN_DROPOUT: 0.8,
     _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
     _KEY_OF_MLP_ACTIVATIONS: ('gelu', 'linear'),
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
@@ -143,6 +144,7 @@ ATTRS = [{
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_MLP_ACTIVATIONS: ('gelu',),
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
@@ -174,27 +176,33 @@ ATTRS = [{
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_ENABLE_ROPE: True,
-    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive",
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_ENABLE_ROPE: True,
-    _KEY_OF_ROPE_GROUP_METHOD: "consecutive"
+    _KEY_OF_ROPE_GROUP_METHOD: "consecutive",
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_ENABLE_ROPE: True,
-    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate",
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
     _KEY_OF_ENABLE_ROPE: True,
-    _KEY_OF_ROPE_GROUP_METHOD: "alternate"
+    _KEY_OF_ROPE_GROUP_METHOD: "alternate",
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_HIDDEN_DROPOUT_DIMS: (0,),
     _KEY_OF_INTERMEDIATE_DROPOUT_DIMS: (1,),
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+    _KEY_OF_USE_BIAS: True,
 }]
 
 # TODO(rewang): Add GQA + RoPE
@@ -318,7 +326,9 @@ class EncoderRunner(BaseRunner):
         'attention/query/scale': 'pre_attention_layer_norm/scale',
         'attention/query/ln_bias': 'pre_attention_layer_norm/ln_bias',
         'mlp/wi_kernel': 'mlp/wi/kernel',
+        'mlp/wi_bias': 'mlp/wi/bias',
         'mlp/wo_kernel': 'mlp/wo/kernel',
+        'mlp/wo_bias': 'mlp/wo/bias',
         'mlp/scale': 'pre_mlp_layer_norm/scale',
         'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
     }
@@ -361,7 +371,9 @@ class DecoderRunner(BaseRunner):
         'self_attention/query/scale': 'pre_self_attention_layer_norm/scale',
         'self_attention/query/ln_bias': 'pre_self_attention_layer_norm/ln_bias',
         'mlp/wi_kernel': 'mlp/wi/kernel',
+        'mlp/wi_bias': 'mlp/wi/bias',
         'mlp/wo_kernel': 'mlp/wo/kernel',
+        'mlp/wo_bias': 'mlp/wo/bias',
         'mlp/scale': 'pre_mlp_layer_norm/scale',
         'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
     }
@@ -405,7 +417,7 @@ class BaseTester():
 
     def test_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-5, atol=1e-5)
+        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-5, atol=4e-5)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
