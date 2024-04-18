@@ -74,7 +74,7 @@ def apply_model(state, images, labels, var_collect, rngs=None):
     return grads, loss, accuracy
 
 
-@partial(jax.jit, static_argnums=2)
+@partial(jax.jit, static_argnums=(0, 1))
 def update_model(state, grads):
     """Update model params and FP8 meta."""
     state = state.apply_gradients(grads=grads[PARAMS_KEY])
