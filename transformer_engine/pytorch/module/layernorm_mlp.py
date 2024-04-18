@@ -33,6 +33,7 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -544,7 +545,10 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
-            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(
+                inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias):
+                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -1121,7 +1125,7 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc2_wgrad = None
 
-        if ctx.is_first_module and not is_graph_capturing():
+        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
