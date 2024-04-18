@@ -32,7 +32,6 @@ def gemm(
 ) -> Tuple[Union[paddle.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
-    print(f"accumulate: {accumulate}")
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"

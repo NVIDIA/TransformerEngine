@@ -83,6 +83,7 @@ def train(enable_master_grad, fuse_wgrad_accumulation=False):
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 def test_master_grad():
     '''Test main_grad'''
+    paddle.set_default_dtype('float32')
     loss1 = train(enable_master_grad=False)
     loss2 = train(enable_master_grad=True)
     loss3 = train(enable_master_grad=True, fuse_wgrad_accumulation=True)
