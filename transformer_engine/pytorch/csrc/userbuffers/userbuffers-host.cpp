@@ -105,7 +105,7 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                              \
   } while (0)
 
-static int check_nvml(communicator **comm) {
+static int init_nvml(communicator **comm) {
   int gpu_device;
   int flag = 0;
   CUdevice current_gpu;
@@ -141,6 +141,34 @@ static int check_nvml(communicator **comm) {
 
   (*comm)->nvml_fabric_info = fabric_info;
   return 1;
+}
+
+static int fetch_nvml_domin(communicator **comm) {
+    unsigned char *cluster_uuid = (unsigned char*)malloc((*comm)->nranks * sizeof(char)*NVML_GPU_FABRIC_UUID_LEN);
+    if (cluster_uuid == NULL) {
+      UB_PRINT("Failed to allocate memory for UUID [%p]", cluster_uuid);
+      return 1;
+    }
+
+    int mpi_status;
+    mpi_status = MPI_Allgather(&(*comm)->nvml_fabric_info.clusterUuid, NVML_GPU_FABRIC_UUID_LEN,
+                               MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN, MPI_CHAR, MPI_COMM_WORLD);
+    if (mpi_status == MPI_SUCCESS) {
+      UB_PRINT("MPI_Allgather failed [%d]", mpi_status);
+      return 1;
+    }
+
+    unsigned int *cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) * NVML_GPU_FABRIC_UUID_LEN);
+    if (cluster_cliqueid == NULL) {
+      UB_PRINT("Failed to allocate memory for UUID [%p]", cluster_cliqueid);
+      return 1;
+    }
+    mpi_status = MPI_Allgather(&(*comm)->nvml_fabric_info.cliqueId, 1,
+                               MPI_UNSIGNED, cluster_cliqueid, 1, MPI_UNSIGNED, MPI_COMM_WORLD);
+    if (mpi_status == MPI_SUCCESS) {
+      UB_PRINT("MPI_Allgather failed [%d]", mpi_status);
+      return 1;
+    }
 }
 
 int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
