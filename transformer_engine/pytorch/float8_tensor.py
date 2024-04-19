@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch.utils._pytree import tree_map
@@ -233,6 +233,87 @@ class _IdentityFunc(torch.autograd.Function):
     def backward(ctx, grad):
         return grad.to(ctx.input_dtype), None
 
+class _ViewFunc(torch.autograd.Function):
+    """View function
+
+    View the Float8Tensor using the provided shape.
+
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        tensor: torch.Tensor,
+        shape: Tuple[int] = None,
+    ) -> torch.Tensor:
+
+        # Return input tensor if shape is not provided
+        ctx.shape = tensor.shape
+        if shape is None:
+            return tensor
+
+        # Construct new tensor if shape is provided
+        if isinstance(tensor, Float8Tensor):
+            return Float8Tensor.make_like(
+                tensor,
+                data=tensor._data.view(*shape),
+            )
+        return tensor.view(*shape)
+
+    @staticmethod
+    def backward(ctx,
+        grad: torch.Tensor,
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+
+        if isinstance(grad, Float8Tensor):
+            dgrad = Float8Tensor.make_like(
+                grad,
+                data=grad._data.view(ctx.shape),
+            )
+            return dgrad, None
+        return grad.view(ctx.shape), None
+
+
+class _ReshapeFunc(torch.autograd.Function):
+    """Reshape function
+
+    Reshape the Float8Tensor using the provided shape.
+
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        tensor: torch.Tensor,
+        shape: Tuple[int] = None,
+    ) -> torch.Tensor:
+
+        # Return input tensor if shape is not provided
+        ctx.shape = tensor.shape
+        if shape is None:
+            return tensor
+
+        # Construct new tensor if shape is provided
+        if isinstance(tensor, Float8Tensor):
+            return Float8Tensor.make_like(
+                tensor,
+                data=tensor._data.reshape(*shape),
+            )
+        return tensor.reshape(*shape)
+
+    @staticmethod
+    def backward(ctx,
+        grad: torch.Tensor,
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+
+        if isinstance(grad, Float8Tensor):
+            dgrad = Float8Tensor.make_like(
+                grad,
+                data=grad._data.reshape(ctx.shape),
+            )
+            return dgrad, None
+        return grad.reshape(ctx.shape), None
+
 
 class Float8Tensor(torch.Tensor):
     """Experimental tensor class with FP8 data
@@ -452,6 +533,12 @@ class Float8Tensor(torch.Tensor):
 
     def clone(self) -> Float8Tensor:
         return _IdentityFunc.apply(self, {"data": self._data.detach().clone()})
+
+    def view(self, *shape: Tuple[int]) -> Float8Tensor:
+        return _ViewFunc.apply(self, shape)
+
+    def reshape(self, *shape: Tuple[int]) -> Float8Tensor:
+        return _ReshapeFunc.apply(self, shape)
 
     def expand_as(self, other: torch.Tensor):
         if other is self:
