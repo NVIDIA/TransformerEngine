@@ -684,13 +684,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
-            cast_to_fp8(
-                grad_output_mat,
-                ctx.fp8_meta["scaling_bwd"],
-                tex.FP8BwdTensors.GRAD_OUTPUT1,
-                fp8_dtype_backward,
-                out=grad_output_c,
-            )
+            if not isinstance(grad_output_mat, Float8Tensor):
+                cast_to_fp8(
+                    grad_output_mat,
+                    ctx.fp8_meta["scaling_bwd"],
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    fp8_dtype_backward,
+                    out=grad_output_c,
+                )
+            else:
+                grad_output_c = grad_output_mat
             if not ctx.ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
