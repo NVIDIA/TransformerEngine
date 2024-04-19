@@ -172,10 +172,18 @@ def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
 
 def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=torch.float32, requires_grad=True
-    ).cuda()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=torch.float32,
+        device="cuda",
+        requires_grad=True,
+    )
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
+    te_inp_attn_mask = torch.randint(
+        2,
+        (1, 1, config.seq_len, config.seq_len),
+        dtype=torch.bool,
+        device="cuda",
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -198,9 +206,17 @@ def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
 
 def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
-    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    te_inp_attn_mask = torch.randint(
+        2,
+        (1, 1, config.seq_len, config.seq_len),
+        dtype=torch.bool,
+        device="cuda",
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -227,8 +243,11 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
     te_inp_hidden_states = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -250,10 +269,18 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
 
 def _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
 
-    te_inp_attn_mask = torch.rand(torch.Size([config.batch_size, 1, 1, config.seq_len])).cuda() > 0.5
+    te_inp_attn_mask = torch.randint(
+        2,
+        (config.batch_size, 1, 1, config.seq_len),
+        dtype=torch.bool,
+        device="cuda",
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -268,10 +295,24 @@ def _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad):
 
 def _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
-    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
-    enc_dec_attn_mask = torch.rand(torch.Size([config.batch_size, 1, 1, config.seq_len])).cuda() > 0.5
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    te_inp_attn_mask = torch.randint(
+        2,
+        (1, 1, config.seq_len, config.seq_len),
+        dtype=torch.bool,
+        device="cuda",
+    )
+
+    enc_dec_attn_mask = torch.randint(
+        2,
+        (config.batch_size, 1, 1, config.seq_len),
+        dtype=torch.bool,
+        device="cuda",
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -294,8 +335,11 @@ def _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad
         pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")
 
     te_inp = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, dtype=dtype, requires_grad=not skip_dgrad
-    ).cuda()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=not skip_dgrad,
+    )
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -315,8 +359,10 @@ def _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad)
         pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")
 
     te_inp = torch.randn(
-        config.seq_len, config.batch_size, config.hidden_size, requires_grad=True
-    ).cuda()
+        (config.seq_len, config.batch_size, config.hidden_size),
+        device="cuda",
+        requires_grad=True,
+    )
     te_inp.retain_grad()
 
     with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
@@ -371,16 +417,14 @@ def test_sanity_layernorm_linear(dtype, fp8_recipe, model, skip_wgrad,
     sigma = 0.023
     init_method = init_method_normal(sigma)
 
-    block = (
-        LayerNormLinear(
-            config.hidden_size,
-            config.hidden_size * 3,
-            init_method=init_method,
-            zero_centered_gamma=zero_centered_gamma,
-            normalization=normalization,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = LayerNormLinear(
+        config.hidden_size,
+        config.hidden_size * 3,
+        init_method=init_method,
+        zero_centered_gamma=zero_centered_gamma,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
@@ -402,12 +446,12 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
     sigma = 0.023
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        Linear(
-            config.hidden_size, config.hidden_size, init_method=output_layer_init_method
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = Linear(
+        config.hidden_size,
+        config.hidden_size,
+        init_method=output_layer_init_method,
+        params_dtype=dtype,
+        device="cuda",
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
@@ -435,18 +479,16 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        LayerNormMLP(
-            config.hidden_size,
-            4 * config.hidden_size,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            zero_centered_gamma=zero_centered_gamma,
-            activation=activation,
-            normalization=normalization,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        zero_centered_gamma=zero_centered_gamma,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
@@ -477,26 +519,24 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            zero_centered_gamma=zero_centered_gamma,
-            bias=bias,
-            activation=activation,
-            normalization=normalization,
-            parallel_attention_mlp=parallel_attention_mlp,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        zero_centered_gamma=zero_centered_gamma,
+        bias=bias,
+        activation=activation,
+        normalization=normalization,
+        device="cuda",
+        parallel_attention_mlp=parallel_attention_mlp,
     )
 
     _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload)
@@ -546,24 +586,22 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=True,
-            output_layernorm=True,
-            zero_centered_gamma=zero_centered_gamma,
-            self_attn_mask_type="padding",
-            normalization=normalization,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=True,
+        output_layernorm=True,
+        zero_centered_gamma=zero_centered_gamma,
+        self_attn_mask_type="padding",
+        normalization=normalization,
+        device="cuda",
     )
 
     _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad)
@@ -607,24 +645,22 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            layer_type="decoder",
-            zero_centered_gamma=zero_centered_gamma,
-            normalization=normalization,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        layer_type="decoder",
+        zero_centered_gamma=zero_centered_gamma,
+        normalization=normalization,
+        device="cuda",
     )
 
     _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad)
@@ -665,19 +701,17 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-        )
-        .to(dtype=torch.float32)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=torch.float32,
+        device="cuda",
     )
 
     _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad)
@@ -700,22 +734,20 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            drop_path_rate=1.0,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        drop_path_rate=1.0,
+        device="cuda",
     )
 
     _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, False)
@@ -738,22 +770,20 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            fuse_qkv_params=True,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        fuse_qkv_params=True,
+        device="cuda",
     )
 
     _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, False)
@@ -777,24 +807,22 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            zero_centered_gamma=zero_centered_gamma,
-            fuse_qkv_params=True,
-            fuse_wgrad_accumulation=True,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        zero_centered_gamma=zero_centered_gamma,
+        fuse_qkv_params=True,
+        fuse_wgrad_accumulation=True,
+        device="cuda",
     )
 
     _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_recipe, skip_wgrad)
@@ -820,30 +848,28 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.kv_channels,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            zero_centered_gamma=zero_centered_gamma,
-            fuse_qkv_params=True,
-            normalization=normalization,
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.kv_channels,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        zero_centered_gamma=zero_centered_gamma,
+        fuse_qkv_params=True,
+        normalization=normalization,
+        device="cuda",
     )
 
     _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad)
 
 def test_model_multiple_cast():
-    a = torch.zeros((16,16)).cuda()
+    a = torch.zeros((16,16), device="cuda")
     m = Linear(16,32)
 
     y = m(a)
