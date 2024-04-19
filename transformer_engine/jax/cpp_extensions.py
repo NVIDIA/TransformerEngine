@@ -385,8 +385,8 @@ class LayerNormFwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            0,    # no dgamma_part in FWD pass
-            0,    # no dbeta_part in BWD pass
+            (0,),    # no dgamma_part in FWD pass
+            (0,),    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -463,7 +463,6 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 f"{LayerNormFwdPrimitive.name} does not support sharding of parameter beta " \
                 f"Enforcing no sharding of parameters hidden dim! " \
             )
-
 
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         g_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -589,8 +588,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            dgamma_part_aval.size,
-            dbeta_part_aval.size,
+            dgamma_part_aval.shape,
+            dbeta_part_aval.shape,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -791,8 +790,8 @@ class RmsNormFwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            0,    # no dgamma_part in FWD pass
-            0,    # no dbeta_part in BWD pass
+            (0,),    # no dgamma_part in FWD pass
+            (0,),    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -968,8 +967,8 @@ class RmsNormBwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            dgamma_part_aval.size,
-            0,    # no dbeta_part for RMSnorm
+            dgamma_part_aval.shape,
+            (0,),    # no dbeta_part for RMSnorm
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -3588,8 +3587,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            0,    # no dgamma_part in FWD pass
-            0,    # no dbeta_part in BWD pass
+            (0,),    # no dgamma_part in FWD pass
+            (0,),    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
@@ -3840,8 +3839,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            0,    # no dgamma_part in FWD pass
-            0,    # no dbeta_part in BWD pass
+            (0,),    # no dgamma_part in FWD pass
+            (0,),    # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
