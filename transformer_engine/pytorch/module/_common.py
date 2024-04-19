@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 
 from .. import cpp_extensions as tex
+from ..export import is_in_onnx_export_mode
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
 
@@ -99,32 +100,79 @@ def _apply_normalization(inputmat:torch.Tensor,
 
 
 class _NoopCatFunc(torch.autograd.Function):
-    """No-op concatenate tensors along dim 0
+    """Concatenate tensors, doing a no-op if possible
 
-    `full_tensor` is assumed to already be the concatenation of
-    `tensors`, i.e. they occupy the same memory with the correct
-    offsets.
+    See _noop_cat.
 
     """
 
     @staticmethod
     def forward(
-        ctx,
-        split_ranges: List[Tuple[int, int]],
-        full_tensor: torch.Tensor,
+        ctx: Any,
+        dim: int,
         *tensors: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
-        # pylint: disable=unused-argument
+
+        # Check first tensor
+        if not tensors:
+            raise ValueError("Attempted to concatenate 0 tensors")
+        num_dims = tensors[0].dim()
+        if not -num_dims <= dim < num_dims:
+            raise ValueError(
+                "Attempted to concatenate tensor "
+                f"with shape {list(tensors[0].size())} along dim {dim}"
+            )
+        dim %= num_dims
+
+        # Check remaining tensors
+        out_shape = list(tensors[0].size())
+        split_ranges = [(0, tensors[0].size(dim))]
+        for tensor in tensors[1:]:
+            in_shape = list(tensor.size())
+            if (
+                len(in_shape) != num_dims
+                or in_shape[:dim] != out_shape[:dim]
+                or in_shape[dim+1:] != out_shape[dim+1:]
+            ):
+                raise ValueError(
+                    "Attempted to concatenate tensors with shapes "
+                    f"{[list(tensor.size()) for tensor in tensors]} "
+                    f"along dim {dim}"
+                )
+            split_start = out_shape[dim]
+            split_end = split_start + in_shape[dim]
+            out_shape[dim] = split_end
+            split_ranges.append((split_start, split_end))
+
+        # Save state for backward
+        ctx.dim = dim
         ctx.split_ranges = split_ranges
-        assert not full_tensor.requires_grad, "Concatenated tensor should not require gradient"
-        out = full_tensor.new()
+
+        # Out-of-place concatenation if needed
+        dtype = tensors[0].dtype
+        device = tensors[0].device
+        strides = tensors[0].stride()
+        data_ptr_stride = strides[dim] * tensors[0].element_size()
+        data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
+        for tensor in tensors[1:]:
+            if (
+                tensor.dtype != dtype
+                or tensor.device != device
+                or tensor.stride() != strides
+                or tensor.data_ptr() != data_ptr
+            ):
+                return torch.cat(tensors, dim=dim)
+            data_ptr += tensor.size(dim) * data_ptr_stride
+
+        # No-op concatenation
+        out = tensors[0].new()
         out.set_(
-            full_tensor.untyped_storage(),
-            full_tensor.storage_offset(),
-            full_tensor.size(),
-            full_tensor.stride(),
+            tensors[0].untyped_storage(),
+            tensors[0].storage_offset(),
+            out_shape,
+            strides,
         )
-        out.requires_grad = True
+        out.requires_grad = any(tensor.requires_grad for tensor in tensors)
         return out
 
     @staticmethod
@@ -132,64 +180,32 @@ class _NoopCatFunc(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        grads = [
-            grad_output[split_start:split_end]
-            for split_start, split_end in ctx.split_ranges
-        ]
-        return None, None, *grads
+        grad_inputs = []
+        for split_start, split_end in ctx.split_ranges:
+            slices = [slice(None)] * grad_output.dim()
+            slices[ctx.dim] = slice(split_start, split_end)
+            grad_inputs.append(grad_output[tuple(slices)])
+        return None, *grad_inputs
 
 
 def _noop_cat(
     tensors: List[torch.Tensor],
-    full_tensor: torch.Tensor,
+    dim: int = 0,
 ) -> torch.Tensor:
-    """Concatenate tensors along dim 0, doing a no-op if possible
+    """Concatenate tensors, doing a no-op if possible
 
-    If `full_tensor` is already the concatenation of `tensors`, i.e.
-    they occupy the same memory region with the correct offsets, then
-    no copies are performed. Otherwise the buffers in all the tensors
-    are reallocated so that another call would result in a no-op.
-
-    In the backward pass, gradients to `partial_tensors` will just be
-    tensor views.
+    If tensors are already concatenated in memory, a tensor view of
+    that memory region will be returned. Otherwise the tensors will be
+    concatenated out-of-place, as usual.
 
     """
-
-    # Determine split points
-    split_ranges = []
-    full_tensor_shape = full_tensor.size()
-    offset = 0
-    for tensor in tensors:
-        tensor_shape = tensor.size()
-        if tensor_shape[1:] != full_tensor_shape[1:]:
-            raise ValueError(
-                f"Attempting to concatenate tensor with shape={list(tensor_shape)} "
-                f"into a tensor with shape={list(full_tensor_shape)}"
-            )
-        split_start = offset
-        offset += tensor_shape[0]
-        split_end = offset
-        split_ranges.append((split_start, split_end))
-    if offset != full_tensor_shape[0]:
-        raise ValueError(
-            f"Attempting to concatenate tensors with total shape[0]={offset} "
-            f"into a tensor with shape[0]={full_tensor_shape[0]}"
-        )
-
-    # Reallocate buffers if no-op concat isn't possible
-    need_to_reallocate = False
-    for tensor, (split_start, _) in zip(tensors, split_ranges):
-        if tensor.data_ptr() != full_tensor[split_start].data_ptr():
-            need_to_reallocate = True
-            break
-    if need_to_reallocate:
-        with torch.no_grad():
-            full_tensor.data = torch.cat(tensors)
-            for tensor, (split_start, split_end) in zip(tensors, split_ranges):
-                tensor.data = full_tensor[split_start:split_end]
-
-    # Perform no-op concat
-    return _NoopCatFunc.apply(split_ranges, full_tensor, *tensors)
+    if not tensors:
+        raise ValueError("Attempted to concatenate 0 tensors")
+    if len(tensors) == 1:
+        return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
+    return _NoopCatFunc.apply(dim, *tensors)
 
 
 @dataclass
