@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include "nvml.h"
 
-#define MNNVL
+#define MNNVL 1
 
 #define CE_DEADLOCK_DETECTOR 1 // Enable CE deadlock detection in production env
 
