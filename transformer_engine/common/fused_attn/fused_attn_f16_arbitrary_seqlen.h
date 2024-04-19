@@ -19,7 +19,7 @@ namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
                 size_t batch, size_t num_attn_heads, size_t max_seqlen,
-                size_t head_size, bool is_training, float attn_scale,
+                size_t head_dim, bool is_training, float attn_scale,
                 float p_dropout, NVTE_QKV_Layout qkv_layout,
                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                 const Tensor *input_QKV, const Tensor *input_Bias,
