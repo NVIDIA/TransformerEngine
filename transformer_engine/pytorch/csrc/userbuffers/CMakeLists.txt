@@ -15,6 +15,7 @@ target_link_libraries(transformer_engine_userbuffers PUBLIC
                       CUDA::cudart
                       CUDA::cuda_driver
                       MPI::MPI_CXX
+                      nvidia-ml
                       )
 target_include_directories(transformer_engine_userbuffers PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

@@ -105,7 +105,7 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                              \
   } while (0)
 
-static int init_nvml(communicator **comm) {
+static int mnnvl_init(communicator **comm) {
   int gpu_device;
   int flag = 0;
   CUdevice current_gpu;
@@ -132,43 +132,83 @@ static int init_nvml(communicator **comm) {
 
   // Get fabric info
   nvmlGpuFabricInfoV_t fabric_info = { .version = nvmlGpuFabricInfo_v2,
-                                      .state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED };
+                                       .state   = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED };
   NVMLCHECK(nvmlDeviceGetGpuFabricInfoV(nvml_device, &fabric_info));
+  if (fabric_info.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
+    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t reported NVML_GPU_FABRIC_STATE_NOT_SUPPORTED [%d]", fabric_info.state); 
+    return 1;
+  }
 
-  UB_PRINT("MNNVL nvmlGpuFabricInfoV_t fabric UUID %lx.%lx (%s) cliqueId 0x%x state %d healthMask 0x%x",
-            ((long *)&fabric_info.clusterUuid)[0], ((long *)&fabric_info.clusterUuid)[1], fabric_info.clusterUuid,
-            fabric_info.cliqueId, fabric_info.state, fabric_info.healthMask);
+// add allreduce for state
+// if (fabric_info.state != NVML_GPU_FABRIC_STATE_COMPLETED) abort
+
+  if (getenv("NVTE_UBDEBUG"))
+    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t fabric UUID %lx.%lx cliqueId 0x%x state %d healthMask 0x%x",
+              ((long *)&fabric_info.clusterUuid)[0], ((long *)&fabric_info.clusterUuid)[1],
+              fabric_info.cliqueId, fabric_info.state, fabric_info.healthMask);
 
   (*comm)->nvml_fabric_info = fabric_info;
-  return 1;
+
+  return 0;
 }
 
-static int fetch_nvml_domin(communicator **comm) {
-    unsigned char *cluster_uuid = (unsigned char*)malloc((*comm)->nranks * sizeof(char)*NVML_GPU_FABRIC_UUID_LEN);
+static int mnnvl_detect_domains(communicator **comm) {
+    int ret = 1;
+    unsigned char *cluster_uuid = NULL;
+    unsigned int *cluster_cliqueid = NULL;
+    int mpi_status;
+    int clique_size = 0;
+    int myclique_rank = 0;
+
+
+    cluster_uuid = (unsigned char*)malloc((*comm)->nranks * sizeof(char)*NVML_GPU_FABRIC_UUID_LEN);
     if (cluster_uuid == NULL) {
       UB_PRINT("Failed to allocate memory for UUID [%p]", cluster_uuid);
-      return 1;
+      goto error;
     }
 
-    int mpi_status;
     mpi_status = MPI_Allgather(&(*comm)->nvml_fabric_info.clusterUuid, NVML_GPU_FABRIC_UUID_LEN,
                                MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN, MPI_CHAR, MPI_COMM_WORLD);
-    if (mpi_status == MPI_SUCCESS) {
+    if (mpi_status != MPI_SUCCESS) {
       UB_PRINT("MPI_Allgather failed [%d]", mpi_status);
-      return 1;
+      goto error;
     }
 
-    unsigned int *cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) * NVML_GPU_FABRIC_UUID_LEN);
+    cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) * NVML_GPU_FABRIC_UUID_LEN);
     if (cluster_cliqueid == NULL) {
       UB_PRINT("Failed to allocate memory for UUID [%p]", cluster_cliqueid);
-      return 1;
+      goto error;
     }
     mpi_status = MPI_Allgather(&(*comm)->nvml_fabric_info.cliqueId, 1,
                                MPI_UNSIGNED, cluster_cliqueid, 1, MPI_UNSIGNED, MPI_COMM_WORLD);
-    if (mpi_status == MPI_SUCCESS) {
+    if (mpi_status != MPI_SUCCESS) {
       UB_PRINT("MPI_Allgather failed [%d]", mpi_status);
-      return 1;
+      goto error;
     }
+
+    for (int n = 0; n < (*comm)->nranks; n++) {
+      if (0 == strncmp((const char*)(*comm)->nvml_fabric_info.clusterUuid, (const char*)&cluster_uuid[n * NVML_GPU_FABRIC_UUID_LEN], NVML_GPU_FABRIC_UUID_LEN) &&
+          (*comm)->nvml_fabric_info.cliqueId == cluster_cliqueid[n]) {
+              if (n == (*comm)->myrank) {
+                myclique_rank = clique_size;
+              }
+              clique_size++;
+       }
+    }
+
+    (*comm)->nvrank = myclique_rank;
+    (*comm)->nvsize = clique_size;
+    
+    if (getenv("NVTE_UBDEBUG"))
+      UB_PRINT("MNNVL cliqueId 0x%x cliqueSize %d cliqueRank %d",
+              (*comm)->nvml_fabric_info.cliqueId, clique_size, myclique_rank);
+
+    ret = 0;
+error:
+    free(cluster_uuid);
+    free(cluster_cliqueid);
+
+    return ret;
 }
 
 int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
@@ -212,11 +252,21 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   }
 
   int ret = 0;
+  int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
+  int rank = (*comm)->myrank, size = (*comm)->nranks;
+
+#ifdef MNNVL
+  if (mnnvl_init(comm))
+    return 1;
+  if (mnnvl_detect_domains(comm))
+    return 1;
+
+  mylocal  = (*comm)->nvrank;
+  numlocal = (*comm)->nvsize;
+#else
   // split communicator
   char host_name[MPI_MAX_PROCESSOR_NAME];
   char(*host_names)[MPI_MAX_PROCESSOR_NAME];
-  int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
-  int rank = (*comm)->myrank, size = (*comm)->nranks;
   MPI_Get_processor_name(host_name, &namelen);
   bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
   host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
@@ -243,6 +293,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   MPI_Comm_size(MPI_COMM_WORLD, &numlocal);
   (*comm)->nvrank = mylocal;
   (*comm)->nvsize = numlocal;
+#endif
 
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
