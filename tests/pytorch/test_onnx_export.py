@@ -86,6 +86,12 @@ def set_max_seq_len(max_seq_len=128):
     os.environ["NVTE_ONNX_KVCACHE_MAX_SEQ_LEN"] = f"{max_seq_len}"
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 def create_fp8_recipe():
     return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
 
@@ -654,6 +660,7 @@ def test_export_layernorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
+                0,
                 zero_centered_gamma)
 
             ret = cast_from_fp8(
@@ -742,6 +749,7 @@ def test_export_rmsnorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
+                0,
                 zero_centered_gamma)
 
             ret = cast_from_fp8(
@@ -1273,6 +1281,7 @@ def test_export_gemm_layernorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
+                0,
                 zero_centered_gamma)
 
             x = cast_from_fp8(

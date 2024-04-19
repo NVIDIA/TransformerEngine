@@ -485,7 +485,8 @@ class TestGeLuFP8(TestGeLu):
         primitive.defvjp(primitive_fwd, primitive_bwd)
         func = value_and_grad(lambda x, y, z, w: jnp.mean(primitive(x, y, z, w)), (0, 1, 2, 3))
 
-        return func(inputs, no_use, no_use, no_use)
+        return func(inputs, jnp.transpose(inputs, (2, 0, 1)),
+                    jnp.zeros(inputs.shape[-1], dtype=inputs.dtype), no_use)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('shape', [(32, 2, 64), (64, 2, 256)])
@@ -582,7 +583,7 @@ class TestGatedGeLuFP8(TestGatedGeLu):
         primitive.defvjp(primitive_fwd, primitive_bwd)
         func = value_and_grad(lambda x, y, z: jnp.mean(primitive(x, y, z)), (0, 1, 2))
 
-        return func(inputs, no_use, no_use)
+        return func(inputs, jnp.transpose(inputs, (1, 2, 0)), no_use)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('shape', [(32, 2, 64), (64, 2, 256)])
