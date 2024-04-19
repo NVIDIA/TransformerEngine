@@ -117,7 +117,7 @@ template <size_t load_size, size_t store_size, typename IType, typename OType>
 __global__ void
 __launch_bounds__(block_size)
 cast_transpose_general_kernel(const IType * __restrict__ const input,
-                              const CType * const noop,
+                              const CType * __restrict__ const noop,
                               OType * __restrict__  const output_c,
                               OType * __restrict__  const output_t,
                               const CType * __restrict__ const scale_ptr,

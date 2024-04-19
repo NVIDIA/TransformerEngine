@@ -24,7 +24,7 @@ constexpr size_t block_size = __BLOCK_SIZE__;
 __global__ void
 __launch_bounds__(block_size)
 cast_transpose_optimized_kernel(const IType * __restrict__ const input,
-                                const CType * const noop,
+                                const CType * __restrict__ const noop,
                                 OType * __restrict__  const output_c,
                                 OType * __restrict__  const output_t,
                                 const CType * __restrict__ const scale_ptr,
