@@ -174,7 +174,7 @@ class TestFP8Dot:
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
+    @pytest.mark.parametrize('m,n,k', [(256, 512, 128), (16384, 1024, 2816), (16384, 2816, 1024),
                                        (16384, 1024, 1024)])
     @pytest.mark.parametrize('activation_type', [('gelu', ),
                                                  ('gelu', 'linear')])
@@ -198,7 +198,7 @@ class TestFP8Dot:
             b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
             b2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
-            b1 = jax.random.normal(subkeys[3], (len(activation_type), 0), jnp.bfloat16)
+            b1 = jax.random.normal(subkeys[3], (0,), jnp.bfloat16)
             b2 = jax.random.normal(subkeys[4], (0,), jnp.bfloat16)
 
         init_fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM * 2)

@@ -14,7 +14,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <iostream>
 
 #include "common/common.h"
 #include "common/util/logging.h"
@@ -305,11 +304,7 @@ pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hi
     auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
 
     TensorWrapper dummy_workspace;
-    assert(input_tensor.data() != nullptr);
-    assert(output_tensor.data() != nullptr);
-    assert(output_trans_tensor.data() != nullptr);
-    assert(dbias_tensor.data() != nullptr);
-    assert(dummy_workspace.data() != nullptr);
+
     nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(),
                               output_trans_tensor.data(), dbias_tensor.data(),
                               dummy_workspace.data(), nullptr);
