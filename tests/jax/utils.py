@@ -865,6 +865,7 @@ class RelativePositionBiases(nn.Module):
 
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
+    enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
@@ -892,6 +893,7 @@ class EncoderLayer(nn.Module):
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
+    self_attn_bias_type: Any = None
     self_attn_mask_type: Any = None
 
     def __post_init__(self):
@@ -906,17 +908,20 @@ class EncoderLayer(nn.Module):
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
 
-        if self.relative_embedding is None:
-            rel_emb = RelativePositionBiases(num_buckets=32,
-                                             max_distance=128,
-                                             num_heads=self.num_attention_heads,
-                                             dtype=self.dtype,
-                                             embedding_init=nn.initializers.variance_scaling(
-                                                 1.0, 'fan_avg', 'uniform'),
-                                             name='relpos_bias')
+        if self.enable_relative_embedding:
+            if self.relative_embedding is None:
+                rel_emb = RelativePositionBiases(num_buckets=32,
+                                                 max_distance=128,
+                                                 num_heads=self.num_attention_heads,
+                                                 dtype=self.dtype,
+                                                 embedding_init=nn.initializers.variance_scaling(
+                                                     1.0, 'fan_avg', 'uniform'),
+                                                 name='relpos_bias')
+            else:
+                rel_emb = self.relative_embedding
+            encoder_bias = rel_emb(inputs.shape[sequence_dim], inputs.shape[sequence_dim], True)
         else:
-            rel_emb = self.relative_embedding
-        encoder_bias = rel_emb(inputs.shape[sequence_dim], inputs.shape[sequence_dim], True)
+            encoder_bias = None
 
         # Attention block.
         residual = inputs
@@ -1003,6 +1008,7 @@ class EncoderLayer(nn.Module):
 
 class DecoderLayer(nn.Module):
     """Transformer decoder layer that attends to the encoder."""
+    enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
@@ -1030,6 +1036,7 @@ class DecoderLayer(nn.Module):
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
+    self_attn_bias_type: Any = None
     self_attn_mask_type: Any = None
 
     def __post_init__(self):
@@ -1050,18 +1057,22 @@ class DecoderLayer(nn.Module):
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
-        l = max_decode_length if decode and max_decode_length else inputs.shape[sequence_dim]
-        if self.relative_embedding is None:
-            rel_emb = RelativePositionBiases(num_buckets=32,
-                                             max_distance=128,
-                                             num_heads=self.num_attention_heads,
-                                             dtype=self.dtype,
-                                             embedding_init=nn.initializers.variance_scaling(
-                                                 1.0, 'fan_avg', 'uniform'),
-                                             name='relpos_bias')
+
+        if self.enable_relative_embedding:
+            l = max_decode_length if decode and max_decode_length else inputs.shape[sequence_dim]
+            if self.relative_embedding is None:
+                rel_emb = RelativePositionBiases(num_buckets=32,
+                                                 max_distance=128,
+                                                 num_heads=self.num_attention_heads,
+                                                 dtype=self.dtype,
+                                                 embedding_init=nn.initializers.variance_scaling(
+                                                     1.0, 'fan_avg', 'uniform'),
+                                                 name='relpos_bias')
+            else:
+                rel_emb = self.relative_embedding
+            decoder_bias = rel_emb(l, l, False)
         else:
-            rel_emb = self.relative_embedding
-        decoder_bias = rel_emb(l, l, False)
+            decoder_bias = None
 
         # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
         residual = inputs

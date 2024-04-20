@@ -22,7 +22,7 @@ from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 is_fp8_supported, reason = is_fp8_available()
 
 
-@pytest.fixture(autouse=True, scope='module')
+@pytest.fixture(autouse=True, scope='function')
 def enable_fused_attn():
     """
     Enable fused attention
@@ -68,9 +68,11 @@ _KEY_OF_NUM_HEADS = "num_attention_heads"
 _KEY_OF_NUM_GQA_GROUPS = "num_gqa_groups"
 _KEY_OF_ENABLE_ROPE = "enable_rotary_pos_emb"
 _KEY_OF_ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
+_KEY_OF_SELF_ATTN_BIAS_TYPE = "self_attn_bias_type"
 _KEY_OF_SELF_ATTN_MASK_TYPE = "self_attn_mask_type"
 _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
+_KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -186,9 +188,12 @@ ATTRS = [{}, {
 }, {
     _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
     _KEY_OF_USE_BIAS: True,
+}, {
+    _KEY_OF_RELATIVE_EMBEDDING: False,
+    _KEY_OF_SELF_ATTN_BIAS_TYPE: "no_bias",
+}, {
+    _KEY_OF_ATTENTION_DROPOUT: 0.3,
 }]
-
-# TODO(rewang): attention dropout
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
@@ -198,8 +203,12 @@ class BaseRunner:
     reference_layer: flax.linen.Module = None
     transformations: Dict[str, str] = None
 
-    def __init__(self):
+    def __init__(self, attrs):
+        self.attrs = attrs
         self.generate_test_rngs()
+        # Disable fused attention for attention dropout because the different dropout impl
+        if attrs.get(_KEY_OF_ATTENTION_DROPOUT, False) and os.getenv('NVTE_FUSED_ATTN'):
+            os.environ['NVTE_FUSED_ATTN'] = "0"
 
     def generate_test_rngs(self):
         root_rng = jax.random.PRNGKey(0)
@@ -226,11 +235,11 @@ class BaseRunner:
         target = sync_params_values(target, ref, self.transformations)
         return ref, target
 
-    def test_forward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype, attrs)
+    def test_forward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+        inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **attrs)
+        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
 
         ref_layer, ref_params, ref_others = self.generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self.generate_layer(layer_cls, inputs, test_masks)
@@ -241,11 +250,11 @@ class BaseRunner:
 
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
-    def test_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
-        inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype, attrs)
+    def test_backward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+        inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **attrs)
+        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
 
         ref_layer, ref_params, ref_others = self.generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self.generate_layer(layer_cls, inputs, test_masks)
@@ -297,11 +306,11 @@ class EncoderRunner(BaseRunner):
         'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
     }
 
-    def generate_inputs(self, data_shape, dtype, attrs):
+    def generate_inputs(self, data_shape, dtype):
         """
         Return inputs, (ref_masks, test_masks)
         """
-        transpose_batch_sequence = attrs[_KEY_OF_TRANSPOSE_BS]
+        transpose_batch_sequence = self.attrs[_KEY_OF_TRANSPOSE_BS]
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
@@ -311,7 +320,7 @@ class EncoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
             mask = causal_mask
         else:
             mask = padded_mask
@@ -342,11 +351,11 @@ class DecoderRunner(BaseRunner):
         'mlp/ln_bias': 'pre_mlp_layer_norm/ln_bias',
     }
 
-    def generate_inputs(self, data_shape, dtype, attrs):
+    def generate_inputs(self, data_shape, dtype):
         """
         Return inputs, (ref_masks, test_masks)
         """
-        transpose_batch_sequence = attrs[_KEY_OF_TRANSPOSE_BS]
+        transpose_batch_sequence = self.attrs[_KEY_OF_TRANSPOSE_BS]
         batch, seqlen = data_shape[:2]
         if transpose_batch_sequence:
             data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
@@ -358,7 +367,7 @@ class DecoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ['casual', 'padding_causal']:
             self_mask = causal_mask
         else:
             self_mask = padded_mask
@@ -377,24 +386,24 @@ class BaseTester():
 
     def test_forward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.runner().test_forward(data_shape, dtype, attrs, rtol=1e-5, atol=1e-5)
+        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-5, atol=1e-5)
 
     def test_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-5, atol=4e-5)
+        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-5, atol=4e-5)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
         FP8Helper.initialize(fp8_format=fp8_format)
-        self.runner().test_forward(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
+        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
         FP8Helper.initialize(fp8_format=fp8_format)
-        self.runner().test_backward(data_shape, dtype, attrs, rtol=1e-4, atol=1e-3)
+        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
 
 
