@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax.linen.attention import combine_masks
 from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
@@ -62,27 +63,6 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
     if callable(fn_or_string):
         return fn_or_string
     raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
-
-
-def combine_masks(*masks: Optional[Array], dtype: DType = jnp.float32):
-    """Combine attention masks.
-
-  Args:
-    *masks: set of attention mask arguments to combine, some can be None.
-    dtype: final mask dtype
-
-  Returns:
-    Combined mask, reduced by logical and, returns None if no masks given.
-  """
-    masks = [m for m in masks if m is not None]
-    if not masks:
-        return None
-    assert all(map(lambda x: x.ndim == masks[0].ndim,
-                   masks)), (f'masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}')
-    mask, *other_masks = masks
-    for other_mask in other_masks:
-        mask = jnp.logical_and(mask, other_mask)
-    return mask.astype(dtype)
 
 
 def combine_biases(*masks: Optional[Array]):
@@ -573,7 +553,8 @@ class MultiHeadAttention(nn.Module):
             batch_dim = 1 if self.transpose_batch_sequence else 0
             seq_dim = 1 - batch_dim
 
-            position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+            q_position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+            k_position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
 
             if self.rotary_pos_emb_group_method == 'alternate':
                 apply_rotary_pos_emb = apply_rotary_pos_emb_alternate
@@ -582,8 +563,8 @@ class MultiHeadAttention(nn.Module):
 
             query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
-            query = apply_rotary_pos_emb(query, position)
-            key = apply_rotary_pos_emb(key, position)
+            query = apply_rotary_pos_emb(query, q_position)
+            key = apply_rotary_pos_emb(key, k_position)
 
         query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
         key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
@@ -903,6 +884,7 @@ class EncoderLayer(nn.Module):
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     output_layernorm: bool = False
     drop_path: float = 0.0
@@ -942,6 +924,7 @@ class EncoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_attention_layer_norm")(inputs)
@@ -981,6 +964,7 @@ class EncoderLayer(nn.Module):
         # MLP block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(x)
@@ -1010,6 +994,7 @@ class EncoderLayer(nn.Module):
 
         if self.output_layernorm:
             y = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layernorm")(y)
@@ -1038,6 +1023,7 @@ class DecoderLayer(nn.Module):
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     drop_path: float = 0.0
     enable_rotary_pos_emb: bool = False
@@ -1083,6 +1069,7 @@ class DecoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_self_attention_layer_norm")(inputs)
@@ -1123,6 +1110,7 @@ class DecoderLayer(nn.Module):
         # Encoder-Decoder block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_cross_attention_layer_norm')(x)
@@ -1153,6 +1141,7 @@ class DecoderLayer(nn.Module):
         # MLP block.
         residual = y
         z = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(y)
@@ -1179,6 +1168,7 @@ class DecoderLayer(nn.Module):
 
         if self.output_layernorm:
             z = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layernorm")(z)
@@ -1320,3 +1310,36 @@ def dtype_tols(
         rtol=eps_relaxed,
         atol=max(ulp, eps_relaxed),
     )
+
+
+def sync_params_values(dst, src, transformations, sep='/'):
+    """
+    This function will reconstuct a tree with dst's tree_def/shape and src's value.
+    transformations is a map that records the key mappings between dst and src.
+    If no dst key found in the transformerations, it will fall back to src key = dst key.
+    transformations = {
+        dst key map 0: src key map 0,
+        dst key map 1: src key map 1,
+        ...
+        # if dst key = src key, we don't need to add it
+    }
+    """
+    src_values = {}
+    for key, value in jax.tree_util.tree_leaves_with_path(src):
+        normalized_key = sep.join(x.key for x in key)
+        src_values[normalized_key] = value
+
+    flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
+    synced_dst_values = []
+
+    for key, value in flatten_dst:
+        normalized_key = sep.join(x.key for x in key)
+        if normalized_key in transformations:
+            corresponding_src_key = transformations[normalized_key]
+        else:
+            corresponding_src_key = normalized_key
+        synced_dst_values.append(src_values[corresponding_src_key])
+
+    synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
+
+    return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
