@@ -602,7 +602,7 @@ class UnfusedLinear(UnfusedOperation):
                         )
                     )
                 fp8_gemm(
-                    w.transpose()._data,
+                    w.transpose_2d(cache=True),
                     w._scale_inv,
                     0,
                     w._fp8_dtype,
@@ -661,11 +661,11 @@ class UnfusedLinear(UnfusedOperation):
             x_async = _wait_async(x_async)
             if with_fp8_compute:
                 fp8_gemm(
-                    x.transpose()._data,
+                    x.transpose_2d(cache=True),
                     x._scale_inv,
                     0,
                     x._fp8_dtype,
-                    dy.transpose()._data,
+                    dy.transpose_2d(cache=True),
                     dy._scale_inv,
                     0,
                     dy._fp8_dtype,

@@ -12,7 +12,6 @@ from typing import Optional
 import torch
 
 from transformer_engine.pytorch.fp8 import (
-    amax_and_scale_update,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -221,15 +220,16 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
             self._fp8_metas = self._make_fp8_metas()
 
         # Update FP8 metadata if needed
+        ### TODO Fix
         ### TODO Fused kernel
         ### TODO amax reductions
-        if fp8_enabled:
-            if self.num_fp8_scales("input"):
-                amax_and_scale_update(self.get_fp8_meta("input"), True)
-            if self.num_fp8_scales("param"):
-                amax_and_scale_update(self.get_fp8_meta("param"), True)
-            if self.num_fp8_scales("grad_output"):
-                amax_and_scale_update(self.get_fp8_meta("grad_output"), False)
+        # if fp8_enabled:
+        #     if self.num_fp8_scales("input"):
+        #         amax_and_scale_update(self.get_fp8_meta("input"), True)
+        #     if self.num_fp8_scales("param"):
+        #         amax_and_scale_update(self.get_fp8_meta("param"), True)
+        #     if self.num_fp8_scales("grad_output"):
+        #         amax_and_scale_update(self.get_fp8_meta("grad_output"), False)
 
     @abc.abstractmethod
     def op_forward(

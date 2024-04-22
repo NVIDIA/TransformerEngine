@@ -40,6 +40,22 @@ def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
         dtype = torch.get_default_dtype()
     return dtype
 
+def devices_match(device1: torch.device, device2: torch.device) -> bool:
+    """Whether two devices are the same"""
+    device1 = torch.device(device1)
+    device2 = torch.device(device2)
+    if device1.type != device2.type:
+        return False
+    if device1.type == "cuda":
+        index1 = device1.index
+        index2 = device2.index
+        if index1 is None:
+            index1 = torch.cuda.current_device()
+        if index2 is None:
+            index2 = torch.cuda.current_device()
+        return index1 == index2
+    return device1 == device2
+
 def is_float8_tensor(tensor: Any) -> bool:
     """Check if object is a `Float8Tensor`"""
     return isinstance(tensor, Float8Tensor)
@@ -65,7 +81,7 @@ def convert_tensor(
     tensor = tensor.detach()
 
     # Return immediately if tensor already has desired attributes
-    if device == tensor.device and dtype == tensor.dtype:
+    if devices_match(device, tensor.device) and dtype == tensor.dtype:
         if (
             memory_format == torch.preserve_format
             or tensor.is_contiguous(memory_format=memory_format)
@@ -75,7 +91,12 @@ def convert_tensor(
     # Convert FP8 tensor
     if is_float8_tensor(tensor):
         data = tensor._data.to(device=device, memory_format=memory_format)
-        return Float8Tensor.make_like(tensor, data=data, dtype=dtype)
+        return Float8Tensor.make_like(
+            tensor,
+            data=data,
+            fp8_attrs=tensor._fp8_attrs,
+            dtype=dtype,
+        )
 
     # Convert standard PyTorch tensor
     return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
@@ -121,15 +142,8 @@ def reshape(
         out = Float8Tensor.make_like(
             tensor,
             data=tensor._data.view(shape),
+            fp8_attrs=tensor._fp8_attrs,
         )
-        if (
-            tensor._transpose is not None
-            and out.dim() >= 1
-            and tensor._transpose.dim() == 2
-            and tensor._transpose.size(0) == out.size(-1)
-            and tensor._transpose.size(1) == math.prod(out.size()[:-1])
-        ):
-            out._transpose = tensor._transpose
         return out
 
     # Reshape standard PyTorch tensor
@@ -146,14 +160,15 @@ def fp8_cast_transpose(
 ) -> Float8Tensor:
     """Fused FP8 cast and transpose"""
 
-    # Check tensor
+    # Make sure tensor is in expected format
     device = tensor.device
     if device.type != "cuda":
         device = canonicalize_device(None)
     dtype = tensor.dtype
     if dtype not in (torch.float32, torch.float16, torch.bfloat16):
         dtype = torch.float32
-    tensor = tensor.to(
+    tensor = convert_tensor(
+        tensor,
         device=device,
         dtype=dtype,
         memory_format=torch.contiguous_format,
@@ -178,5 +193,6 @@ def fp8_cast_transpose(
         fp8_meta_index=fp8_meta_index,
         fp8_dtype=fp8_dtype,
     )
-    out._transpose = Float8Tensor.make_like(out, data=data_t)
+    out._transpose = data_t
+    out._transpose_invalid = False
     return out
