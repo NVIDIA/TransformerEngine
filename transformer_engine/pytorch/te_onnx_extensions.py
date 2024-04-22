@@ -304,9 +304,9 @@ def _ones_like(g, inp, dtype):
     return one
 
 
-@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "b")
+@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
-                            scale_inv, fp8_tensor, otype, zero_centered_gamma):
+                           scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
     """ONNX graph for layernorm_fwd_fp8"""
     # pylint: disable=unused-argument
     inp_dtype = get_TensorProtoDataType(inputs)
@@ -316,13 +316,13 @@ def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
     if inp_dtype != get_TensorProtoDataType(bias):
         bias = g.op("Cast", bias, to_i=inp_dtype)
 
-    ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma)
+    ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps, sm_margin, zero_centered_gamma)
     fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
     return fp8_ln
 
 
-@symbolic_helper.parse_args("v", "v", "v", "f", "b")
-def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
+@symbolic_helper.parse_args("v", "v", "v", "f", "i", "b")
+def onnx_layernorm_fwd(g, inputs, weight, bias, eps, sm_margin, zero_centered_gamma):
     """ONNX graph for layernorm_fwd"""
     # pylint: disable=unused-argument
 
@@ -352,9 +352,9 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     )
     return ln
 
-@symbolic_helper.parse_args("v", "v", "f", "v", "v", "fs", "i", "i", "b")
+@symbolic_helper.parse_args("v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
 def onnx_rmsnorm_fwd_fp8(g, inputs, weight, eps, scale, amax,
-                         scale_inv, fp8_tensor, otype, zero_centered_gamma):
+                         scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
     """ONNX graph for rmsnorm_fwd_fp8"""
     # pylint: disable=unused-argument
     inp_dtype = get_TensorProtoDataType(inputs)
@@ -362,13 +362,13 @@ def onnx_rmsnorm_fwd_fp8(g, inputs, weight, eps, scale, amax,
     if inp_dtype != get_TensorProtoDataType(weight):
         weight = g.op("Cast", weight, to_i=inp_dtype)
 
-    ln = onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma)
+    ln = onnx_rmsnorm_fwd(g, inputs, weight, eps, sm_margin, zero_centered_gamma)
     fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
     return fp8_ln
 
 
-@symbolic_helper.parse_args("v", "v", "f", "b")
-def onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma):
+@symbolic_helper.parse_args("v", "v", "f", "i", "b")
+def onnx_rmsnorm_fwd(g, inputs, weight, eps, sm_margin, zero_centered_gamma):
     """ONNX graph for rmsnorm_fwd"""
     # pylint: disable=unused-argument
 

@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 
 """Transformer Engine bindings for pyTorch"""
+import torch
+
 from .module import LayerNormLinear
 from .module import Linear
 from .module import LayerNormMLP
@@ -14,6 +16,7 @@ from .attention import MultiheadAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
 from .fp8 import fp8_model_init
+from .graph import make_graphed_callables
 from .export import onnx_export
 from .distributed import checkpoint
 from .distributed import CudaRNGStatesTracker
@@ -31,8 +34,8 @@ from .te_onnx_extensions import (
     onnx_rmsnorm_fwd,
     onnx_rmsnorm_fwd_fp8
 )
+
 try:
-    import torch
     torch._dynamo.config.error_on_nested_jit_trace = False
-except: # pylint: disable=bare-except
-    pass
+except AttributeError:
+    pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0

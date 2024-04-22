@@ -29,6 +29,7 @@ pybind11::dict Registrations() {
     dict["te_gelu_fp8"] = EncapsulateFunction(GeluFP8);
     dict["te_dgelu"] = EncapsulateFunction(DGelu);
     dict["te_dgelu_dbias_cast_transpose"] = EncapsulateFunction(DGeluDBiasCastTranspose);
+    dict["te_dbias_cast_transpose"] = EncapsulateFunction(DBiasCastTranspose);
     dict["te_gated_gelu"] = EncapsulateFunction(GatedGelu);
     dict["te_gated_gelu_fp8"] = EncapsulateFunction(GatedGeluFP8);
     dict["te_dgated_gelu"] = EncapsulateFunction(DGatedGelu);
@@ -76,6 +77,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("get_cublasLt_version", &cublasLtGetVersion);
     m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
+    m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
     m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);

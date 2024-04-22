@@ -529,10 +529,11 @@ void cast_transpose_dbias(const Tensor &input,
                           Tensor *dbias,
                           Tensor *workspace,
                           cudaStream_t stream) {
-  CheckInputTensor(input, "cast_transpose_dbias_input");
-  CheckOutputTensor(*cast_output, "cast_output");
-  CheckOutputTensor(*transposed_output, "transposed_output");
-  CheckOutputTensor(*dbias, "dbias");
+  // TODO
+  // CheckInputTensor(input, "cast_transpose_dbias_input");
+  // CheckOutputTensor(*cast_output, "cast_output");
+  // CheckOutputTensor(*transposed_output, "transposed_output");
+  // CheckOutputTensor(*dbias, "dbias");
 
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");

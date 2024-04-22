@@ -798,6 +798,7 @@ class MultiHeadAttnAttr:
     NUM_GQA_GROUPS = 'num_gqa_groups'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
     ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -867,6 +868,22 @@ class MultiHeadAttnAttr:
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
         ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        LORA_SCOPE: 'all'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        LORA_SCOPE: 'all'
     }]
 
 
@@ -897,6 +914,7 @@ class TestMultiHeadAttn(TestLayer):
         attn_mask_type = attrs[MultiHeadAttnAttr.ATTN_MASK_TYPE]
         enable_rotary_pos_emb = attrs[MultiHeadAttnAttr.ENABLE_ROPE]
         rotary_pos_emb_group_method = attrs[MultiHeadAttnAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(MultiHeadAttnAttr.LORA_SCOPE, 'none')
         fuse_qkv_params = True
         transpose_batch_sequence = True
         scale_attn_logits = False
@@ -919,6 +937,7 @@ class TestMultiHeadAttn(TestLayer):
                                      attn_mask_type=attn_mask_type,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
                                      rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      fuse_qkv_params=fuse_qkv_params,
                                      transpose_batch_sequence=transpose_batch_sequence,
                                      scale_attn_logits=scale_attn_logits,
@@ -940,6 +959,7 @@ class TestMultiHeadAttn(TestLayer):
             attn_mask_type=attn_mask_type,
             enable_rotary_pos_emb=enable_rotary_pos_emb,
             rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=low_rank_adaptation_scope,
             fuse_qkv_params=fuse_qkv_params,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
@@ -983,6 +1003,7 @@ class TransformerLayerAttr:
     TRANSPOSE_BS = 'transpose_batch_sequence'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
     ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -1131,6 +1152,16 @@ class TransformerLayerAttr:
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
@@ -1199,6 +1230,16 @@ class TransformerLayerAttr:
         ENABLE_ROPE: True,
         ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
     }]
 
 
@@ -1233,6 +1274,7 @@ class TestTransformer(TestLayer):
         layer_type = attrs[TransformerLayerAttr.LYR_TYPE]
         enable_rotary_pos_emb = attrs[TransformerLayerAttr.ENABLE_ROPE]
         rotary_pos_emb_group_method = attrs[TransformerLayerAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(TransformerLayerAttr.LORA_SCOPE, 'none')
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
                                                dtype=dtype,
@@ -1271,6 +1313,7 @@ class TestTransformer(TestLayer):
                                      enable_relative_embedding=enable_relative_embedding,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
                                      rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      relative_embedding=relative_embedding,
                                      drop_path=drop_path,
                                      transpose_batch_sequence=transpose_batch_sequence)
@@ -1296,6 +1339,7 @@ class TestTransformer(TestLayer):
                            rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                            enable_relative_embedding=enable_relative_embedding,
                            relative_embedding=relative_embedding_flax_module,
+                           low_rank_adaptation_scope=low_rank_adaptation_scope,
                            drop_path=drop_path,
                            transpose_batch_sequence=transpose_batch_sequence)
 

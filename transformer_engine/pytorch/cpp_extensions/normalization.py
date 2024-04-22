@@ -66,6 +66,7 @@ def layernorm_fwd_fp8_inf(
     fp8_meta_tensor: tex.FP8TensorMeta,
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
+    sm_margin: int,
     zero_centered_gamma,
 ) -> torch.Tensor:
     """LayerNorm with FP8 output.
@@ -83,6 +84,7 @@ def layernorm_fwd_fp8_inf(
         fp8_meta_tensor.scale_inv,
         fp8_tensor,
         otype,
+        sm_margin,
         zero_centered_gamma)
     return ret
 
@@ -92,6 +94,7 @@ def layernorm_fwd_inf(
     weight: torch.Tensor,
     bias: torch.Tensor,
     eps: float,
+    sm_margin: int,
     zero_centered_gamma: bool,
 ) -> torch.Tensor:
     """LayerNorm with FP8 output"""
@@ -100,6 +103,7 @@ def layernorm_fwd_inf(
         weight,
         bias,
         eps,
+        sm_margin,
         zero_centered_gamma,
     )
 
@@ -149,6 +153,7 @@ def rmsnorm_fwd_fp8_inf(
     fp8_meta_tensor: tex.FP8TensorMeta,
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
+    sm_margin: int,
     zero_centered_gamma,
 ) -> torch.Tensor:
     """RMSNorm with FP8 output.
@@ -165,6 +170,7 @@ def rmsnorm_fwd_fp8_inf(
         fp8_meta_tensor.scale_inv,
         fp8_tensor,
         otype,
+        sm_margin,
         zero_centered_gamma)
     return ret
 
@@ -173,6 +179,7 @@ def rmsnorm_fwd_inf(
     inp: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    sm_margin: int,
     zero_centered_gamma: bool,
 ) -> torch.Tensor:
     """RMSNorm with FP8 output"""
@@ -180,5 +187,6 @@ def rmsnorm_fwd_inf(
         inp,
         weight,
         eps,
+        sm_margin,
         zero_centered_gamma,
     )
