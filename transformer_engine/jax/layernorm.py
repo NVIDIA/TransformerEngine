@@ -72,17 +72,18 @@ def _layernorm_fwd_rule(x,
         mu = None
     else:
         raise ValueError(f"{layernorm_type=} is not supported.")
-    return output, (x, mu, rsigma, gamma)
+    return output, (x, mu, rsigma, gamma, beta)
 
 
 def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
-    x, mu, rsigma, gamma = ctx
+    x, mu, rsigma, gamma, beta = ctx
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dz,
                                           x,
                                           mu,
                                           rsigma,
                                           gamma,
+                                          beta,
                                           zero_centered_gamma=zero_centered_gamma,
                                           epsilon=epsilon)
     elif layernorm_type == 'rmsnorm':
@@ -215,8 +216,8 @@ def _layernorm_fp8_dot_fwd_rule(
                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     ctx = (ln_out, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
-           updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, x_contracting_dims,
-           k_contracting_dims)
+           updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, beta,
+           x_contracting_dims, k_contracting_dims)
 
     return output, ctx
 
@@ -233,7 +234,7 @@ def _layernorm_fp8_dot_bwd_rule(
         grad):
     ln_out_, casted_kernel, fp8_max, amax, scale, scale_inv, \
     updated_x_amax, updated_kernel_amax, \
-    x_shape, kernel_shape, mu, rsigma, x, gamma, \
+    x_shape, kernel_shape, mu, rsigma, x, gamma, beta, \
     x_contracting_dims, k_contracting_dims = ctx
 
     ln_out_t = transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
@@ -270,6 +271,7 @@ def _layernorm_fp8_dot_bwd_rule(
                                           mu,
                                           rsigma,
                                           gamma,
+                                          beta,
                                           zero_centered_gamma=zero_centered_gamma,
                                           epsilon=epsilon)
     else:
