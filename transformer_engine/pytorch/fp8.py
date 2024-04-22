@@ -502,12 +502,12 @@ def fp8_model_init(enabled: bool = True) -> None:
 
              This functionality is *EXPERIMENTAL*.
     """
+    _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+    FP8GlobalStateManager.FP8_PARAMETERS = enabled
     try:
-        _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
-        FP8GlobalStateManager.FP8_PARAMETERS = enabled
         yield
     finally:
-        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters # pylint: disable=used-before-assignment
+        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
 
 
 @contextmanager
@@ -555,16 +555,16 @@ def fp8_autocast(
                distributed group over which amaxes for the fp8 tensors
                are reduced at the end of each training step.
     """
+    fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
+    FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
+                                             calibrating=calibrating,
+                                             fp8_recipe=fp8_recipe,
+                                             fp8_group=fp8_group,
+                                             _graph=_graph)
     try:
-        fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
-        FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
-                                                 calibrating=calibrating,
-                                                 fp8_recipe=fp8_recipe,
-                                                 fp8_group=fp8_group,
-                                                 _graph=_graph)
         yield
     finally:
-        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
+        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state)
         FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
 
 

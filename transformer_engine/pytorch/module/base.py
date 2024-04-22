@@ -703,7 +703,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     out=grad_output_c,
                 )
             else:
-                grad_output_c = grad_ouput_mat # pylint: disable=undefined-variable
+                grad_output_c = grad_output_mat
             if not ctx.ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 if not isinstance(grad_output_c, Float8Tensor):

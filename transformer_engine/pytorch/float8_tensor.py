@@ -730,8 +730,6 @@ class Float8Tensor(torch.Tensor):
             return None
 
         # Slice op
-        # TODO Consider additional bookkeeping so we invalidate caches # pylint: disable=fixme
-        # if these slices are modified in-place
         if func == aten.slice.Tensor:
             tensor = args[0]
             data = tensor._data
