@@ -20,18 +20,6 @@ from transformer_engine.jax.softmax import is_softmax_kernel_available
 from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    # Calling customcalls before jax may cause CUDA uninitialize error
-    _ = jnp.zeros(0)
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
-
-
 def catch_unsupported(method):
     """
     The unsupported case should raise error instead of running it incorrectly.

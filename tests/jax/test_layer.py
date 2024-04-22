@@ -32,16 +32,6 @@ def enable_fused_attn():
     del os.environ["NVTE_FUSED_ATTN"]
 
 
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
-
-
 DATA_SHAPE = [    # (batch, seqlen, emb_dim)
     pytest.param((32, 128, 1024), id='32-128-1024'),
     pytest.param((32, 512, 1024), id='32-512-1024'),

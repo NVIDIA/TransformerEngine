@@ -45,16 +45,6 @@ def _convert_to_activation_function(fn_or_string):
     raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
 
 
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
-
-
 class TestFP8Dot:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
