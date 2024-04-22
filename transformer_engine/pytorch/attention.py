@@ -5,7 +5,6 @@
 """Attention."""
 import collections
 from contextlib import nullcontext
-import functools
 from importlib.metadata import version
 import math
 import os
@@ -279,7 +278,6 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
     return indices
 
 cu_seqlens_global = {}
-@functools.lru_cache
 def _get_full_cu_seqlens(
     batch_size: int,
     max_seqlen: int,
