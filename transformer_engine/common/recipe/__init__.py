@@ -96,7 +96,7 @@ class DelayedScaling:
 
                                  where `Tensor` is a framework tensor type.
     override_linear_precision: Tuple(bool, bool, bool), default=(False, False, False)
-                              Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
+                              Whether or not to execute the `fprop`, `dgrad`, and `wgrad`
                               GEMMs (respectively) in higher precision when using FP8.
     reduce_amax: bool, default = `True`
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
@@ -106,6 +106,20 @@ class DelayedScaling:
                 GPU maintains local amaxes and scaling factors. To ensure results are
                 numerically identical across checkpointing boundaries in this case, all
                 ranks must checkpoint in order to store the local tensors.
+    fp8_dpa: bool, default = `False`
+             Whether to enable FP8 dot product attention (DPA). When the model is placed in an
+             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             inputs from higher precision to FP8, performs attention in FP8, and casts tensors
+             back to higher precision as outputs. FP8 DPA currently is only supported in the
+             `FusedAttention` backend.
+    fp8_mha: bool, default = `False`
+            Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
+            operations mentioned above at the DPA boundaries. Currently only standard MHA modules
+            i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
+            `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
+            `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
+            When `fp8_mha = True, fp8_dpa = True`, it becomes
+            `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
 
     Notes
     -----
@@ -116,6 +130,9 @@ class DelayedScaling:
 
           FP8_MAX = maximum_representable_value(fp8_format)
           new_scaling_factor = (FP8_MAX / amax) / (2 ^ margin)
+
+    * `fp8_dpa` and `fp8_mha` are Beta features, and their API and functionality are
+      subject to change in future Transformer Engine releases.
     """
 
     margin: int = 0
@@ -126,6 +143,8 @@ class DelayedScaling:
     override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."

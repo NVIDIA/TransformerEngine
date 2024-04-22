@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import os
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
@@ -25,6 +26,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     init_method_constant,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -45,6 +47,8 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
+
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 __all__ = ["Linear"]
 
@@ -81,11 +85,16 @@ class _Linear(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         ub_name: str,
+        is_first_module_in_mha: bool,
     ) -> torch.Tensor:
+        is_input_fp8 = isinstance(inp, Float8Tensor)
+        if is_input_fp8:
+            fp8_meta["scaling_fwd"].scale_inv[tex.FP8FwdTensors.GEMM1_INPUT] = inp._scale_inv[0]
+
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmat = inp.view((-1, in_features))
+        inputmat = inp.view(-1, in_features)
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
@@ -103,29 +112,40 @@ class _Linear(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_t = None
         inputmat_no_fp8 = inputmat
+
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if (
-                not fp8_meta["recipe"].override_linear_precision.wgrad
-                and is_grad_enabled
-                and weight.requires_grad
-                and not sequence_parallel
-            ):
-                # FP8 input for forward, FP8 input transpose for backward wgrad
-                inputmat, inputmat_t = fp8_cast_transpose_fused(
-                    inputmat,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
+            if isinstance(inputmat, Float8Tensor):
+                if (
+                    not fp8_meta["recipe"].override_linear_precision.wgrad
+                    and is_grad_enabled
+                    and weight.requires_grad
+                    and not sequence_parallel
+                ):
+                    # FP8 input for forward, FP8 input transpose for backward wgrad
+                    inputmat_t = inputmat.transpose_2d()
             else:
-                # FP8 input for forward
-                inputmat = cast_to_fp8(
-                    inputmat,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
+                if (
+                    not fp8_meta["recipe"].override_linear_precision.wgrad
+                    and is_grad_enabled
+                    and weight.requires_grad
+                    and not sequence_parallel
+                ):
+                    # FP8 input for forward, FP8 input transpose for backward wgrad
+                    inputmat, inputmat_t = fp8_cast_transpose_fused(
+                        inputmat,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
+                else:
+                    # FP8 input for forward
+                    inputmat = cast_to_fp8(
+                        inputmat,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    )
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
@@ -134,6 +154,9 @@ class _Linear(torch.autograd.Function):
             inputmat_total = inputmat
 
         if fp8:
+            if _NVTE_DEBUG:
+                print('[Linear]: using FP8 forward')
+
             bias_dtype = (
                 torch.bfloat16
                 if activation_dtype == torch.float32
@@ -174,8 +197,16 @@ class _Linear(torch.autograd.Function):
                     )
                     weight_t_fp8 = None
 
-            proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
-                None, None, None, activation_dtype)
+            if is_first_module_in_mha:
+                proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
+                    tex.FP8FwdTensors.GEMM1_OUTPUT,
+                    fp8_meta["scaling_fwd"],
+                    fp8_dtype_forward,
+                    torch.uint8)
+            else:
+                proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
+                    None, None, None, activation_dtype)
+
             if ub_overlap_rs:
                 ub_obj_projout = get_ub(ub_name+"_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
@@ -202,14 +233,15 @@ class _Linear(torch.autograd.Function):
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
-                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                out = torch.empty(dim_size, dtype=proj_out_pttype, device=inputmat_total.device)
 
             _ = fp8_gemm(
                 weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
                 fp8_dtype_forward,
-                inputmat_total,
+                inputmat_total._data
+                if isinstance(inputmat_total, Float8Tensor) else inputmat_total,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
@@ -226,7 +258,18 @@ class _Linear(torch.autograd.Function):
                 fp8_meta_tensor = meta_tensor,
                 D_dtype = proj_out_tetype,
             )
+            if is_first_module_in_mha:
+                out = Float8Tensor(data=out,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_OUTPUT,
+                    fp8_dtype=fp8_dtype_forward,
+                    dtype=activation_dtype,
+                )
         else:
+            if _NVTE_DEBUG:
+                print('[Linear]: using non-FP8 forward')
+
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -319,8 +362,13 @@ class _Linear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
+            ctx.is_input_fp8 = is_input_fp8
             ctx.primary_weights_in_fp8 = primary_weights_in_fp8
-            ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(inp, weight, bias):
+                ctx.reduce_and_update_bwd_fp8_tensors = (
+                    ctx.reduce_and_update_bwd_fp8_tensors or
+                    FP8GlobalStateManager.is_first_fp8_module())
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -338,6 +386,10 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        if isinstance(grad_output, Float8Tensor):
+            ctx.fp8_meta["scaling_bwd"].scale_inv[
+                tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_output._scale_inv
+
         with torch.cuda.nvtx.range("_Linear_backward"):
             (
                 inputmat,
@@ -412,6 +464,18 @@ class _Linear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
+                    if _NVTE_DEBUG:
+                        print('[Linear]: using FP8 backward')
+
+                    if ctx.is_input_fp8:
+                        out_index, meta_tensor, output_te_dtype, output_dtype = (
+                            tex.FP8BwdTensors.GRAD_INPUT1,
+                            ctx.fp8_meta["scaling_bwd"],
+                            fp8_dtype_backward,
+                            torch.uint8)
+                    else:
+                        out_index, meta_tensor, output_te_dtype, output_dtype = (
+                            None, None, None, ctx.activation_dtype)
                     dgrad, _ = fp8_gemm(
                         weight_t_fp8,
                         fwd_scale_inverses,
@@ -421,13 +485,27 @@ class _Linear(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
                         tex.FP8BwdTensors.GRAD_OUTPUT1,
                         fp8_dtype_backward,
-                        ctx.activation_dtype,
+                        output_dtype,
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
                         ub_algo=ub_algo if ctx.ub_overlap_ag else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
+                        out_index=out_index,
+                        fp8_meta_tensor=meta_tensor,
+                        D_dtype=output_te_dtype,
                     )
+                    if output_dtype == torch.uint8:
+                        dgrad = Float8Tensor(data=dgrad,
+                            fp8_meta=ctx.fp8_meta,
+                            fp8_meta_forward=False,
+                            fp8_meta_index=tex.FP8BwdTensors.GRAD_INPUT1,
+                            fp8_dtype=fp8_dtype_backward,
+                            dtype=ctx.activation_dtype,
+                            )
                 else:
+                    if _NVTE_DEBUG:
+                        print('[Linear]: using non-FP8 backward')
+
                     dgrad, _, _ = gemm(
                         weight,
                         grad_output,
@@ -455,11 +533,19 @@ class _Linear(torch.autograd.Function):
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_overlap_ag:
-                            grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                            if isinstance(grad_output_c, Float8Tensor):
+                                grad_output_t = grad_output_c.transpose_2d()
+                            else:
+                                grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                         if inputmat_t_total is None:
-                            inputmat_t_total = tex.fp8_transpose(inputmat_total, fp8_dtype_backward)
+                            if isinstance(inputmat_total, Float8Tensor):
+                                inputmat_t_total = inputmat_total.transpose_2d()
+                            else:
+                                inputmat_t_total = tex.fp8_transpose(
+                                    inputmat_total, fp8_dtype_backward)
                         wgrad, _ = fp8_gemm(
-                            inputmat_t_total,
+                            inputmat_t_total._data
+                            if isinstance(inputmat_t_total, Float8Tensor) else inputmat_t_total,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
@@ -530,7 +616,7 @@ class _Linear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.is_first_module and not is_graph_capturing():
+        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
@@ -539,6 +625,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -690,14 +777,20 @@ class Linear(TransformerEngineBaseModule):
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
-        self.weight_tensor = torch.empty(
-            self.out_features, self.in_features,
-            device=device, dtype=params_dtype)
-
+        # Contiguous buffers for params
+        weight_tensor = torch.empty(
+            self.out_features,
+            self.in_features,
+            device=device,
+            dtype=params_dtype,
+        )
+        bias_tensor = None
         if self.use_bias:
-            self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
-        else:
-            self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
+            bias_tensor = torch.empty(
+                self.out_features,
+                device=device,
+                dtype=params_dtype,
+            )
 
         # Configure parameter splits
         self.weight_names = []
@@ -743,7 +836,11 @@ class Linear(TransformerEngineBaseModule):
                     )
                 self.parameter_split_sizes[i] = size // self.tp_size
 
-        # Construct parameters from weight and bias buffers
+        # Construct weight parameters
+        # Note: Register weights together so that they are adjacent to
+        # each other in Linear.parameters(). This makes it more likely
+        # that they will stay contiguous if the weights are
+        # manipulated externally, e.g. by FSDP.
         offset = 0
         for i, split_size in enumerate(self.parameter_split_sizes):
             split_start = offset
@@ -759,32 +856,30 @@ class Linear(TransformerEngineBaseModule):
                 )
 
             # Construct weight parameter
-            weight = self.weight_tensor
-            if is_subview:
-                weight = weight[split_start:split_end]
-            weight = torch.nn.Parameter(weight)
-            self.register_parameter(self.weight_names[i], weight,
-                                    init_fn=init_method,
-                                    get_rng_state_tracker=get_rng_state_tracker,
-                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
+            self.register_parameter(
+                self.weight_names[i],
+                torch.nn.Parameter(weight_tensor[split_start:split_end]),
+                init_fn=init_method,
+                get_rng_state_tracker=get_rng_state_tracker,
+                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+            )
 
-            # Construct bias parameter if needed
-            if self.use_bias:
-                bias = self.bias_tensor
-                if is_subview:
-                    bias = bias[split_start:split_end]
-                bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias,
-                                        init_fn=init_method_constant(0.0))
-            else:
+        # Construct bias parameters if needed
+        if self.use_bias:
+            offset = 0
+            for i, split_size in enumerate(self.parameter_split_sizes):
+                split_start = offset
+                offset += split_size
+                split_end = offset
+                self.register_parameter(
+                    self.bias_names[i],
+                    torch.nn.Parameter(bias_tensor[split_start:split_end]),
+                    init_fn=init_method_constant(0.0),
+                )
+        else:
+            for name in self.bias_names:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
-                setattr(self, self.bias_names[i], bias)
-
-            # Concatenated tensors are not needed if not splitting
-            # into multiple parameters
-            if not is_subview:
-                del self.weight_tensor
-                del self.bias_tensor
+                setattr(self, name, bias)
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
@@ -850,6 +945,7 @@ class Linear(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
+        is_first_module_in_mha: Optional[bool] = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -877,29 +973,24 @@ class Linear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
-        with self.prepare_forward(inp, is_first_microbatch) as inp:
+        with self.prepare_forward(inp,
+            is_first_microbatch,
+            allow_non_contiguous=isinstance(inp,Float8Tensor)) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
                    "Need to run inside fp8_autocast region when weights are stored in FP8."
 
+            is_first_module_in_mha = is_first_module_in_mha and self.fp8_meta["recipe"].fp8_mha
+
             # Get concatenated weight and bias tensors
-            if len(self.parameter_split_sizes) == 1:
-                weight_tensor = getattr(self, self.weight_names[0])
-                bias_tensor = getattr(self, self.bias_names[0])
-            elif torch.is_grad_enabled():
-                weight_tensor = _noop_cat(
-                    [getattr(self, name) for name in self.weight_names],
-                    self.weight_tensor,
+            weight_tensor = _noop_cat(
+                [getattr(self, name) for name in self.weight_names],
+            )
+            if self.use_bias:
+                bias_tensor = _noop_cat(
+                    [getattr(self, name) for name in self.bias_names],
                 )
-                if self.use_bias:
-                    bias_tensor = _noop_cat(
-                        [getattr(self, name) for name in self.bias_names],
-                        self.bias_tensor,
-                    )
-                else:
-                    bias_tensor = getattr(self, self.bias_names[0])  # Unused
             else:
-                weight_tensor = self.weight_tensor
-                bias_tensor = self.bias_tensor
+                bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
@@ -939,6 +1030,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.ub_name,
+                is_first_module_in_mha,
             )
             out = linear_fn(*args)
 

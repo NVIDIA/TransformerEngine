@@ -3,8 +3,10 @@
 # See LICENSE for license information.
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
-from typing import Any
+from __future__ import annotations
 from contextlib import nullcontext
+from typing import Any, Dict, Optional
+
 import torch
 
 from .float8_tensor import Float8Tensor
@@ -99,10 +101,17 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
     and `tensor_pop` interface. How the offload-handler manages the offloading, recovering
     or prefetching timing is transparent to this hook.
     """
-    def __init__(self, offload_handler, handler_extra_kwargs={}, debug=False) -> None: # pylint: disable=dangerous-default-value
-        self.debug = debug
-        self.offload_handler = offload_handler
-        self.handler_extra_kwargs = handler_extra_kwargs
+    def __init__(
+        self,
+        offload_handler: OffloadHandler,
+        handler_extra_kwargs: Optional[Dict[str,Any]] = None,
+        debug: bool = False,
+    ) -> None:
+        if handler_extra_kwargs is None:
+            handler_extra_kwargs = {}
+        self.debug: bool = debug
+        self.offload_handler: OffloadHandler = offload_handler
+        self.handler_extra_kwargs: Dict[str,Any] = handler_extra_kwargs
         super().__init__()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
@@ -290,10 +299,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             allocate_new_buf = True
         else:
             tensor_buf = id_buf_map[tensor_id]
-            if not (tensor_buf.size() == tensor.size() and tensor_buf.dtype == tensor.dtype): # pylint: disable=simplifiable-if-statement
-                allocate_new_buf = True
-            else:
-                allocate_new_buf = False # in this case, reuse the old buffer
+            allocate_new_buf = (
+                tensor_buf.size() != tensor.size()
+                or tensor_buf.dtype != tensor.dtype
+            )
 
         if allocate_new_buf:
             # supposed to only execute once
@@ -491,7 +500,7 @@ def get_cpu_offload_context(
     def tensor_need_offloading_checker_weights(tensor):
         return hasattr(tensor, "weight_offloading")
 
-    def tensor_need_offloading_checker_all(tensor): # pylint: disable=unused-argument
+    def tensor_need_offloading_checker_all(tensor):
         return (hasattr(tensor,"activation_offloading") or hasattr(tensor, "weight_offloading"))
 
     if offload_activations and offload_weights:
