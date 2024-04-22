@@ -10,6 +10,7 @@ from test_fused_attn import (
     _is_flash_attention_2_available,
     _cudnn_version,
 )
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 model_configs = {
     #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
@@ -29,6 +30,7 @@ def get_bash_arguments(**kwargs):
     return args
 
 @pytest.mark.skipif(not _is_flash_attention_2_available(), reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'])
@@ -44,6 +46,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
     )
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'])
