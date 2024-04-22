@@ -13,7 +13,6 @@ from torch.nn import init
 
 from .base import (
     get_workspace,
-    _prepare_backward,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -34,6 +33,7 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -50,7 +50,7 @@ from .. import cpp_extensions as tex
 
 from ..constants import dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-
+from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
 
@@ -94,6 +94,7 @@ class _LayerNormMLP(torch.autograd.Function):
         use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
+        skip_fp8_weight_update: Union[torch.Tensor, None],
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
@@ -131,7 +132,11 @@ class _LayerNormMLP(torch.autograd.Function):
             assert_dim_for_fp8_exec(fc1_weight)
             assert_dim_for_fp8_exec(fc2_weight)
 
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        update_fp8_weights = (
+            is_first_microbatch is None
+            or is_first_microbatch
+            or skip_fp8_weight_update is not None
+        )
 
         activation_func = _act_func(activation)[0]
 
@@ -225,8 +230,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.reset_fp8_meta_scale_inv()
                 fc1_weight_fp8 = fc1_weight
                 fc2_weight_fp8 = fc2_weight
-                fc1_weight_t_fp8 = None
-                fc2_weight_t_fp8 = None
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 fc1_weight_fp8 = Float8Tensor(
@@ -250,6 +253,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=fc1_weight_fp8._data,
                         transpose_out=fc1_weight_t_fp8._data,
+                        noop_flag=skip_fp8_weight_update,
                     )
                     tex.fp8_cast_transpose_fused(
                         fc2_weight,
@@ -258,6 +262,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_dtype_forward,
                         cast_out=fc2_weight_fp8._data,
                         transpose_out=fc2_weight_t_fp8._data,
+                        noop_flag=skip_fp8_weight_update,
                     )
                 else:
                     tex.cast_to_fp8(
@@ -510,6 +515,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                skip_fp8_weight_update.clone() if skip_fp8_weight_update is not None else None,
             )
             ctx.activation_dtype = activation_dtype
             ctx.activation = activation
@@ -538,6 +544,11 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_overlap_ag = ub_overlap_ag
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.primary_weights_in_fp8 = primary_weights_in_fp8
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.fp8 and requires_grad(
+                inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias):
+                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
 
         # Row Parallel Linear
         if ub_overlap_rs:
@@ -563,9 +574,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(
-            ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormMLP"
-        ):
+        with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             (
                 inputmat,
                 ln_weight,
@@ -582,6 +591,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fwd_scale_inverses,
+                skip_fp8_weight_update,
             ) = ctx.saved_tensors
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -592,11 +602,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
-            update_transpose_cache = "reuse_only" if ctx.is_first_microbatch is None else "lazy"
-            if ctx.fp8 and fc1_weight_t_fp8 is None:
-                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=update_transpose_cache)
-            if ctx.fp8 and fc2_weight_t_fp8 is None:
-                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=update_transpose_cache)
+            if ctx.primary_weights_in_fp8:
+                fc1_weight_t_fp8 = fc1_weight.transpose_2d(
+                    cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
+                )
+                fc2_weight_t_fp8 = fc2_weight.transpose_2d(
+                    cache=ctx.is_first_microbatch is not None,
+                    noop_flag=skip_fp8_weight_update,
+                )
+            elif ctx.fp8:
+                fc1_weight_t_fp8 = fc1_weight_t_fp8._data
+                fc2_weight_t_fp8 = fc2_weight_t_fp8._data
 
             activation_func = _act_func(ctx.activation)[1]
 
@@ -673,7 +690,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # FC2 DGRAD; Unconditional
                 fc2_dgrad, _ = tex.fp8_gemm(
-                    fc2_weight_t_fp8._data,
+                    fc2_weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM2_WEIGHT,
                     fp8_dtype_forward,
@@ -826,7 +843,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj = None
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
-                    fc1_weight_t_fp8._data,
+                    fc1_weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
@@ -1108,6 +1125,9 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc2_wgrad = None
 
+        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -1121,6 +1141,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             fc2_bias_grad if ctx.use_fc2_bias else None,
+            None,
             None,
             None,
             None,
@@ -1389,7 +1410,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
@@ -1413,6 +1433,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         # communication overlap with LN.
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1473,7 +1494,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     @no_torch_dynamo()
     def forward(
-        self, inp: torch.Tensor, is_first_microbatch: Optional[bool] = None
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a feedforward network (MLP Block).
@@ -1496,6 +1519,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+
+        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
 
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
             assert self.fp8 or not self.primary_weights_in_fp8, \
@@ -1535,6 +1562,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
+                skip_fp8_weight_update,
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
@@ -1550,7 +1578,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.bias_gelu_nvfusion,
                 self.set_parallel_mode,
                 torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin,
+                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,
