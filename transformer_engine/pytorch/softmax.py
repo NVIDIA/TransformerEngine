@@ -336,19 +336,20 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool: # pylint: disable=too-many-return-statements
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if ( # pylint: disable=too-many-boolean-expressions
-            not self.scaled_masked_softmax_fusion   # user doesn't want to fuse
-            or not self.input_in_float16            # input must be fp16
-            or sk < 16
-            or sk > 16384                           # sk must be 16 ~ 16384
-            or sk % 8 != 0                          # sk must be divisor of 8
-            or self.attn_mask_type == "arbitrary"   # Custom masks not supported
-        ):
-            return False
+        if not self.scaled_masked_softmax_fusion:
+            return False  # user doesn't want to fuse
+        if not self.input_in_float16:
+            return False  # input must be fp16
+        if not 16 < sk < 16384:
+            return False  # sk must be 16 ~ 16384
+        if sk % 8 != 0:
+            return False  # sk must be divisor of 8
+        if self.attn_mask_type == "arbitrary":
+            return False  # Custom masks not supported
 
         if self.attn_mask_type == "causal":         # unfused causal softmax kernel
             return True
