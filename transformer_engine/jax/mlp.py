@@ -10,15 +10,9 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
-<<<<<<< HEAD
-from .cpp_extensions import cast_fp8, transpose, cast_transpose
-from .cpp_extensions import gelu, gelu_fp8
-from .cpp_extensions import dgelu, dgelu_dbias_cast_transpose
-=======
 from .cpp_extensions import cast_fp8, transpose, cast_transpose, dbias_cast_transpose
 from .cpp_extensions import gelu
 from .cpp_extensions import gelu_fp8, dgelu, dgelu_dbias_cast_transpose
->>>>>>> main
 from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import silu, silu_fp8
@@ -34,39 +28,25 @@ from .sharding import with_sharding_constraint_by_logical_axes
 
 
 activation_dict = {
-<<<<<<< HEAD
-    ('gelu',): { 'fwd': gelu,
-                "bwd": dgelu },
-    ('gelu', 'linear'): { 'fwd': gated_gelu,
-                         'bwd': dgated_gelu },
-    ('silu',): { 'fwd': silu,
-                "bwd": dsilu },
-    ('silu', 'linear'): { 'fwd': gated_silu,
-                         'bwd': dgated_silu }
-}
-
-activation_fp8_dict = {
-    ('gelu',): { 'fwd': gelu_fp8,
-                'bwd': dgelu_dbias_cast_transpose },
-    ('gelu', 'linear'): { 'fwd': gated_gelu_fp8,
-                          'bwd': dgated_gelu_cast_transpose },
-    ('silu',): { 'fwd': silu_fp8,
-                'bwd': dsilu_dbias_cast_transpose },
-    ('silu', 'linear'): { 'fwd': gated_silu_fp8,
-                          'bwd': dgated_silu_cast_transpose }
-=======
     ('gelu',): {'fwd': gelu,
                 "bwd": dgelu},
     ('gelu', 'linear'): {'fwd': gated_gelu,
-                         'bwd': dgated_gelu}
+                         'bwd': dgated_gelu},
+    ('silu',): {'fwd': silu,
+                "bwd": dsilu },
+    ('silu', 'linear'): {'fwd': gated_silu,
+                         'bwd': dgated_silu}
 }
 
 activation_fp8_dict = {
     ('gelu',): {'fwd': gelu_fp8,
                 'bwd': dgelu_dbias_cast_transpose},
     ('gelu', 'linear'): {'fwd': gated_gelu_fp8,
-                         'bwd': dgated_gelu_cast_transpose}
->>>>>>> main
+                         'bwd': dgated_gelu_cast_transpose},
+    ('silu',): { 'fwd': silu_fp8,
+                'bwd': dsilu_dbias_cast_transpose },
+    ('silu', 'linear'): { 'fwd': gated_silu_fp8,
+                          'bwd': dgated_silu_cast_transpose }
 }
 
 
@@ -75,27 +55,14 @@ def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]
     Activation Unit
     """
     if len(activation_type) > 1:
-<<<<<<< HEAD
-        assert x.shape[-2] == 2 # Linear + GeLU
-=======
         assert x.shape[-2] == 2  # Linear + GeLU
->>>>>>> main
     output = _activation_lu(x, activation_type)
     return output
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
 
-<<<<<<< HEAD
     _output, _ = _activation_lu_fwd_rule(x, activation_type)
-=======
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
-
-    _output, _ = _activation_lu_fwd_rule(x, activation_type)
-
-    return _output
->>>>>>> main
 
     return _output
 
@@ -103,10 +70,6 @@ def _activation_lu_fwd_rule(x, activation_type):
     fwd_output = activation_dict[activation_type]["fwd"](x)
     return fwd_output, (x,)
 
-<<<<<<< HEAD
-=======
-
->>>>>>> main
 def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
     assert x.dtype == g.dtype
