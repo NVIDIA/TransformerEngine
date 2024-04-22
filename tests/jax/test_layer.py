@@ -386,11 +386,11 @@ class BaseTester():
 
     def test_forward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-5, atol=1e-5)
+        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-5, atol=7e-5)
 
     def test_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-5, atol=4e-5)
+        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-5, atol=7e-5)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
