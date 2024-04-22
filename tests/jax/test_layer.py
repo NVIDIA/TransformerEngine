@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
+"""Test transformer_engine.jax.flax.TransformerLayer"""
 import os
 from functools import partial
 from typing import Dict
@@ -189,36 +189,39 @@ ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
 
 class BaseRunner:
+    """
+    Base runner to define forward and backward tests
+    """
     layer_type: TransformerLayerType = None
     reference_layer: flax.linen.Module = None
     transformations: Dict[str, str] = None
 
     def __init__(self, attrs):
         self.attrs = attrs
-        self.generate_test_rngs()
+        self._generate_test_rngs()
         # Disable fused attention for attention dropout because the different dropout impl
         if attrs.get(_KEY_OF_ATTENTION_DROPOUT, False) and os.getenv('NVTE_FUSED_ATTN'):
             os.environ['NVTE_FUSED_ATTN'] = "0"
 
-    def generate_test_rngs(self):
+    def _generate_test_rngs(self):
         root_rng = jax.random.PRNGKey(0)
         params_rng, init_dropout_rng, apply_dropout_rng = jax.random.split(root_rng, 3)
         self.init_rng = {'params': params_rng, 'dropout': init_dropout_rng}
         self.apply_rng = {'dropout': apply_dropout_rng}
 
-    def generate_layer(self, layer_cls, diff_inputs, no_diff_inputs):
+    def _generate_layer(self, layer_cls, diff_inputs, no_diff_inputs):
         layer = layer_cls()
         variables = layer.init(self.init_rng, *diff_inputs, *no_diff_inputs)
         others, params = flax.core.pop(variables, 'params')
         del variables
         return layer, params, others
 
-    def loss_fn(self, diff_xs, no_diff_xs, params, others, model):
+    def _loss_fn(self, diff_xs, no_diff_xs, params, others, model):
         variables = {'params': params, **others}
         output = model.apply(variables, *diff_xs, *no_diff_xs, rngs=self.apply_rng)
         return jnp.mean(output, dtype=jnp.float32).astype(output.dtype)
 
-    def sync_params(self, ref, target):
+    def _sync_params(self, ref, target):
         """
         Copy the reference params to target
         """
@@ -226,34 +229,40 @@ class BaseRunner:
         return ref, target
 
     def test_forward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+        """
+        Test only the forward
+        """
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
         ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
         layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
 
-        ref_layer, ref_params, ref_others = self.generate_layer(ref_layer_cls, inputs, ref_masks)
-        test_layer, test_params, test_others = self.generate_layer(layer_cls, inputs, test_masks)
-        ref_params, test_params = self.sync_params(ref_params, test_params)
+        ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
+        test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
+        ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        ref_out = self.loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer)
-        test_out = self.loss_fn(inputs, test_masks, test_params, test_others, test_layer)
+        ref_out = self._loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer)
+        test_out = self._loss_fn(inputs, test_masks, test_params, test_others, test_layer)
 
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
     def test_backward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+        """
+        Test forward and backward through value_and_grad()
+        """
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
         ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
         layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
 
-        ref_layer, ref_params, ref_others = self.generate_layer(ref_layer_cls, inputs, ref_masks)
-        test_layer, test_params, test_others = self.generate_layer(layer_cls, inputs, test_masks)
+        ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
+        test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
 
-        ref_params, test_params = self.sync_params(ref_params, test_params)
+        ref_params, test_params = self._sync_params(ref_params, test_params)
 
         if FP8Helper.is_fp8_enabled():
             for _ in range(4):
-                _, tmp_grad = jax.value_and_grad(self.loss_fn, argnums=(3,), has_aux=False)(
+                _, tmp_grad = jax.value_and_grad(self._loss_fn, argnums=(3,), has_aux=False)(
                     inputs,
                     test_masks,
                     test_params,
@@ -266,7 +275,7 @@ class BaseRunner:
                 test_others = FP8Helper.update_fp8_metas(test_others)
                 del tmp_grad, fp8_meta_grad
 
-        grad_fn = jax.value_and_grad(self.loss_fn, argnums=(0, 2), has_aux=False)
+        grad_fn = jax.value_and_grad(self._loss_fn, argnums=(0, 2), has_aux=False)
 
         ref_out, (ref_dgrads, ref_wgrads) = grad_fn(inputs, ref_masks, ref_params, ref_others,
                                                     ref_layer)
@@ -276,11 +285,14 @@ class BaseRunner:
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
         assert_tree_like_allclose(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
 
-        _, restructed_ref_wgrads = self.sync_params(ref_wgrads, test_wgrads)
+        _, restructed_ref_wgrads = self._sync_params(ref_wgrads, test_wgrads)
         assert_tree_like_allclose(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
 
 
 class EncoderRunner(BaseRunner):
+    """
+    Encoder runner implementations
+    """
     layer_type = TransformerLayerType.ENCODER
     reference_layer = RefEncoderLayer
     transformations = {
@@ -322,6 +334,9 @@ class EncoderRunner(BaseRunner):
 
 
 class DecoderRunner(BaseRunner):
+    """
+    Decoder runner implementations
+    """
     layer_type = TransformerLayerType.DECODER
     reference_layer = RefDecoderLayer
     transformations = {
@@ -372,19 +387,25 @@ class DecoderRunner(BaseRunner):
 @pytest.mark.parametrize('dtype', DTYPE)
 @pytest.mark.parametrize('attrs', ATTRS)
 class BaseTester():
+    """
+    Pytest interface to invoke the runner
+    """
     runner = BaseRunner
 
     def test_forward(self, data_shape, dtype, attrs):
+        """Test normal datatype forward"""
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-5, atol=7e-5)
 
     def test_backward(self, data_shape, dtype, attrs):
+        """Test normal datatype backward"""
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-5, atol=7e-5)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
+        """Test forward with fp8 enabled"""
         FP8Helper.initialize(fp8_format=fp8_format)
         self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
@@ -392,14 +413,21 @@ class BaseTester():
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
+        """Test backward with fp8 enabled"""
         FP8Helper.initialize(fp8_format=fp8_format)
         self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         FP8Helper.finalize()
 
 
 class TestEncoderLayer(BaseTester):
+    """
+    Test transformer_engine.jax.flax.TransformerLayer(layer_type=Encoder)
+    """
     runner = EncoderRunner
 
 
 class TestDecoderLayer(BaseTester):
+    """
+    Test transformer_engine.jax.flax.TransformerLayer(layer_type=Decoder)
+    """
     runner = DecoderRunner
