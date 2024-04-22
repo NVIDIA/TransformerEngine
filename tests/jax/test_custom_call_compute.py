@@ -330,7 +330,6 @@ class TestFP8Dot:
                             jnp.asarray(ref_b2_grad, np.float32),
                             dtype=jnp.bfloat16)
 
-    #test_grad_fused_layernorm_fp8_mlp(256, 256, 256, activation_type = ('gelu', 'linear' ), use_bias = False)
 
 
 @pytest.fixture(name="random_inputs")
