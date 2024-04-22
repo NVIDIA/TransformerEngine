@@ -336,7 +336,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool: # pylint: disable=too-many-return-statements
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
@@ -344,7 +344,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             return False  # user doesn't want to fuse
         if not self.input_in_float16:
             return False  # input must be fp16
-        if not (16 < sk < 16384):
+        if not 16 < sk < 16384:
             return False  # sk must be 16 ~ 16384
         if sk % 8 != 0:
             return False  # sk must be divisor of 8

@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 
 """Transformer Engine bindings for pyTorch"""
+import torch
+
 from .module import LayerNormLinear
 from .module import Linear
 from .module import LayerNormMLP
@@ -33,7 +35,6 @@ from .te_onnx_extensions import (
     onnx_rmsnorm_fwd_fp8
 )
 
-import torch
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
 except AttributeError:
