@@ -1631,18 +1631,18 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
                         stream);
 }
 
-void nvte_cast_transpose_dbias_dsilu(const NVTETensor input,
-                                     const NVTETensor silu_input,
+void nvte_cast_transpose_dbias_dswish(const NVTETensor input,
+                                     const NVTETensor swish_input,
                                      NVTETensor cast_output,
                                      NVTETensor transposed_output,
                                      NVTETensor dbias,
                                      NVTETensor workspace,
                                      cudaStream_t stream) {
-  NVTE_API_CALL(nvte_cast_transpose_dbias_dsilu);
+  NVTE_API_CALL(nvte_cast_transpose_dbias_dswish);
   using namespace transformer_engine;
   cast_transpose_dbias_dgelu<fp32, Empty, dswish<fp32, fp32>>(
                              *reinterpret_cast<const Tensor*>(input),
-                             *reinterpret_cast<const Tensor*>(silu_input),
+                             *reinterpret_cast<const Tensor*>(swish_input),
                              reinterpret_cast<Tensor*>(cast_output),
                              reinterpret_cast<Tensor*>(transposed_output),
                              reinterpret_cast<Tensor*>(dbias),

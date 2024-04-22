@@ -14,7 +14,7 @@ namespace transformer_engine {
 
 template <typename ComputeType, typename Param,
                    ComputeType (*OP)(ComputeType, const Param&)>
-void act_lu(const Tensor &input,
+void act_fn(const Tensor &input,
           Tensor *output,
           cudaStream_t stream) {
   CheckInputTensor(input, "act_lu_input");
@@ -39,7 +39,7 @@ void act_lu(const Tensor &input,
 
 template <typename ComputeType, typename Param,
                    ComputeType (*OP)(ComputeType, const Param&)>
-void dact_lu(const Tensor &grad,
+void dact_fn(const Tensor &grad,
            const Tensor &input,
            Tensor *output,
            cudaStream_t stream) {
@@ -69,7 +69,7 @@ void dact_lu(const Tensor &grad,
 
 template <typename ComputeType, typename Param,
                    ComputeType (*OP)(ComputeType, const Param&)>
-void gated_act_lu(const Tensor &input,
+void gated_act_fn(const Tensor &input,
            Tensor *output,
            cudaStream_t stream) {
   CheckInputTensor(input, "gated_act_input");
@@ -100,7 +100,7 @@ void gated_act_lu(const Tensor &input,
 template <typename ComputeType, typename Param,
                    ComputeType (*OP1)(ComputeType, const Param&),
                    ComputeType (*OP2)(ComputeType, const Param&)>
-void dgated_act_lu(const Tensor &grad,
+void dgated_act_fn(const Tensor &grad,
             const Tensor &input,
             Tensor *output,
             cudaStream_t stream) {

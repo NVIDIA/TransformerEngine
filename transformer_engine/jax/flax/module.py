@@ -669,7 +669,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
 
 class LayerNormMLP(TransformerEngineBase):
-    """
+    r"""
     Applies layer normalization on the input followed by the MLP module,
     consisting of 2 successive linear transformations, separated by given activations.
 

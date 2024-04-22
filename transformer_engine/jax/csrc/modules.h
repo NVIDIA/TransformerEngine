@@ -149,7 +149,7 @@ void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opa
 
 void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                          DType in_dtype, DType out_dtype);
 
 void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
@@ -169,9 +169,6 @@ void Silu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
 void SiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-pybind11::tuple GetDSiluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                         DType in_dtype, DType out_dtype);
 
 void DSiluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);

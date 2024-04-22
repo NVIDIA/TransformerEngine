@@ -88,8 +88,8 @@ def activation_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     Activation Unit
     """
     transpose_indices = (1, 2, 0) if len(activation_type) > 1 else (2, 0, 1)
-    dx_trans_no_use = jnp.zeros([x.shape[i] for i in transpose_indices], dtype=x.dtype)
-    dbias_no_use = jnp.zeros(x.shape[-1], dtype=x.dtype)
+    dx_trans_no_use = jnp.empty([x.shape[i] for i in transpose_indices], dtype=x.dtype)
+    dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
 
     output = _activation_lu_fp8(x, dx_trans_no_use, dbias_no_use, amax,
                                 scale, scale_inv, fwd_dtype, bwd_dtype, activation_type)
@@ -108,8 +108,13 @@ def _activation_lu_fp8(x: jnp.ndarray,
 
     return output
 
-def _activation_lu_fp8_fwd_rule(x, dx_trans_no_use, dbias_no_use, amax,
-                                scale, scale_inv, fwd_dtype, bwd_dtype, activation_type):
+def _activation_lu_fp8_fwd_rule(x,
+                                dx_trans_no_use,    # pylint: disable=unused-argument
+                                dbias_no_use,   # pylint: disable=unused-argument
+                                amax,
+                                scale, scale_inv,
+                                fwd_dtype, bwd_dtype,   # pylint: disable=unused-argument
+                                activation_type):
     activation_lu_out, _ = activation_fp8_dict[activation_type ]["fwd"](
         x, amax, scale, scale_inv, fwd_dtype)
 
@@ -117,14 +122,15 @@ def _activation_lu_fp8_fwd_rule(x, dx_trans_no_use, dbias_no_use, amax,
     ctx = (x, amax, scale, scale_inv)
     return activation_lu_out, ctx
 
-def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype, activation_type, ctx, g):
+def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype,   # pylint: disable=unused-argument
+                                activation_type, ctx, g):
     x, amax, scale, scale_inv = ctx
 
     activation_lu_fp8_bwd = activation_fp8_dict[activation_type]["bwd"]
     if len(activation_type) > 1: #gated, no bias
         dactivation_lu, dactivation_lu_trans, amax_out = \
         activation_lu_fp8_bwd(g, x, amax, scale, scale_inv, bwd_dtype, -1)
-        dbias = jnp.zeros(x.shape[-1], x.dtype)
+        dbias = jnp.empty(x.shape[-1], x.dtype)
     else:
         dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
         activation_lu_fp8_bwd(g, x, amax, scale, scale_inv, bwd_dtype, -1)

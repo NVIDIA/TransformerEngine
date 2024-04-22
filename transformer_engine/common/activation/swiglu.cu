@@ -8,23 +8,23 @@
 #include "../util/math.h"
 
 
-void nvte_silu(const NVTETensor input,
+void nvte_swish(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream) {
-  NVTE_API_CALL(nvte_silu);
+  NVTE_API_CALL(nvte_swish);
   using namespace transformer_engine;
-  act_lu<fp32, Empty, swish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(input),
+  act_fn<fp32, Empty, swish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(input),
                                          reinterpret_cast<Tensor*>(output),
                                          stream);
 }
 
-void nvte_dsilu(const NVTETensor grad,
+void nvte_dswish(const NVTETensor grad,
                 const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dsilu);
+  NVTE_API_CALL(nvte_dswish);
   using namespace transformer_engine;
-  dact_lu<fp32, Empty, dswish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(grad),
+  dact_fn<fp32, Empty, dswish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(grad),
                                            *reinterpret_cast<const Tensor*>(input),
                                            reinterpret_cast<Tensor*>(output),
                                            stream);
@@ -35,7 +35,7 @@ void nvte_swiglu(const NVTETensor input,
                  cudaStream_t stream) {
   NVTE_API_CALL(nvte_swiglu);
   using namespace transformer_engine;
-  gated_act_lu<fp32, Empty, swish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(input),
+  gated_act_fn<fp32, Empty, swish<fp32, fp32>>(*reinterpret_cast<const Tensor*>(input),
                                                reinterpret_cast<Tensor*>(output),
                                                stream);
 }
@@ -46,7 +46,7 @@ void nvte_dswiglu(const NVTETensor grad,
                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_dswiglu);
   using namespace transformer_engine;
-  dgated_act_lu<fp32, Empty, swish<fp32, fp32>, dswish<fp32, fp32>>(
+  dgated_act_fn<fp32, Empty, swish<fp32, fp32>, dswish<fp32, fp32>>(
     *reinterpret_cast<const Tensor*>(grad),
     *reinterpret_cast<const Tensor*>(input),
     reinterpret_cast<Tensor*>(output),

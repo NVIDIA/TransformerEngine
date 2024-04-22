@@ -171,7 +171,7 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
  *  but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     silu_input          Tensor used as input to the forward of SiLU operation.
+ *  \param[in]     swish_input          Tensor used as input to the forward of SiLU operation.
  *                                     Shape [N, H].
  *  \param[in,out] cast_output         Result of the cast. Shape: [N, H].
  *  \param[in,out] transposed_output   Result of the cast and transpose. Shape: [H, N].
@@ -180,8 +180,8 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_cast_transpose_dbias_dsilu(const NVTETensor input,
-                                     const NVTETensor silu_input,
+void nvte_cast_transpose_dbias_dswish(const NVTETensor input,
+                                     const NVTETensor swish_input,
                                      NVTETensor cast_output,
                                      NVTETensor transposed_output,
                                      NVTETensor dbias,

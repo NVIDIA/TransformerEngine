@@ -4136,7 +4136,7 @@ class DGeluDBiasCastTransposePrimitive(BasePrimitive):
 
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
 
-        wkspace_info, = transformer_engine_jax.get_dgelu_dbias_ct_workspace_sizes(
+        wkspace_info, = transformer_engine_jax.get_dact_dbias_ct_workspace_sizes(
             x_aval.size // gi_hidden_size,
             gi_hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
@@ -5281,7 +5281,7 @@ class DSiluDBiasCastTransposePrimitive(BasePrimitive):
 
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
 
-        wkspace_info, = transformer_engine_jax.get_dsilu_dbias_ct_workspace_sizes(
+        wkspace_info, = transformer_engine_jax.get_dact_dbias_ct_workspace_sizes(
             x_aval.size // gi_hidden_size,
             gi_hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
