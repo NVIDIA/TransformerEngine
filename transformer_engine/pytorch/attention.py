@@ -277,7 +277,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
 
     return indices
 
-cu_seqlens_global = {}
+_cu_seqlens_cache = {}
 def _get_full_cu_seqlens(
     batch_size: int,
     max_seqlen: int,
@@ -288,16 +288,16 @@ def _get_full_cu_seqlens(
     All sequences in batch have the maximum sequence length.
 
     """
-    global cu_seqlens_global
-    if max_seqlen not in cu_seqlens_global:
-        cu_seqlens_global[max_seqlen] = torch.arange(
+    global _cu_seqlens_cache
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
             0,
             (batch_size + 1) * max_seqlen,
             step=max_seqlen,
             dtype=torch.int32,
             device=device,
         )
-    return cu_seqlens_global[max_seqlen]
+    return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
 @jit_fuser
