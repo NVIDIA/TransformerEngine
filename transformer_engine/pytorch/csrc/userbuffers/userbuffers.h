@@ -15,7 +15,12 @@
 #include <stdexcept>
 #include "nvml.h"
 
+// Check if the CUDA version is above 12.3
+#if CUDA_VERSION >= 12030
 #define MNNVL 1
+#else
+#define MNNVL 0
+#endif
 
 #define CE_DEADLOCK_DETECTOR 1 // Enable CE deadlock detection in production env
 
@@ -103,6 +108,7 @@ enum req_type {
 struct communicator {
   int myrank, nranks;  // global job communicator
   int nvrank, nvsize;  // single node comm_intra
+  int nvclique_index;  // clique index for MPI communicator
   int free_region;
 
   int launch_mode;
@@ -152,9 +158,8 @@ struct communicator {
   int padding2[15];
   volatile int tail;
 
-  MPI_Request mpihndl[NVTE_MAX_SHARP];
   MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
-      comm_intra;       // full intranode (all ndev GPUS)
+      comm_intra;       // full intranode (all ndev GPUS in the same NVLink domain)
   int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
