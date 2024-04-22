@@ -24,9 +24,7 @@ is_fp8_supported, reason = is_fp8_available()
 
 @pytest.fixture(autouse=True, scope='function')
 def enable_fused_attn():
-    """
-    Enable fused attention
-    """
+    """Enable fused attention"""
     os.environ["NVTE_FUSED_ATTN"] = "1"
     yield
     del os.environ["NVTE_FUSED_ATTN"]
@@ -189,9 +187,7 @@ ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
 
 
 class BaseRunner:
-    """
-    Base runner to define forward and backward tests
-    """
+    """Base runner to define forward and backward tests"""
     layer_type: TransformerLayerType = None
     reference_layer: flax.linen.Module = None
     transformations: Dict[str, str] = None
@@ -222,16 +218,12 @@ class BaseRunner:
         return jnp.mean(output, dtype=jnp.float32).astype(output.dtype)
 
     def _sync_params(self, ref, target):
-        """
-        Copy the reference params to target
-        """
+        """Copy the reference params to target"""
         target = sync_params_values(target, ref, self.transformations)
         return ref, target
 
     def test_forward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
-        """
-        Test only the forward
-        """
+        """Test only the forward"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
         ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
@@ -247,9 +239,7 @@ class BaseRunner:
         assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
 
     def test_backward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
-        """
-        Test forward and backward through value_and_grad()
-        """
+        """Test forward and backward through value_and_grad()"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
         ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
@@ -290,9 +280,7 @@ class BaseRunner:
 
 
 class EncoderRunner(BaseRunner):
-    """
-    Encoder runner implementations
-    """
+    """Encoder runner implementations"""
     layer_type = TransformerLayerType.ENCODER
     reference_layer = RefEncoderLayer
     transformations = {
