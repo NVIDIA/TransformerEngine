@@ -777,14 +777,20 @@ class Linear(TransformerEngineBaseModule):
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
-        self.weight_tensor = torch.empty(
-            self.out_features, self.in_features,
-            device=device, dtype=params_dtype)
-
+        # Contiguous buffers for params
+        weight_tensor = torch.empty(
+            self.out_features,
+            self.in_features,
+            device=device,
+            dtype=params_dtype,
+        )
+        bias_tensor = None
         if self.use_bias:
-            self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
-        else:
-            self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
+            bias_tensor = torch.empty(
+                self.out_features,
+                device=device,
+                dtype=params_dtype,
+            )
 
         # Configure parameter splits
         self.weight_names = []
@@ -830,7 +836,11 @@ class Linear(TransformerEngineBaseModule):
                     )
                 self.parameter_split_sizes[i] = size // self.tp_size
 
-        # Construct parameters from weight and bias buffers
+        # Construct weight parameters
+        # Note: Register weights together so that they are adjacent to
+        # each other in Linear.parameters(). This makes it more likely
+        # that they will stay contiguous if the weights are
+        # manipulated externally, e.g. by FSDP.
         offset = 0
         for i, split_size in enumerate(self.parameter_split_sizes):
             split_start = offset
@@ -846,32 +856,30 @@ class Linear(TransformerEngineBaseModule):
                 )
 
             # Construct weight parameter
-            weight = self.weight_tensor
-            if is_subview:
-                weight = weight[split_start:split_end]
-            weight = torch.nn.Parameter(weight)
-            self.register_parameter(self.weight_names[i], weight,
-                                    init_fn=init_method,
-                                    get_rng_state_tracker=get_rng_state_tracker,
-                                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT)
+            self.register_parameter(
+                self.weight_names[i],
+                torch.nn.Parameter(weight_tensor[split_start:split_end]),
+                init_fn=init_method,
+                get_rng_state_tracker=get_rng_state_tracker,
+                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+            )
 
-            # Construct bias parameter if needed
-            if self.use_bias:
-                bias = self.bias_tensor
-                if is_subview:
-                    bias = bias[split_start:split_end]
-                bias = torch.nn.Parameter(bias)
-                self.register_parameter(self.bias_names[i], bias,
-                                        init_fn=init_method_constant(0.0))
-            else:
+        # Construct bias parameters if needed
+        if self.use_bias:
+            offset = 0
+            for i, split_size in enumerate(self.parameter_split_sizes):
+                split_start = offset
+                offset += split_size
+                split_end = offset
+                self.register_parameter(
+                    self.bias_names[i],
+                    torch.nn.Parameter(bias_tensor[split_start:split_end]),
+                    init_fn=init_method_constant(0.0),
+                )
+        else:
+            for name in self.bias_names:
                 bias = torch.Tensor().to(dtype=params_dtype, device=device)
-                setattr(self, self.bias_names[i], bias)
-
-            # Concatenated tensors are not needed if not splitting
-            # into multiple parameters
-            if not is_subview:
-                del self.weight_tensor
-                del self.bias_tensor
+                setattr(self, name, bias)
 
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata()
@@ -974,24 +982,15 @@ class Linear(TransformerEngineBaseModule):
             is_first_module_in_mha = is_first_module_in_mha and self.fp8_meta["recipe"].fp8_mha
 
             # Get concatenated weight and bias tensors
-            if len(self.parameter_split_sizes) == 1:
-                weight_tensor = getattr(self, self.weight_names[0])
-                bias_tensor = getattr(self, self.bias_names[0])
-            elif torch.is_grad_enabled():
-                weight_tensor = _noop_cat(
-                    [getattr(self, name) for name in self.weight_names],
-                    self.weight_tensor,
+            weight_tensor = _noop_cat(
+                [getattr(self, name) for name in self.weight_names],
+            )
+            if self.use_bias:
+                bias_tensor = _noop_cat(
+                    [getattr(self, name) for name in self.bias_names],
                 )
-                if self.use_bias:
-                    bias_tensor = _noop_cat(
-                        [getattr(self, name) for name in self.bias_names],
-                        self.bias_tensor,
-                    )
-                else:
-                    bias_tensor = getattr(self, self.bias_names[0])  # Unused
             else:
-                weight_tensor = self.weight_tensor
-                bias_tensor = self.bias_tensor
+                bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
