@@ -314,18 +314,24 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     # Since the sharding of outputs should be the same as dot_1's input
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
 
-    casted_grad, casted_grad_t, updated_grad_amax = \
-        cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
-                       static_axis_boundary=-1, transpose_axis_boundary=-1)
+    if use_bias:
+        casted_grad, casted_grad_t, dbias_2, updated_grad_amax = \
+        dbias_cast_transpose(grad, grad_amax, grad_scale,
+                             grad_scale_inv, bwd_dtype,
+                             static_axis_boundary=-1,
+                             transpose_axis_boundary=-1)
+        dbias_2 = jnp.reshape(dbias_2, bias_2_shape)
+    else:
+        casted_grad, casted_grad_t, updated_grad_amax = \
+        cast_transpose(grad, grad_amax, grad_scale,
+                       grad_scale_inv, bwd_dtype,
+                       static_axis_boundary=-1,
+                       transpose_axis_boundary=-1)
+        dbias_2 = jnp.empty(bias_2_shape, grad.dtype)
 
     casted_activation_lu_out_t = transpose(casted_activation_lu_out,
                                            static_axis_boundary=-1,
                                            transpose_axis_boundary=-1)
-    if use_bias:
-        dbias_2 = jnp.sum(grad, axis=(i for i in range(grad.ndim - 1)))
-        dbias_2 = jnp.reshape(dbias_2, bias_2_shape)
-    else:
-        dbias_2 = jnp.zeros(bias_2_shape, grad.dtype)
 
     # (hidden, batch...,) x (hidden, batch...)
     gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
@@ -395,9 +401,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-2 if is_gated else -1)
+                transpose_axis_boundary=-1)
             dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
-
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
