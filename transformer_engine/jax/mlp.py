@@ -136,9 +136,6 @@ def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype,   # pylint: disable=unused
         activation_lu_fp8_bwd(g, x, amax, scale, scale_inv, bwd_dtype, -1)
     dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
     dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)
-    print(dactivation_lu.shape)
-    print(dactivation_lu_trans.shape)
-    print(dactivation_lu_trans.dtype)
     ctx = (dactivation_lu, dactivation_lu_trans, dbias, amax_out, scale, scale_inv)
     return ctx
 
