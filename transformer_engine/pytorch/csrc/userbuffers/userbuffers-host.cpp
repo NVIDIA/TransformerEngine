@@ -128,7 +128,7 @@ static int mnnvl_init(communicator **comm) {
   return 0;
 }
 
-static int mnnvl_detect_domains(communicator **comm) {
+static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     int ret = 1;
     unsigned char *cluster_uuid = NULL;
     unsigned int *cluster_cliqueid = NULL;
@@ -159,7 +159,8 @@ static int mnnvl_detect_domains(communicator **comm) {
                                 "MPI_Allgather");
 
     for (int n = 0; n < (*comm)->nranks; n++) {
-      if (0 == strncmp((const char*)(*comm)->nvml_fabric_info.clusterUuid, (const char*)&cluster_uuid[n * NVML_GPU_FABRIC_UUID_LEN], NVML_GPU_FABRIC_UUID_LEN) &&
+      if (0 == strncmp((const char*)(*comm)->nvml_fabric_info.clusterUuid,
+          (const char*)&cluster_uuid[n * NVML_GPU_FABRIC_UUID_LEN], NVML_GPU_FABRIC_UUID_LEN) &&
           (*comm)->nvml_fabric_info.cliqueId == cluster_cliqueid[n]) {
               if (n == (*comm)->myrank) {
                 myclique_rank = clique_size;
@@ -174,7 +175,11 @@ static int mnnvl_detect_domains(communicator **comm) {
     (*comm)->nvrank = myclique_rank;
     (*comm)->nvsize = clique_size;
     // User as a color for MPI communicatro split
-    (*comm)->nvclique_index = clique_index;
+    // for case when nvlink domain hosts few tensor parallel groups
+    // we need to split clique_size / tensorgpus groups.
+    // e.g. 32 GPU nvlink domain with 8 gpus per tensort dimension
+    // means that we have to split the clique to 4 communicators
+    (*comm)->nvclique_index = clique_index + (myclique_rank/tensorgpus);
     
     MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index, (*comm)->myrank, &(*comm)->comm_intra),
                      "MPI_Comm_split");
@@ -247,7 +252,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 #if MNNVL
   if (mnnvl_init(comm))
     return 1;
-  if (mnnvl_detect_domains(comm))
+  if (mnnvl_detect_domains(comm, tensorgpus))
     return 1;
 
   mylocal  = (*comm)->nvrank;
