@@ -3035,6 +3035,8 @@ class FusedAttention(TransformerEngineBaseModule):
             assert (
                 core_attention_bias_type not in ["alibi"]
             ), f"Attention bias type of {core_attention_bias_type} is not supported with context parallelism!"
+            query_layer, key_layer, value_layer = [x.contiguous()
+                for x in (query_layer, key_layer, value_layer)]
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
                     self.training,
