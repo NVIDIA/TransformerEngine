@@ -184,11 +184,18 @@ def initialize_ub(
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
-            if name in ub_cfgs and 'method' in ub_cfgs[name] and ub_cfgs[name]['method'] != 'bulk':
-                wgrad_name = name.replace('dgrad','wgrad')
-                assert wgrad_name not in ub_cfgs
+            if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
+                wgrad_name = name.replace("dgrad","wgrad")
+                assert wgrad_name not in ub_cfgs, (
+                        f"{wgrad_name} found in TP config along with DGRAD->RS overlap."
+                )
                 layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+                methods["pipeline"].append(name)
+                assert not ub_cfgs[name].get("fp8_buf", False), (
+                        f"FP8 RS not supported with DGRAD->RS overlap."
+                )
 
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
