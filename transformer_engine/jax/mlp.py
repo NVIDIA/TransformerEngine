@@ -33,7 +33,7 @@ activation_dict = {
     ('gelu', 'linear'): {'fwd': gated_gelu,
                          'bwd': dgated_gelu},
     ('silu',): {'fwd': silu,
-                "bwd": dsilu },
+                "bwd": dsilu},
     ('silu', 'linear'): {'fwd': gated_silu,
                          'bwd': dgated_silu}
 }
@@ -44,9 +44,9 @@ activation_fp8_dict = {
     ('gelu', 'linear'): {'fwd': gated_gelu_fp8,
                          'bwd': dgated_gelu_cast_transpose},
     ('silu',): { 'fwd': silu_fp8,
-                'bwd': dsilu_dbias_cast_transpose },
+                'bwd': dsilu_dbias_cast_transpose},
     ('silu', 'linear'): { 'fwd': gated_silu_fp8,
-                          'bwd': dgated_silu_cast_transpose }
+                          'bwd': dgated_silu_cast_transpose}
 }
 
 
@@ -67,7 +67,7 @@ def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable
     return _output
 
 def _activation_lu_fwd_rule(x, activation_type):
-    fwd_output = activation_dict[activation_type]["fwd"](x)
+    fwd_output = activation_dict[activation_type]["fwd"](x, activation_type)
     return fwd_output, (x,)
 
 def _activation_lu_bwd_rule(activation_type, ctx, g):

@@ -4,7 +4,7 @@
 """JAX te custom call"""
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial, reduce
 import operator
 import os
@@ -2565,12 +2565,12 @@ class GeluPrimitive(BasePrimitive):
     """
     name = "te_gelu"
     multiple_results = False
+    impl_static_args = (1,)
     inner_primitive = None
     outer_primitive = None
-    impl_static_args = ()
 
     @staticmethod
-    def abstract(x_aval):
+    def abstract(x_aval, *, act_enum):
         """
         gated_gelu abstract
         """
@@ -2581,7 +2581,7 @@ class GeluPrimitive(BasePrimitive):
         return out_aval
 
     @staticmethod
-    def lowering(ctx, x):
+    def lowering(ctx, x, *, act_enum):
         """
         gated_gelu lowering rules
         """
@@ -2601,21 +2601,21 @@ class GeluPrimitive(BasePrimitive):
         hidden_size = ir_x_shape[-1]
         batch_size = reduce(operator.mul, ir_x_shape[:-1])
         in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor((batch_size, hidden_size), in_dtype,
-                                                               in_dtype)
+        opaque = transformer_engine_jax.pack_common_descriptor(
+            (batch_size, hidden_size), in_dtype, in_dtype, act_enum)
 
         out = custom_caller(GeluPrimitive.name, args, opaque, False)
 
         return [out]
 
     @staticmethod
-    def impl(x):
+    def impl(x, act_enum):
         assert GeluPrimitive.inner_primitive is not None
-        out = GeluPrimitive.inner_primitive.bind(x)
+        out = GeluPrimitive.inner_primitive.bind(x, act_enum=act_enum)
         return out
 
     @staticmethod
-    def batcher(batched_args, batch_dims):
+    def batcher(batched_args, batch_dims, *, act_enum):
         """
         gated_gelu batcher
         """
@@ -2625,24 +2625,24 @@ class GeluPrimitive(BasePrimitive):
         inputs_bdim, = batch_dims
 
         out_bdims = inputs_bdim
-        return GeluPrimitive.outer_primitive.bind(inputs), out_bdims
+        return GeluPrimitive.outer_primitive.bind(inputs, act_enum=act_enum), out_bdims
 
     @staticmethod
-    def infer_sharding_from_operands(mesh, arg_infos, result_infos):
+    def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
         """
         gated_gelu infer_sharding_from_operands
         """
-        del result_infos    # Unused.
+        del result_infos, act_enum    # Unused.
         x_spec = get_padded_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         return out_sharding
 
     @staticmethod
-    def partition(mesh, arg_infos, result_infos):
+    def partition(act_enum, mesh, arg_infos, result_infos):
         """
         gated_gelu partitioning
         """
-        del result_infos
+        del result_infos, act_enum
         x_spec = get_padded_spec(arg_infos[0])
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
@@ -2652,14 +2652,23 @@ class GeluPrimitive(BasePrimitive):
 
 register_primitive(GeluPrimitive)
 
+# The value of activations are explicitedly defined to avoid order rearrangement in the future
+ActivationEnum = {
+    ('gelu',): 0,
+    ('gelu', 'linear'): 1,
+    ('silu',): 2,
+    ('silu', 'linear'): 3
+}
 
-def gelu(inputs: jnp.ndarray) -> jnp.ndarray:
+def gelu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]) -> jnp.ndarray:
     """
     gelu wrapper
-    Return geglu(inputs)
-    Assume inputs has two dimensions shape and the memory layout is (N..., H)
+    Return ActLu(inputs)
+    Input shape: (N, H) for non-gated activations
+                 (N, 2, H) for gated activations
     """
-    return GeluPrimitive.outer_primitive.bind(inputs)
+    act_type_id = ActivationEnum[activation_type]
+    return GeluPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
 
 
 class DGeluPrimitive(BasePrimitive):
@@ -2713,7 +2722,7 @@ class DGeluPrimitive(BasePrimitive):
 
         in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
         opaque = transformer_engine_jax.pack_common_descriptor((ir_batch_size, i_hidden_size),
-                                                               in_dtype, in_dtype)
+                                                               in_dtype, in_dtype, 1)
 
         out = custom_caller(DGeluPrimitive.name, args, opaque, False)
 
@@ -4622,7 +4631,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor((batch_size, out_shape[-1]),
+        opaque = transformer_engine_jax.ack_common_descriptor((batch_size, out_shape[-1]),
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
 

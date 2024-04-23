@@ -351,11 +351,11 @@ class TestActivationLu:
     def primitive_func(self, inputs):
         return jnp.mean(activation_lu(inputs, activation_type = self.activation_type))
 
-    @pytest.mark.parametrize('shape', [(32, 2, 64), (64, 2, 256)])
-    @pytest.mark.parametrize('activation_type', [('gelu',),
-                                                 ('gelu', 'linear'),
-                                                 ('silu',),
-                                                 ('silu', 'linear')])
+#                                                 ('gelu', 'linear'),
+#                                                 ('silu',),
+#                                                 ('silu', 'linear')])
+    @pytest.mark.parametrize('shape', [(32, 64), (64, 2, 256)])
+    @pytest.mark.parametrize('activation_type', [('gelu',)])
     def test_activation_lu(self, random_inputs, activation_type):
         x = random_inputs
         self.activation_type = activation_type

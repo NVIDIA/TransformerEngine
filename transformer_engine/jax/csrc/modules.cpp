@@ -52,11 +52,12 @@ const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
 }
 
 pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
-                                               DType out_dtype) {
+                                               DType out_dtype, size_t act_enum) {
     CustomCallCommonDescriptor desc;
     desc.shape.from_vector(shape);
     desc.in_dtype = in_dtype;
     desc.out_dtype = out_dtype;
+    desc.act_enum = act_enum;
     return PackOpaque(desc);
 }
 
@@ -171,7 +172,8 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 }
 
 void GeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
-              cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+              cudaStream_t stream, float *scale_inverse, float *amax, void *output,
+              size_t act_enum) {
     auto input_shape = std::vector<size_t>{m, n};
     auto output_shape = std::vector<size_t>{m, n};
 
@@ -179,8 +181,13 @@ void GeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, 
 
     auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
                                        scale, scale_inverse);
-
-    nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
+    ActivationEnum act_enum_casted = (ActivationEnum)act_enum;
+    switch (act_enum_casted) {
+      case GELU:
+        nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
+        // default:
+        // nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
+  }
 }
 
 void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -190,8 +197,10 @@ void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
+    auto act_enum = desc.act_enum;
 
-    GeluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr, output);
+    GeluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream,
+             nullptr, nullptr, output, act_enum);
 }
 
 void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -213,7 +222,7 @@ void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opa
     auto n = desc.shape.dims[1];
 
     GeluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
-             output);
+             output, 0);
 }
 
 void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
