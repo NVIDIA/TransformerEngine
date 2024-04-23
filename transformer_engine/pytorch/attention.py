@@ -2718,8 +2718,14 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-        self.tp_size = tp_size
-        self.tp_group = tp_group
+        if tp_group is None:
+            self.tp_size = tp_size
+            if tp_size == 1:
+                self.set_tensor_parallel_group(tp_group)
+        else:
+            self.tp_size = get_distributed_world_size(tp_group)
+            self.set_tensor_parallel_group(tp_group)
+        self.set_nccl_overlap_warning_if_tp()
 
     def get_fp8_weights_scratchpad(
         self,
