@@ -646,7 +646,7 @@ def _compute_scaling_factor(
             fp8_max,
             recipe.margin,
         )
-    return recipe.scaling_factor_compute_algo(amax, scale, fp8_max, recipe.margin)
+    return recipe.scaling_factor_compute_algo(amax, scale, fp8_max, recipe)
 
 
 def _amax_and_scale_update(
