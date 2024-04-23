@@ -610,7 +610,7 @@ def _default_sf_compute(
     sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
-    sf = torch.where(torch.isfinite(sf), sf, torch.ones_like(sf) * torch.finfo(torch.float32).max)
+    sf = torch.where(torch.isinf(sf), torch.full_like(sf, torch.finfo(torch.float32).max), sf)
     scale.copy_(sf)
     return scale
 
