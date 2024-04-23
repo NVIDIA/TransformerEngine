@@ -11,7 +11,6 @@
 #include <chrono>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#include <immintrin.h>
 #include <iostream>
 #include <math.h>
 #include <mpi.h>
@@ -19,7 +18,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <x86intrin.h>
 #define MULTICAST_GB_TOTAL 512
 
 static int oob_bcast(void *comm_context, void *buf, int size, int root) {
@@ -123,10 +121,19 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->basecounter[i] = 0;
   (*comm)->head = 0;
   (*comm)->tail = 0;
-  (*comm)->activeproxy = 1;
   (*comm)->active_nreqs = 0;
   for (int i = 0; i < userbuffers_op_types; i++)
     (*comm)->active_req[i].active = -1;
+
+  int device_clock    = 0;
+  // 110 sec wait time by default
+  int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
+  CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+  (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
+  if ((*comm)->myrank == 0) {
+    printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n",
+            sec_timeout, (*comm)->ub_timeout, device_clock);
+  }
 
   int ret = 0;
   // split communicator
@@ -232,58 +239,11 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->num2_nodes = tensornodes;
   (*comm)->my2_node = (mynode / datanodes) % tensornodes;
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
-
-  char *ib_dev_list;
-  int ZIONROCE = getenv("NVTE_ZIONROCE") ? atoi(getenv("NVTE_ZIONROCE")) : 0;
-  int ROCE = getenv("NVTE_ROCE") ? atoi(getenv("NVTE_ROCE")) : 0;
-  if (ZIONROCE)
-    ROCE = 1;
-  int DGX_H100 = device_prop.major == 9;
-
-  switch (mylocal) {
-  case 0:
-    ib_dev_list = "mlx5_0:1";
-    break;  // NOLINT(*)
-  case 1:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_3:1" : "mlx5_1:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 2:
-    ib_dev_list = (char *)(ZIONROCE   ? "mlx5_4:1" : DGX_H100 ? "mlx5_4:1" : "mlx5_2:1");  // NOLINT(*)
-    break;                                                                                 // NOLINT(*)
-  case 3:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_5:1" : "mlx5_3:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 4:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_6:1" : "mlx5_6:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 5:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_9:1" : "mlx5_7:1");  // NOLINT(*)
-    break;                                                       // NOLINT(*)
-  case 6:
-    ib_dev_list = (char *)(ZIONROCE   ? "mlx5_10:1" : DGX_H100 ? "mlx5_10:1" : "mlx5_8:1");  // NOLINT(*)
-    break;                                                                                   // NOLINT(*)
-  case 7:
-    ib_dev_list = (char *)(DGX_H100 ? "mlx5_11:1" : "mlx5_9:1");  // NOLINT(*)
-    break;                                                        // NOLINT(*)
-  default:
-    break;
-  }
-
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
   (*comm)->minblock = 1024 * 2 * 1024;
   (*comm)->asyncblocks = 16;
-
-  CUDACHECK(cudaMallocHost((void **)&(*comm)->hostflags,  // NOLINT(*)
-                           (NVTE_MAX_SMS + 100) * sizeof(int)));
-  for (int i = 0; i < 100 + NVTE_MAX_SMS; i++)
-    (*comm)->hostflags[i] = 0;
-  _mm_mfence();
-  sleep(1);
-
-  // init_p2p_transport();
-  (*comm)->ibnvsize = (*comm)->nvsize;
 
 #define NBUF 2
   if ((*comm)->sm_arch >= 9 && (*comm)->ar2_nvsize > 1 &&
@@ -374,6 +334,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 #define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
 #define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
+
   CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
   unsigned int flag = 1;
   CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
@@ -381,23 +342,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
   using namespace std;
-  (*comm)->g = gdr_open();
-  if ((*comm)->g == NULL) {
-    fprintf(stderr, "gdrcopy open failed\n");
-    return -1;
-  }
-  gdr_mh_t mh;
-  ret = gdr_pin_buffer((*comm)->g, (CUdeviceptr)(*comm)->flags, GPU_PAGE_SIZE, 0, 0, &mh);
-  if (ret) {
-    fprintf(stderr, "gdr_pin_buffer failed\n");
-    return -1;
-  }
-  ret = gdr_map((*comm)->g, mh, (void **)&((*comm)->map_flags), GPU_PAGE_SIZE);  // NOLINT(*)
-
-  if (ret) {
-    fprintf(stderr, "gdr_map failed\n");
-    return -1;
-  }
   sched_param param;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -426,10 +370,6 @@ int create_communicator(communicator **comm) {
 }
 
 void destroy_communicator(communicator *comm) {
-  comm->activeproxy = 0;
-  if (!comm->myrank && getenv("NVTE_UBDEBUG"))
-    printf("waiting for userbuffers proxy thread to exit()\n");
-  gdr_close(comm->g);
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
@@ -533,7 +473,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       CUCHECK(cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
                                  0 /*memOffset*/, aligned_size, 0));
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
-      comm->mc_ptr[hndl] = comm->mc_baseptr + comm->mc_offset;
+      comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
     } else if (!comm->myrank) {
       printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,
@@ -569,147 +509,4 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_ptr[hndl] = *gpubuff;
 
   return comm->free_region++;
-}
-
-int allreduce_userbuff_inplace_gpu(const int handler, const int offset, const int elements,
-                                   const int blocksize, communicator *comm, cudaStream_t stream);
-
-int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                    const int elements, const int blocksize, communicator *comm,
-                                    cudaStream_t stream, int op);
-
-int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                        const int elements, const int blocksize, communicator *comm,
-                                        cudaStream_t stream, int op);
-
-int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
-                                    const int elements, const int blocksize, communicator *comm,
-                                    cudaStream_t stream, int op);
-
-void allreduce_nonsharp_inplace(const int handler, const int offset, const int elements,
-                                communicator *comm, cudaStream_t stream, int op) {
-  if (elements < 64)
-    NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
-  // if(comm->myrank==0) fprintf(stderr,"AR2(%d) user call
-  // launch_mode=%d\n",op,comm->launch_mode);
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  int blocksize = elements * 2;
-  int maxcredit = 0;
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  blocksize = (comm->nblocks - 1 + (comm->alignblock - 1 + elements * 2) / comm->alignblock) /
-              comm->nblocks;  // FIXME TUNING
-  blocksize *= comm->alignblock;
-  if (blocksize < comm->minblock)
-    blocksize = comm->minblock;
-
-  maxcredit = (elements * 2 + blocksize - 1) / blocksize;
-  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
-  if (blocksize > peerblock * ar_nvsize)
-    blocksize = peerblock * ar_nvsize;
-  int sms = allreduce2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize, comm,
-                                            stream, op);
-
-  if (num_nodes > 1 && comm->launch_mode & NVTE_LAUNCH_CPU) {
-    if (!sms)
-      return;
-    comm->fifo[comm->head].optype = op;
-    comm->fifo[comm->head].basecounter = comm->basecounter[op];
-    comm->fifo[comm->head].blocksize = blocksize;
-    comm->fifo[comm->head].maxcredit = maxcredit;
-    comm->fifo[comm->head].handler = handler;
-    comm->fifo[comm->head].offset = offset;
-    comm->fifo[comm->head].elements = elements;
-
-    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
-    while (newhead == comm->tail) {
-    }
-    comm->head = newhead;
-
-    comm->basecounter[op] += (elements * 2 + blocksize - 1) / blocksize;
-  }
-}
-
-void allreduce2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                 communicator *comm, cudaStream_t stream) {
-  allreduce_nonsharp_inplace(handler, offset, elements, comm, stream,
-                             userbuffers_allreduceop_nonsharp2);
-}
-
-void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
-                                communicator *comm, cudaStream_t stream) {
-  if (elements < 64)
-    NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
-  allreduce_nonsharp_inplace(handler, offset, elements, comm, stream,
-                             userbuffers_allreduceop_nonsharp);
-  return;
-}
-
-void reducescatter_userbuff_inplace(const int handler, const int offset, const int elements,
-                                    communicator *comm, cudaStream_t stream) {
-  if (elements < 64)
-    NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
-
-  int op = userbuffers_allreduceop_nonsharp;
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  int blocksize = elements * 2;
-  int maxcredit = 0;
-
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  blocksize = (comm->nblocks - 1 + (comm->alignblock - 1 + elements * 2) / comm->alignblock) /
-              comm->nblocks;  // FIXME TUNING
-  blocksize *= comm->alignblock;
-  if (blocksize < comm->minblock)
-    blocksize = comm->minblock;
-
-  maxcredit = (elements * 2 + blocksize - 1) / blocksize;
-  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
-  if (blocksize > peerblock * ar_nvsize)
-    blocksize = peerblock * ar_nvsize;
-
-  int sms = reducescatter2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize,
-                                                comm, stream, op);
-
-  if (num_nodes > 1 && comm->launch_mode & NVTE_LAUNCH_CPU) {
-    if (!sms)
-      return;
-    comm->fifo[comm->head].optype = op;
-    comm->fifo[comm->head].basecounter = comm->basecounter[op];
-    comm->fifo[comm->head].blocksize = blocksize;
-    comm->fifo[comm->head].maxcredit = maxcredit;
-    comm->fifo[comm->head].handler = handler;
-    comm->fifo[comm->head].offset = offset;
-    comm->fifo[comm->head].elements = elements;
-
-    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
-    while (newhead == comm->tail) {
-    }
-    comm->head = newhead;
-
-    comm->basecounter[op] += (elements * 2 + blocksize - 1) / blocksize;
-  }
-}
-
-void allgather_userbuff_inplace(const int handler, const int offset, const int elements,
-                                communicator *comm, cudaStream_t stream) {
-  if (elements < 64)
-    NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
-  int op = userbuffers_allreduceop_nonsharp;
-  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  int blocksize = elements * 2;
-  int maxcredit = 0;
-
-  const int num_nodes = op == userbuffers_allreduceop_nonsharp ? comm->num_nodes : comm->num2_nodes;
-  blocksize = (comm->nblocks - 1 + (comm->alignblock - 1 + elements * 2) / comm->alignblock) /
-              comm->nblocks;  // FIXME TUNING
-  blocksize *= comm->alignblock;
-  if (blocksize < comm->minblock)
-    blocksize = comm->minblock;
-
-  maxcredit = (elements * 2 + blocksize - 1) / blocksize;
-  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
-  if (blocksize > peerblock * ar_nvsize)
-    blocksize = peerblock * ar_nvsize;
-
-  int sms = allgather2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize, comm,
-                                            stream, op);
 }

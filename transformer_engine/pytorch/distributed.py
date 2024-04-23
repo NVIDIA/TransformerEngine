@@ -521,8 +521,11 @@ def has_te_modules(network):
         for module in network.modules():
             if any(isinstance(module, te_class) for te_class in te_classes_list):
                 return True
+        return False
 
-    return False
+    # Cannot check for TE modules inside a custom class/callable that's not a torch.nn.Module,
+    # so just assume that it has TE modules just to be safe.
+    return True
 
 
 def checkpoint(
