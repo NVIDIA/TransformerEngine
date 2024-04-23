@@ -23,11 +23,14 @@
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-#define MPICHECK(cmd, op)                                                                          \
+#define MPICHECK(cmd)                                                                              \
   do {                                                                                             \
     int e = cmd;                                                                                   \
     if (e != MPI_SUCCESS) {                                                                        \
-      UB_PRINT("MPI Operation failed %s [%d]", op, e);                                             \
+      char error_string[MPI_MAX_ERROR_STRING];                                                     \
+      int error_length;                                                                            \
+      MPI_Error_string(e, error_string, &error_length);                                            \
+      UB_PRINT("MPI Operation failed: %s  [%d]", error_string, e);                                 \
       exit(EXIT_FAILURE);                                                                          \
     }                                                                                              \
   } while (0)
@@ -145,8 +148,7 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     }
 
     MPICHECK(MPI_Allgather(&(*comm)->nvml_fabric_info.clusterUuid, NVML_GPU_FABRIC_UUID_LEN,
-                               MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN, MPI_CHAR, MPI_COMM_WORLD),
-                               "MPI_Allgather");
+                               MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN, MPI_CHAR, MPI_COMM_WORLD));
 
     cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) * NVML_GPU_FABRIC_UUID_LEN);
     if (cluster_cliqueid == NULL) {
@@ -155,8 +157,7 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     }
 
     MPICHECK(MPI_Allgather(&(*comm)->nvml_fabric_info.cliqueId, 1,
-                               MPI_UNSIGNED, cluster_cliqueid, 1, MPI_UNSIGNED, MPI_COMM_WORLD),
-                                "MPI_Allgather");
+                               MPI_UNSIGNED, cluster_cliqueid, 1, MPI_UNSIGNED, MPI_COMM_WORLD));
 
     for (int n = 0; n < (*comm)->nranks; n++) {
       if (0 == strncmp((const char*)(*comm)->nvml_fabric_info.clusterUuid,
@@ -181,13 +182,12 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     // means that we have to split the clique to 4 communicators
     (*comm)->nvclique_index = clique_index + (myclique_rank/tensorgpus);
     
-    MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index, (*comm)->myrank, &(*comm)->comm_intra),
-                     "MPI_Comm_split");
+    MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index, (*comm)->myrank, &(*comm)->comm_intra));
 
     int mylocal, numlocal;
 
-    MPICHECK(MPI_Comm_rank((*comm)->comm_intra, &mylocal), "MPI_Comm_rank");
-    MPICHECK(MPI_Comm_size((*comm)->comm_intra, &numlocal), "MPI_Comm_size");
+    MPICHECK(MPI_Comm_rank((*comm)->comm_intra, &mylocal));
+    MPICHECK(MPI_Comm_size((*comm)->comm_intra, &numlocal));
 
     assert(mylocal  == myclique_rank);
     assert(numlocal == clique_size);
@@ -405,7 +405,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(exphndl), (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
     }
 
-    MPICHECK(MPI_Bcast(exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, 0, (*comm)->comm_intra), "MPI_Bcast");
+    MPICHECK(MPI_Bcast(exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, 0, (*comm)->comm_intra));
 
     if ((*comm)->ar2_nvrank != 0) {
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(exphndl), CU_MEM_HANDLE_TYPE_FABRIC));
@@ -570,8 +570,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     CUmemFabricHandle myhndl;
     CUCHECK(cuMemExportToShareableHandle(&myhndl, comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0));
     MPICHECK(MPI_Allgather(&myhndl, sizeof(CUmemFabricHandle), MPI_BYTE, exphndl,
-                           sizeof(CUmemFabricHandle), MPI_BYTE, comm->comm_intra),
-                           "MPI_Allgather");
+                           sizeof(CUmemFabricHandle), MPI_BYTE, comm->comm_intra));
     for (int p = 0; p < nranks; p++)
       if (p != myrank)
         CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p], reinterpret_cast<void *>(&exphndl[p]), CU_MEM_HANDLE_TYPE_FABRIC));
