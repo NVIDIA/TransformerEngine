@@ -2727,6 +2727,25 @@ class FusedAttention(TransformerEngineBaseModule):
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
 
+        def remove_extra_states_check(self, incompatible_keys):
+            for key in incompatible_keys.missing_keys:
+                if 'fused_attention._extra_state' in key:
+                    incompatible_keys.missing_keys.remove(key)
+                    warnings.warn(
+                        f"""Ignoring missing key "{key}" in checkpoints. """
+                        "The likely cause is that checkpoints were collected using "
+                        "pre-v1.6 TransformerEngine. While no functionality impact, "
+                        "please use v1.6+ TransformerEngine for checkpointing "
+                        "next time.")
+
+        self.register_load_state_dict_post_hook(remove_extra_states_check)
+
+    #def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+    #                          missing_keys, unexpected_keys, error_msgs):
+    #    """Overrides FusedAttention from loading _extra_states very strictly"""
+    #    super()._load_from_state_dict(state_dict, prefix, local_metadata, False,
+    #        missing_keys, unexpected_keys, error_msgs)
+
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],

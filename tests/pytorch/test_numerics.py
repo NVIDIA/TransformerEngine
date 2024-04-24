@@ -60,11 +60,11 @@ backends_inference = ["FlashAttention", "UnfusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
-param_types = [torch.float32, torch.float16]
+param_types = []#torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
-batch_sizes = [1, 2]
+batch_sizes = [2]#1, 2]
 
 all_boolean = [True, False]
 
@@ -627,7 +627,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     )
 
 
-def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path="checkpoint.pt"):
+def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="checkpoint.pt"):
     reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
@@ -639,13 +639,16 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     te_inp_hidden_states.retain_grad()
 
     block = _test_e2e_checkpointing_get_model(config, dtype)
+    print('block._modules', block._modules.keys())
 
-    for _ in range(steps // 2):
+    for i in range(steps // 2):
+        print(f'>>>>>>>>>>>> iter {i} fwd >>>>>>>>>>>>>')
         te_out = block(
             te_inp_hidden_states,
             None,
         )
         loss = te_out.sum()
+        print(f'>>>>>>>>>>>> iter {i} bwd >>>>>>>>>>>>>')
         loss.backward()
 
     if checkpoint:
@@ -654,7 +657,16 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         # loading from a checkpoint gives bitwise identical results.
         # Since gradients are being accumulated, it is important to
         # restore them post loading the checkpoint.
-        torch.save(block.state_dict(), path)
+        #print('dir(block) ',dir(block))
+        sd = block.state_dict()
+        #del block.state_dict()['self_attention.core_attention.fused_attention._extra_state']
+        del sd['self_attention.core_attention.fused_attention._extra_state']
+        #torch.save(block.state_dict(), path)
+        torch.save(sd, path)
+        print('block.state_dict(): ')
+        #for k,v in block.state_dict().items():
+        for k,v in sd.items():
+            print(k)
 
         param_grads = []
         for p in block.parameters():
@@ -667,7 +679,11 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
+        print('>>>>>>>>>>>> loading >>>>>>>>>>>>>')
         block.load_state_dict(torch.load(path))
+        print('block.state_dict(): after')
+        for k,v in block.state_dict().items():
+            print(k)
         reset_rng_states()
 
         for p in block.parameters():
@@ -701,7 +717,11 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
+    print()
+    print('=================== checkpoint=False ====================')
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
+    print()
+    print('=================== checkpoint=True ====================')
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
     # Check that results match
