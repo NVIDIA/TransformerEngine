@@ -11,43 +11,14 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
 from .cpp_extensions import cast_fp8, transpose, cast_transpose, dbias_cast_transpose
-from .cpp_extensions import gelu
-from .cpp_extensions import gelu_fp8, dgelu, dgelu_dbias_cast_transpose
-from .cpp_extensions import gated_gelu, gated_gelu_fp8
-from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
-from .cpp_extensions import silu, silu_fp8
-from .cpp_extensions import dsilu, dsilu_dbias_cast_transpose
-from .cpp_extensions import gated_silu, gated_silu_fp8
-from .cpp_extensions import dgated_silu, dgated_silu_cast_transpose
+from .cpp_extensions import act_lu, act_lu_fp8, dact_lu
+from .cpp_extensions import dact_lu_dbias_cast_transpose, dgated_act_lu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize, dequantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
-
-
-activation_dict = {
-    ('gelu',): {'fwd': gelu,
-                "bwd": dgelu},
-    ('gelu', 'linear'): {'fwd': gated_gelu,
-                         'bwd': dgated_gelu},
-    ('silu',): {'fwd': silu,
-                "bwd": dsilu },
-    ('silu', 'linear'): {'fwd': gated_silu,
-                         'bwd': dgated_silu}
-}
-
-activation_fp8_dict = {
-    ('gelu',): {'fwd': gelu_fp8,
-                'bwd': dgelu_dbias_cast_transpose},
-    ('gelu', 'linear'): {'fwd': gated_gelu_fp8,
-                         'bwd': dgated_gelu_cast_transpose},
-    ('silu',): { 'fwd': silu_fp8,
-                'bwd': dsilu_dbias_cast_transpose },
-    ('silu', 'linear'): { 'fwd': gated_silu_fp8,
-                          'bwd': dgated_silu_cast_transpose }
-}
 
 
 def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
@@ -67,14 +38,14 @@ def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable
     return _output
 
 def _activation_lu_fwd_rule(x, activation_type):
-    fwd_output = activation_dict[activation_type]["fwd"](x)
+    fwd_output = act_lu(x, activation_type)
     return fwd_output, (x,)
 
 def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
     assert x.dtype == g.dtype
 
-    dx = activation_dict[activation_type]["bwd"](g, x)
+    dx = dact_lu(g, x, activation_type)
     dx = jnp.reshape(dx, x.shape)
     return (dx,)
 
@@ -115,8 +86,8 @@ def _activation_lu_fp8_fwd_rule(x,
                                 scale, scale_inv,
                                 fwd_dtype, bwd_dtype,   # pylint: disable=unused-argument
                                 activation_type):
-    activation_lu_out, _ = activation_fp8_dict[activation_type ]["fwd"](
-        x, amax, scale, scale_inv, fwd_dtype)
+    activation_lu_out, _ = act_lu_fp8(x, amax, scale, scale_inv, fwd_dtype,
+                                      activation_type)
 
     activation_lu_out = dequantize(activation_lu_out, x.dtype, scale_inv)
     ctx = (x, amax, scale, scale_inv)
@@ -126,14 +97,13 @@ def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype,   # pylint: disable=unused
                                 activation_type, ctx, g):
     x, amax, scale, scale_inv = ctx
 
-    activation_lu_fp8_bwd = activation_fp8_dict[activation_type]["bwd"]
     if len(activation_type) > 1: #gated, no bias
         dactivation_lu, dactivation_lu_trans, amax_out = \
-        activation_lu_fp8_bwd(g, x, amax, scale, scale_inv, bwd_dtype, -1)
+        dgated_act_lu_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype, -1, activation_type)
         dbias = jnp.empty(x.shape[-1], x.dtype)
-    else:
+    else: #not gated, with bias
         dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
-        activation_lu_fp8_bwd(g, x, amax, scale, scale_inv, bwd_dtype, -1)
+        dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype, -1, activation_type)
     dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
     dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)
     ctx = (dactivation_lu, dactivation_lu_trans, dbias, amax_out, scale, scale_inv)
@@ -317,12 +287,11 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     activation_lu_out_scale = scale[gemm2_x_idx]
     activation_lu_out_scale_inv = scale_inv[gemm2_x_idx]
 
-    activation_lu_fwd_fp8 = activation_fp8_dict[activation_type]["fwd"]
 
     # (batch..., hidden_in) -> (batch..., hidden)
     casted_activation_lu_out, updated_activation_lu_amax = \
-        activation_lu_fwd_fp8(dot_1_output, activation_lu_out_amax, activation_lu_out_scale,
-                                                    activation_lu_out_scale_inv, fwd_dtype)
+    act_lu_fp8(dot_1_output, activation_lu_out_amax, activation_lu_out_scale,
+               activation_lu_out_scale_inv, fwd_dtype, activation_type)
 
     casted_activation_lu_out = with_sharding_constraint_by_logical_axes(casted_activation_lu_out,
                                                                         dot_2_input_axes)
@@ -440,19 +409,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
         else:
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
-            dactivation_lu_cast_transpose(
-                dgrad_2,
-                dot_1_output,
-                dactivation_lu_amax,
-                dactivation_lu_scale,
-                dactivation_lu_scale_inv,
-                bwd_dtype,
-                static_axis_boundary=-1)
-            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
-    else:
-        if use_bias:
-            casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
-            dactivation_lu_cast_transpose(
+            dgated_act_lu_cast_transpose(
                 dgrad_2,
                 dot_1_output,
                 dactivation_lu_amax,
@@ -460,7 +417,21 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-1)
+                activation_type=activation_type)
+            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
+    else:
+        if use_bias:
+            casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
+            dact_lu_dbias_cast_transpose(
+                dgrad_2,
+                dot_1_output,
+                dactivation_lu_amax,
+                dactivation_lu_scale,
+                dactivation_lu_scale_inv,
+                bwd_dtype,
+                static_axis_boundary=-1,
+                transpose_axis_boundary=-1,
+                activation_type=activation_type)
             dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
         else:
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
