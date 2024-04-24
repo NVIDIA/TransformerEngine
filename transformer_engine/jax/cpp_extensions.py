@@ -2683,7 +2683,7 @@ class DActLuPrimitive(BasePrimitive):
     """
     Dgated ActLu Primitive
     """
-    name = "te_dgelu"
+    name = "te_dact_lu"
     multiple_results = False
     inner_primitive = None
     outer_primitive = None
@@ -2911,7 +2911,7 @@ class CastTransposePrimitive(BasePrimitive):
                               reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype))
+                                                               jax_dtype_to_te_dtype(out_dtype), 0)
 
         out = custom_caller(CastTransposePrimitive.name,
                             args,
@@ -3069,7 +3069,7 @@ class CastFP8Primitive(BasePrimitive):
 
         opaque = transformer_engine_jax.pack_common_descriptor(ir_x_shape,
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype))
+                                                               jax_dtype_to_te_dtype(out_dtype), 0)
 
         out = custom_caller(CastFP8Primitive.name,
                             args,
@@ -3192,7 +3192,7 @@ class TransposePrimitive(BasePrimitive):
         contracted_x_shape = (reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
                               reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape, te_dtype,
-                                                               te_dtype)
+                                                               te_dtype, 0)
 
         out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
@@ -3918,7 +3918,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
     """
     DActLu DBias Cast Transpose Primitive
     """
-    name = "te_dgelu_dbias_cast_transpose"
+    name = "te_dact_lu_dbias_cast_transpose"
     multiple_results = True
     # out_dtype, static_axis_boundary, transpose_axis_boundary, act_enum
     impl_static_args = (5, 6, 7, 8)
@@ -3940,7 +3940,8 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         ir_hidden_szie = dz_aval.shape[-1]
         gi_hidden_size = x_aval.shape[-1]
         assert ir_hidden_szie == gi_hidden_size
-        t_shape = _multidim_transpose(x_aval.shape, static_axis_boundary, transpose_axis_boundary)
+        t_shape = _multidim_transpose(x_aval.shape,
+                                      static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=x_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
 
@@ -3986,11 +3987,11 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         ir_dz_shape = ir_dz_type.shape
         x_type = ir.RankedTensorType(x.type)
         x_shape = x_type.shape
-        assert ir_dz_shape == x_shape
-
-        batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        dz_batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        x_batch_size = reduce(operator.mul, x_shape[:-2])
+        assert dz_batch_szie == x_batch_size
         ir_hidden_szie = ir_dz_shape[-1]
-        contracted_x_shape = (batch_szie, ir_hidden_szie)
+        contracted_x_shape = (x_batch_size, ir_hidden_szie)
 
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
@@ -4134,7 +4135,8 @@ def dact_lu_dbias_cast_transpose(
     out_dtype: TEDType,
     static_axis_boundary: int,
     transpose_axis_boundary: int = -1,
-    activation_type: Sequence[Union[str, Callable]]) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    activation_type: Sequence[Union[str, Callable]] = ('gelu',)
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose dact_lu and dbias fusion wrapper
     Return FP8(dact_lu(inputs)), dbias
@@ -4178,13 +4180,14 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        gi_hidden_size = dz_aval.shape[-1]
+        if dz_aval.shape[-2] == 1 or dz_aval.shape[-2] == 2:
+            gi_hidden_size = reduce(operator.mul, dz_aval.shape[-2:])
+        else:
+            gi_hidden_size = dz_aval.shape[-1]
         t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
 
-        if dz_aval.shape[-2] == 2:
-            gi_hidden_size *= 2
         dbias_shape = (*dz_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
         dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
 
@@ -4223,12 +4226,12 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         ir_dz_type = ir.RankedTensorType(dz.type)
         ir_dz_shape = ir_dz_type.shape
-        ir_hidden_szie = ir_dz_shape[-1]
-        if dz_aval.shape[-2] == 2:
+        if ir_dz_shape[-2] == 1 or dz_aval.shape[-2] == 2:
             batch_szie = reduce(operator.mul, ir_dz_shape[:-2])
-            ir_hidden_szie *= 2
+            ir_hidden_szie = reduce(operator.mul, ir_dz_shape[-2:])
         else:
             batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+            ir_hidden_szie = ir_dz_shape[-1]
         contracted_dz_shape = (batch_szie, ir_hidden_szie)
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
@@ -4254,7 +4257,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_common_wk_descriptor(
             contracted_dz_shape, wkspace_aval.shape, jax_dtype_to_te_dtype(dz_aval.dtype),
-            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype))
+            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype), 0)
 
         out = custom_caller(DBiasCastTransposePrimitive.name,
                             args,
@@ -4385,7 +4388,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
     """
     Dgated ActLu Cast Transpose Primitive
     """
-    name = "te_dgated_gelu_cast_transpose"
+    name = "te_dgated_act_lu_cast_transpose"
     multiple_results = True
     impl_static_args = (5, 6, 7)    # out_dtype, static_axis_boundary, act_enum
     inner_primitive = None

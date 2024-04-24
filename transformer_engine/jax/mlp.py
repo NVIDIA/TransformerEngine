@@ -58,7 +58,7 @@ def activation_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     """
     Activation Unit
     """
-    transpose_indices = (1, 2, 0) if len(activation_type) > 1 else (2, 0, 1)
+    transpose_indices = (1, 2, 0) 
     dx_trans_no_use = jnp.empty([x.shape[i] for i in transpose_indices], dtype=x.dtype)
     dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
 
@@ -103,7 +103,8 @@ def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype,   # pylint: disable=unused
         dbias = jnp.empty(x.shape[-1], x.dtype)
     else: #not gated, with bias
         dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
-        dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype, -1, activation_type)
+        dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype,
+                                     -1, -2, activation_type)
     dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
     dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)
     ctx = (dactivation_lu, dactivation_lu_trans, dbias, amax_out, scale, scale_inv)
@@ -207,7 +208,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         activation_type,
         use_bias):
 
-    is_gated = len(activation_type) > 1
+#    is_gated = len(activation_type) > 1
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 1, Hidden_out)
     # Kernel_2 should be in shape of (Hidden_in, Hidden_out)
@@ -223,8 +224,8 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     # Squeeze act axis
     # (hidden_in, 1, hidden_out) -> (hidden_in, hidden_out)
-    if not is_gated:
-        kernel_1 = jnp.squeeze(kernel_1, axis=-2)
+#    if not is_gated:
+#        kernel_1 = jnp.squeeze(kernel_1, axis=-2)
 
     amax = FP8Helper.update_amax_history(amax)
 
@@ -352,7 +353,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
     # Since the sharding of outputs should be the same as dot_1's input
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
-
     if use_bias:
         casted_grad, casted_grad_t, dbias_2, updated_grad_amax = \
         dbias_cast_transpose(grad, grad_amax, grad_scale,
@@ -392,11 +392,9 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     dactivation_lu_scale = scale[gemm1_grad_idx]
     dactivation_lu_scale_inv = scale_inv[gemm1_grad_idx]
 
-    dactivation_lu_cast_transpose = activation_fp8_dict[activation_type]["bwd"]
-    dactivation_lu = activation_dict[activation_type]["bwd"](dgrad_2, dot_1_output)
-
     if is_gated:
         if use_bias:
+            dactivation_lu = dact_lu(dgrad_2, dot_1_output, activation_type)
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
             dbias_cast_transpose(
                 dactivation_lu,
@@ -421,7 +419,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
     else:
         if use_bias:
-            casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
+            casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax=\
             dact_lu_dbias_cast_transpose(
                 dgrad_2,
                 dot_1_output,
@@ -430,10 +428,11 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-1,
+                transpose_axis_boundary=-2,
                 activation_type=activation_type)
             dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
         else:
+            dactivation_lu = dact_lu(dgrad_2, dot_1_output, activation_type)
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
             cast_transpose(
                 dactivation_lu,
@@ -442,29 +441,21 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-1)
+                transpose_axis_boundary=-2)
             dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     # (hidden, batch...) x (hidden, batch...)
     gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
-    xt_batch_dims_2 = xt_batch_dims if not is_gated \
-        else tuple(i + 1 for i in xt_batch_dims)
+    xt_batch_dims_2 = tuple(i + 1 for i in xt_batch_dims)
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dactivation_lu_t, gemm1_x_scale_inv,
                            dactivation_lu_scale_inv, grad.dtype,
                            (xt_batch_dims, xt_batch_dims_2),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
-    # Expand act axis to match the shape with the given kernel_1
-    if not is_gated:
-        wgrad_1 = jnp.expand_dims(wgrad_1, axis=-2)
 
-    # (batch..., hidden_out) x (hidden_in, hidden_out)
-    if is_gated:
-        x_contracting_dims = ((min(x_contracting_dims),) + tuple(
+    x_contracting_dims = ((min(x_contracting_dims),) + tuple(
             i + 1 for i in x_contracting_dims), (1,2))
-    else:
-        x_contracting_dims = (x_contracting_dims, (1,))
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
     dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1,
                            dactivation_lu_scale_inv, kernel_1_scale_inv,
