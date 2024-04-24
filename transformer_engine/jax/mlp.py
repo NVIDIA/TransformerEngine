@@ -264,7 +264,7 @@ def _layernorm_geglu_fp8_mlp_fwd_rule(
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
-    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kernel_1,
+    ctx = (x, ln_out, mu, rsigma, gamma, beta, dot_1_output, casted_geglu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
            updated_kernel_1_amax, updated_kernel_2_amax, x_contracting_dims, xt_batch_dims)
 
@@ -284,7 +284,7 @@ def _layernorm_geglu_fp8_mlp_bwd_rule(
         ffn2_ckpt_name,    # pylint: disable=unused-argument
         ctx,
         grad):
-    x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, \
+    x, ln_out, mu, rsigma, gamma, beta, dot_1_output, casted_geglu_out, \
     casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
     updated_geglu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims = ctx
@@ -360,6 +360,7 @@ def _layernorm_geglu_fp8_mlp_bwd_rule(
                                           mu,
                                           rsigma,
                                           gamma,
+                                          beta,
                                           zero_centered_gamma=zero_centered_gamma,
                                           epsilon=epsilon)
     else:
@@ -571,7 +572,7 @@ def _layernorm_gelu_fp8_mlp_fwd_rule(
     dot_2_output += jnp.reshape(bias_2, bias_2_shape)
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
-    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_gelu_out, casted_kernel_1,
+    ctx = (x, ln_out, mu, rsigma, gamma, beta, dot_1_output, casted_gelu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_gelu_amax,
            updated_kernel_1_amax, updated_kernel_2_amax, x_contracting_dims, xt_batch_dims,
            bias_1.shape, bias_2.shape)
@@ -592,7 +593,7 @@ def _layernorm_gelu_fp8_mlp_bwd_rule(
         ffn2_ckpt_name,    # pylint: disable=unused-argument
         ctx,
         grad):
-    x, ln_out, mu, rsigma, gamma, dot_1_output, casted_gelu_out, \
+    x, ln_out, mu, rsigma, gamma, beta, dot_1_output, casted_gelu_out, \
     casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
     updated_gelu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape= ctx
@@ -673,6 +674,7 @@ def _layernorm_gelu_fp8_mlp_bwd_rule(
                                           mu,
                                           rsigma,
                                           gamma,
+                                          beta,
                                           zero_centered_gamma=zero_centered_gamma,
                                           epsilon=epsilon)
     else:

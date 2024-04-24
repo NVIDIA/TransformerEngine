@@ -133,7 +133,9 @@ def enable_primitive(primitive_name):
     """
     pattern = os.getenv('NVTE_PRIMITIVES_RE', r'.*')
     pattern = re.compile(pattern)
-    return pattern.match(primitive_name) is not None
+    result = pattern.match(primitive_name) is not None
+    print(f'{primitive_name=} {pattern=} {result=} {pattern.match(primitive_name)=}')
+    return result
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -496,21 +498,26 @@ register_primitive(LayerNormFwdPrimitive)
 def native_layernorm(x, gamma, beta, zero_centered_gamma, eps):
     """
     JAX native layernorm implementations
-    - bias is not None: layernorm
-    - bias is None: rmsnorm
     """
     x_ = jnp.asarray(x, jnp.float32)
-    if beta is None:
-        mean = 0.
-    else:
-        mean = jnp.mean(x_, axis=-1, keepdims=True)
+    mean = jnp.mean(x_, axis=-1, keepdims=True)
     var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
     normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
     if zero_centered_gamma:
         gamma += 1.
-    if beta is None:
-        beta = 0.
     return jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
+
+
+def native_rmsnorm(x, gamma, zero_centered_gamma, eps):
+    """
+    JAX native rmsnorm implementations
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    normed_input = x_ * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.
+    return jnp.asarray(normed_input * gamma).astype(x.dtype)
 
 
 def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
@@ -523,7 +530,7 @@ def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_ce
         mu = jnp.mean(x_, axis=-1, keepdims=True)
         rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_ - mu), axis=-1, keepdims=True) + epsilon)
         return native_layernorm(x, gamma, beta, zero_centered_gamma,
-                                epsilon), mu.flatten(), rsigma.flatten()
+                                epsilon), jnp.squeeze(mu, axis=-1), jnp.squeeze(rsigma, axis=-1)
     return LayerNormFwdPrimitive.outer_primitive.bind(x,
                                                       gamma,
                                                       beta,
@@ -919,6 +926,12 @@ def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
     """
     Wrapper for TE rmsnorm fwd
     """
+    if not enable_primitive(RmsNormFwdPrimitive.name):
+        x_ = jnp.asarray(x, jnp.float32)
+        # mu = jnp.mean(x_, axis=-1, keepdims=True)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_), axis=-1, keepdims=True) + epsilon)
+        return native_rmsnorm(x, gamma, zero_centered_gamma=False,
+                              eps=epsilon), jnp.squeeze(rsigma, axis=-1)
     return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon)
 
 
@@ -1105,6 +1118,10 @@ def rmsnorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp
     """
     Wrapper for TE layernorm bwd
     """
+    if not enable_primitive(RmsNormBwdPrimitive.name):
+        _, vjp_func = jax.vjp(partial(native_rmsnorm, zero_centered_gamma=False, eps=epsilon), x,
+                              gamma)
+        return vjp_func(dz)
     return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
 
 
@@ -2817,7 +2834,7 @@ def dgelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
     dgelu fusion wrapper
     Return dgelu(inputs)
     """
-    if not enable_primitive(GeluPrimitive.name):
+    if not enable_primitive(DGeluPrimitive.name):
         _, vjp_func = jax.vjp(jax.nn.gelu, gelu_inputs)
         return vjp_func(inputs)[0]
     return DGeluPrimitive.outer_primitive.bind(inputs, gelu_inputs)
