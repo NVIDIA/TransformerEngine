@@ -16,8 +16,6 @@
 #include <stddef.h>
 #include <cuda_runtime_api.h>
 
-#include "../common.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
