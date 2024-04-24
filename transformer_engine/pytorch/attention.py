@@ -539,7 +539,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 # [s, b, np, hn] -> [2, s//2, b, np, hn]
                 q, k, v = [x.view(2, x.shape[0]//2, *x.shape[1:]) for x in [q, k, v]]
         if attn_bias is not None:
-            assert (len(attn_bias.shape) == 4), "Attention bias shape should be [b, h, sq, sk]"
+            assert (len(attn_bias.shape) == 4), \
+                "Only support bias shape of [b, h, sq, sk] for forward, and [1, h, sq, sk] for backward!"
             # [b, np, sq, sk] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_bias_ = attn_bias.view( \
                 *attn_bias.shape[:-2], \
