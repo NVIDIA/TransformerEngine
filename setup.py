@@ -171,9 +171,9 @@ def cuda_version() -> Tuple[int, ...]:
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
     """Check if userbuffers support is enabled"""
-    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")):
+    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")) and int(os.getenv("UB_MPI_BOOTSTRAP", "0")):
         assert os.getenv("MPI_HOME"), \
-            "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
+            "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1 and UB_MPI_BOOTSTRAP=1"
         return True
     return False
 

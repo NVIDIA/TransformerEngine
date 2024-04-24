@@ -9,11 +9,11 @@
 #include <pybind11/stl.h>
 #include <dlpack/dlpack.h>
 
-#include "transformer_engine/transformer_engine.h"
+#include <transformer_engine/transformer_engine.h>
+#include "../common.h"
+
 #include "userbuffers.h"
 #include "executor.h"
-
-#include "../common.h"
 
 namespace py = pybind11;
 
@@ -22,6 +22,8 @@ namespace transformer_engine {
 namespace userbuffers {
 
 PYBIND11_MODULE(transformer_engine_userbuffers, m) {
+  m.attr("_NUM_MAX_UB_STREAMS") = py::int_(_NUM_MAX_UB_STREAMS);
+
   py::enum_<UbufCommType>(m, "UbufCommType", py::module_local())
     .value("RS", UbufCommType::RS)
     .value("AG", UbufCommType::AG);

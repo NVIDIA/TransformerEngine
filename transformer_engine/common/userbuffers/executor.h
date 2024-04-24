@@ -14,10 +14,11 @@
 #include <dlpack/dlpack.h>
 #include <pybind11/pybind11.h>
 
-#include "transformer_engine/transformer_engine.h"
-#include "transformer_engine/gemm.h"
-#include "common/util/logging.h"
-#include "common/util/system.h"
+#include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/gemm.h>
+#include "../util/logging.h"
+#include "../util/system.h"
+
 #include "userbuffers.h"
 #include "dlpack_helper.h"
 
@@ -29,6 +30,8 @@ namespace py = pybind11;
 namespace transformer_engine {
 
 namespace userbuffers {
+
+static const size_t _NUM_MAX_UB_STREAMS = 3;
 
 enum class UbufCommType { RS = 0, AG = 1 };
 
@@ -73,16 +76,16 @@ class UbufExecutorBase {
                      const char *group) {
     int cur_dev;
     NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
-    auto send = buffer_to_dlpack<uint8_t>(sendbuf, static_cast<int64_t>(sendbytes), cur_dev);
-    auto recv = buffer_to_dlpack<uint8_t>(recvbuf, static_cast<int64_t>(recvbytes), cur_dev);
+    auto send = buffer_to_capsule<uint8_t>(sendbuf, static_cast<int64_t>(sendbytes), cur_dev);
+    auto recv = buffer_to_capsule<uint8_t>(recvbuf, static_cast<int64_t>(recvbytes), cur_dev);
     _allgather(send, recv, group);
   }
 
   void _ub_barrier(const char *group) { _barrier(group); }
 
  public:
-  std::function<void(py::capsule &, py::capsule &, const std::string &group)> _allgather;
-  std::function<void(const std::string &group)> _barrier;
+  std::function<void(py::capsule &, py::capsule &, const std::string &)> _allgather;
+  std::function<void(const std::string &)> _barrier;
 
   UbufExecutorBase(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
@@ -252,8 +255,8 @@ class UbufExecutor : public UbufExecutorBase {
       ubuf->dptr(), {n, m}, ubuf->dtype(), D->amax(), D->scale(), nullptr);
     TensorWrapper workspace_chunk = TensorWrapper(
       workspace->dptr(), {workspace_size_chunk}, workspace->dtype());
-    nvte_cublas_atomic_gemm(A->data(), B->data(), output_d->data(), bias->data(),
-                            pre_gelu_out->data(), A_trans, B_trans, grad, workspace_chunk->data(),
+    nvte_cublas_atomic_gemm(A->data(), B->data(), output_d.data(), bias->data(),
+                            pre_gelu_out->data(), A_trans, B_trans, grad, workspace_chunk.data(),
                             accumulate, use_split_accumulator, _math_sms, _num_splits, 0, true,
                             counters->dptr(), _stream_compute[0]);
 
@@ -807,9 +810,9 @@ class UbufExecutorP2P : public UbufExecutorBase {
 
     // Get input and workspace data pointers
     char *input_b_ptr = reinterpret_cast<char *>(B->dptr());
-    char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
+    char *workspace_ptr = reinterpret_cast<char *>(workspace->dptr());
     int *counter_ptr = reinterpret_cast<int *>(counters->dptr());
-    size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+    size_t workspace_size_chunk = workspace->numel() / _stream_compute.size();
 
     // Catch up the main stream
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
@@ -818,14 +821,14 @@ class UbufExecutorP2P : public UbufExecutorBase {
     // Atomic GEMM
     // Process GEMM chunks in the order that AG+GEMM places the output chunks.
     TensorWrapper workspace_chunk = TensorWrapper(
-      reinterpret_cast<void *>(workspace_ptr), {workspace_size_chunk}, workspace.dtype());
+      reinterpret_cast<void *>(workspace_ptr), {workspace_size_chunk}, workspace->dtype());
     nvte_cublas_atomic_gemm(A->data(), B->data(), ubuf->data(), bias->data(), pre_gelu_out->data(),
                             A_trans, B_trans, grad, workspace_chunk.data(), accumulate,
                             use_split_accumulator, _math_sms, 0, _tp_size, true, counters->data(),
                             stream_main);
 
     // P2P communication chunk
-    char *rs_out_ptr = reinterpret_cast<char *>(rs_out.dptr());
+    char *rs_out_ptr = reinterpret_cast<char *>(rs_out->dptr());
     for (int i = 1; i < _tp_size; i++) {
       int send_chunk_id = i - 1;
       int recv_chunk_id = send_chunk_id + _tp_size;
@@ -846,13 +849,13 @@ class UbufExecutorP2P : public UbufExecutorBase {
     // Reduce GEMM output chunks
     char *reduce_buf_ptr = reinterpret_cast<char *>(ubuf_chunks[_tp_size - 1].dptr());
     if (is_fp8_dtype(ubuf->dtype())) {
-      assert(!is_fp8_dtype(rs_out.dtype()));
+      assert(!is_fp8_dtype(rs_out->dtype()));
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_out_ptr, ubuf->scale_inv(),
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out.dtype(), out_type,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
           reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
                                                    ubuf_chunks[_tp_size - 1].numel(), stream_main);
         )
@@ -883,8 +886,8 @@ class UbufExecutorP2P : public UbufExecutorBase {
 
     // Get input and workspace data pointers
     char *input_b_ptr = reinterpret_cast<char *>(B->dptr());
-    char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
-    size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+    char *workspace_ptr = reinterpret_cast<char *>(workspace->dptr());
+    size_t workspace_size_chunk = workspace->numel() / _stream_compute.size();
 
     // Catch up the main stream
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
@@ -893,7 +896,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
     }
 
     // GEMM and send/recv chunks
-    char *rs_out_ptr = reinterpret_cast<char *>(rs_out.dptr());
+    char *rs_out_ptr = reinterpret_cast<char *>(rs_out->dptr());
     for (int i = 0; i < _tp_size; i++) {
       // GEMM chunk
       int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
@@ -905,7 +908,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
       TensorWrapper workspace_chunk = TensorWrapper(
         reinterpret_cast<void*>(
           workspace_ptr + ((i % _stream_compute.size()) * workspace_size_chunk)),
-          {workspace_size_chunk}, workspace.dtype());
+          {workspace_size_chunk}, workspace->dtype());
       cudaStream_t gemm_stream = (i == _tp_size - 1) ? stream_main
                                                      : _stream_compute[i % _stream_compute.size()];
       nvte_cublas_gemm(A->data(), input_b_chunk.data(), ubuf_chunks[i].data(),
@@ -935,13 +938,13 @@ class UbufExecutorP2P : public UbufExecutorBase {
     // Reduce GEMM output chunks
     char *reduce_buf_ptr = reinterpret_cast<char *>(ubuf_chunks[_tp_size - 1].dptr());
     if (is_fp8_dtype(ubuf->dtype())) {
-      assert(!is_fp8_dtype(rs_out.dtype()));
+      assert(!is_fp8_dtype(rs_out->dtype()));
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_out_ptr, ubuf->scale_inv(),
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out.dtype(), out_type,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
           reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
                                                    ubuf_chunks[_tp_size - 1].numel(), stream_main)
         )

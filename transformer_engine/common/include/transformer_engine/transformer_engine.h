@@ -165,6 +165,7 @@ void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 
 #ifdef __cplusplus
 }  // extern "C"
+#endif
 
 #include <vector>
 
@@ -386,7 +387,5 @@ class TensorWrapper {
 };
 
 }  // namespace transformer_engine
-
-#endif
 
 #endif  // TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_

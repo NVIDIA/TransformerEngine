@@ -17,8 +17,8 @@
 #include <pybind11/pybind11.h>
 
 #include "transformer_engine/transformer_engine.h"
-#include "../common.h"
 #include "../util/logging.h"
+#include "../common.h"
 
 namespace py = pybind11;
 
@@ -26,11 +26,36 @@ namespace transformer_engine {
 
 namespace userbuffers {
 
-typedef enum _RawBufferType {
-  HOST = 0,
-  DEVICE = 1,
-  PINNED = 2
-}  RawBufferType;
+DType get_te_dtype(DLDataType dtype) {
+  NVTE_CHECK(dtype.lanes == 1, "Unsupported number of data lanes: %d", dtype.lanes);
+  switch (dtype.code) {
+    case kDLFloat:
+      if (dtype.bits == 16) {
+        return DType::kFloat16;
+      } else if (dtype.bits == 32) {
+        return DType::kFloat32;
+      } else {
+        NVTE_ERROR("Unsupported %d-bit float type.", dtype.bits);
+      }
+
+    case kDLBfloat:
+      NVTE_CHECK(dtype.bits == 16, "BFloat16 type must be 16-bits.");
+      return DType::kBFloat16;
+
+    case kDLInt:
+      if (dtype.bits == 32) {
+        return DType::kInt32;
+      } else if (dtype.bits == 64) {
+        return DType::kInt64;
+      } else {
+        NVTE_ERROR("Unsupported %d-bit int type.", dtype.bits);
+      }
+
+    default:
+      NVTE_CHECK(dtype.bits == 8, "Unsupported %d-bit data type.", dtype.bits);
+      return DType::kByte;
+  }
+}
 
 template <typename T>
 DLDataType get_dlpack_dtype(int dtype = -1) {
@@ -45,7 +70,6 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   dl_dtype.lanes = 1;
   dl_type.bits = sizeof(T) * 8;
   switch (typeid(static_cast<T>(1))) {
-    case typeid(static_cast<double>(1)):
     case typeid(static_cast<float>(1)):
     case typeid(static_cast<half>(1)):
       dl_dtype.code = kDLFloat;
@@ -55,22 +79,20 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
       dl_dtype.code = kDLBfloat;
       break;
 
-    case typeid(static_cast<bool>(1)):
-      dl_dtype.code = kDLBool;
-      break;
-
-    case typeid(static_cast<int8_t>(1)):
-    case typeid(static_cast<int16_t>(1)):
     case typeid(static_cast<int32_t>(1)):
     case typeid(static_cast<int64_t>(1)):
       dl_dtype.code = kDLInt;
       break;
 
-    // Everything else is treated as an unsigned integer
-    // NOTE: This includes fp8 dtypes because not all frameworks natively support fp8
     default:
-      dl_dtype.code = kDLUInt;
-      break;
+      // All 8-bit dtypes come out as UInt8 because not all frameworks support Fp8.
+      if (dl_dtype.bits == 8) {
+        dl_dtype.code = kDLUInt;
+        break;
+      } else {
+        NVTE_ERROR("Unsupported %d-bit data type.", dl_dtype.bits);
+      }
+
   }
   return dl_dtype;
 }
@@ -102,15 +124,15 @@ done:
 }
 
 template <typename T = char>
-py::capsule buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1, int dtype = -1) {
+DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1, int dtype = -1) {
   // Convert data type and compute number of tensor elements
   DLDataType dl_dtype = get_dlpack_dtype<T>(dtype);
   assert(bytes % dl_dtype.bits == 0);
   int64_t numel = bytes / (dl_dtype.bits / 8);
 
   // Create and return the dlpack tensor structure
-  DLManagedTensor dlmt{};
-  DLTensor dl_tensor = dlmt.dl_tensor;
+  DLManagedTensor *dlmt = new DLManagedTensor{};
+  DLTensor dl_tensor = dlmt->dl_tensor;
   dl_tensor.data = data;
   dl_tensor.dtype = dl_dtype;
   dl_tensor.shape = &numel;
@@ -120,18 +142,38 @@ py::capsule buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1, int 
   } else {
     dl_tensor.device = {kDLCUDA, device_id};
   }
-  return py::capsule(&dlmt, "dltensor", &dlpack_capsule_deleter);
+  return dlmt;
 }
 
-int64_t dlpack_to_buffer(const py::capsule &capsule, void **buffer) {
+py::capsule dlpack_to_capsule(DLManagedTensor *dlmt) {
+  py::capsule(dlmt, "dltensor", &dlpack_capsule_deleter);
+}
+
+template <typename T = char>
+py::capsule buffer_to_capsule(void *data, int64_t bytes, int device_id = -1, int dtype = -1) {
+  return dlpack_to_capsule(buffer_to_dlpack<T>(data, bytes, device_id, dtype));
+}
+
+DLManagedTensor * capsule_to_dlpack(py::capsule &capsule) {
   if (strcmp(capsule.name(), "used_dltensor") != 0) {
     // something else is already using the data in the capsule
-    return -1;
+    return nullptr;
   }
-  DLManagedTensor *dlmt = capsule.get_pointer<DLManagedTensor>();
   capsule.set_name("used_dltensor");
+  return capsule.get_pointer<DLManagedTensor>();
+}
+
+int64_t dlpack_to_buffer(DLManagedTensor *dlmt, void **buffer) {
   *buffer = dlmt->dl_tensor.data;
-  return dlmt->dl_tensor.shape[0] * (dlmt->dl_tensor.dtype.bits / 8);
+  int64_t numel = std::reduce(dlmt->dl_tensor.shape, dlmt->dl_tensor.shape + dlmt->dl_tensor.ndim,
+                              1, std::multiplies<int64_t>{});
+  int64_t element_size = dlmt->dl_tensor.dtype.bits / 8;
+  int64_t bytes = numel * element_size;
+  return bytes;
+}
+
+int64_t capsule_to_buffer(py::capsule &capsule, void **buffer) {
+  return dlpack_to_buffer(capsule_to_dlpack(capsule), buffer);
 }
 
 }  // namespace userbuffers

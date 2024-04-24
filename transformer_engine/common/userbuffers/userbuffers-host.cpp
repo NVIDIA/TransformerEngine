@@ -13,11 +13,15 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <math.h>
-#include <mpi.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef UB_MPI_BOOTSTRAP
+#include <mpi.h>
+#endif
+
 #define MULTICAST_GB_TOTAL 512
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
@@ -79,7 +83,7 @@ int pipe_rank(communicator *comm, int step) {
 }
 
 int create_communicator_grouped2(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
@@ -87,7 +91,7 @@ int create_communicator_grouped2(communicator **comm
 , int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
   *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_allgather = ext_allgather;
   (*comm)->_barrier = ext_barrier;
@@ -134,7 +138,8 @@ int create_communicator_grouped2(communicator **comm
   }
 
   int ret = 0;
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+
+#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_intra = EXT_COMM_INTRA;
 #else
   // split communicator
@@ -223,7 +228,7 @@ int create_communicator_grouped2(communicator **comm
 
   (*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
 
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_inter = EXT_COMM_INTER;
 #else
   CUDACHECK(cudaFree(0));
@@ -371,28 +376,28 @@ int create_communicator_grouped2(communicator **comm
   return 0;
 }
 int create_communicator_grouped(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
   , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
 #endif
   , pipegpus, pipenodes, 1, 1);
 }
 
 int create_communicator(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 ) {
   return create_communicator_grouped2(comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
   , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
 #endif
   , 1, 1, 1, 1);

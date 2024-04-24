@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 typedef char *ExtComm;
 static const ExtComm EXT_COMM_WORLD = "world";
 static const ExtComm EXT_COMM_INTRA = "intra";
@@ -171,7 +171,7 @@ void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
 int create_communicator(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
@@ -180,14 +180,14 @@ int create_communicator(communicator **comm
 /*  creates communicator, allocates all internal buffers if necessary */
 
 int create_communicator_grouped(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes);
 int create_communicator_grouped2(communicator **comm
-#ifdef UBUF_EXTERNAL_BOOTSTRAP
+#ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
 , std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
 , std::function<void(ExtComm)> ext_barrier

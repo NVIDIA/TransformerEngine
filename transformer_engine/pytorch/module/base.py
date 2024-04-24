@@ -40,7 +40,6 @@ _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
 _ub_communicators = None
-_NUM_MAX_UB_STREAMS = 3
 layers_atomic_ring_exchange = []
 
 
@@ -69,6 +68,11 @@ def initialize_ub(
     ub_cfgs: Optional[dict] = None
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
+    try:
+        import transformer_engine_userbuffers as tub
+    except ImportError:
+        raise ImportError("Comm+GEMM overlap requires Transformer Engine to be built with "
+                        "NVTE_WITH_USERBUFFERS=1.")
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
@@ -79,7 +83,7 @@ def initialize_ub(
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    _cublas_workspace = get_workspace().repeat(tub._NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -174,7 +178,7 @@ def initialize_ub(
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
                     num_splits,
-                    _NUM_MAX_UB_STREAMS,
+                    tub._NUM_MAX_UB_STREAMS,
                     cga_size,               # CGA cluster size
                     num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
@@ -190,7 +194,7 @@ def initialize_ub(
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
                     num_splits,
-                    _NUM_MAX_UB_STREAMS,
+                    tub._NUM_MAX_UB_STREAMS,
                     cga_size,               # CGA cluster size
                     num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
