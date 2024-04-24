@@ -301,6 +301,69 @@ void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *op
                                     dbias_tensor.data(), workspace.data(), stream);
 }
 
+// HERE
+pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype) {
+    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
+    auto dbias_shape = std::vector<size_t>{hidden_size};
+
+    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
+    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
+    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+
+    TensorWrapper dummy_workspace;
+
+    nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(),
+                              output_trans_tensor.data(), dbias_tensor.data(),
+                              dummy_workspace.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(dummy_workspace.shape());
+    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
+}
+
+void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    auto *output_trans = buffers[5];
+    auto *dbias = buffers[6];
+    float *amax_out = reinterpret_cast<float *>(buffers[7]);
+    void *workspace_ptr = buffers[8];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+    auto output_trans_shape = std::vector<size_t>{n, m};
+    auto dbias_shape = std::vector<size_t>{n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
+
+    auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
+
+    nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(),
+                              output_trans_tensor.data(), dbias_tensor.data(),
+                              workspace.data(), stream);
+}
+
 void GatedGeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
                    cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
     auto input_shape = std::vector<size_t>{m, n * 2};
