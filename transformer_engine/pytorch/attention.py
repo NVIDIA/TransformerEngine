@@ -2729,15 +2729,14 @@ class FusedAttention(TransformerEngineBaseModule):
         self.set_nccl_overlap_warning_if_tp()
 
         def remove_extra_states_check(self, incompatible_keys):
+            """
+            Temporarily remove fused_attention._extra_state as a missing key
+            when loading older TransformerEngine checkpoints. Will phase out
+            this hook in TransformerEngine 2.0.
+            """
             for key in incompatible_keys.missing_keys:
                 if 'fused_attention._extra_state' in key:
                     incompatible_keys.missing_keys.remove(key)
-                    warnings.warn(
-                        f"""Ignoring missing key "{key}" in checkpoints. """
-                        "The likely cause is that checkpoints were collected using "
-                        "pre-v1.6 TransformerEngine. While no functionality impact, "
-                        "please use v1.6+ TransformerEngine for checkpointing "
-                        "next time.")
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
     def get_fp8_weights_scratchpad(
