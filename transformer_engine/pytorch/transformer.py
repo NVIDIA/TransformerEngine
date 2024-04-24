@@ -635,6 +635,7 @@ class TransformerLayer(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
         )
 
+
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
             attention_output, attention_bias, residual = self_attention_outputs
             hidden_states = self._bias_dropout_add(
@@ -673,6 +674,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             is_first_microbatch=is_first_microbatch,
         )
+        
         if self.apply_residual_connection_post_layernorm:
             mlp_output, mlp_bias, residual = mlp_outputs
             output = self._bias_dropout_add(mlp_output, mlp_bias, residual, self.drop_path)

@@ -28,6 +28,7 @@ class HyperParameters:
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps=5
         self.num_training_steps=10
+        self.fuse_qkv_params=False
         
 
 hyperparams = HyperParameters()
@@ -86,15 +87,17 @@ def init_baseline_model(hyperparams):
 
     return model
 
-def init_te_gemma_model(hyperparams):
+def init_te_gemma_model(hyperparams, fp8_model_init=False):
     # Init the model
     from te_gemma import TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
+    config.fuse_qkv_params = hyperparams.fuse_qkv_params
     model = TEGemmaForCausalLM.from_pretrained_local(
             hyperparams.model_name,
             config=config,
             torch_dtype=torch.bfloat16,
+            fp8_init=fp8_model_init,
     )
     # Needed for the cases when using TEGemmaForCausalLM
 

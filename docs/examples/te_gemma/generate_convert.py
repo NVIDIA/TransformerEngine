@@ -33,8 +33,10 @@ with te.fp8_autocast(enabled=False, calibrating=True):
         batch["input_ids"] = batch["input_ids"].cuda()
         outputs = model.generate(
             **batch,
-            max_new_tokens=1
+            max_new_tokens=10
         )
+        generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        print(generated_texts[0][:50])
 print("calibration_finished")
 
 print("scale_fwd computation started")
