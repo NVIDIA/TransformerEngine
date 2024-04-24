@@ -4334,6 +4334,231 @@ def dgelu_dbias_cast_transpose(
         transpose_axis_boundary=transpose_axis_boundary)
 
 
+class DBiasCastTransposePrimitive(BasePrimitive):
+    """
+    DBias Cast Transpose Primitive
+    """
+    name = "te_dbias_cast_transpose"
+    multiple_results = True
+    # out_dtype, static_axis_boundary, transpose_axis_boundary
+    impl_static_args = (4, 5, 6)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(dz_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
+                 static_axis_boundary, transpose_axis_boundary):
+        """
+        te_dbias_cast_transpose_p abstract
+        """
+        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+        gi_hidden_size = dz_aval.shape[-1]
+        t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
+        out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
+        t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
+
+        if dz_aval.shape[-2] == 2:
+            gi_hidden_size *= 2
+        dbias_shape = (*dz_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
+        dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
+
+        updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
+        wkspace_info, = transformer_engine_jax.get_dbias_ct_workspace_sizes(
+            dz_aval.size // gi_hidden_size,
+            gi_hidden_size,
+            jax_dtype_to_te_dtype(dz_aval.dtype),
+            jax_dtype_to_te_dtype(out_dtype)
+        )
+        wkspace_aval = dz_aval.update(shape=wkspace_info[0],
+                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
+
+        return out, t_out, dbias, updated_amax_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        te_dbias_cast_transpose_p outer abstract
+        """
+
+        out, t_out, dbias, updated_amax_aval, _ = \
+        DBiasCastTransposePrimitive.abstract(*args, **kwargs)
+        return out, t_out, dbias, updated_amax_aval
+
+    @staticmethod
+    def lowering(ctx, dz, amax, scale, scale_inv, *, out_dtype, static_axis_boundary,
+                 transpose_axis_boundary):
+        """
+        te_dbias_cast_transpose_p lowering rules
+        """
+        dz_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
+        assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert amax_aval.dtype == jnp.float32
+        assert scale_aval.dtype == jnp.float32
+        assert scale_inv_aval.dtype == jnp.float32
+        ir_dz_type = ir.RankedTensorType(dz.type)
+        ir_dz_shape = ir_dz_type.shape
+        ir_hidden_szie = ir_dz_shape[-1]
+        if dz_aval.shape[-2] == 2:
+            batch_szie = reduce(operator.mul, ir_dz_shape[:-2])
+            ir_hidden_szie *= 2
+        else:
+            batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        contracted_dz_shape = (batch_szie, ir_hidden_szie)
+        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+        ir_amax_type = ir.RankedTensorType(amax.type)
+        ir_amax_dtype = ir_amax_type.element_type
+        ir_amax_shape = ir_amax_type.shape
+        ir_scale_shape = ir_amax_shape
+        ir_scale_inv_shape = ir_amax_shape
+        transposed_dz_shape = _multidim_transpose(ir_dz_shape, static_axis_boundary,
+                                                 transpose_axis_boundary)
+        dbias_shape = (*ir_dz_shape[:static_axis_boundary + 1], ir_hidden_szie)
+
+        wkspace_aval = ctx.avals_out[-1]
+
+        out_types = [
+            ir.RankedTensorType.get(ir_dz_shape, ir_out_dtype),
+            ir.RankedTensorType.get(transposed_dz_shape, ir_out_dtype),
+            ir.RankedTensorType.get(dbias_shape, ir_dz_type.element_type),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
+        ]
+        operands = [dz, amax, scale, scale_inv]
+        operand_shapes = [ir_dz_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_common_wk_descriptor(
+            contracted_dz_shape, wkspace_aval.shape, jax_dtype_to_te_dtype(dz_aval.dtype),
+            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype))
+
+        out = custom_caller(DBiasCastTransposePrimitive.name,
+                            args,
+                            opaque,
+                            False,
+                            operand_output_aliases={1: 3})
+
+        return out
+
+    @staticmethod
+    def impl(dz, amax, scale, scale_inv, out_dtype, static_axis_boundary,
+             transpose_axis_boundary):
+        """
+        to describe implementation
+        """
+        assert DBiasCastTransposePrimitive.inner_primitive is not None
+        out, t_out, dbias, updated_amax, _ = DBiasCastTransposePrimitive.inner_primitive.bind(
+            dz,
+            amax,
+            scale,
+            scale_inv,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary)
+        return out, t_out, dbias, updated_amax
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary,
+                transpose_axis_boundary):
+        """
+        to describe batch rules for vmap
+        """
+        del static_axis_boundary
+        _check_valid_batch_dims(batch_dims)
+        assert DBiasCastTransposePrimitive.outer_primitive is not None
+        dz, amax, scale, scale_inv = batched_args
+        dz_bdim, _, amax_bdim, _, _ = batch_dims
+
+        # Minus batch dim.
+        transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, dz.ndim - 1)
+        transpose_axis_boundary += 1    # Plus batch dim
+
+        out_bdims = dz_bdim, dz_bdim, dz_bdim, amax_bdim
+        return DBiasCastTransposePrimitive.outer_primitive.bind(
+            dz,
+            amax,
+            scale,
+            scale_inv,
+            out_dtype=out_dtype,
+            static_axis_boundary=dz_bdim,
+            transpose_axis_boundary=transpose_axis_boundary), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh,
+                                     arg_infos, result_infos):
+        del out_dtype, result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
+
+    @staticmethod
+    def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh, arg_infos,
+                  result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+
+        dbias_shaprding = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
+
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (casted_x_sharding, casted_transposed_x_sharding, dbias_shaprding,
+                         amax_sharding)
+
+        def sharded_impl(dz, amax, scale, scale_inv):
+            local_out, local_t_out, local_dbias, local_amax = DBiasCastTransposePrimitive.impl(
+                dz,
+                amax,
+                scale,
+                scale_inv,
+                out_dtype=out_dtype,
+                static_axis_boundary=static_axis_boundary,
+                transpose_axis_boundary=transpose_axis_boundary)
+            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            return local_out, local_t_out, global_dbias, global_updated_amax
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(DBiasCastTransposePrimitive)
+
+
+def dbias_cast_transpose(
+    dz: jnp.ndarray,
+    amax: jnp.ndarray,
+    scale: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    out_dtype: TEDType,
+    static_axis_boundary: int,
+    transpose_axis_boundary: int = -1) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    cast transpose dbias partial fusion wrapper
+    Return FP8(inputs), dbias
+    """
+    if static_axis_boundary < 0:
+        static_axis_boundary = -1    # means no static axes
+
+    return DBiasCastTransposePrimitive.outer_primitive.bind(
+        dz,
+        amax,
+        scale,
+        scale_inv,
+        out_dtype=out_dtype,
+        static_axis_boundary=static_axis_boundary,
+        transpose_axis_boundary=transpose_axis_boundary)
+
+
 class GatedGeluFp8Primitive(BasePrimitive):
     """
     Gated Gelu FP8 Primitive
