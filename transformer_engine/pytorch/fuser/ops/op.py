@@ -15,6 +15,7 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
+from transformer_engine.pytorch.graph import is_graph_capturing
 import transformer_engine_extensions as tex
 from ._common import canonicalize_device, is_float8_tensor
 
@@ -163,7 +164,7 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
 
         return 0
 
-    def _make_fp8_metas(self) -> dict[str, Any]:
+    def _make_fp8_metas(self) -> dict[str, Optional[dict[str, Any]]]:
         """Construct FP8 metadata"""
 
         # Shared objects for FP8 metadata
@@ -174,8 +175,10 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
         def _make_meta(
             num_scales: int,
             is_forward: bool,
-        ) -> dict[str, Any]:
+        ) -> Optional[dict[str, Any]]:
             """Construct FP8 metadata for one tensor type"""
+            if num_scales == 0:
+                return None
             key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
             meta = tex.FP8TensorMeta()
             meta.scale = torch.ones(num_scales, dtype=dtype, device=device)
@@ -188,7 +191,7 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
             return {
                 key: meta,
                 "recipe": recipe,
-                f"{key}_non_weight_mask": None,
+                "fp8_group": None,
             }
 
         # Construct FP8 metadata for all tensor types
@@ -198,7 +201,33 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
             grad_output=_make_meta(self.num_fp8_scales("grad_output"), False),
         )
 
-    def get_fp8_meta(self, mode: str) -> dict:
+    @torch.no_grad()
+    def _check_fp8_meta(self, fp8_meta: Optional[dict[str, Any]]) -> None:
+        if fp8_meta is None:
+            return
+
+        # Update FP8 recipe and communication group
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        fp8_meta["recipe"] = recipe
+        fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+
+        # Adjust amax history length if needed
+        amax_history_len = recipe.amax_history_len
+        for is_forward in (True, False):
+            key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
+            if key not in fp8_meta:
+                continue
+            meta = fp8_meta[key]
+            curr_len = meta.amax_history.size(0)
+            if curr_len > amax_history_len:
+                meta.amax_history = meta.amax_history[:amax_history_len].clone()
+            elif curr_len < amax_history_len:
+                meta.amax_history = torch.nn.functional.pad(
+                    meta.amax_history,
+                    pad=(0, 0, 0, amax_history_len - curr_len),
+                )
+
+    def get_fp8_meta(self, mode: str) -> Optional[dict[str, Any]]:
         """FP8 metadata
 
         Parameters
@@ -216,20 +245,32 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
 
         # Initialize FP8 metadata if needed
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        if self._fp8_metas is None and fp8_enabled:
-            self._fp8_metas = self._make_fp8_metas()
+        if fp8_enabled:
 
-        # Update FP8 metadata if needed
-        ### TODO Fix
-        ### TODO Fused kernel
-        ### TODO amax reductions
-        # if fp8_enabled:
-        #     if self.num_fp8_scales("input"):
-        #         amax_and_scale_update(self.get_fp8_meta("input"), True)
-        #     if self.num_fp8_scales("param"):
-        #         amax_and_scale_update(self.get_fp8_meta("param"), True)
-        #     if self.num_fp8_scales("grad_output"):
-        #         amax_and_scale_update(self.get_fp8_meta("grad_output"), False)
+            # Construct FP8 metadata if needed
+            if self._fp8_metas is None:
+                self._fp8_metas = self._make_fp8_metas()
+
+            # Make sure FP8 metadata matches FP8 autocast context
+            for fp8_meta in self._fp8_metas.values():
+                self._check_fp8_meta(fp8_meta)
+
+            # Register FP8 metadata for amax and scale update
+            if not FP8GlobalStateManager.fp8_graph_capturing():
+                if self.num_fp8_scales("input"):
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                        self.get_fp8_meta("input"),
+                    )
+                if self.num_fp8_scales("param"):
+                    fp8_params = list(filter(is_float8_tensor, self.parameters()))
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                        self.get_fp8_meta("param"),
+                        fp8_weights=(fp8_params if fp8_params else None),
+                    )
+                if self.num_fp8_scales("grad_output"):
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                        self.get_fp8_meta("grad_output"),
+                    )
 
     @abc.abstractmethod
     def op_forward(

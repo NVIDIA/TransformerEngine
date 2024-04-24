@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import torch
 
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.fuser.ops.op import (
     FusableOperation,
     OperationContext,
@@ -16,6 +17,7 @@ from transformer_engine.pytorch.fuser.ops.op import (
 from transformer_engine.pytorch.fuser.ops.fused_forward import (
     fuse_forward_linear_bias_activation,
 )
+from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.utils import clear_tensor_data
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -100,6 +102,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         func_ctx.backward_ops = backward_ops
         func_ctx.unfused_ops = unfused_ops
         func_ctx.unfused_op_ctxs = unfused_op_ctxs
+        func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         return x
 
@@ -158,6 +161,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     f"but got {len(dparams)}"
                 )
             grad_params_flat.extend(dparams)
+
+        # Update FP8 scaling factors
+        if func_ctx.is_first_module and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
             dx,    # input_

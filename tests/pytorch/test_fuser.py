@@ -9,6 +9,7 @@ import math
 import pytest
 import torch
 
+import transformer_engine
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -96,7 +97,107 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
-class TestFuserOps:
+class TestFuser:
+    """Tests for fuser infrastructure"""
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_fp8_scale_update(
+        self,
+        size: int = 16,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Test FP8 scaling factors with delayed scaling recipe"""
+
+        # FP8 recipe
+        margin = 2
+        fp8_format = transformer_engine.common.recipe.Format.HYBRID
+        recipe = transformer_engine.common.recipe.DelayedScaling(
+            margin=margin,
+            interval=1,
+            fp8_format=fp8_format,
+            amax_history_len=8,
+            amax_compute_algo="max",
+        )
+
+        # Construct model
+        with te.fp8_model_init():
+            model = te_fuser.ops.unfused.UnfusedLinear(
+                size,
+                size,
+                device=device,
+                dtype=dtype,
+            )
+
+        # Training steps
+        w_vals = [2, 5, 3, 11]
+        x_vals = [7, 3, 5]
+        dy_vals = [1, 2, 1]
+        with torch.no_grad():
+            model.weight.fill_(w_vals[0])
+        for step in range(3):
+
+            # Data tensors
+            x = torch.full(
+                (size, size),
+                x_vals[step],
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
+            dy = torch.full(
+                (size, size),
+                dy_vals[step],
+                dtype=dtype,
+                device=device,
+            )
+
+            # Training step
+            with te.fp8_autocast(fp8_recipe=recipe):
+                y = model(x)
+            y.backward(dy)
+            with torch.no_grad():
+                model.weight.fill_(w_vals[step+1])
+
+            # Check that output tensors match expected
+            tols = dict(rtol=0, atol=0)
+            y_val_ref = w_vals[step] * x_vals[step] * size
+            dx_val_ref = w_vals[step] * dy_vals[step] * size
+            torch.testing.assert_close(
+                y,
+                torch.full_like(y, y_val_ref),
+                **dtype_tols(tex.DType.kFloat8E4M3),
+            )
+            torch.testing.assert_close(
+                x.grad,
+                torch.full_like(x.grad, dx_val_ref),
+                **dtype_tols(tex.DType.kFloat8E5M2),
+            )
+
+            # Check that scaling factors match expected
+            w_amax_ref = max(w_vals[:step+2])
+            x_amax_ref = max(x_vals[:step+1])
+            dy_amax_ref = max(dy_vals[:step+1])
+            w_scale_ref = (fp8_format.value.max_fwd / w_amax_ref) / (2 ** margin)
+            x_scale_ref = (fp8_format.value.max_fwd / x_amax_ref) / (2 ** margin)
+            dy_scale_ref = (fp8_format.value.max_bwd / dy_amax_ref) / (2 ** margin)
+            forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+            backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+            w_scale = model.get_fp8_meta("param")[forward_key].scale
+            x_scale = model.get_fp8_meta("input")[forward_key].scale
+            dy_scale = model.get_fp8_meta("grad_output")[backward_key].scale
+            torch.testing.assert_close(w_scale, torch.full_like(w_scale, w_scale_ref))
+            torch.testing.assert_close(x_scale, torch.full_like(x_scale, x_scale_ref))
+            torch.testing.assert_close(dy_scale, torch.full_like(dy_scale, dy_scale_ref))
+
+class TestBasicOps:
     """Tests for individual operations"""
 
     @staticmethod
@@ -527,7 +628,7 @@ class TestFuserOps:
             db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
-class TestFuserFusions:
+class TestFusedOps:
     """Tests for fused operations"""
 
     @staticmethod
