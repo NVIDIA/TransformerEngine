@@ -943,17 +943,18 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        # Make sure each tuple is sorted in alphabet order
-        gated_act_pool = [('gelu', 'linear')]
-                          #('linear', 'silu')] coming
-        act_pool = [('gelu',)]
-                    #('silu',)] coming
+        gated_act_pool = [('gelu', 'linear'),
+                          ('silu', 'linear')]
+        act_pool = [('gelu',),
+                    ('silu',)]
         normalize_acts = []
         for act in self.activations:
             if not isinstance(act, str):
                 return False
             normalize_acts.append(act.lower())
-        normalize_acts = tuple(sorted(normalize_acts))
+        normalize_acts = tuple(reversed(normalize_acts)
+                               if normalize_acts[0] == 'linear' else normalize_acts)
+
         is_gated = normalize_acts in gated_act_pool
         is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 

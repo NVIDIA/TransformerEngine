@@ -61,24 +61,24 @@ void nvte_dgeglu(const NVTETensor grad,
                  NVTETensor output,
                  cudaStream_t stream);
 
-/*! \brief Compute RELU activation of the input.
+/*! \brief Compute SiLU activation of the input.
  *
- *  \param[in]     input     Input tensor for RELU activation.
+ *  \param[in]     input     Input tensor for GELU activation.
  *  \param[in,out] output    Output tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_relu(const NVTETensor input,
+void nvte_swish(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream);
 
-/*! \brief Compute RELU activation gradient.
+/*! \brief Compute Swish activation gradient.
  *
  *  \param[in]     grad      Incoming gradient.
- *  \param[in]     input     Input tensor for RELU activation.
+ *  \param[in]     input     Input tensor for Swish activation.
  *  \param[in,out] output    Output tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_drelu(const NVTETensor grad,
+void nvte_dswish(const NVTETensor grad,
                 const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream);
@@ -104,6 +104,29 @@ void nvte_dswiglu(const NVTETensor grad,
                   const NVTETensor input,
                   NVTETensor output,
                   cudaStream_t stream);
+
+
+/*! \brief Compute RELU activation of the input.
+ *
+ *  \param[in]     input     Input tensor for RELU activation.
+ *  \param[in,out] output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_relu(const NVTETensor input,
+               NVTETensor output,
+               cudaStream_t stream);
+
+/*! \brief Compute RELU activation gradient.
+ *
+ *  \param[in]     grad      Incoming gradient.
+ *  \param[in]     input     Input tensor for RELU activation.
+ *  \param[in,out] output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_drelu(const NVTETensor grad,
+                const NVTETensor input,
+                NVTETensor output,
+                cudaStream_t stream);
 
 /*! \brief Compute ReGLU activation of the input.
  *
