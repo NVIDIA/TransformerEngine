@@ -540,8 +540,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                 # [s, b, np, hn] -> [2, s//2, b, np, hn]
                 q, k, v = [x.view(2, x.shape[0]//2, *x.shape[1:]) for x in [q, k, v]]
         if attn_bias is not None:
-            assert (len(attn_bias.shape) == 4), \
-                "Only support bias shape of [b, h, sq, sk] for forward, and [1, h, sq, sk] for backward!"
+            assert (len(attn_bias.shape) == 4), (
+                "Only support bias shape of [b, h, sq, sk] for forward, "
+                "and [1, h, sq, sk] for backward!"
+            )
             # [b, np, sq, sk] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_bias_ = attn_bias.view( \
                 *attn_bias.shape[:-2], \
@@ -941,7 +943,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
-                        dq_, dk_, dv_, dbias_, *rest = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             cu_seqlens_q, cu_seqlens_k,
                             q_, kv_[0], kv_[1], out_, dout_,
@@ -994,7 +996,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
-                        dq_, dk_, dv_, dbias_, *rest = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                             cu_seqlens_q, cu_seqlens_k//2,
                             q_, kv_[0], kv_[1], out_, dout_,
@@ -1047,7 +1049,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         aux_ctx_tensors = [softmax_lse_, ctx.rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
-                        dq_, dk_, dv_, dbias_, *rest = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             cu_seqlens_q//2, cu_seqlens_k,
                             q_, kv_[0], kv_[1], out_, dout_,
@@ -1084,7 +1086,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
                     if attn_dbias is not None:
                         aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
-                    dq_, dk_, dv_, dbias_, *rest = fused_attn_bwd(
+                    dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         cu_seqlens_q, cu_seqlens_k,
                         q, kv[0], kv[1], out, dout,
@@ -1245,15 +1247,16 @@ class AttnFuncWithCP(torch.autograd.Function):
 
 
 def attn_forward_func_with_cp(
-    is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
-    cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd", attn_mask_type="causal",
-    attn_bias_type="no_bias", attn_bias=None, deterministic=False, use_fused_attention=False
+    is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+    dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd",
+    attn_mask_type="causal", attn_bias_type="no_bias", attn_bias=None, deterministic=False,
+    use_fused_attention=False
 ) -> torch.Tensor:
     """Attention implementation with context parallelism"""
     assert(qkv_format in ["bshd", "sbhd"]
         ), f"QKV format of {qkv_format} is not supported with context parallelism!"
     assert(qkv_format != "sbhd" or use_fused_attention
-        ), f"FlashAttention does not support sbhd format!"
+        ), "FlashAttention does not support sbhd format!"
     assert (attn_mask_type in ["causal", "no_mask"]
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
     assert (attn_bias is None or use_fused_attention
@@ -3036,7 +3039,7 @@ class FusedAttention(TransformerEngineBaseModule):
                 ), f"{fused_attention_backend} does not work with context parallelism!"
             assert (
                 core_attention_bias_type not in ["alibi"]
-            ), f"Attention bias type of {core_attention_bias_type} is not supported with context parallelism!"
+            ), f"{core_attention_bias_type} is not supported with context parallelism!"
             query_layer, key_layer, value_layer = [x.contiguous()
                 for x in (query_layer, key_layer, value_layer)]
             with self.attention_dropout_ctx():
