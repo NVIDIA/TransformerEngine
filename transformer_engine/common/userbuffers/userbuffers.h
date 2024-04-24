@@ -157,7 +157,7 @@ struct communicator {
   ExtComm comm_world,
           comm_inter,       // reduction group communicator (subset of the nodes) along GPU rail
           comm_intra;       // full intranode (all ndev GPUS)
-#ifndef UBUF_EXTERNAL_BOOTSTRAP
+#ifdef UB_MPI_BOOTSTRAP
   MPI_Request mpihndl[NVTE_MAX_SHARP];
 #endif
 

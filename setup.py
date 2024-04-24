@@ -478,6 +478,9 @@ def setup_pytorch_extension() -> setuptools.Extension:
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if with_userbuffers():
+        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
+        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
 
     # Version-dependent CUDA options
     try:
