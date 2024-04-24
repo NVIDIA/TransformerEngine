@@ -5,7 +5,6 @@
 """Attention."""
 import collections
 from contextlib import nullcontext
-import functools
 from importlib.metadata import version
 import math
 import os
@@ -278,8 +277,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
 
     return indices
 
-
-@functools.lru_cache
+_cu_seqlens_cache = {}
 def _get_full_cu_seqlens(
     batch_size: int,
     max_seqlen: int,
@@ -290,13 +288,16 @@ def _get_full_cu_seqlens(
     All sequences in batch have the maximum sequence length.
 
     """
-    return torch.arange(
-        0,
-        (batch_size + 1) * max_seqlen,
-        step=max_seqlen,
-        dtype=torch.int32,
-        device=device,
-    )
+    global _cu_seqlens_cache
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+            0,
+            (batch_size + 1) * max_seqlen,
+            step=max_seqlen,
+            dtype=torch.int32,
+            device=device,
+        )
+    return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
 @jit_fuser
