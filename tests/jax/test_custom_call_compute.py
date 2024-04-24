@@ -204,8 +204,8 @@ class TestFP8Dot:
             b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
             b2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
-            b1 = jax.random.normal(subkeys[3], (0,), jnp.bfloat16)
-            b2 = jax.random.normal(subkeys[4], (0,), jnp.bfloat16)
+            b1 = jnp.empty((0,), jnp.bfloat16)
+            b2 = jnp.empty((0,), jnp.bfloat16)
 
         init_fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM * 2)
         init_fp8_metas_amax = jnp.zeros(
@@ -310,18 +310,18 @@ class TestFP8Dot:
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)
-        assert_allclose(jnp.asarray(primitive_k2_grad, np.float32),
-                        jnp.asarray(ref_k2_grad, np.float32),
-                        dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(jnp.asarray(primitive_s_grad, np.float32),
                         jnp.asarray(ref_s_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)
+        assert_allclose(jnp.asarray(primitive_k2_grad, np.float32),
+                        jnp.asarray(ref_k2_grad, np.float32),
+                        dtype=FP8Helper.BWD_DTYPE)
         if use_bias:
-            assert_allclose(jnp.asarray(primitive_b1_grad, np.float32),
-                            jnp.asarray(ref_b1_grad, np.float32),
-                            dtype=jnp.bfloat16)
             assert_allclose(jnp.asarray(primitive_b2_grad, np.float32),
                             jnp.asarray(ref_b2_grad, np.float32),
+                            dtype=jnp.bfloat16)
+            assert_allclose(jnp.asarray(primitive_b1_grad, np.float32),
+                            jnp.asarray(ref_b1_grad, np.float32),
                             dtype=jnp.bfloat16)
 
 
@@ -351,13 +351,14 @@ class TestActivationLu:
     def primitive_func(self, inputs):
         return jnp.mean(activation_lu(inputs, activation_type = self.activation_type))
 
-    @pytest.mark.parametrize('shape', [(32, 2, 64), (64, 2, 256)])
+    @pytest.mark.parametrize('shape', [(32, 1, 64), (64, 1, 256)])
     @pytest.mark.parametrize('activation_type', [('gelu',),
                                                  ('gelu', 'linear'),
                                                  ('silu',),
                                                  ('silu', 'linear')])
     def test_activation_lu(self, random_inputs, activation_type):
         x = random_inputs
+        x = jnp.repeat(x, len(activation_type), axis=1)
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(
@@ -365,8 +366,6 @@ class TestActivationLu:
 
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x)
         ref_out, (ref_grad,) = self.ref_func(x, activation_type)
-        """ prim_grad, = prim_grad """
-        """ ref_grad, = ref_grad """
 
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
         assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
@@ -382,7 +381,7 @@ class TestActivationLuFP8(TestActivationLu):
                               activation_type = self.activation_type))
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('shape', [(32, 2, 64), (64, 2, 256)])
+    @pytest.mark.parametrize('shape', [(32, 1, 64), (64, 1, 256)])
     @pytest.mark.parametrize('activation_type', [('gelu',),
                                                  ('gelu', 'linear'),
                                                  ('silu',),
@@ -394,6 +393,7 @@ class TestActivationLuFP8(TestActivationLu):
         self.activation_type = activation_type
 
         x = random_inputs
+        x = jnp.repeat(x, len(activation_type), axis=1)
 
         value_n_grad_primitive_func = jit( value_and_grad(self.primitive_func, (0, 1, 2, 3, 4, 5,)))
 
