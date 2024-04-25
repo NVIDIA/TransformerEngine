@@ -1055,8 +1055,10 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
     // Catch up the main stream
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t)stream_main));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
     for (int i = 0; i < _stream_compute.size(); i++) {
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i], _start_compute, 0));
     }
@@ -1097,6 +1099,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                            _ub_comm, recv_rank, (cudaStream_t) _stream_recv);
       }
     }
+    for (int i = 0; i < _stream_compute.size(); i++) {
+      CHECK_CUDA(
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[i]));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    }
+    CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
     CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t) _stream_recv));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_recv, 0));
 
