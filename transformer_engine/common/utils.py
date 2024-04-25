@@ -6,7 +6,7 @@ import inspect
 import warnings
 from enum import Enum
 
-warnings.simplefilter('default')
+warnings.filterwarnings("module", category=DeprecationWarning, module="utils")
 
 
 class DeprecatedEnum:    # pylint: disable=too-few-public-methods
