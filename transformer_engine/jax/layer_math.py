@@ -74,6 +74,13 @@ def rmsnorm_fp8(x, gamma, scale, amax, out_dtype, zero_centered_gamma, eps):
     return casted_output, jnp.squeeze(rsigma, axis=-1), updated_amax
 
 
+def bias_gelu(inputs, bias):
+    """
+    JAX native bias_gelu implementation
+    """
+    return jax.nn.gelu(inputs + bias)
+
+
 def gated_gelu(inputs):
     """
     JAX native gated gelu implementation
@@ -82,6 +89,16 @@ def gated_gelu(inputs):
     gelu_inputs, identity_inputs = jnp.split(inputs, [1], axis=-2)
     gelu_outputs = jax.nn.gelu(gelu_inputs)
     return jnp.squeeze(gelu_outputs * identity_inputs, axis=-2)
+
+
+def gated_gelu_fp8(inputs, scale, amax, out_dtype):
+    """
+    JAX native gated gelu fp8 implementation
+    """
+    geglu_output = gated_gelu(inputs)
+    casted_output = quantize(geglu_output, scale, q_dtype=out_dtype)
+    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(geglu_output)).astype(amax.dtype))
+    return casted_output, updated_amax
 
 
 def cast_fp8(inputs, scale, amax, out_dtype):

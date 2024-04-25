@@ -4400,6 +4400,7 @@ register_primitive(DGeluDBiasCastTransposePrimitive)
 def dgelu_dbias_cast_transpose(
         dz: jnp.ndarray,
         x: jnp.ndarray,
+        bias: jnp.ndarray,
         amax: jnp.ndarray,
         scale: jnp.ndarray,
         scale_inv: jnp.ndarray,
@@ -4413,6 +4414,17 @@ def dgelu_dbias_cast_transpose(
     if static_axis_boundary < 0:
         static_axis_boundary = -1    # means no static axes
 
+    if not enable_primitive(DGeluDBiasCastTransposePrimitive.name):
+        _, vjp_func = jax.vjp(layer_math.bias_gelu, x, bias)
+        gelu_grad, bias_grad = vjp_func(dz)
+        casted_gelu_grad, ct_gelu_grad, updated_amax = layer_math.cast_transpose(
+            gelu_grad,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary)
+        return casted_gelu_grad, ct_gelu_grad, bias_grad, updated_amax
     return DGeluDBiasCastTransposePrimitive.outer_primitive.bind(
         dz,
         x,
@@ -4568,6 +4580,8 @@ def gated_gelu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_
     gated gelu wrapper
     Return FP8(geglu(x))
     """
+    if not enable_primitive(GatedGeluFp8Primitive.name):
+        return layer_math.gated_gelu_fp8(x, scale, amax, out_dtype=out_dtype)
     return GatedGeluFp8Primitive.outer_primitive.bind(x,
                                                       amax,
                                                       scale,
@@ -4738,6 +4752,15 @@ def dgated_gelu_cast_transpose(
     cast transpose d_gated_gelu fusion wrapper
     Return FP8(dgeglu(inputs))
     """
+    if not enable_primitive(DgatedGeluCastTransposePrimitive.name):
+        _, vjp_func = jax.vjp(layer_math.gated_gelu, x)
+        dx, = vjp_func(dz)
+        return layer_math.cast_transpose(dx,
+                                         scale,
+                                         amax,
+                                         out_dtype=out_dtype,
+                                         static_axis_boundary=static_axis_boundary,
+                                         transpose_axis_boundary=-2)
     return DgatedGeluCastTransposePrimitive.outer_primitive.bind(
         dz,
         x,
