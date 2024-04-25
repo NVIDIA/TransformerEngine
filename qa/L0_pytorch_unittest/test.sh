@@ -8,6 +8,7 @@ set -e
 
 pip install pytest==7.2 onnxruntime==1.13.1
 pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py
+pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py
 pytest -v -s $TE_PATH/tests/pytorch/test_deferred_init.py
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 pytest -v -s $TE_PATH/tests/pytorch/test_numerics.py
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 pytest -v -s $TE_PATH/tests/pytorch/test_cuda_graphs.py
