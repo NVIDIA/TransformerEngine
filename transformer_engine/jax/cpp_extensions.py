@@ -31,6 +31,7 @@ from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from . import layer_math
+from .layer_math import _multidim_transpose, _normalize_axis_boundary
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
 from .sharding import get_all_mesh_axes, num_of_devices
@@ -2968,6 +2969,8 @@ def gated_gelu(inputs: jnp.ndarray) -> jnp.ndarray:
     Return FP8(geglu(inputs))
     Assume inputs has two dimensions shape and the memory layout is (N, 2, H)
     """
+    if not enable_primitive(GatedGeluPrimitive.name):
+        return layer_math.gated_gelu(inputs)
     return GatedGeluPrimitive.outer_primitive.bind(inputs)
 
 
@@ -3085,47 +3088,15 @@ class DgatedGeluPrimitive(BasePrimitive):
 register_primitive(DgatedGeluPrimitive)
 
 
-def dgated_gelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
+def dgated_gelu(inputs: jnp.ndarray, geglu_inputs: jnp.ndarray) -> jnp.ndarray:
     """
     dgated_gelu fusion wrapper
     Return dgeglu(inputs)
     """
-    return DgatedGeluPrimitive.outer_primitive.bind(inputs, gelu_inputs)
-
-
-def _normalize_axis_boundary(axis, ndim):
-    return axis if axis >= 0 else ndim + axis
-
-
-def _multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
-    """
-    te_cast_transpose_p multi-dims transpose
-
-    static_axis_boundary: int, Indicate those axes <= static_axis_boundary would not be
-        involved into transpose, -1 means all axes involve into transpose.
-    transpose_axis_boundary: int, Indicate how to split multi-dimensions tensors to 2D matrix for
-        transpose. Note, transpose_axis_boundary should be greater than static_axis_boundary
-
-    examples:
-        X in shape (dim0, dim1, dim2, dim3, dim4)
-
-        static_axis_boundary == -1, transpose_axis_boundary == 2
-            Xt = (dim2, dim3, dim4, dim0, dim1)
-
-        static_axis_boundary == 0, transpose_axis_boundary == 2
-            Xt = (dim0, dim2, dim3, dim4, dim1)
-
-        static_axis_boundary == 0, transpose_axis_boundary == 3
-            Xt = (dim0, dim3, dim4, dim1. dim2)
-    """
-    if static_axis_boundary < 0:
-        static_axis_boundary = -1    # means no static axes
-    assert static_axis_boundary < len(shape) - 2    # at least 2 remaining for transpose.
-    transpose_start_idx = static_axis_boundary + 1
-    transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, len(shape))
-    assert transpose_start_idx < transpose_axis_boundary
-    return (*shape[:transpose_start_idx], *shape[transpose_axis_boundary:],
-            *shape[transpose_start_idx:transpose_axis_boundary])
+    if not enable_primitive(DgatedGeluPrimitive.name):
+        _, vjp_func = jax.vjp(layer_math.gated_gelu, geglu_inputs)
+        return vjp_func(inputs)[0]
+    return DgatedGeluPrimitive.outer_primitive.bind(inputs, geglu_inputs)
 
 
 class CastTransposePrimitive(BasePrimitive):
@@ -3291,6 +3262,13 @@ def cast_transpose(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_
     cast transpose wrapper
     Return two tensors, FP8(inputs) and FP8(inputs.T), which are scaled by `scale`
     """
+    if not enable_primitive(CastTransposePrimitive.name):
+        return layer_math.cast_transpose(x,
+                                         scale,
+                                         amax,
+                                         out_dtype=out_dtype,
+                                         static_axis_boundary=static_axis_boundary,
+                                         transpose_axis_boundary=transpose_axis_boundary)
     return CastTransposePrimitive.outer_primitive.bind(
         x,
         amax,
@@ -3425,6 +3403,8 @@ def cast_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: j
     Cast wrapper
     Return FP8 tensor
     """
+    if not enable_primitive(CastFP8Primitive.name):
+        return layer_math.cast_fp8(x, scale, amax, out_dtype=out_dtype)
     return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
@@ -3548,6 +3528,8 @@ def transpose(x: jnp.ndarray, static_axis_boundary: int,
     """
     transpose wrapper
     """
+    if not enable_primitive(TransposePrimitive.name):
+        return layer_math.transpose(x, static_axis_boundary, transpose_axis_boundary)
     return TransposePrimitive.outer_primitive.bind(x,
                                                    static_axis_boundary=static_axis_boundary,
                                                    transpose_axis_boundary=transpose_axis_boundary)
