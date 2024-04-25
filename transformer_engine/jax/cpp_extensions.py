@@ -2911,7 +2911,7 @@ class CastTransposePrimitive(BasePrimitive):
                               reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype), 0)
+                                                               jax_dtype_to_te_dtype(out_dtype))
 
         out = custom_caller(CastTransposePrimitive.name,
                             args,
@@ -3069,7 +3069,7 @@ class CastFP8Primitive(BasePrimitive):
 
         opaque = transformer_engine_jax.pack_common_descriptor(ir_x_shape,
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype), 0)
+                                                               jax_dtype_to_te_dtype(out_dtype))
 
         out = custom_caller(CastFP8Primitive.name,
                             args,
@@ -3192,7 +3192,7 @@ class TransposePrimitive(BasePrimitive):
         contracted_x_shape = (reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
                               reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape, te_dtype,
-                                                               te_dtype, 0)
+                                                               te_dtype)
 
         out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
@@ -4257,7 +4257,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_common_wk_descriptor(
             contracted_dz_shape, wkspace_aval.shape, jax_dtype_to_te_dtype(dz_aval.dtype),
-            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype), 0)
+            jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype))
 
         out = custom_caller(DBiasCastTransposePrimitive.name,
                             args,

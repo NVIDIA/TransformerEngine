@@ -56,8 +56,11 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("registrations", &Registrations);
-    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor);
-    m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor);
+    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,
+          pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
+    m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor,
+          pybind11::arg(), pybind11::arg(), pybind11::arg(),
+          pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);

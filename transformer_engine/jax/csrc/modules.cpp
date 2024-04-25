@@ -177,7 +177,7 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
               size_t act_enum) {
     // Gated should have even enum value
     auto act_len = act_enum % 2 + 1;
-    auto input_shape = std::vector<size_t>{m, n * act_len}; //TODO
+    auto input_shape = std::vector<size_t>{m, n * act_len};
     auto output_shape = std::vector<size_t>{m, n};
     auto input_tensor = TensorWrapper(input, input_shape,
                                       static_cast<DType>(in_dtype));
@@ -198,7 +198,7 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
         nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good way here
+        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
         break;
   }
 }
@@ -276,7 +276,7 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
                      output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good way here
+        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
         break;
     }
 }
@@ -358,7 +358,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
                                     dbias_tensor.data(), workspace.data(), stream);
         break;
     default:
-      throw std::runtime_error("Not Implemented"); //TODO: what is a good way here
+      throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
       break;
   }
 }
@@ -408,7 +408,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
                                    stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good way here
+        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
         break;
     }
 }
