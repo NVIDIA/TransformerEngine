@@ -186,22 +186,23 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
                                        static_cast<DType>(out_dtype), amax,
                                        scale, scale_inverse);
     switch (act_enum) {
-    case ActivationEnum::GELU:
+      case ActivationEnum::GELU:
         nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::GEGLU:
+      case ActivationEnum::GEGLU:
         nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::SILU:
+      case ActivationEnum::SILU:
         nvte_swish(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::SWIGLU:
+      case ActivationEnum::SWIGLU:
         nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
+        // TODO: what is a good message here
+        throw std::runtime_error("Not Implemented");
         break;
-  }
+    }
 }
 
 void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -278,7 +279,8 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
                      output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
+        // TODO: what is a good message here
+        throw std::runtime_error("Not Implemented");
         break;
     }
 }
@@ -347,22 +349,22 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
 
     auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
 
-  switch (act_enum) {
-    case ActivationEnum::GELU:
-      nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
-                                    output_tensor.data(), output_trans_tensor.data(),
-                                    dbias_tensor.data(), workspace.data(), stream);
-      break;
-
-    case ActivationEnum::SILU:
-      nvte_cast_transpose_dbias_dswish(input_tensor.data(), gelu_input_tensor.data(),
-                                    output_tensor.data(), output_trans_tensor.data(),
-                                    dbias_tensor.data(), workspace.data(), stream);
+    switch (act_enum) {
+      case ActivationEnum::GELU:
+        nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
         break;
-    default:
-      throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
-      break;
-  }
+      case ActivationEnum::SILU:
+        nvte_cast_transpose_dbias_dswish(input_tensor.data(), gelu_input_tensor.data(),
+                                         output_tensor.data(), output_trans_tensor.data(),
+                                         dbias_tensor.data(), workspace.data(), stream);
+        break;
+      default:
+        // TODO: what is a good message here
+        throw std::runtime_error("Not Implemented");
+        break;
+    }
 }
 
 void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
@@ -410,7 +412,8 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
                                    stream);
         break;
       default:
-        throw std::runtime_error("Not Implemented"); //TODO: what is a good message here
+      // TODO: what is a good message here
+        throw std::runtime_error("Not Implemented");
         break;
     }
 }

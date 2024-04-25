@@ -72,8 +72,9 @@ struct CustomCallCommonWkDescriptor {
 };
 
 pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shape,
-                                                 const std::vector<size_t> &wkshape, DType in_dtype,
-                                                 DType out_dtype, DType wk_dtype, size_t act_enum = 0);
+                                                 const std::vector<size_t> &wkshape,
+                                                 DType in_dtype, DType out_dtype, DType wk_dtype,
+                                                 size_t act_enum = 0);
 
 struct CustomCallNormDescriptor {
     size_t batch_size;

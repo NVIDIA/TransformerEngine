@@ -955,7 +955,6 @@ class LayerNormMLP(TransformerEngineBase):
         normalize_acts = tuple(reversed(normalize_acts)
                                if normalize_acts[0] == 'linear' else normalize_acts)
 
-        is_gated = normalize_acts in gated_act_pool
         is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
         use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented and\
@@ -1130,7 +1129,6 @@ class LayerNormMLP(TransformerEngineBase):
                 x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
-
             activations = []
             if is_act_implemented:
                 z = activation_lu(x, normalize_acts)
@@ -1140,8 +1138,8 @@ class LayerNormMLP(TransformerEngineBase):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
-            if not is_gated:
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+                if num_activations == 1:
+                    z = jnp.reshape(z, (*z.shape[:-2], -1))
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
                            broadcast_dims=self.intermediate_hidden_dropout_dims,
