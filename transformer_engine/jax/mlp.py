@@ -58,7 +58,7 @@ def activation_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     """
     Activation Unit
     """
-    transpose_indices = (1, 2, 0) 
+    transpose_indices = (1, 2, 0)
     dx_trans_no_use = jnp.empty([x.shape[i] for i in transpose_indices], dtype=x.dtype)
     dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
 

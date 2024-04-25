@@ -4,7 +4,7 @@
 """JAX te custom call"""
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Sequence, Union, Callable
 from functools import partial, reduce
 import operator
 import os
@@ -2576,10 +2576,10 @@ class ActLuPrimitive(BasePrimitive):
     multiple_results = False
     inner_primitive = None
     outer_primitive = None
-    impl_static_args = ()
+    impl_static_args = (1,)
 
     @staticmethod
-    def abstract(x_aval):
+    def abstract(x_aval, *, act_enum):  # pylint: disable=unused-argument
         """
         gated_gelu abstract
         """
@@ -2690,17 +2690,15 @@ class DActLuPrimitive(BasePrimitive):
     impl_static_args = (2,)
 
     @staticmethod
-    def abstract(dz_aval, x_aval, *, act_enum):
+    def abstract(dz_aval, x_aval, *, act_enum):  # pylint: disable=unused-argument
         """
         dgelu abstract
         """
         dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dtype
-        #assert dz_aval.shape == x_aval.shape
-        #TODO: uncomment this assert
-        #for axis in range(len(dz_aval.shape) - 1):
-        #    assert dz_aval.shape[axis] == x_aval.shape[axis]
+        for axis in range(len(dz_aval.shape) - 1):
+            assert dz_aval.shape[axis] == x_aval.shape[axis]
         assert (x_aval.shape[-2] == 2 or x_aval.shape[-2] == 1)
 
         i_hidden_size = dz_aval.shape[-1]
@@ -3771,7 +3769,8 @@ class ActLuFp8Primitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype, act_enum):
+    def abstract(x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
+                 act_enum):  # pylint: disable=unused-argument
         """
         te_gelu_p abstract
         """
@@ -3927,7 +3926,8 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
-                 static_axis_boundary, transpose_axis_boundary, act_enum):
+                 static_axis_boundary, transpose_axis_boundary,
+                 act_enum):  # pylint: disable=unused-argument
         """
         te_dgelu_dbais_cast_transpose_p abstract
         """
@@ -4089,7 +4089,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
 
     @staticmethod
-    def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, 
+    def partition(out_dtype, static_axis_boundary, transpose_axis_boundary,
                   act_enum, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
@@ -4106,7 +4106,8 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
                          amax_sharding)
 
         def sharded_impl(dz, x, amax, scale, scale_inv):
-            local_out, local_t_out, local_dbias, local_amax = DActLuDBiasCastTransposePrimitive.impl(
+            local_out, local_t_out, local_dbias, local_amax =\
+            DActLuDBiasCastTransposePrimitive.impl(
                 dz,
                 x,
                 amax,
@@ -4396,7 +4397,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
-                 static_axis_boundary, act_enum):
+                 static_axis_boundary, act_enum):  # pylint: disable=unused-argument
         """
         te_dgated_gelu_cast_transpose_p abstract
         """
@@ -4549,7 +4550,8 @@ def dgated_act_lu_cast_transpose(
     dz: jnp.ndarray, x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     scale_inv: jnp.ndarray, out_dtype: TEDType,
     static_axis_boundary: int,
-    activation_type: Sequence[Union[str, Callable]]) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    activation_type: Sequence[Union[str, Callable]]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose d_gated_act_lu fusion wrapper
     Return FP8(dgayed_act_lu(inputs))
@@ -4564,4 +4566,3 @@ def dgated_act_lu_cast_transpose(
         out_dtype=out_dtype,
         static_axis_boundary=static_axis_boundary,
         act_enum=act_type_id)
-
