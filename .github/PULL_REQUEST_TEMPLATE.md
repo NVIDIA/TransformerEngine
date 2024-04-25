@@ -20,6 +20,7 @@ Please list the changes introduced in this PR:
 
 # Checklist:
 
+- [ ] I have read and followed the [contributing guidelines](https://github.com/NVIDIA/TransformerEngine/blob/main/CONTRIBUTING.rst)
 - [ ] The functionality is complete
 - [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] I have made corresponding changes to the documentation
