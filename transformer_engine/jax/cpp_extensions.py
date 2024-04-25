@@ -8,9 +8,11 @@ from typing import Tuple
 from functools import partial, reduce
 import operator
 import os
+import re
 import warnings
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
@@ -122,6 +124,16 @@ def _check_valid_batch_dims(bdims):
         assert dim in [0, None], \
             "Currently only support batch_dim in [0, None], " \
             f"but got {dim=}"
+
+
+def enable_primitive(primitive_name):
+    """
+    Args: primitive name
+    Return: whether to enable this primitive
+    """
+    pattern = os.getenv('NVTE_PRIMITIVES_RE', r'.*')
+    pattern = re.compile(pattern)
+    return pattern.match(primitive_name) is not None
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -481,11 +493,37 @@ class LayerNormFwdPrimitive(BasePrimitive):
 register_primitive(LayerNormFwdPrimitive)
 
 
+def native_layernorm(x, gamma, beta, zero_centered_gamma, eps):
+    """
+    JAX native layernorm implementations
+    - bias is not None: layernorm
+    - bias is None: rmsnorm
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    if beta is None:
+        mean = 0.
+    else:
+        mean = jnp.mean(x_, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.
+    if beta is None:
+        beta = 0.
+    return jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
+
+
 def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
                   epsilon: float):
     """
     Wrapper for TE layernorm fwd
     """
+    if not enable_primitive(LayerNormFwdPrimitive.name):
+        x_ = jnp.asarray(x, jnp.float32)
+        mu = jnp.mean(x_, axis=-1, keepdims=True)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_ - mu), axis=-1, keepdims=True) + epsilon)
+        return native_layernorm(x, gamma, beta, zero_centered_gamma,
+                                epsilon), mu.flatten(), rsigma.flatten()
     return LayerNormFwdPrimitive.outer_primitive.bind(x,
                                                       gamma,
                                                       beta,
@@ -691,10 +729,15 @@ register_primitive(LayerNormBwdPrimitive)
 
 
 def layernorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.ndarray,
-                  gamma: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
+                  gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
     """
     Wrapper for TE layernorm bwd
     """
+    if not enable_primitive(LayerNormBwdPrimitive.name):
+        _, vjp_func = jax.vjp(
+            partial(native_layernorm, zero_centered_gamma=zero_centered_gamma, eps=epsilon), x,
+            gamma, beta)
+        return vjp_func(dz)
     return LayerNormBwdPrimitive.outer_primitive.bind(dz,
                                                       x,
                                                       mu,
@@ -2659,6 +2702,8 @@ def gelu(inputs: jnp.ndarray) -> jnp.ndarray:
     Return geglu(inputs)
     Assume inputs has two dimensions shape and the memory layout is (N..., H)
     """
+    if not enable_primitive(GeluPrimitive.name):
+        return jax.nn.gelu(inputs)
     return GeluPrimitive.outer_primitive.bind(inputs)
 
 
@@ -2770,8 +2815,11 @@ register_primitive(DGeluPrimitive)
 def dgelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
     """
     dgelu fusion wrapper
-    Return dgeglu(inputs)
+    Return dgelu(inputs)
     """
+    if not enable_primitive(GeluPrimitive.name):
+        _, vjp_func = jax.vjp(jax.nn.gelu, gelu_inputs)
+        return vjp_func(inputs)[0]
     return DGeluPrimitive.outer_primitive.bind(inputs, gelu_inputs)
 
 
@@ -4097,6 +4145,11 @@ def gelu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: j
     gated gelu wrapper
     Return FP8(geglu(x))
     """
+    if not enable_primitive(GeluFp8Primitive.name):
+        gelu_out = jax.nn.gelu(x)
+        cast_gelu_out = (gelu_out * scale).astype(out_dtype)
+        updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(x)).astype(amax.dtype))
+        return cast_gelu_out, updated_amax
     return GeluFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
