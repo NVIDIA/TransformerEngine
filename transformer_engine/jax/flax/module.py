@@ -22,8 +22,7 @@ from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import layernorm_geglu_fp8_mlp, geglu
-from ..mlp import layernorm_gelu_fp8_mlp, gelu
+from ..mlp import fused_layernorm_fp8_mlp, activation_lu
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -102,6 +101,31 @@ def _combine_biases(*masks: List[Array]):
     for other_mask in other_masks:
         mask = mask + other_mask
     return mask
+
+
+def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel, alpha):
+    """Low Rank Adaptation Implementation"""
+
+    assert len(axis) <= 5
+    hidden_in_names = 'ijklm'[:len(axis)]
+    assert len(features) <= 5
+    hidden_out_names = 'nopqr'[:len(features)]
+    rank_name = 's'
+
+    assert lora_a_kernel.shape[-1] == lora_b_kernel.shape[-2]
+    rank = lora_a_kernel.shape[-1]
+    scaling = alpha / rank if alpha is not None else 1.0
+
+    x_einsum_express = f"...{hidden_in_names}"
+    lora_a_einsum_express = f"{hidden_in_names}{hidden_out_names[:-1]}{rank_name}"
+    lora_b_einsum_express = f"{hidden_out_names[:-1]}{rank_name}{hidden_out_names[-1]}"
+    output_einsum_express = f"...{hidden_out_names}"
+    final_einsum_express = f"{x_einsum_express},{lora_a_einsum_express},{lora_b_einsum_express}" \
+                           f"->{output_einsum_express}"
+
+    output = jnp.einsum(final_einsum_express, x, lora_a_kernel, lora_b_kernel)
+    output = output * scaling
+    return output
 
 
 class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
@@ -355,6 +379,14 @@ class DenseGeneral(TransformerEngineBase):
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
+    enable_low_rank_adaptation: bool, default = False
+        Indicate whether to enable low rank adaptation for each linear layer.
+    low_rank_adaptation_dim: int, default = 32
+        The dimension for low rank adaptation, only used when
+        :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
 
@@ -374,6 +406,9 @@ class DenseGeneral(TransformerEngineBase):
     use_bias: bool = True
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
@@ -439,6 +474,32 @@ class DenseGeneral(TransformerEngineBase):
                                   fp8_meta_pkg=fp8_gemm_pkg,
                                   contracting_dims=(axis, contract_ind))
 
+        if self.enable_low_rank_adaptation:
+            lora_a_kernel_shape = (*kernel_shape[:len(axis)], *features[:-1],
+                                   self.low_rank_adaptation_dim)
+            lora_a_kernel_init_shape = (kernel_param_shape[0], *features[:-1],
+                                        self.low_rank_adaptation_dim)
+            lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
+            lora_a_kernel = nn_partitioning.param_with_axes('lora_a_kernel',
+                                                            self.kernel_init,
+                                                            lora_a_kernel_init_shape,
+                                                            jnp.float32,
+                                                            axes=lora_a_kernel_axes)
+            lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
+            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+
+            lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
+            lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
+            lora_b_kernel = nn_partitioning.param_with_axes('lora_b_kernel',
+                                                            nn.initializers.zeros,
+                                                            lora_b_kernel_shape,
+                                                            jnp.float32,
+                                                            axes=lora_b_kernel_axes)
+            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+
+            y += _apply_low_rank_adaptation(inputs, axis, features, lora_a_kernel, lora_b_kernel,
+                                            self.low_rank_adaptation_alpha)
+
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
             y += jnp.reshape(bias, bias_shape)
@@ -502,6 +563,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     return_layernorm_output: bool, default = True
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
+    enable_low_rank_adaptation: bool, default = False
+        Indicate whether to enable low rank adaptation for each linear layer.
+    low_rank_adaptation_dim: int, default = 32
+        The dimension for low rank adaptation, only used when
+        :attr:`enable_low_rank_adaptation=True`
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
@@ -541,6 +610,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
     return_layernorm_output: bool = True
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -650,6 +722,32 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                       fp8_meta_pkg=fp8_meta_package,
                                       contracting_dims=(axis, contract_ind))
 
+        if self.enable_low_rank_adaptation:
+            lora_a_kernel_shape = (*kernel_shape[:len(axis)], *features[:-1],
+                                   self.low_rank_adaptation_dim)
+            lora_a_kernel_init_shape = (kernel_param_shape[0], *features[:-1],
+                                        self.low_rank_adaptation_dim)
+            lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
+            lora_a_kernel = nn_partitioning.param_with_axes('lora_a_kernel',
+                                                            self.kernel_init,
+                                                            lora_a_kernel_init_shape,
+                                                            jnp.float32,
+                                                            axes=lora_a_kernel_axes)
+            lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
+            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+
+            lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
+            lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
+            lora_b_kernel = nn_partitioning.param_with_axes('lora_b_kernel',
+                                                            nn.initializers.zeros,
+                                                            lora_b_kernel_shape,
+                                                            jnp.float32,
+                                                            axes=lora_b_kernel_axes)
+            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+
+            z += _apply_low_rank_adaptation(y, axis, features, lora_a_kernel, lora_b_kernel,
+                                            self.low_rank_adaptation_alpha)
+
         bias = None
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
@@ -745,6 +843,14 @@ class LayerNormMLP(TransformerEngineBase):
         Dropout probability for the dropout op after the :attr:`activations`.
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden
+    enable_low_rank_adaptation: bool, default = False
+        Indicate whether to enable low rank adaptation for each linear layer.
+    low_rank_adaptation_dim: int, default = 32
+        The dimension for low rank adaptation, only used when
+        :attr:`enable_low_rank_adaptation=True`.
+    low_rank_adaptation_alpha: float, default = None
+        The alpha for computing the scaling factor of LoRA output.
+        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
@@ -791,6 +897,9 @@ class LayerNormMLP(TransformerEngineBase):
     intermediate_dropout_rng_name: str = 'dropout'
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()
+    enable_low_rank_adaptation: bool = False
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -834,33 +943,23 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        def is_geglu(acts):
-            geglu_act_pool = [('gelu', 'linear'), ('linear', 'gelu')]
+        gated_act_pool = [('gelu', 'linear'),
+                          ('silu', 'linear')]
+        act_pool = [('gelu',),
+                    ('silu',)]
+        normalize_acts = []
+        for act in self.activations:
+            if not isinstance(act, str):
+                return False
+            normalize_acts.append(act.lower())
+        normalize_acts = tuple(reversed(normalize_acts)
+                               if normalize_acts[0] == 'linear' else normalize_acts)
 
-            normalize_acts = []
-            for act in acts:
-                if not isinstance(act, str):
-                    return False
-                normalize_acts.append(act.lower())
-            return tuple(normalize_acts) in geglu_act_pool
+        is_gated = normalize_acts in gated_act_pool
+        is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
-        def is_gelu(acts):
-            geglu_act_pool = [('gelu',)]
-
-            normalize_acts = []
-            for act in acts:
-                if not isinstance(act, str):
-                    return False
-                normalize_acts.append(act.lower())
-            return tuple(normalize_acts) in geglu_act_pool
-
-        use_fused_ln_geglu_mlp = fuse_layernorm \
-            and (not self.use_bias) and is_geglu(self.activations) \
-                and (self.intermediate_dropout_rate < 1e-3)
-
-        use_fused_ln_gelu_mlp = fuse_layernorm \
-            and self.use_bias and is_gelu(self.activations) \
-                and (self.intermediate_dropout_rate < 1e-3)
+        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented and\
+                                self.intermediate_dropout_rate < 1e-3
 
         # LayerNorm
         if self.enable_layernorm:
@@ -933,38 +1032,26 @@ class LayerNormMLP(TransformerEngineBase):
         ffn1_ckpt_name = 'ffn1'
         ffn2_ckpt_name = 'ffn2'
 
-        if use_fused_ln_geglu_mlp:
+        if use_fused_layernorm_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            out = layernorm_geglu_fp8_mlp(y,
-                                          scale,
-                                          ln_bias, [kernel_1, kernel_2],
-                                          fp8_meta_package,
-                                          self.layernorm_type,
-                                          zero_centered_gamma=self.zero_centered_gamma,
-                                          epsilon=self.epsilon,
-                                          layernorm_input_axes=self.layernorm_input_axes,
-                                          dot_1_input_axes=self.dot_1_input_axes,
-                                          dot_2_input_axes=self.dot_2_input_axes,
-                                          ffn1_ckpt_name=ffn1_ckpt_name,
-                                          ffn2_ckpt_name=ffn2_ckpt_name)
-        elif use_fused_ln_gelu_mlp:
-            assert self.axis == -1    # Only support axis = =-1 at this moment
-
+            bias_1_shape = intermediate_dim if self.use_bias else 0
             bias_1 = nn_partitioning.param_with_axes('wi_bias',
                                                      self.bias_init,
-                                                     intermediate_dim,
+                                                     bias_1_shape,
                                                      jnp.float32,
                                                      axes=self.bias_axes_1)
             bias_1 = bias_1.astype(self.dtype)
 
+            bias_2_shape = (hidden_size,) if self.use_bias else (0,)
             bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                     self.bias_init, (hidden_size,),
+                                                     self.bias_init,
+                                                     bias_2_shape,
                                                      jnp.float32,
                                                      axes=self.bias_axes_2)
             bias_2 = bias_2.astype(self.dtype)
 
-            out = layernorm_gelu_fp8_mlp(y,
+            out = fused_layernorm_fp8_mlp(y,
                                          scale,
                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
                                          fp8_meta_package,
@@ -975,9 +1062,10 @@ class LayerNormMLP(TransformerEngineBase):
                                          dot_1_input_axes=self.dot_1_input_axes,
                                          dot_2_input_axes=self.dot_2_input_axes,
                                          ffn1_ckpt_name=ffn1_ckpt_name,
-                                         ffn2_ckpt_name=ffn2_ckpt_name)
+                                         ffn2_ckpt_name=ffn2_ckpt_name,
+                                         activation_type = normalize_acts,
+                                         use_bias = self.use_bias)
         else:    # not use_fused_ln_geglu_mlp
-
             # DenseGeneral 1
             gemm1_fp8_meta_package = None if fp8_meta_package is None \
                                      else fp8_meta_package.get_package_by_gemm_idx(0)
@@ -999,31 +1087,60 @@ class LayerNormMLP(TransformerEngineBase):
                                           fp8_meta_pkg=gemm1_fp8_meta_package,
                                           contracting_dims=(axis, contract_ind))
 
-            bias = None
+            if self.enable_low_rank_adaptation:
+                wi_lora_a_kernel_shape = (*kernel_1_shape[:len(axis)], num_activations,
+                                          self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_init_shape = (kernel_1_each_shape[0], num_activations,
+                                               self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_init_each_shape = (kernel_1_each_shape[0],
+                                                    self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_init_shape)
+                wi_lora_a_kernel = nn_partitioning.param_with_axes('wi_lora_a_kernel',
+                                                                   kernel_1_init,
+                                                                   num_activations,
+                                                                   -2,
+                                                                   wi_lora_a_kernel_init_each_shape,
+                                                                   jnp.float32,
+                                                                   axes=wi_lora_a_kernel_axes)
+                wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
+                wi_lora_a_kernel = wi_lora_a_kernel.astype(self.dtype)
+
+                wi_lora_b_kernel_shape = (num_activations, self.low_rank_adaptation_dim,
+                                          self.intermediate_dim)
+                wi_lora_b_kernel_axes = (None,) * len(wi_lora_b_kernel_shape)
+                wi_lora_b_kernel = nn_partitioning.param_with_axes('wi_lora_b_kernel',
+                                                                   nn.initializers.zeros,
+                                                                   wi_lora_b_kernel_shape,
+                                                                   jnp.float32,
+                                                                   axes=wi_lora_b_kernel_axes)
+                wi_lora_b_kernel = wi_lora_b_kernel.astype(self.dtype)
+
+                x += _apply_low_rank_adaptation(y, axis, intermediate_dim, wi_lora_a_kernel,
+                                                wi_lora_b_kernel, self.low_rank_adaptation_alpha)
+
+            bias_1 = None
             if self.use_bias:
-                bias = nn_partitioning.param_with_axes('wi_bias',
+                bias_1 = nn_partitioning.param_with_axes('wi_bias',
                                                        self.bias_init,
                                                        intermediate_dim,
                                                        jnp.float32,
                                                        axes=self.bias_axes_1)
-                bias = bias.astype(self.dtype)
-                bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
-                x += jnp.reshape(bias, bias_shape)
+                bias_1 = bias_1.astype(self.dtype)
+                bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
+                x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
 
             activations = []
-            if is_geglu(self.activations):
-                z = geglu(x)
-            elif is_gelu(self.activations):
-                z = gelu(x)
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+            if is_act_implemented:
+                z = activation_lu(x, normalize_acts)
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
+            if not is_gated:
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
@@ -1042,14 +1159,36 @@ class LayerNormMLP(TransformerEngineBase):
                                         fp8_meta_pkg=gemm2_fp8_meta_package,
                                         contracting_dims=(axis, contract_ind))
 
-            bias = None
+            if self.enable_low_rank_adaptation:
+                wo_lora_a_kernel_shape = (self.intermediate_dim, self.low_rank_adaptation_dim)
+                wo_lora_a_kernel_axes = (None,) * len(wo_lora_a_kernel_shape)
+                wo_lora_a_kernel = nn_partitioning.param_with_axes('wo_lora_a_kernel',
+                                                                   self.kernel_init,
+                                                                   wo_lora_a_kernel_shape,
+                                                                   jnp.float32,
+                                                                   axes=wo_lora_a_kernel_axes)
+                wo_lora_a_kernel = wo_lora_a_kernel.astype(self.dtype)
+
+                wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
+                wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
+                wo_lora_b_kernel = nn_partitioning.param_with_axes('wo_lora_b_kernel',
+                                                                   nn.initializers.zeros,
+                                                                   wo_lora_b_kernel_shape,
+                                                                   jnp.float32,
+                                                                   axes=wo_lora_b_kernel_axes)
+                wo_lora_b_kernel = wo_lora_b_kernel.astype(self.dtype)
+
+                out += _apply_low_rank_adaptation(z, axis, hidden_size_tuple, wo_lora_a_kernel,
+                                                  wo_lora_b_kernel, self.low_rank_adaptation_alpha)
+
+            bias_2 = None
             if self.use_bias:
-                bias = nn_partitioning.param_with_axes('wo_bias',
+                bias_2 = nn_partitioning.param_with_axes('wo_bias',
                                                        self.bias_init, (hidden_size,),
                                                        jnp.float32,
                                                        axes=self.bias_axes_2)
-                bias = bias.astype(self.dtype)
-                out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
+                bias_2 = bias_2.astype(self.dtype)
+                out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 

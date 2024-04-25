@@ -8,6 +8,14 @@ from typing import Any, Callable, Optional, Tuple
 import torch
 
 
+def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
+    """Check if any of the given tensors require gradient."""
+    for tensor in tensors:
+        if tensor is not None and tensor.requires_grad:
+            return True
+    return False
+
+
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
