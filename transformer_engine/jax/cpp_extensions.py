@@ -2581,7 +2581,7 @@ class ActLuPrimitive(BasePrimitive):
     @staticmethod
     def abstract(x_aval, *, act_enum):  # pylint: disable=unused-argument
         """
-        gated_gelu abstract
+        act_lu abstract
         """
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -2599,7 +2599,7 @@ class ActLuPrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, x, *, act_enum):
         """
-        gated_gelu lowering rules
+        act_lu lowering rules
         """
         (x_aval,) = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -2633,7 +2633,7 @@ class ActLuPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, act_enum):
         """
-        gated_gelu batcher
+        act_lu batcher
         """
         _check_valid_batch_dims(batch_dims)
         assert ActLuPrimitive.outer_primitive is not None
@@ -2646,7 +2646,7 @@ class ActLuPrimitive(BasePrimitive):
     @staticmethod
     def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
         """
-        gated_gelu infer_sharding_from_operands
+        act_lu infer_sharding_from_operands
         """
         del result_infos, act_enum    # Unused.
         x_spec = get_padded_spec(arg_infos[0])
@@ -2656,7 +2656,7 @@ class ActLuPrimitive(BasePrimitive):
     @staticmethod
     def partition(act_enum, mesh, arg_infos, result_infos):
         """
-        gated_gelu partitioning
+        act_lu partitioning
         """
         del result_infos, act_enum
         x_spec = get_padded_spec(arg_infos[0])
@@ -2692,7 +2692,7 @@ class DActLuPrimitive(BasePrimitive):
     @staticmethod
     def abstract(dz_aval, x_aval, *, act_enum):  # pylint: disable=unused-argument
         """
-        dgelu abstract
+        dact_lu abstract
         """
         dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -2711,7 +2711,7 @@ class DActLuPrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, dz, x, *, act_enum):
         """
-        dgelu lowering rules
+        dact_lu lowering rules
         """
         in_aval, gi_aval = ctx.avals_in
         assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -2749,7 +2749,7 @@ class DActLuPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, act_enum):
         """
-        dgelu implementation
+        dact_lu implementation
         """
         assert DActLuPrimitive.inner_primitive is not None
         dx = DActLuPrimitive.inner_primitive.bind(dz, x, act_enum=act_enum)
@@ -2758,7 +2758,7 @@ class DActLuPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, act_enum):
         """
-        dgelu batcher
+        dact_lu batcher
         """
         _check_valid_batch_dims(batch_dims)
         assert DActLuPrimitive.outer_primitive is not None
@@ -2771,17 +2771,17 @@ class DActLuPrimitive(BasePrimitive):
     @staticmethod
     def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
         """
-        dgelu infer_sharding_from_operands
+        dact_lu infer_sharding_from_operands
         """
         del result_infos, act_enum    # Unused.
-        gelu_out_spec = get_padded_spec(arg_infos[1])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*gelu_out_spec))
+        act_lu_out_spec = get_padded_spec(arg_infos[1])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*act_lu_out_spec))
         return dx_sharding
 
     @staticmethod
     def partition(act_enum, mesh, arg_infos, result_infos):
         """
-        dgelu partition
+        dact_lu partition
         """
         del result_infos, act_enum
         dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
@@ -2794,14 +2794,14 @@ class DActLuPrimitive(BasePrimitive):
 register_primitive(DActLuPrimitive)
 
 
-def dact_lu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray,
+def dact_lu(inputs: jnp.ndarray, act_lu_inputs: jnp.ndarray,
             activation_type: Sequence[Union[str, Callable]]) -> jnp.ndarray:
     """
-    dgelu fusion wrapper
-    Return dgeglu(inputs)
+    dact_lu fusion wrapper
+    Return dgated_act_lu(inputs)
     """
     act_type_id = ActivationEnum[activation_type]
-    return DActLuPrimitive.outer_primitive.bind(inputs, gelu_inputs, act_enum=act_type_id)
+    return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
 
 
 def _normalize_axis_boundary(axis, ndim):
@@ -3772,7 +3772,7 @@ class ActLuFp8Primitive(BasePrimitive):
     def abstract(x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
                  act_enum):  # pylint: disable=unused-argument
         """
-        te_gelu_p abstract
+        te_act_lu_p abstract
         """
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         # Currently only support casting to E4M3 only in C side.
@@ -3794,7 +3794,7 @@ class ActLuFp8Primitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, x, amax, scale, scale_inv, *, out_dtype, act_enum):
         """
-        te_gated_gelu_p lowering rules
+        te_gated_act_lu_p lowering rules
         """
         x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -3929,7 +3929,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
                  static_axis_boundary, transpose_axis_boundary,
                  act_enum):  # pylint: disable=unused-argument
         """
-        te_dgelu_dbais_cast_transpose_p abstract
+        te_dact_lu_dbais_cast_transpose_p abstract
         """
         dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -3964,7 +3964,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
-        te_dgelu_dbais_cast_transpose_p outer abstract
+        te_dact_lu_dbais_cast_transpose_p outer abstract
         """
 
         out, t_out, dbias, updated_amax_aval, _ = \
@@ -3975,7 +3975,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
     def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary,
                  transpose_axis_boundary, act_enum):
         """
-        te_dgated_gelu_cast_transpose_p lowering rules
+        te_dgated_act_lu_cast_transpose_p lowering rules
         """
         dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -4399,7 +4399,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
     def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
                  static_axis_boundary, act_enum):  # pylint: disable=unused-argument
         """
-        te_dgated_gelu_cast_transpose_p abstract
+        te_dgated_act_lu_cast_transpose_p abstract
         """
         dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -4420,7 +4420,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary, act_enum):
         """
-        te_dgated_gelu_cast_transpose_p lowering rules
+        te_dgated_act_lu_cast_transpose_p lowering rules
         """
         dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]

@@ -243,7 +243,7 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    auto *gelu_input = buffers[1];
+    auto *act_input = buffers[1];
     auto *output = buffers[2];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
@@ -254,28 +254,28 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
     // Gated should have odd enum value
     auto act_len = act_enum % 2 + 1;
     auto input_shape = std::vector<size_t>{m, n};
-    auto gelu_input_shape = std::vector<size_t>{m, n * act_len};
+    auto act_input_shape = std::vector<size_t>{m, n * act_len};
     auto output_shape = std::vector<size_t>{m, n * act_len};
 
     auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
-    auto gelu_input_tensor = TensorWrapper(gelu_input, gelu_input_shape, desc.in_dtype);
+    auto act_input_tensor = TensorWrapper(act_input, act_input_shape, desc.in_dtype);
     auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
 
     switch (act_enum) {
       case ActivationEnum::GELU:
-        nvte_dgelu(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dgelu(input_tensor.data(), act_input_tensor.data(),
                    output_tensor.data(), stream);
         break;
       case ActivationEnum::GEGLU:
-        nvte_dgeglu(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dgeglu(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
       case ActivationEnum::SILU:
-        nvte_dswish(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dswish(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
       case ActivationEnum::SWIGLU:
-        nvte_dswiglu(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dswiglu(input_tensor.data(), act_input_tensor.data(),
                      output_tensor.data(), stream);
         break;
       default:
@@ -313,7 +313,7 @@ pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_
 void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
-    auto *gelu_input = buffers[1];
+    auto *act_input = buffers[1];
     float *amax = reinterpret_cast<float *>(buffers[2]);
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
@@ -334,13 +334,13 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     auto n = desc.shape.dims[1];
     auto act_enum = desc.act_enum;
     auto input_shape = std::vector<size_t>{m, n};
-    auto gelu_input_shape = std::vector<size_t>{m, n};
+    auto act_input_shape = std::vector<size_t>{m, n};
     auto output_shape = std::vector<size_t>{m, n};
     auto output_trans_shape = std::vector<size_t>{n, m};
     auto dbias_shape = std::vector<size_t>{n};
 
     auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
-    auto gelu_input_tensor = TensorWrapper(gelu_input, gelu_input_shape, desc.in_dtype);
+    auto act_input_tensor = TensorWrapper(act_input, act_input_shape, desc.in_dtype);
     auto output_tensor =
         TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
     auto output_trans_tensor =
@@ -351,12 +351,12 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
 
     switch (act_enum) {
       case ActivationEnum::GELU:
-        nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_cast_transpose_dbias_dgelu(input_tensor.data(), act_input_tensor.data(),
                                         output_tensor.data(), output_trans_tensor.data(),
                                         dbias_tensor.data(), workspace.data(), stream);
         break;
       case ActivationEnum::SILU:
-        nvte_cast_transpose_dbias_dswish(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_cast_transpose_dbias_dswish(input_tensor.data(), act_input_tensor.data(),
                                          output_tensor.data(), output_trans_tensor.data(),
                                          dbias_tensor.data(), workspace.data(), stream);
         break;
@@ -370,7 +370,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
 void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
-    auto *gelu_input = buffers[1];
+    auto *act_input = buffers[1];
     float *amax = reinterpret_cast<float *>(buffers[2]);
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
@@ -389,12 +389,12 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
     auto n = desc.shape.dims[1];
     auto act_enum = desc.act_enum;
     auto input_shape = desc.shape.to_vector();
-    auto gelu_input_shape = std::vector<size_t>{m, n * 2};
+    auto act_input_shape = std::vector<size_t>{m, n * 2};
     auto output_shape = std::vector<size_t>{m, n * 2};
     auto output_trans_shape = std::vector<size_t>{n * 2, m};
 
     auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
-    auto gelu_input_tensor = TensorWrapper(gelu_input, gelu_input_shape, desc.in_dtype);
+    auto act_input_tensor = TensorWrapper(act_input, act_input_shape, desc.in_dtype);
     auto output_tensor =
         TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
     auto output_trans_tensor =
@@ -402,12 +402,12 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
 
     switch (act_enum) {
       case ActivationEnum::GEGLU:
-        nvte_dgeglu_cast_transpose(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
       case ActivationEnum::SWIGLU:
-        nvte_dswiglu_cast_transpose(input_tensor.data(), gelu_input_tensor.data(),
+        nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
