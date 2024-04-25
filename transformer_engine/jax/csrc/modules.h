@@ -140,13 +140,14 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+// TODO (Phuong): Templating these 9x2 rountines before adding ReGLU, QuickGeLU, Squared ReLu
 void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                          DType in_dtype, DType out_dtype);
 
 void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
@@ -165,6 +166,24 @@ void GatedGeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_
 void DGatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
+
+void Silu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void SiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DSiluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
+
+void GatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void GatedSiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DGatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DGatedSiluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
 
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
