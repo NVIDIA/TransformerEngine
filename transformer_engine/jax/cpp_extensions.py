@@ -30,6 +30,7 @@ from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
+from . import layer_math
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
 from .sharding import get_all_mesh_axes, num_of_devices
@@ -495,31 +496,6 @@ class LayerNormFwdPrimitive(BasePrimitive):
 register_primitive(LayerNormFwdPrimitive)
 
 
-def native_layernorm(x, gamma, beta, zero_centered_gamma, eps):
-    """
-    JAX native layernorm implementations
-    """
-    x_ = jnp.asarray(x, jnp.float32)
-    mean = jnp.mean(x_, axis=-1, keepdims=True)
-    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
-    normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
-    if zero_centered_gamma:
-        gamma += 1.
-    return jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
-
-
-def native_rmsnorm(x, gamma, zero_centered_gamma, eps):
-    """
-    JAX native rmsnorm implementations
-    """
-    x_ = jnp.asarray(x, jnp.float32)
-    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
-    normed_input = x_ * jax.lax.rsqrt(var + eps)
-    if zero_centered_gamma:
-        gamma += 1.
-    return jnp.asarray(normed_input * gamma).astype(x.dtype)
-
-
 def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
                   epsilon: float):
     """
@@ -529,8 +505,8 @@ def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_ce
         x_ = jnp.asarray(x, jnp.float32)
         mu = jnp.mean(x_, axis=-1, keepdims=True)
         rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_ - mu), axis=-1, keepdims=True) + epsilon)
-        return native_layernorm(x, gamma, beta, zero_centered_gamma,
-                                epsilon), jnp.squeeze(mu, axis=-1), jnp.squeeze(rsigma, axis=-1)
+        return layer_math.layernorm(x, gamma, beta, zero_centered_gamma,
+                                    epsilon), jnp.squeeze(mu, axis=-1), jnp.squeeze(rsigma, axis=-1)
     return LayerNormFwdPrimitive.outer_primitive.bind(x,
                                                       gamma,
                                                       beta,
@@ -742,7 +718,7 @@ def layernorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.
     """
     if not enable_primitive(LayerNormBwdPrimitive.name):
         _, vjp_func = jax.vjp(
-            partial(native_layernorm, zero_centered_gamma=zero_centered_gamma, eps=epsilon), x,
+            partial(layer_math.layernorm, zero_centered_gamma=zero_centered_gamma, eps=epsilon), x,
             gamma, beta)
         return vjp_func(dz)
     return LayerNormBwdPrimitive.outer_primitive.bind(dz,
@@ -928,10 +904,9 @@ def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
     """
     if not enable_primitive(RmsNormFwdPrimitive.name):
         x_ = jnp.asarray(x, jnp.float32)
-        # mu = jnp.mean(x_, axis=-1, keepdims=True)
         rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_), axis=-1, keepdims=True) + epsilon)
-        return native_rmsnorm(x, gamma, zero_centered_gamma=False,
-                              eps=epsilon), jnp.squeeze(rsigma, axis=-1)
+        return layer_math.rmsnorm(x, gamma, zero_centered_gamma=False,
+                                  eps=epsilon), jnp.squeeze(rsigma, axis=-1)
     return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon)
 
 
@@ -1119,8 +1094,8 @@ def rmsnorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp
     Wrapper for TE layernorm bwd
     """
     if not enable_primitive(RmsNormBwdPrimitive.name):
-        _, vjp_func = jax.vjp(partial(native_rmsnorm, zero_centered_gamma=False, eps=epsilon), x,
-                              gamma)
+        _, vjp_func = jax.vjp(partial(layer_math.rmsnorm, zero_centered_gamma=False, eps=epsilon),
+                              x, gamma)
         return vjp_func(dz)
     return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
 
@@ -1672,7 +1647,6 @@ def scaled_masked_softmax_fwd(logits: jnp.ndarray, mask: jnp.ndarray,
                                      jnp.full(mask.shape, -1e10).astype(logits.dtype),
                                      jnp.full(mask.shape, 0.).astype(logits.dtype))
         return jax.nn.softmax(logits * scale_factor)
-
     return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(logits,
                                                                 mask,
                                                                 scale_factor=scale_factor)
@@ -3831,6 +3805,15 @@ def layernorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, ama
     """
     Wrapper for TE layernorm fwd (fp8 out)
     """
+    if not enable_primitive(LayerNormFwdFp8Primitive.name):
+        return layer_math.layernorm_fp8(x,
+                                        gamma,
+                                        beta,
+                                        scale,
+                                        amax,
+                                        out_dtype=out_dtype,
+                                        zero_centered_gamma=zero_centered_gamma,
+                                        eps=epsilon)
     return LayerNormFwdFp8Primitive.outer_primitive.bind(x,
                                                          gamma,
                                                          beta,
@@ -4064,6 +4047,14 @@ def rmsnorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, amax: jnp.ndarray, scale
     """
     Wrapper for TE rmsnorm fwd (fp8 out)
     """
+    if not enable_primitive(RmsNormFwdFp8Primitive.name):
+        return layer_math.rmsnorm_fp8(x,
+                                      gamma,
+                                      scale,
+                                      amax,
+                                      out_dtype=out_dtype,
+                                      zero_centered_gamma=False,
+                                      eps=epsilon)
     return RmsNormFwdFp8Primitive.outer_primitive.bind(x,
                                                        gamma,
                                                        amax,
