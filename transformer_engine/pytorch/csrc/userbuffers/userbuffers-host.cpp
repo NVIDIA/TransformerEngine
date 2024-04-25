@@ -93,7 +93,8 @@ static int mnnvl_init(communicator **comm) {
   CUdevice current_gpu;
   CUDACHECK(cudaGetDevice(&gpu_device));
   CUCHECK(cuDeviceGet(&current_gpu, gpu_device));
-  CUCHECK(cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, current_gpu));
+  CUCHECK(cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
+                                current_gpu));
   if (!flag) {
     UB_PRINT("CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED is not detected [%d]\n", flag);
     return 0;
@@ -104,7 +105,7 @@ static int mnnvl_init(communicator **comm) {
   NVMLCHECK(nvmlDeviceGetCount_v2(&nvml_device_count));
   if (!nvml_device_count) {
     UB_PRINT("No NVML devices found [%d]\n", nvml_device_count);
-    return 1; // No nvml devices found
+    return 1;  // No nvml devices found
   }
 
   // Get device handle for the last device
@@ -117,13 +118,16 @@ static int mnnvl_init(communicator **comm) {
                                        .state   = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED };
   NVMLCHECK(nvmlDeviceGetGpuFabricInfoV(nvml_device, &fabric_info));
   if (fabric_info.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
-    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t reported NVML_GPU_FABRIC_STATE_NOT_SUPPORTED [%d]", fabric_info.state); 
+    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t reported NVML_GPU_FABRIC_STATE_NOT_SUPPORTED [%d]",
+              fabric_info.state);
     return 1;
   }
 
   if (getenv("NVTE_UBDEBUG"))
-    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t fabric UUID %lx.%lx cliqueId 0x%x state %d healthMask 0x%x",
-              ((long *)&fabric_info.clusterUuid)[0], ((long *)&fabric_info.clusterUuid)[1],
+    UB_PRINT("MNNVL nvmlGpuFabricInfoV_t fabric UUID %" PRId64".%" PRId64
+             "cliqueId 0x%x state %d healthMask 0x%x",
+              reinterpret_cast<int64_t *>(&fabric_info.clusterUuid)[0],
+              reinterpret_cast<int64_t *>(&fabric_info.clusterUuid)[1],
               fabric_info.cliqueId, fabric_info.state, fabric_info.healthMask);
 
   (*comm)->nvml_fabric_info = fabric_info;
@@ -148,9 +152,11 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     }
 
     MPICHECK(MPI_Allgather(&(*comm)->nvml_fabric_info.clusterUuid, NVML_GPU_FABRIC_UUID_LEN,
-                               MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN, MPI_CHAR, MPI_COMM_WORLD));
+                               MPI_CHAR, cluster_uuid, NVML_GPU_FABRIC_UUID_LEN,
+                               MPI_CHAR, MPI_COMM_WORLD));
 
-    cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) * NVML_GPU_FABRIC_UUID_LEN);
+    cluster_cliqueid = (unsigned int*)malloc((*comm)->nranks * sizeof(int) *
+                                              NVML_GPU_FABRIC_UUID_LEN);
     if (cluster_cliqueid == NULL) {
       UB_PRINT("Failed to allocate memory for UUID [%p]", cluster_cliqueid);
       goto error;
@@ -181,8 +187,9 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     // e.g. 32 GPU nvlink domain with 8 gpus per tensort dimension
     // means that we have to split the clique to 4 communicators
     (*comm)->nvclique_index = clique_index + (myclique_rank/tensorgpus);
-    
-    MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index, (*comm)->myrank, &(*comm)->comm_intra));
+
+    MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index,
+             (*comm)->myrank, &(*comm)->comm_intra));
 
     int mylocal, numlocal;
 
@@ -344,8 +351,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 
   CUDACHECK(cudaFree(0));
 
-#if 0 // Keep the code for now because it can be re-used for multiple
-      // tensor dimensions in the same clique
+#if 0   // Keep the code for now because it can be re-used for multiple
+        // tensor dimensions in the same clique
   int datanodegroup_id =
       // global rank / num of ranks in nvlink domain / num of datanodes
       myrank / numlocal / datanodes;  // data reduction group node belongs, equals 0 for all if both
@@ -396,19 +403,23 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
     }
 
-    CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(sizeof(CUmemFabricHandle));
+    CUmemFabricHandle *exphndl = reinterpret_cast<CUmemFabricHandle *>
+                                                  (malloc(sizeof(CUmemFabricHandle)));
     if (exphndl == NULL) {
       UB_PRINT("Memory allocation failed %p\n", exphndl);
       exit(1);
     }
     if ((*comm)->ar2_nvrank == 0) {
-      CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(exphndl), (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+      CUCHECK(cuMemExportToShareableHandle(&exphndl, (*comm)->mc_handle,
+                                            CU_MEM_HANDLE_TYPE_FABRIC, 0));
     }
 
     MPICHECK(MPI_Bcast(exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, 0, (*comm)->comm_intra));
 
     if ((*comm)->ar2_nvrank != 0) {
-      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(exphndl), CU_MEM_HANDLE_TYPE_FABRIC));
+      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle,
+                                              reinterpret_cast<void *>(exphndl),
+                                              CU_MEM_HANDLE_TYPE_FABRIC));
     }
     free(exphndl);
 #else
@@ -472,7 +483,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
                        LOCALSIZE));  // flags and pointers, no block data yet
   CUDACHECK(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
   CUDACHECK(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);  // will use handler 0
+  // will use handler 0
+  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);
   CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
@@ -562,18 +574,23 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
     prop.location.id = comm->mydev;
-    comm->uchandles[hndl] = 
-        reinterpret_cast<CUmemGenericAllocationHandle *>(malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
+    comm->uchandles[hndl] =
+        reinterpret_cast<CUmemGenericAllocationHandle *>(malloc(nranks *
+                                                         sizeof(CUmemGenericAllocationHandle)));
     CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
 #if MNNVL
-    CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(nranks * sizeof(CUmemFabricHandle));
+    CUmemFabricHandle *exphndl = reinterpret_cast<CUmemFabricHandle *>
+                                  (malloc(nranks * sizeof(CUmemFabricHandle)));
     CUmemFabricHandle myhndl;
-    CUCHECK(cuMemExportToShareableHandle(&myhndl, comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    CUCHECK(cuMemExportToShareableHandle(&myhndl, comm->uchandles[hndl][myrank],
+                                          CU_MEM_HANDLE_TYPE_FABRIC, 0));
     MPICHECK(MPI_Allgather(&myhndl, sizeof(CUmemFabricHandle), MPI_BYTE, exphndl,
                            sizeof(CUmemFabricHandle), MPI_BYTE, comm->comm_intra));
     for (int p = 0; p < nranks; p++)
       if (p != myrank)
-        CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p], reinterpret_cast<void *>(&exphndl[p]), CU_MEM_HANDLE_TYPE_FABRIC));
+        CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
+                                                reinterpret_cast<void *>(&exphndl[p]),
+                                                CU_MEM_HANDLE_TYPE_FABRIC));
     free(exphndl);
 #else
     int *peerfd                  = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
@@ -647,7 +664,8 @@ error:
     }
   } else {
     if (!comm->myrank)
-      printf("UB: warning region %d size %ld MB allocated using cudaMalloc - deprecated(no MC available)\n", hndl, aligned_size / 1024 / 1024);
+      printf("UB: warning region %d size %ld MB allocated using cudaMalloc"
+             " - deprecated(no MC available)\n", hndl, aligned_size / 1024 / 1024);
 #if MNNVL
     exit(2);
 #endif

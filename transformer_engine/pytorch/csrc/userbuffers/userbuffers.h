@@ -15,14 +15,14 @@
 #include <stdexcept>
 #include "nvml.h"
 
-// Check if the CUDA version is above 12.3
-#if CUDA_VERSION >= 12030
+// Check if the CUDA version is above 12.4
+#if CUDA_VERSION >= 12040
 #define MNNVL 1
 #else
 #define MNNVL 0
 #endif
 
-#define CE_DEADLOCK_DETECTOR 1 // Enable CE deadlock detection in production env
+#define NVTE_CE_DEADLOCK_DETECTOR 1  // Enable CE deadlock detection in production env
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
@@ -189,11 +189,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     returns handler if buffer is registered already, or -1 if not.
     returned offset is offset of gpubuff relative to buffer registered
 */
-
-//int pipe_rank(communicator *comm,
-//              int step);  // helper function to help walk across allreduce1 x allreduce2 groups
-//                          // data-parallel and tensor-parallel position within data and tensor
-//                          // groups would be preserved
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm,
                                     bool alloc = false);
