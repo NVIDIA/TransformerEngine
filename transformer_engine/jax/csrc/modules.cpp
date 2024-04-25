@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include "common/common.h"
 #include "common/util/logging.h"
@@ -234,30 +235,6 @@ void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
     nvte_dgelu(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(), stream);
 }
 
-pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                         DType in_dtype, DType out_dtype) {
-    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto gelu_input_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
-    auto dbias_shape = std::vector<size_t>{hidden_size};
-
-    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-    auto gelu_input_tensor = TensorWrapper(nullptr, gelu_input_shape, in_dtype);
-    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
-    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
-    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
-
-    TensorWrapper dummy_workspace;
-
-    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
-                                    output_tensor.data(), output_trans_tensor.data(),
-                                    dbias_tensor.data(), dummy_workspace.data(), nullptr);
-
-    auto work_shape = MakeShapeVector(dummy_workspace.shape());
-    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
-}
-
 void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
@@ -463,6 +440,241 @@ void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *op
         TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
 
     nvte_dgeglu_cast_transpose(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(),
+                               output_trans_tensor.data(), stream);
+}
+
+void SiluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
+              cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+    auto input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+
+    auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
+                                       scale, scale_inverse);
+
+    nvte_swish(input_tensor.data(), output_tensor.data(), stream);
+}
+
+void Silu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *output = buffers[1];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    SiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr, output);
+}
+
+void SiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    assert(amax == amax_out);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    SiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
+             output);
+}
+
+void DSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    auto *output = buffers[2];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
+
+    nvte_dswish(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(), stream);
+}
+
+pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype) {
+    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto dact_input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
+    auto dbias_shape = std::vector<size_t>{hidden_size};
+
+    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
+    auto dact_input_tensor = TensorWrapper(nullptr, dact_input_shape, in_dtype);
+    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
+    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+
+    TensorWrapper dummy_workspace;
+
+    // For now, all dbias_dact(-s) have the same workspace size
+    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), dact_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), dummy_workspace.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(dummy_workspace.shape());
+    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
+}
+
+void DSiluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    float *amax = reinterpret_cast<float *>(buffers[2]);
+    float *scale = reinterpret_cast<float *>(buffers[3]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[4]);
+    auto *output = buffers[5];
+    auto *output_trans = buffers[6];
+    auto *dbias = buffers[7];
+    float *amax_out = reinterpret_cast<float *>(buffers[8]);
+    void *workspace_ptr = buffers[9];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+    auto output_trans_shape = std::vector<size_t>{n, m};
+    auto dbias_shape = std::vector<size_t>{n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
+
+    auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
+
+    nvte_cast_transpose_dbias_dswish(input_tensor.data(), silu_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), workspace.data(), stream);
+}
+
+void GatedSiluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
+                   cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+    auto input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+
+    auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
+                                       scale, scale_inverse);
+
+    nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
+}
+
+void GatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *output = buffers[1];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GatedSiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr,
+                  output);
+}
+
+void GatedSiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    assert(amax == amax_out);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GatedSiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
+                  output);
+}
+
+void DGatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    auto *output = buffers[2];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n * 2};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
+
+    nvte_dswiglu(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(), stream);
+}
+
+void DGatedSiluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    float *amax = reinterpret_cast<float *>(buffers[2]);
+    float *scale = reinterpret_cast<float *>(buffers[3]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[4]);
+    auto *output = buffers[5];
+    auto *output_trans = buffers[6];
+    float *amax_out = reinterpret_cast<float *>(buffers[7]);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = desc.shape.to_vector();
+    auto silu_input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n * 2};
+    auto output_trans_shape = std::vector<size_t>{n * 2, m};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+
+    nvte_dswiglu_cast_transpose(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(),
                                output_trans_tensor.data(), stream);
 }
 
