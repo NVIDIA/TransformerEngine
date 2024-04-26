@@ -180,7 +180,12 @@ class TestFP8Recipe:
         else:
             raise ValueError(f"{fp8_dtype=} is not supported")
 
-        scaling_factor_compute_algo = None if fused_update else te.fp8._default_sf_compute
+        scaling_factor_compute_algo = None
+        if fused_update:
+            scaling_factor_compute_algo = (
+                lambda amax, scale, fp8_max, recipe:
+                te.fp8._default_sf_compute(amax, scale, fp8_max, recipe.margin)
+            )
         recipe = transformer_engine.common.recipe.DelayedScaling(
             fp8_format=fp8_format, scaling_factor_compute_algo=scaling_factor_compute_algo
         )

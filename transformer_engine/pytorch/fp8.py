@@ -598,6 +598,7 @@ def _default_sf_compute(
     scale: torch.Tensor,
     fp8_max: float,
     margin: int,
+    _fp32_max: float = torch.finfo(torch.float32).max,  # finfo not available in jitter
 ) -> torch.Tensor:
     """Default function to convert amax to scaling factor.
     Computing the scaling factor requires consideration of the following scenarios:
@@ -614,7 +615,7 @@ def _default_sf_compute(
     sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
-    sf = torch.where(torch.isinf(sf), torch.full_like(sf, torch.finfo(torch.float32).max), sf)
+    sf = torch.where(torch.isinf(sf), torch.full_like(sf, _fp32_max), sf)
     scale.copy_(sf)
     return scale
 
