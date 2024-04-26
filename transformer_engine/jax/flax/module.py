@@ -944,9 +944,15 @@ class LayerNormMLP(TransformerEngineBase):
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         gated_act_pool = [('gelu', 'linear'),
-                          ('silu', 'linear')]
+                          ('silu', 'linear'),
+                          ('relu', 'linear'),
+                          ('quick_gelu', 'linear'),
+                          ('squared_relu', 'linear')]
         act_pool = [('gelu',),
-                    ('silu',)]
+                    ('silu',),
+                    ('relu',),
+                    ('quick_gelu',),
+                    ('squared_relu',)]
         normalize_acts = []
         for act in self.activations:
             if not isinstance(act, str):

@@ -124,12 +124,20 @@ def _check_valid_batch_dims(bdims):
             f"but got {dim=}"
 
 
-# The value of activations are explicitedly defined to avoid order rearrangement in the future
+""" The value of activations are explicitedly defined to avoid order rearrangement in the future.
+Gated activations should have odd value, non-gated activations should have even value. """
+
 ActivationEnum = {
     ('gelu',): 0,
     ('gelu', 'linear'): 1,
     ('silu',): 2,
-    ('silu', 'linear'): 3
+    ('silu', 'linear'): 3,
+    ('relu',): 4,
+    ('relu', 'linear'): 5,
+    ('quick_gelu',): 6,
+    ('quick_gelu', 'linear'): 7,
+    ('squared_relu',): 8,
+    ('squared_relu', 'linear'): 9,
 }
 
 

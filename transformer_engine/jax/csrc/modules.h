@@ -44,10 +44,16 @@ struct Shape {
 };
 
 enum ActivationEnum {
-  GELU,
-  GEGLU,
-  SILU,
-  SWIGLU
+  GELU,     // 0
+  GEGLU,    // 1
+  SILU,     // 2
+  SWIGLU,   // 3
+  RELU,     // 4
+  REGLU,    // 5
+  QGELU,    // 6
+  QGEGLU,   // 7
+  SRELU,    // 8
+  SREGLU,   // 9
 };
 
 

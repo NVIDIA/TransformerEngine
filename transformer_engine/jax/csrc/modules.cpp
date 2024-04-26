@@ -193,10 +193,28 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
         nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       case ActivationEnum::SILU:
-        nvte_swish(input_tensor.data(), output_tensor.data(), stream);
+        nvte_silu(input_tensor.data(), output_tensor.data(), stream);
         break;
       case ActivationEnum::SWIGLU:
         nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::RELU:
+        nvte_relu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::REGLU:
+        nvte_reglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::QGELU:
+        nvte_qgelu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::QGEGLU:
+        nvte_qgeglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::SRELU:
+        nvte_srelu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case ActivationEnum::SREGLU:
+        nvte_sreglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       default:
         // TODO: what is a good message here
@@ -271,12 +289,36 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
                     output_tensor.data(), stream);
         break;
       case ActivationEnum::SILU:
-        nvte_dswish(input_tensor.data(), act_input_tensor.data(),
+        nvte_dsilu(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
       case ActivationEnum::SWIGLU:
         nvte_dswiglu(input_tensor.data(), act_input_tensor.data(),
                      output_tensor.data(), stream);
+        break;
+      case ActivationEnum::RELU:
+        nvte_drelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case ActivationEnum::REGLU:
+        nvte_dreglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case ActivationEnum::QGELU:
+        nvte_dqgelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case ActivationEnum::QGEGLU:
+        nvte_dqgeglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case ActivationEnum::SRELU:
+        nvte_dsrelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case ActivationEnum::SREGLU:
+        nvte_dsreglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
         break;
       default:
         // TODO: what is a good message here
@@ -356,9 +398,24 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
                                         dbias_tensor.data(), workspace.data(), stream);
         break;
       case ActivationEnum::SILU:
-        nvte_cast_transpose_dbias_dswish(input_tensor.data(), act_input_tensor.data(),
+        nvte_cast_transpose_dbias_dsilu(input_tensor.data(), act_input_tensor.data(),
                                          output_tensor.data(), output_trans_tensor.data(),
                                          dbias_tensor.data(), workspace.data(), stream);
+        break;
+      case ActivationEnum::RELU:
+        nvte_cast_transpose_dbias_drelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
+        break;
+      case ActivationEnum::QGELU:
+        nvte_cast_transpose_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
+        break;
+      case ActivationEnum::SRELU:
+        nvte_cast_transpose_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
         break;
       default:
         // TODO: what is a good message here
@@ -408,6 +465,21 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
         break;
       case ActivationEnum::SWIGLU:
         nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case ActivationEnum::REGLU:
+        nvte_dreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case ActivationEnum::QGEGLU:
+        nvte_dqgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case ActivationEnum::SREGLU:
+        nvte_dsreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
