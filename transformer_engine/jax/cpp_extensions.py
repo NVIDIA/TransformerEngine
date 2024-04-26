@@ -2720,7 +2720,6 @@ class DActLuPrimitive(BasePrimitive):
         ir_in_shape = ir_in_type.shape
         gi_type = ir.RankedTensorType(x.type)
         gi_shape = gi_type.shape
-#        assert ir_in_shape == gi_shape
         for axis in range(len(ir_in_shape) - 1):
             assert ir_in_shape[axis] == gi_shape[axis]
 
@@ -4554,7 +4553,7 @@ def dgated_act_lu_cast_transpose(
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose d_gated_act_lu fusion wrapper
-    Return FP8(dgayed_act_lu(inputs))
+    Return FP8(dgated_act_lu(inputs))
     """
     act_type_id = ActivationEnum[activation_type]
     return DgatedActLuCastTransposePrimitive.outer_primitive.bind(

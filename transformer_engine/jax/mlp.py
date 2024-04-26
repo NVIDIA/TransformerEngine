@@ -208,7 +208,6 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         activation_type,
         use_bias):
 
-#    is_gated = len(activation_type) > 1
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 1, Hidden_out)
     # Kernel_2 should be in shape of (Hidden_in, Hidden_out)
@@ -221,11 +220,6 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[0]
     assert kernel_1.shape[-1] == kernel_2.shape[0]
-
-    # Squeeze act axis
-    # (hidden_in, 1, hidden_out) -> (hidden_in, hidden_out)
-#    if not is_gated:
-#        kernel_1 = jnp.squeeze(kernel_1, axis=-2)
 
     amax = FP8Helper.update_amax_history(amax)
 

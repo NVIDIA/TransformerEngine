@@ -43,13 +43,15 @@ struct Shape {
     }
 };
 
-enum ActivationEnum {
+enum class ActivationEnum {
+  // <ActivationType> = <ActivationLen>
   GELU,
   GEGLU,
   SILU,
-  SWIGLU
+  SWIGLU,
 };
 
+size_t get_activation_len(ActivationEnum act_enum);
 
 struct CustomCallCommonDescriptor {
     Shape shape;
