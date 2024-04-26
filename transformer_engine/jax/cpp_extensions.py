@@ -27,6 +27,7 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import NVTE_Activation_Enum
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
@@ -124,20 +125,17 @@ def _check_valid_batch_dims(bdims):
             f"but got {dim=}"
 
 
-""" The value of activations are explicitedly defined to avoid order rearrangement in the future.
-Gated activations should have odd value, non-gated activations should have even value. """
-
 ActivationEnum = {
-    ('gelu',): 0,
-    ('gelu', 'linear'): 1,
-    ('silu',): 2,
-    ('silu', 'linear'): 3,
-    ('relu',): 4,
-    ('relu', 'linear'): 5,
-    ('quick_gelu',): 6,
-    ('quick_gelu', 'linear'): 7,
-    ('squared_relu',): 8,
-    ('squared_relu', 'linear'): 9,
+    ('gelu',): NVTE_Activation_Enum.GELU,
+    ('gelu', 'linear'): NVTE_Activation_Enum.GEGLU,
+    ('silu',): NVTE_Activation_Enum.SILU,
+    ('silu', 'linear'): NVTE_Activation_Enum.SWIGLU,
+    ('relu',): NVTE_Activation_Enum.RELU,
+    ('relu', 'linear'): NVTE_Activation_Enum.REGLU,
+    ('quick_gelu',): NVTE_Activation_Enum.QGELU,
+    ('quick_gelu', 'linear'): NVTE_Activation_Enum.QGEGLU,
+    ('squared_relu',): NVTE_Activation_Enum.SRELU,
+    ('squared_relu', 'linear'): NVTE_Activation_Enum.SREGLU,
 }
 
 

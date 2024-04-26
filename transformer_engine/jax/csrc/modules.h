@@ -43,19 +43,20 @@ struct Shape {
     }
 };
 
-enum ActivationEnum {
-  GELU,     // 0
-  GEGLU,    // 1
-  SILU,     // 2
-  SWIGLU,   // 3
-  RELU,     // 4
-  REGLU,    // 5
-  QGELU,    // 6
-  QGEGLU,   // 7
-  SRELU,    // 8
-  SREGLU,   // 9
+enum class NVTE_Activation_Enum {
+  GELU,
+  GEGLU,
+  SILU,
+  SWIGLU,
+  RELU,
+  REGLU,
+  QGELU,
+  QGEGLU,
+  SRELU,
+  SREGLU,
 };
 
+size_t get_activation_len(NVTE_Activation_Enum act_enum);
 
 struct CustomCallCommonDescriptor {
     Shape shape;
