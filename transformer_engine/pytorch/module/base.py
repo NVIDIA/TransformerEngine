@@ -255,6 +255,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_weight_shapes = []
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self._fp8_workspaces: Dict[str, Float8Tensor] = {}
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -854,3 +855,57 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         is_first_microbatch: Union[bool, None],
     ) -> List[torch.Tensor]:
         """Needs override."""
+
+    def get_fp8_workspace(
+        self,
+        tensor: torch.Tensor,
+        *,
+        fp8_meta_forward: bool,
+        fp8_meta_index: int,
+        cache_name: Optional[str] = None,
+        update_workspace: bool = True,
+        skip_update_flag: Optional[torch.Tensor] = None,
+        with_transpose: bool = True,
+    ) -> Optional[Float8Tensor]:
+
+        # Construct workspace if needed
+        out = None
+        if cache_name is not None:
+            out = self._fp8_workspaces.get(cache_name, None)
+        if out is None:
+            fp8_dtype = get_fp8_te_dtype(
+                self.fp8_meta["recipe"],
+                fprop_tensor=fp8_meta_forward,
+            )
+            scale_inv = torch.empty(
+                [1],
+                dtype=torch.float32,
+                device=tensor.device
+            )
+            out = Float8Tensor(
+                data=torch.empty_like(tensor, dtype=torch.uint8),
+                fp8_meta=self.fp8_meta,
+                fp8_meta_forward=fp8_meta_forward,
+                fp8_meta_index=fp8_meta_index,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=scale_inv,
+                dtype=tensor.dtype,
+            )
+            if cache_name is not None:
+                self._fp8_workspaces[cache_name] = out
+            update_workspace = True
+            skip_update_flag = None
+
+        # Update workspace if needed
+        if skip_update_flag is not None:
+            update_workspace = True
+        if update_workspace:
+            if with_transpose:
+                out.cast_transpose_(
+                    tensor,
+                    noop_flag=skip_update_flag,
+                )
+            else:
+                out.copy_(tensor)
+
+        return out

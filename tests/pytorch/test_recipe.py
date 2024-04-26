@@ -11,7 +11,6 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
-    amax_and_scale_update,
     get_default_fp8_recipe,
 )
 
