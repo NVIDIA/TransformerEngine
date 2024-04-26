@@ -523,7 +523,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:
         """returns the FP8 weights."""
         fp8_params = []
-        for param in self.parameters():
+        for param in self.parameters(recurse=False):
             if isinstance(param, Float8Tensor) and param.requires_grad:
                 fp8_params.append(param)
         if len(fp8_params) == 0:
