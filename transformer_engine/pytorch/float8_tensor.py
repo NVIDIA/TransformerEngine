@@ -663,14 +663,17 @@ class Float8Tensor(torch.Tensor):
             transpose_out=self._transpose,
             noop_flag=noop_flag,
         )
-        scale_inv = fp8_meta.scale[self._fp8_meta_index].reciprocal()
         if noop_flag is None:
-            self._scale_inv.copy_(scale_inv)
+            torch.reciprocal(
+                fp8_meta.scale[self._fp8_meta_index],
+                out=self._scale_inv,
+            )
+            self._scale_inv = self._scale_inv.view(1)
         else:
             torch.where(
                 noop_flag,
-                self._scale_inv,
-                scale_inv,
+                self.scale_inv,
+                fp8_meta.scale[self._fp8_meta_index].reciprocal(),
                 out=self._scale_inv,
             )
         self._transpose_invalid = False
