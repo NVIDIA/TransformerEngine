@@ -32,8 +32,8 @@ _default_causal_mask = {}
 def _get_default_causal_mask(seqlen: int) -> paddle.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if seqlen not in _default_causal_mask:
-        _default_causal_mask[seqlen] = paddle.triu(paddle.ones((seqlen, seqlen)),
-                                                   diagonal=1).cast('bool')
+        _default_causal_mask[seqlen] = paddle.tril(paddle.ones((seqlen, seqlen)),
+                                                   diagonal=0).cast('bool')
     return _default_causal_mask[seqlen]
 
 

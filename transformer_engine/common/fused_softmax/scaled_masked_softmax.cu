@@ -286,7 +286,7 @@ __global__ void scaled_masked_softmax_warp_forward(
 
 #pragma unroll
                   for (int element = 0; element < ELEMENTS_PER_LDG_STG; ++element) {
-                      if (temp_mask[element] != 1) {
+                      if (temp_mask[element] == 1) {
                           elements[i][it + element] = (acc_t)temp_data[element] * scale;
                       } else {
                           elements[i][it + element] = -10000.0;

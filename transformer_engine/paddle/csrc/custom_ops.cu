@@ -1304,12 +1304,12 @@ __global__ __launch_bounds__(BLOCK_SIZE) void mask_to_actual_seqlens_kernel(
     int q = 0, kv = 0;
     for (unsigned int q_idx = tid * kv_seqlen; q_idx < q_seqlen * kv_seqlen;
          q_idx += BLOCK_SIZE * kv_seqlen) {
-        q += (mask[q_idx + batch_offset] ? 0 : 1);
+        q += (mask[q_idx + batch_offset] ? 1 : 0);
     }
 
     if (need_kv) {
         for (unsigned int kv_idx = tid; kv_idx < kv_seqlen; kv_idx += BLOCK_SIZE) {
-            kv += (mask[kv_idx + batch_offset] ? 0 : 1);
+            kv += (mask[kv_idx + batch_offset] ? 1 : 0);
         }
     }
     __syncthreads();

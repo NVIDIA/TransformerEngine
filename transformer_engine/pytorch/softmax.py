@@ -23,12 +23,12 @@ _default_causal_mask = {}
 def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if sq == 1:
-        return torch.zeros((1, sk), dtype=torch.bool, device="cuda")
+        return torch.ones((1, sk), dtype=torch.bool, device="cuda")
 
     matrix_shape = (sq, sk)
     if matrix_shape not in _default_causal_mask:
-        diagonal_offset = sk - sq + 1
-        _default_causal_mask[matrix_shape] = torch.triu(
+        diagonal_offset = sk - sq
+        _default_causal_mask[matrix_shape] = torch.tril(
             torch.ones(sq, sk, dtype=torch.bool, device="cuda"),
             diagonal=diagonal_offset)
     return _default_causal_mask[matrix_shape]
@@ -42,9 +42,9 @@ def _get_onnx_export_causal_mask(
     ONNX does not support dynamic control-flow and requires non-square masks when
     using a KV-cache (seq_k's length len(context)+len(generative) while seq_q's length is 1).
 
-    Argument `onnx_causal_mask` is a square triu (k=1) mask that is sliced to the correct
+    Argument `onnx_causal_mask` is a square tril (k=1) mask that is sliced to the correct
     shape for GPT context and generation phases.
-    In the context phase the derived mask is a square triu of shape (seq_k, seq_k), and in
+    In the context phase the derived mask is a square tril of shape (seq_k, seq_k), and in
     the generation phase the mask is rectangular with shape (1, seq_k).
     """
     assert len(onnx_causal_mask.size()) == 2
@@ -226,8 +226,8 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         # Captures the logic of function scaled_masked_softmax_warp_forward.
         # output = softmax(mask(input*scale)
         # Computed as:
-        #   masked_scaled = (1 - mask)*(input*scale)
-        #   softmax_mask = mask * -10000
+        #   masked_scaled = mask*(input*scale)
+        #   softmax_mask = (1 - mask) * -10000
         #   output = softmax(masked_scaled + softmax_mask)
         scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
         scaled = g.op("Mul", inputs, scale_input)
@@ -235,8 +235,8 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         inv_mask = g.op("Sub", one, mask)
         # Note: type is hard coded because softmax uses FP16 or BF16
         neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
-        softmax_mask = g.op("Mul", mask, neg_tenK)
-        masked_scaled = g.op("Mul", inv_mask, scaled)
+        softmax_mask = g.op("Mul", inv_mask, neg_tenK)
+        masked_scaled = g.op("Mul", mask, scaled)
         masked = g.op("Add", masked_scaled, softmax_mask)
         out = g.op("Softmax", masked)
         return out

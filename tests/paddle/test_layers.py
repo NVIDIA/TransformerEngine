@@ -858,7 +858,7 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     q_actual_seqlen = paddle.randint(low=20, high=q_seqlen, shape=(bs,), dtype='int32')
     kv_actual_seqlen = paddle.randint(low=20, high=kv_seqlen, shape=(bs,),
                                       dtype='int32') if attn_type == 'cross' else q_actual_seqlen
-    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+    attn_mask = paddle.zeros(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
 
     grad_out = paddle.normal(mean=0.0, std=0.02,
                              shape=(bs, q_seqlen, num_heads, head_size)).astype('float32')
@@ -867,7 +867,7 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     grad_out = grad_out.astype(math_dtype)
 
     for i in range(0, bs):
-        attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+        attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = True
 
     head_size = hidden_size // num_heads
     layer_te = te.DotProductAttention(num_heads,

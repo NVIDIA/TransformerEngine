@@ -226,7 +226,6 @@ def get_swa(seq_q, seq_kv, w=None):
     m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
     mu = torch.triu(m, diagonal=seq_kv-seq_q-w[0])
     ml = torch.tril(mu, diagonal=seq_kv-seq_q+w[1])
-    ml = ~ ml
     return w, ml
 
 
@@ -558,12 +557,11 @@ def _run_dot_product_attention(
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = (
                     attention_mask_q.to(device="cuda"), attention_mask_kv.to(device="cuda"))
+    window_size = None
     if swa:
         window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
     elif "causal" in config.attn_mask_type:
         window_size, attention_mask = (-1, 0), None
-    else:
-        window_size, attention_mask = None, None
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":

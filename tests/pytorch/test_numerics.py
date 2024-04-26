@@ -76,7 +76,7 @@ mask_types = ["causal", "no_mask"]
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
-    return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
+    return torch.tril(torch.ones(sq, sq, device="cuda"), diagonal=0).bool()
 
 
 def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
@@ -324,6 +324,7 @@ class TorchMHA(nn.Module):
         )
 
     def forward(self, x, attention_mask=None):
+        attention_mask = attention_mask.logical_not() if attention_mask is not None else None
         output = self.mhsa(x, x, x, attn_mask=attention_mask, need_weights=False)
         if isinstance(output, tuple):
             output = output[0]
@@ -914,7 +915,7 @@ def _test_granular_accuracy(block, bs, dtype, config):
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
-    mask = torch.triu(torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1)
+    mask = torch.tril(torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=0)
     query, key, value = [
         torch.randn(
             (config.seq_len, bs, config.num_attention_heads, config.embed),

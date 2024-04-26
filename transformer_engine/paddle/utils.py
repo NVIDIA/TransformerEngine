@@ -63,7 +63,7 @@ def attention_mask_func(attention_scores: paddle.Tensor,
 
     def _masked_fill(x, mask, value):
         y = paddle.full(x.shape, value, x.dtype)
-        return paddle.where(mask, y, x)
+        return paddle.where(mask, x, y)
 
     attention_scores = _masked_fill(attention_scores, attention_mask, -10000.0)
     return attention_scores
