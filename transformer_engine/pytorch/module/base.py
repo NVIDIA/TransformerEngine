@@ -858,10 +858,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def get_fp8_workspace(
         self,
-        tensor: torch.Tensor,
         *,
-        fp8_meta_forward: bool,
-        fp8_meta_index: int,
+        tensor: Optional[torch.Tensor] = None,
+        fp8_meta_forward: Optional[bool] = None,
+        fp8_meta_index: Optional[int] = None,
         cache_name: Optional[str] = None,
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
@@ -873,6 +873,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
         if out is None:
+            if (
+                tensor is None
+                or fp8_meta_forward is None
+                or fp8_meta_index is None
+            ):
+                raise ValueError(
+                    "tensor, fp8_meta_forward, and fp8_meta_index kwargs "
+                    "must be provided to construct FP8 workspace"
+                )
             fp8_dtype = get_fp8_te_dtype(
                 self.fp8_meta["recipe"],
                 fprop_tensor=fp8_meta_forward,
@@ -900,6 +909,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if skip_update_flag is not None:
             update_workspace = True
         if update_workspace:
+            if tensor is None:
+                raise ValueError(
+                    "tensor kwarg must be provided to update FP8 workspace"
+                )
             if with_transpose:
                 out.cast_transpose_(
                     tensor,

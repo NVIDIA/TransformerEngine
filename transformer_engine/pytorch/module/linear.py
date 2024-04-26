@@ -930,6 +930,10 @@ class Linear(TransformerEngineBaseModule):
             # Cast weights to FP8 if needed
             weight_fp8 = None
             if not isinstance(weight_tensor, Float8Tensor):
+                update_workspace = (
+                    is_first_microbatch is None
+                    or is_first_microbatch
+                )
                 with_transpose = torch.is_grad_enabled()
                 if (
                     is_fp8_activation_recompute_enabled()
@@ -937,10 +941,11 @@ class Linear(TransformerEngineBaseModule):
                 ):
                     with_transpose = True
                 weight_fp8 = self.get_fp8_workspace(
-                    weight_tensor,
+                    tensor=weight_tensor,
                     fp8_meta_forward=True,
                     fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
                     cache_name=(None if is_first_microbatch is None else "weight"),
+                    update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     with_transpose=with_transpose,
                 )

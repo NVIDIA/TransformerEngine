@@ -91,10 +91,8 @@ class TestFP8Recipe:
         ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2 ** margin)
         ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2 ** margin)
         ref_scale_inv_forward = torch.reciprocal(ref_scale_forward)
-        update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
-        if not update_weight_scale_inv:
-            ref_scale_inv_forward[1].copy_(scale_inv_forward[1])
         ref_scale_inv_backward = torch.reciprocal(ref_scale_backward)
+        init_scale_inv_forward = fp8_meta[forward_key].scale_inv.clone()
 
         # Make sure we are not trivially passing tests
         if amax_history_len > 1:
@@ -149,6 +147,15 @@ class TestFP8Recipe:
             fp8_meta[forward_key].scale_inv,
             ref_scale_inv_forward,
         )
+        if is_first_microbatch is not None:
+            # FP8 weights have old scale_inv
+            torch.testing.assert_close(
+                module.get_fp8_workspace(
+                    cache_name="weight",
+                    update_workspace=False,
+                )._scale_inv.view([]),
+                init_scale_inv_forward[1],
+            )
         torch.testing.assert_close(
             fp8_meta[backward_key].amax_history[1:],
             ref_amax_history_backward[1:],
