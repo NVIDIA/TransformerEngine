@@ -37,12 +37,12 @@ std::vector<size_t> MakeShapeVector(NVTEShape shape) {
     return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-size_t get_activation_len(ActivationEnum act_enum) {
+size_t get_activation_len(NVTE_Activation_Enum act_enum) {
   switch (act_enum) {
-    case ActivationEnum::GELU: return 1;
-    case ActivationEnum::GEGLU: return 2;
-    case ActivationEnum::SILU: return 1;
-    case ActivationEnum::SWIGLU: return 2;
+    case NVTE_Activation_Enum::GELU: return 1;
+    case NVTE_Activation_Enum::GEGLU: return 2;
+    case NVTE_Activation_Enum::SILU: return 1;
+    case NVTE_Activation_Enum::SWIGLU: return 2;
     default:
       throw std::runtime_error("Not Implemented");
       break;
@@ -188,7 +188,7 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 
 void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
               cudaStream_t stream, float *scale_inverse, float *amax, void *output,
-              ActivationEnum act_enum) {
+              NVTE_Activation_Enum act_enum) {
     auto act_len = get_activation_len(act_enum);
     auto input_shape = std::vector<size_t>{m, n * act_len};
     auto output_shape = std::vector<size_t>{m, n};
@@ -198,20 +198,20 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
                                        static_cast<DType>(out_dtype), amax,
                                        scale, scale_inverse);
     switch (act_enum) {
-    case ActivationEnum::GELU:
+    case NVTE_Activation_Enum::GELU:
         nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::GEGLU:
+    case NVTE_Activation_Enum::GEGLU:
         nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::SILU:
+    case NVTE_Activation_Enum::SILU:
         nvte_swish(input_tensor.data(), output_tensor.data(), stream);
         break;
-    case ActivationEnum::SWIGLU:
+    case NVTE_Activation_Enum::SWIGLU:
         nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Activation Type is not Implemented in ActLuImpl");
+        NVTE_ERROR("Unsupported ActivationEnum");
         break;
     }
 }
@@ -223,7 +223,7 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<ActivationEnum>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Enum>(desc.act_enum);;
 
     ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream,
              nullptr, nullptr, output, act_enum);
@@ -246,7 +246,7 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<ActivationEnum>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Enum>(desc.act_enum);;
 
     ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream,
              scale_inv, amax_out, output, act_enum);
@@ -260,7 +260,7 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<ActivationEnum>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Enum>(desc.act_enum);;
 
     auto act_len = get_activation_len(act_enum);
     auto input_shape = std::vector<size_t>{m, n};
@@ -272,24 +272,24 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
     auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
 
     switch (act_enum) {
-      case ActivationEnum::GELU:
+      case NVTE_Activation_Enum::GELU:
         nvte_dgelu(input_tensor.data(), act_input_tensor.data(),
                    output_tensor.data(), stream);
         break;
-      case ActivationEnum::GEGLU:
+      case NVTE_Activation_Enum::GEGLU:
         nvte_dgeglu(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
-      case ActivationEnum::SILU:
+      case NVTE_Activation_Enum::SILU:
         nvte_dswish(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
-      case ActivationEnum::SWIGLU:
+      case NVTE_Activation_Enum::SWIGLU:
         nvte_dswiglu(input_tensor.data(), act_input_tensor.data(),
                      output_tensor.data(), stream);
         break;
       default:
-        throw std::runtime_error("Activation Type is not Implemented in DActLu");
+        NVTE_ERROR("Unsupported ActivationEnum");
         break;
     }
 }
@@ -341,7 +341,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<ActivationEnum>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Enum>(desc.act_enum);;
     auto input_shape = std::vector<size_t>{m, n};
     auto act_input_shape = std::vector<size_t>{m, n};
     auto output_shape = std::vector<size_t>{m, n};
@@ -359,12 +359,12 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
 
     switch (act_enum) {
-      case ActivationEnum::GELU:
+      case NVTE_Activation_Enum::GELU:
         nvte_cast_transpose_dbias_dgelu(input_tensor.data(), act_input_tensor.data(),
                                         output_tensor.data(), output_trans_tensor.data(),
                                         dbias_tensor.data(), workspace.data(), stream);
         break;
-      case ActivationEnum::SILU:
+      case NVTE_Activation_Enum::SILU:
         nvte_cast_transpose_dbias_dswish(input_tensor.data(), act_input_tensor.data(),
                                          output_tensor.data(), output_trans_tensor.data(),
                                          dbias_tensor.data(), workspace.data(), stream);
@@ -395,7 +395,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<ActivationEnum>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Enum>(desc.act_enum);;
     auto input_shape = desc.shape.to_vector();
     auto act_input_shape = std::vector<size_t>{m, n * 2};
     auto output_shape = std::vector<size_t>{m, n * 2};
@@ -409,18 +409,18 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
         TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
 
     switch (act_enum) {
-      case ActivationEnum::GEGLU:
+      case NVTE_Activation_Enum::GEGLU:
         nvte_dgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
-      case ActivationEnum::SWIGLU:
+      case NVTE_Activation_Enum::SWIGLU:
         nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
       default:
-        throw std::runtime_error("Activation Type is not Implemented in DGatedActLuCastTranspose");
+        NVTE_ERROR("Unsupported ActivationEnum");
         break;
     }
 }

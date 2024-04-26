@@ -43,15 +43,14 @@ struct Shape {
     }
 };
 
-enum class ActivationEnum {
-  // <ActivationType> = <ActivationLen>
+enum class NVTE_Activation_Enum {
   GELU,
   GEGLU,
   SILU,
   SWIGLU,
 };
 
-size_t get_activation_len(ActivationEnum act_enum);
+size_t get_activation_len(NVTE_Activation_Enum act_enum);
 
 struct CustomCallCommonDescriptor {
     Shape shape;

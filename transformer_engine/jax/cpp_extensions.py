@@ -27,6 +27,7 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import NVTE_Activation_Enum
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
@@ -126,10 +127,10 @@ def _check_valid_batch_dims(bdims):
 
 # The value of activations are explicitedly defined to avoid order rearrangement in the future
 ActivationEnum = {
-    ('gelu',): 0,
-    ('gelu', 'linear'): 1,
-    ('silu',): 2,
-    ('silu', 'linear'): 3
+    ('gelu',): NVTE_Activation_Enum.GELU,
+    ('gelu', 'linear'): NVTE_Activation_Enum.GEGLU,
+    ('silu',): NVTE_Activation_Enum.SILU,
+    ('silu', 'linear'): NVTE_Activation_Enum.SWIGLU
 }
 
 
