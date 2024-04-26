@@ -543,11 +543,25 @@ class LayerNormMLPAttr:
         ACTIVATION: ('gelu', 'linear')
     }, {
         INTERMEDIATE_DIM: 2048,
-        USE_BIAS: True,
+        USE_BIAS: False,
         ENABLE_LN: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: True,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: False,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
     }]
 
 
