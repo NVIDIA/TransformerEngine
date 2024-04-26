@@ -93,6 +93,9 @@ class TestFP8Recipe:
         ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2 ** margin)
         ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2 ** margin)
         ref_scale_inv_forward = torch.reciprocal(ref_scale_forward)
+        update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
+        if not update_weight_scale_inv:
+            ref_scale_inv_forward[1].copy_(scale_inv_forward[1])
         ref_scale_inv_backward = torch.reciprocal(ref_scale_backward)
 
         # Make sure we are not trivially passing tests
