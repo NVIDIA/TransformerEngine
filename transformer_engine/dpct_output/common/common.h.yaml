@@ -1,0 +1,163 @@
+---
+MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/dpct_output/common/common.h'
+Replacements:
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          365
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          510
+    Length:          23
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          533
+    Length:          23
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          556
+    Length:          22
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          578
+    Length:          30
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          1486
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          1939
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          6277
+    Length:          11
+    ReplacementText: "{\\\n  dpct::has_capability_or_fail(__VA_ARGS__->get_device(), {sycl::aspect::fp16});\\\n\\\n  __VA_ARGS__->submit(\\\n    [&](sycl::handler &cgh) {\\\n      /*\\\n      DPCT1083:552: The size of local memory in the migrated code may be different from the original code. Check that the allocated memory size in the migrated code is correct.\\\n      */\\\n      sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(sycl::range<1>(__VA_ARGS__), cgh);\\\n      sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(cast_transpose_num_threads / THREADS_PER_WARP), cgh);\\\n\\\n      const InputType * __VA_ARGS___ct0 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct1 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct2 = __VA_ARGS__;\\\n      const fp32 * __VA_ARGS___ct3 = __VA_ARGS__;\\\n      fp32 * __VA_ARGS___ct4 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct5 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct6 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct7 = __VA_ARGS__;\\\n\\\n      cgh.parallel_for(\\\n        sycl::nd_range<3>(sycl::range<3>(1, 1, __VA_ARGS__) * sycl::range<3>(1, 1, __VA_ARGS__), sycl::range<3>(1, 1, __VA_ARGS__)), \\\n        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\\\n          cast_transpose_kernel<, , , , >(__VA_ARGS___ct0, __VA_ARGS___ct1, __VA_ARGS___ct2, __VA_ARGS___ct3, __VA_ARGS___ct4, __VA_ARGS___ct5, __VA_ARGS___ct6, __VA_ARGS___ct7, item_ct1, dpct_local_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get(), staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\\\n        });\\\n    });\\\n}"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          6427
+    Length:          11
+    ReplacementText: "{\\\n  dpct::has_capability_or_fail(__VA_ARGS__->get_device(), {sycl::aspect::fp16});\\\n\\\n  __VA_ARGS__->submit(\\\n    [&](sycl::handler &cgh) {\\\n      /*\\\n      DPCT1083:553: The size of local memory in the migrated code may be different from the original code. Check that the allocated memory size in the migrated code is correct.\\\n      */\\\n      sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(sycl::range<1>(__VA_ARGS__), cgh);\\\n      sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(cast_transpose_num_threads / THREADS_PER_WARP), cgh);\\\n\\\n      const InputType * __VA_ARGS___ct0 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct1 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct2 = __VA_ARGS__;\\\n      const fp32 * __VA_ARGS___ct3 = __VA_ARGS__;\\\n      fp32 * __VA_ARGS___ct4 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct5 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct6 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct7 = __VA_ARGS__;\\\n\\\n      cgh.parallel_for(\\\n        sycl::nd_range<3>(sycl::range<3>(1, 1, __VA_ARGS__) * sycl::range<3>(1, 1, __VA_ARGS__), sycl::range<3>(1, 1, __VA_ARGS__)), \\\n        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\\\n          cast_transpose_kernel<, , , , >(__VA_ARGS___ct0, __VA_ARGS___ct1, __VA_ARGS___ct2, __VA_ARGS___ct3, __VA_ARGS___ct4, __VA_ARGS___ct5, __VA_ARGS___ct6, __VA_ARGS___ct7, item_ct1, dpct_local_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get(), staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\\\n        });\\\n    });\\\n}"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Offset:          6578
+    Length:          11
+    ReplacementText: "{\\\n  dpct::has_capability_or_fail(__VA_ARGS__->get_device(), {sycl::aspect::fp16});\\\n\\\n  __VA_ARGS__->submit(\\\n    [&](sycl::handler &cgh) {\\\n      /*\\\n      DPCT1083:554: The size of local memory in the migrated code may be different from the original code. Check that the allocated memory size in the migrated code is correct.\\\n      */\\\n      sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(sycl::range<1>(__VA_ARGS__), cgh);\\\n      sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(cast_transpose_num_threads / THREADS_PER_WARP), cgh);\\\n\\\n      const InputType * __VA_ARGS___ct0 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct1 = __VA_ARGS__;\\\n      OutputType * __VA_ARGS___ct2 = __VA_ARGS__;\\\n      const fp32 * __VA_ARGS___ct3 = __VA_ARGS__;\\\n      fp32 * __VA_ARGS___ct4 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct5 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct6 = __VA_ARGS__;\\\n      const size_t __VA_ARGS___ct7 = __VA_ARGS__;\\\n\\\n      cgh.parallel_for(\\\n        sycl::nd_range<3>(sycl::range<3>(1, 1, __VA_ARGS__) * sycl::range<3>(1, 1, __VA_ARGS__), sycl::range<3>(1, 1, __VA_ARGS__)), \\\n        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\\\n          cast_transpose_kernel<, , , , >(__VA_ARGS___ct0, __VA_ARGS___ct1, __VA_ARGS___ct2, __VA_ARGS___ct3, __VA_ARGS___ct4, __VA_ARGS___ct5, __VA_ARGS___ct6, __VA_ARGS___ct7, item_ct1, dpct_local_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get(), staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\\\n        });\\\n    });\\\n}"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/common/common.h'
+    Digest:          af68a7a94b93bc38c3402f3a649f6589
+DpctVersion:     18.0.0
+MainHelperFileName: ''
+USMLevel:        ''
+FeatureMap:      {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  BuildScript:
+    Value:           '0'
+    Specified:       false
+  CodePinEnabled:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine/common'
+    Specified:       true
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  HelperFuncPreferenceFlag:
+    Value:           '0'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

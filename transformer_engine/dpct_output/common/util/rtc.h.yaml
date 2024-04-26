@@ -1,0 +1,289 @@
+---
+MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/dpct_output/common/util/rtc.h'
+Replacements:
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          369
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          485
+    Length:          18
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          503
+    Length:          30
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          533
+    Length:          19
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          1776
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          1811
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          1886
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2160
+    Length:          10
+    ReplacementText: 'grid_dim[2]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2204
+    Length:          10
+    ReplacementText: 'grid_dim[1]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2248
+    Length:          10
+    ReplacementText: 'grid_dim[0]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2292
+    Length:          11
+    ReplacementText: 'block_dim[2]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2337
+    Length:          11
+    ReplacementText: 'block_dim[1]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2382
+    Length:          11
+    ReplacementText: 'block_dim[0]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2489
+    Length:          8
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          2741
+    Length:          10
+    ReplacementText: 'dpct::kernel_function'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3011
+    Length:          8
+    ReplacementText: 'dpct::kernel_library'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3089
+    Length:          10
+    ReplacementText: 'dpct::kernel_function'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3289
+    Length:          8
+    ReplacementText: 'dpct::kernel_library'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3324
+    Length:          8
+    ReplacementText: 'dpct::kernel_library'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3400
+    Length:          10
+    ReplacementText: 'dpct::kernel_function'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          3439
+    Length:          10
+    ReplacementText: 'dpct::kernel_function'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          5236
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          5271
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Offset:          5346
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/rtc.h'
+    Digest:          d4740939db2c6022dd55f13dae2dc418
+DpctVersion:     18.0.0
+MainHelperFileName: ''
+USMLevel:        ''
+FeatureMap:      {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  BuildScript:
+    Value:           '0'
+    Specified:       false
+  CodePinEnabled:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine/common'
+    Specified:       true
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  HelperFuncPreferenceFlag:
+    Value:           '0'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

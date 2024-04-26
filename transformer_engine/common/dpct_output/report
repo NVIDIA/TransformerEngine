@@ -1,0 +1,13 @@
+Generate report: report-type:all, report-format:csv, report-file-prefix:stdout
+The directory "dpct_output" is used as "out-root"
+Parsing: /home/amin/workspace/TransformerEngine/transformer_engine/common/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+
+Error: meet signal:SIGINT dpct tries to write analysis reports and terminates...
+------------------APIS report--------------------
+API name				Frequency
+-------------------------------------------------
+--------Diags message----------------
+Cuda Include Path found: /usr/local/cuda-12.1/targets/x86_64-linux/include
+
+-------------------------------------
+

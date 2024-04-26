@@ -1,0 +1,8 @@
+Total Project:
+  +  0 lines of code (  0%) will be automatically migrated.
+    -  0 APIs/Types - No manual effort.
+    -  0 APIs/Types - Low manual effort for checking and code fixing.
+    -  0 APIs/Types - Medium manual effort for code fixing.
+  +  0 lines of code (  0%) will not be automatically migrated.
+    -  0 APIs/Types - High manual effort for code fixing.
+See https://www.intel.com/content/www/us/en/docs/dpcpp-compatibility-tool/developer-guide-reference/current/overview.html for more details.

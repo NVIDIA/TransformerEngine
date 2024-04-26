@@ -1,0 +1,991 @@
+---
+MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/dpct_output/common/util/vectorized_pointwise.h'
+Replacements:
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          403
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          449
+    Length:          23
+    ReplacementText: '#include "../utils.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          472
+    Length:          0
+    ReplacementText: "\n#include <cmath>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          903
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          949
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          1009
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          1052
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          1181
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          1271
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          1551
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          2566
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          3138
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          3254
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          3415
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          3623
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          4568
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          4908
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          5159
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6125
+    Length:          39
+    ReplacementText: "/*\nDPCT1110:14: The total declared local variable size in device function unary_kernel exceeds 128 bytes and may cause high register pressure. Consult with your hardware vendor to find the total register size available and adjust the code, or use smaller sub-group size to avoid high register pressure.\n*/\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6165
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6515
+    Length:          0
+    ReplacementText: ",\n                             const sycl::nd_item<3> &item_ct1,\n                             float *staging"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6802
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6897
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6910
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6923
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6966
+    Length:          9
+    ReplacementText: 'item_ct1.get_group_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          6978
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          7283
+    Length:          23
+    ReplacementText: 'sycl::fmax(sycl::fabs(temp), max)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          7589
+    Length:          0
+    ReplacementText: ', item_ct1, staging'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          7601
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          7995
+    Length:          39
+    ReplacementText: "/*\nDPCT1110:15: The total declared local variable size in device function unary_grad_kernel exceeds 128 bytes and may cause high register pressure. Consult with your hardware vendor to find the total register size available and adjust the code, or use smaller sub-group size to avoid high register pressure.\n*/\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8035
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8481
+    Length:          0
+    ReplacementText: ",\n                                  const sycl::nd_item<3> &item_ct1,\n                                  float *staging"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8839
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8934
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8947
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          8960
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          9003
+    Length:          9
+    ReplacementText: 'item_ct1.get_group_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          9015
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          9435
+    Length:          23
+    ReplacementText: 'sycl::fmax(sycl::fabs(temp), max)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          9741
+    Length:          0
+    ReplacementText: ', item_ct1, staging'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          9753
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12166
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12682
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:16: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12690
+    Length:          151
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_kernel<nvec, true, fp32, Param, OP>(input, output, scale, amax, params, N, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12841
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12896
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:17: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          12904
+    Length:          152
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_kernel<nvec, false, fp32, Param, OP>(input, output, scale, amax, params, N, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          13056
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          13179
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:18: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          13187
+    Length:          129
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_kernel<1, true, fp32, Param, OP>(input, output, scale, amax, params, N, N, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          13316
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          13977
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14499
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:19: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14507
+    Length:          162
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_grad_kernel<nvec, true, fp32, Param, OP>(grad, input, output, scale, amax, params, N, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14669
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14724
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:20: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14732
+    Length:          163
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_grad_kernel<nvec, false, fp32, Param, OP>(grad, input, output, scale, amax, params, N, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          14895
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15018
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:21: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15026
+    Length:          140
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  unary_grad_kernel<1, true, fp32, Param, OP>(grad, input, output, scale, amax, params, N, N, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15166
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15427
+    Length:          39
+    ReplacementText: "/*\nDPCT1110:22: The total declared local variable size in device function gated_act_kernel exceeds 128 bytes and may cause high register pressure. Consult with your hardware vendor to find the total register size available and adjust the code, or use smaller sub-group size to avoid high register pressure.\n*/\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15467
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15900
+    Length:          0
+    ReplacementText: ",\n                                 const sycl::nd_item<3> &item_ct1,\n                                 float *staging"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15969
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15982
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          15995
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          16036
+    Length:          9
+    ReplacementText: 'item_ct1.get_group_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          16048
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          16577
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          17052
+    Length:          23
+    ReplacementText: 'sycl::fmax(sycl::fabs(temp), max)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          17386
+    Length:          0
+    ReplacementText: ', item_ct1, staging'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          17400
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18175
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18645
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:23: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18653
+    Length:          205
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  gated_act_kernel<nvec, true, ComputeType, Param, Activation>(input, output, scale, amax, m, n, p, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18858
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18913
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:24: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          18921
+    Length:          206
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  gated_act_kernel<nvec, false, ComputeType, Param, Activation>(input, output, scale, amax, m, n, p, num_aligned_elements, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19127
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19250
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:25: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19258
+    Length:          183
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->submit(\n            [&](sycl::handler &cgh) {\n              sycl::local_accessor<float, 1> staging_acc_ct1(sycl::range<1>(unary_kernel_threads / THREADS_PER_WARP), cgh);\n\n              cgh.parallel_for(\n                sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n                [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {\n                  gated_act_kernel<1, true, ComputeType, Param, Activation>(input, output, scale, amax, m, n, p, n, item_ct1, staging_acc_ct1.get_multi_ptr<sycl::access::decorated::no>().get());\n                });\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19441
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19773
+    Length:          39
+    ReplacementText: "/*\nDPCT1110:26: The total declared local variable size in device function dgated_act_kernel exceeds 128 bytes and may cause high register pressure. Consult with your hardware vendor to find the total register size available and adjust the code, or use smaller sub-group size to avoid high register pressure.\n*/\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          19813
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20198
+    Length:          0
+    ReplacementText: ",\n                                  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20267
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20280
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20293
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20334
+    Length:          9
+    ReplacementText: 'item_ct1.get_group_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          20346
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          22308
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          22848
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:27: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          22856
+    Length:          173
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->parallel_for(\n            sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n            [=](sycl::nd_item<3> item_ct1) {\n              dgated_act_kernel<nvec, true, ComputeType, Param, Activation, Dactivation>(grad, input, output, m, n, p, num_aligned_elements, item_ct1);\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23029
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23084
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:28: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23092
+    Length:          174
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->parallel_for(\n            sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n            [=](sycl::nd_item<3> item_ct1) {\n              dgated_act_kernel<nvec, false, ComputeType, Param, Activation, Dactivation>(grad, input, output, m, n, p, num_aligned_elements, item_ct1);\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23266
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23389
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:29: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23397
+    Length:          151
+    ReplacementText: "{\n          dpct::has_capability_or_fail(stream->get_device(), {sycl::aspect::fp16});\n\n          stream->parallel_for(\n            sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks) * sycl::range<3>(1, 1, threads), sycl::range<3>(1, 1, threads)), \n            [=](sycl::nd_item<3> item_ct1) {\n              dgated_act_kernel<1, true, ComputeType, Param, Activation, Dactivation>(grad, input, output, m, n, p, n, item_ct1);\n            });\n        }"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Offset:          23548
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/amin/workspace/TransformerEngine/transformer_engine/common/util/vectorized_pointwise.h'
+    Digest:          5624fe612c2dc6e6d981240cee26c364
+DpctVersion:     18.0.0
+MainHelperFileName: ''
+USMLevel:        ''
+FeatureMap:      {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  BuildScript:
+    Value:           '0'
+    Specified:       false
+  CodePinEnabled:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           '/home/amin/workspace/TransformerEngine/transformer_engine/common'
+    Specified:       true
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  HelperFuncPreferenceFlag:
+    Value:           '0'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

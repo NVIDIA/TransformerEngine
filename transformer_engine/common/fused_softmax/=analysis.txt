@@ -1,0 +1,29 @@
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu:
+  + 32 lines of code (100%) will be automatically migrated.
+    -  2 APIs/Types - No manual effort.
+    - 30 APIs/Types - Low manual effort for checking and code fixing.
+    -  0 APIs/Types - Medium manual effort for code fixing.
+  +  0 lines of code (  0%) will not be automatically migrated.
+    -  0 APIs/Types - High manual effort for code fixing.
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu:
+  +  4 lines of code (100%) will be automatically migrated.
+    -  2 APIs/Types - No manual effort.
+    -  2 APIs/Types - Low manual effort for checking and code fixing.
+    -  0 APIs/Types - Medium manual effort for code fixing.
+  +  0 lines of code (  0%) will not be automatically migrated.
+    -  0 APIs/Types - High manual effort for code fixing.
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_softmax/scaled_masked_softmax.cu:
+  + 45 lines of code (100%) will be automatically migrated.
+    -  0 APIs/Types - No manual effort.
+    - 45 APIs/Types - Low manual effort for checking and code fixing.
+    -  0 APIs/Types - Medium manual effort for code fixing.
+  +  0 lines of code (  0%) will not be automatically migrated.
+    -  0 APIs/Types - High manual effort for code fixing.
+Total Project:
+  + 81 lines of code (100%) will be automatically migrated.
+    -  4 APIs/Types - No manual effort.
+    - 77 APIs/Types - Low manual effort for checking and code fixing.
+    -  0 APIs/Types - Medium manual effort for code fixing.
+  +  0 lines of code (  0%) will not be automatically migrated.
+    -  0 APIs/Types - High manual effort for code fixing.
+See https://www.intel.com/content/www/us/en/docs/dpcpp-compatibility-tool/developer-guide-reference/current/overview.html for more details.

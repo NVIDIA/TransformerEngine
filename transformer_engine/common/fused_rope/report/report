@@ -1,0 +1,27 @@
+NOTE: Could not auto-detect compilation database for file 'fused_rope.cu' in '/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope' or any parent directory.
+Generate report: report-type:all, report-format:csv, report-file-prefix:stdout
+Parsing: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope/fused_rope.cu
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope/fused_rope.cu:8:10: fatal error: 'transformer_engine/fused_rope.h' file not found
+    8 | #include <transformer_engine/fused_rope.h>
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Analyzing: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope/fused_rope.cu
+Migrating: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope/fused_rope.cu
+------------------APIS report--------------------
+API name				Frequency
+const char * cudaGetErrorString(cudaError_t error)               4
+cudaError_t cudaGetLastError()               4
+cudaStream_t                                12
+dim3                                         8
+float cosf(float __a)                        1
+float sinf(float __a)                        2
+void sincosf(float __a,float * __s,float * __c)               1
+-------------------------------------------------
+----------Stats report---------------
+
+File name, LOC migrated to SYCL, LOC migrated to helper functions, LOC not needed to migrate, LOC not able to migrate
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_rope/fused_rope.cu, 83, 12, 269, 0
+
+Total migration time: 29467.360000 ms
+
+-------------------------------------
+

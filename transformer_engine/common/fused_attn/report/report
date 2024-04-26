@@ -1,0 +1,33 @@
+NOTE: Could not auto-detect compilation database for file 'fused_attn_fp8.cu' in '/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn' or any parent directory.
+Generate report: report-type:all, report-format:csv, report-file-prefix:stdout
+Parsing: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.cu
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.cu:7:10: fatal error: 'transformer_engine/fused_attn.h' file not found
+    7 | #include "transformer_engine/fused_attn.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Analyzing: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.cu
+Migrating: /home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.cu
+------------------APIS report--------------------
+API name				Frequency
+const char * cudaGetErrorString(cudaError_t error)               2
+const char * cudnnGetErrorString(cudnnStatus_t status)               2
+cudaDeviceProp                               4
+cudaError_t cudaGetDeviceProperties_v2(struct cudaDeviceProp * prop,int device)               2
+cudaStream_t                                10
+cudnnDataType_t                             17
+cudnnHandle_t                               14
+cudnnStatus_t                                2
+cudnnStatus_t cudnnCreate(cudnnHandle_t * handle)               1
+cudnnStatus_t cudnnSetStream(cudnnHandle_t handle,cudaStream_t streamId)               2
+dim3                                         4
+-------------------------------------------------
+----------Stats report---------------
+
+File name, LOC migrated to SYCL, LOC migrated to helper functions, LOC not needed to migrate, LOC not able to migrate
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.cu, 22, 30, 2205, 0
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/utils.h, 9, 7, 147, 0
+/home/amin/workspace/TransformerEngine/transformer_engine/common/fused_attn/fused_attn_fp8.h, 0, 8, 78, 0
+
+Total migration time: 25335.135000 ms
+
+-------------------------------------
+
