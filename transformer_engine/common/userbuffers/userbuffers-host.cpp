@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "ipcsocket.cc"
 #include "ipcsocket.h"
 #include "userbuffers.h"
 #include <assert.h>
@@ -85,7 +84,8 @@ int pipe_rank(communicator *comm, int step) {
 int create_communicator_grouped2(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
@@ -93,14 +93,16 @@ int create_communicator_grouped2(communicator **comm
 
 #ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_world = EXT_COMM_WORLD;
-  (*comm)->_allgather = ext_allgather;
+  (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
+  (*comm)->_free = ext_free;
   (*comm)->_barrier = ext_barrier;
 #else
   int myrank, numranks;
   (*comm)->comm_world = MPI_COMM_WORLD;
   MPI_Comm_rank((*comm)->comm_world, &myrank);
   MPI_Comm_size((*comm)->comm_world, &numranks);
-  (*comm)->_allgather = &ub_allgather;
+  (*comm)->_alloc_copy_allgather = &ub_allgather;
+  (*comm)->_free = &ub_free;
   (*comm)->_barrier = &ub_barrier;
 #endif
   (*comm)->nranks = numranks;
@@ -345,7 +347,6 @@ int create_communicator_grouped2(communicator **comm
 
 #define GPU_PAGE_SHIFT 16
 #define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
-#define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
 
   CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
@@ -378,13 +379,15 @@ int create_communicator_grouped2(communicator **comm
 int create_communicator_grouped(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void*, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm
 #ifndef UB_MPI_BOOTSTRAP
-  , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+  , myrank, numranks, mylocal, numlocal, mynode, numnodes
+  , ext_alloc_copy_allgather, ext_free, ext_barrier
 #endif
   , pipegpus, pipenodes, 1, 1);
 }
@@ -392,13 +395,15 @@ int create_communicator_grouped(communicator **comm
 int create_communicator(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void*, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 ) {
   return create_communicator_grouped2(comm
 #ifndef UB_MPI_BOOTSTRAP
-  , myrank, numranks, mylocal, numlocal, mynode, numnodes, ext_allgather, ext_barrier
+  , myrank, numranks, mylocal, numlocal, mynode, numnodes
+  , ext_alloc_copy_allgather, ext_free, ext_barrier
 #endif
   , 1, 1, 1, 1);
 }
@@ -562,7 +567,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
     for (int p = 1; p < nranks; p++) {
-      MPI_Barrier(comm->comm_intra);
+      comm->_barrier(comm->comm_intra);
       NCCLCHECKGOTO(
           ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
           error);
@@ -626,9 +631,10 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
 
-    comm->_allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t),
-                     memhndl, sizeof(cudaIpcMemHandle_t) * comm->nvsize,
-                     comm->comm_intra);
+    void *tmp;
+    comm->_alloc_copy_allgather(&tmp, memhndl, sizeof(cudaIpcMemHandle_t), comm->comm_intra);
+    memcpy(memhndl, tmp, sizeof(cudaIpcMemHandle_t) * comm->nvsize);
+    comm->_free(tmp, sizeof(cudaIpcMemHandle_t) * comm->nvsize);
 
     for (int i = 0; i < comm->nvsize; i++)
       if (i != comm->nvrank)

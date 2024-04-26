@@ -4,11 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
-#ifdef NVTE_WITH_USERBUFFERS
+#include "common/userbuffers/comm_gemm_overlap.h"
+
 #include "../comm_gemm_overlap.h"
-namespace te_ub = transformer_engine::userbuffers;
-#endif  // NVTE_WITH_USERBUFFERS
+#include "../extensions.h"
+#include "../common.h"
+
+
+namespace te = transformer_engine;
+namespace te_ub = te::userbuffers;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
@@ -104,26 +108,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 
   // Data structures
-  py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
+  py::class_<te::FP8TensorMeta>(m, "FP8TensorMeta", py::module_local())
     .def(py::init<>())
-    .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
-    .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
-    .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+    .def_readwrite("scale", &te::FP8TensorMeta::scale)
+    .def_readwrite("scale_inv", &te::FP8TensorMeta::scale_inv)
+    .def_readwrite("amax_history", &te::FP8TensorMeta::amax_history);
 
-#ifdef NVTE_WITH_USERBUFFERS
-  py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap")
+  py::class_<te_ub::UbufCommOverlap,
+             te_ub::CommGemmOverlap,
+             te_ub::CommGemmOverlapBase>(m, "UbufCommOverlap", py::module_local())
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool>())
     .def("bulk_overlap", &te_ub::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &te_ub::UbufCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_rs", &te_ub::UbufCommOverlap::atomic_gemm_overlap_rs)
-    .def("is_fp8_ubuf", &te_ub::UbufCommOverlap::is_fp8_ubuf)
     .def("copy_input_to_ubuf", &te_ub::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &te_ub::UbufCommOverlap::get_ubuf_output)
-    .def("is_atomic_gemm", &te_ub::UbufCommOverlap::is_atomic_gemm)
-    .def("is_p2p_overlap", &te_ub::UbufCommOverlap::is_p2p_overlap)
-    .def("set_ubuf_scale_inv", &te_ub::UbufCommOverlap::set_ubuf_scale_inv);
+    .def("is_fp8_ubuf", &te_ub::UbufCommOverlap::is_fp8_ubuf)
+    .def("set_ubuf_scale_inv", &te_ub::UbufCommOverlap::set_ubuf_scale_inv)
+    .def("set_collective_callbacks", &te_ub::UbufCommOverlap::set_collective_callbacks);
 
-  py::class_<te_ub::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
+  py::class_<te_ub::UbufP2PCommOverlap,
+             te_ub::CommGemmOverlapP2P,
+             te_ub::CommGemmOverlapBase>(m, "UbufP2PCommOverlap", py::module_local())
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool, bool, bool>())
     .def("split_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_ag)
     .def("split_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_rs)
@@ -132,74 +138,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("copy_input_to_ubuf", &te_ub::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &te_ub::UbufP2PCommOverlap::get_ubuf_output)
     .def("is_fp8_ubuf", &te_ub::UbufP2PCommOverlap::is_fp8_ubuf)
-    .def("is_atomic_gemm", &te_ub::UbufP2PCommOverlap::is_atomic_gemm)
-    .def("is_p2p_overlap", &te_ub::UbufP2PCommOverlap::is_p2p_overlap)
-    .def("set_ubuf_scale_inv", &te_ub::UbufP2PCommOverlap::set_ubuf_scale_inv);
-#else  // NVTE_WITH_USERBUFFERS
-  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
-#endif  // NVTE_WITH_USERBUFFERS
+    .def("set_ubuf_scale_inv", &te_ub::UbufP2PCommOverlap::set_ubuf_scale_inv)
+    .def("set_collective_callbacks", &te_ub::UbufP2PCommOverlap::set_collective_callbacks);
 
-  py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
-    .value("kByte", transformer_engine::DType::kByte)
-    .value("kInt32", transformer_engine::DType::kInt32)
-    .value("kFloat32", transformer_engine::DType::kFloat32)
-    .value("kFloat16", transformer_engine::DType::kFloat16)
-    .value("kBFloat16", transformer_engine::DType::kBFloat16)
-    .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)
-    .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);
+  py::enum_<te::FP8FwdTensors>(m, "FP8FwdTensors", py::module_local())
+    .value("GEMM1_INPUT", te::FP8FwdTensors::GEMM1_INPUT)
+    .value("GEMM1_WEIGHT", te::FP8FwdTensors::GEMM1_WEIGHT)
+    .value("GEMM1_OUTPUT", te::FP8FwdTensors::GEMM1_OUTPUT)
+    .value("GEMM2_INPUT", te::FP8FwdTensors::GEMM2_INPUT)
+    .value("GEMM2_WEIGHT", te::FP8FwdTensors::GEMM2_WEIGHT)
+    .value("GEMM2_OUTPUT", te::FP8FwdTensors::GEMM2_OUTPUT)
+    .value("GEMM3_INPUT", te::FP8FwdTensors::GEMM3_INPUT)
+    .value("GEMM3_WEIGHT", te::FP8FwdTensors::GEMM3_WEIGHT)
+    .value("GEMM3_OUTPUT", te::FP8FwdTensors::GEMM3_OUTPUT);
 
-  py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
-    .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
-    .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
-    .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
-    .value("GEMM2_INPUT", transformer_engine::FP8FwdTensors::GEMM2_INPUT)
-    .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT)
-    .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT)
-    .value("GEMM3_INPUT", transformer_engine::FP8FwdTensors::GEMM3_INPUT)
-    .value("GEMM3_WEIGHT", transformer_engine::FP8FwdTensors::GEMM3_WEIGHT)
-    .value("GEMM3_OUTPUT", transformer_engine::FP8FwdTensors::GEMM3_OUTPUT);
-
-  py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
-    .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
-    .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
-    .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
-    .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2)
-    .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
-    .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
-
-  py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
-      .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
-      .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
-      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
-
-  py::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")
-      .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
-      .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
-
-  py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
-      .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
-      .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
-      .value("NVTE_SBHD_SB2HD", NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
-      .value("NVTE_SBHD_SBH2D", NVTE_QKV_Layout::NVTE_SBHD_SBH2D)
-      .value("NVTE_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
-      .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
-      .value("NVTE_BSH3D", NVTE_QKV_Layout::NVTE_BSH3D)
-      .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
-      .value("NVTE_BSHD_BSH2D", NVTE_QKV_Layout::NVTE_BSHD_BSH2D)
-      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
-      .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
-      .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)
-      .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
-
-  py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
-      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
-      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+  py::enum_<te::FP8BwdTensors>(m, "FP8BwdTensors", py::module_local())
+    .value("GRAD_OUTPUT1", te::FP8BwdTensors::GRAD_OUTPUT1)
+    .value("GRAD_INPUT1", te::FP8BwdTensors::GRAD_INPUT1)
+    .value("GRAD_OUTPUT2", te::FP8BwdTensors::GRAD_OUTPUT2)
+    .value("GRAD_INPUT2", te::FP8BwdTensors::GRAD_INPUT2)
+    .value("GRAD_OUTPUT3", te::FP8BwdTensors::GRAD_OUTPUT3)
+    .value("GRAD_INPUT3", te::FP8BwdTensors::GRAD_INPUT3);
 }

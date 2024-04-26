@@ -16,44 +16,38 @@
 #include <dlpack/dlpack.h>
 #include <pybind11/pybind11.h>
 
-#include "transformer_engine/transformer_engine.h"
-#include "../util/logging.h"
+#include <transformer_engine/transformer_engine.h>
+#include "logging.h"
 #include "../common.h"
 
 namespace py = pybind11;
 
 namespace transformer_engine {
 
-namespace userbuffers {
-
 DType get_te_dtype(DLDataType dtype) {
   NVTE_CHECK(dtype.lanes == 1, "Unsupported number of data lanes: %d", dtype.lanes);
-  switch (dtype.code) {
-    case kDLFloat:
-      if (dtype.bits == 16) {
-        return DType::kFloat16;
-      } else if (dtype.bits == 32) {
-        return DType::kFloat32;
-      } else {
-        NVTE_ERROR("Unsupported %d-bit float type.", dtype.bits);
-      }
-
-    case kDLBfloat:
-      NVTE_CHECK(dtype.bits == 16, "BFloat16 type must be 16-bits.");
-      return DType::kBFloat16;
-
-    case kDLInt:
-      if (dtype.bits == 32) {
-        return DType::kInt32;
-      } else if (dtype.bits == 64) {
-        return DType::kInt64;
-      } else {
-        NVTE_ERROR("Unsupported %d-bit int type.", dtype.bits);
-      }
-
-    default:
-      NVTE_CHECK(dtype.bits == 8, "Unsupported %d-bit data type.", dtype.bits);
-      return DType::kByte;
+  if (dtype.code == kDLFloat) {
+    if (dtype.bits == 16) {
+      return DType::kFloat16;
+    } else if (dtype.bits == 32) {
+      return DType::kFloat32;
+    } else {
+      NVTE_ERROR("Unsupported %d-bit float type.", dtype.bits);
+    }
+  } else if (dtype.code == kDLBfloat) {
+    NVTE_CHECK(dtype.bits == 16, "BFloat16 type must be 16-bits.");
+    return DType::kBFloat16;
+  } else if (dtype.code == kDLInt) {
+    if (dtype.bits == 32) {
+      return DType::kInt32;
+    } else if (dtype.bits == 64) {
+      return DType::kInt64;
+    } else {
+      NVTE_ERROR("Unsupported %d-bit int type.", dtype.bits);
+    }
+  } else {
+    NVTE_CHECK(dtype.bits == 8, "Unsupported %d-bit data type.", dtype.bits);
+    return DType::kByte;
   }
 }
 
@@ -68,31 +62,17 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   }
   DLDataType dl_dtype{};
   dl_dtype.lanes = 1;
-  dl_type.bits = sizeof(T) * 8;
-  switch (typeid(static_cast<T>(1))) {
-    case typeid(static_cast<float>(1)):
-    case typeid(static_cast<half>(1)):
-      dl_dtype.code = kDLFloat;
-      break;
-
-    case typeid(static_cast<nv_bfloat16>(1)):
-      dl_dtype.code = kDLBfloat;
-      break;
-
-    case typeid(static_cast<int32_t>(1)):
-    case typeid(static_cast<int64_t>(1)):
-      dl_dtype.code = kDLInt;
-      break;
-
-    default:
-      // All 8-bit dtypes come out as UInt8 because not all frameworks support Fp8.
-      if (dl_dtype.bits == 8) {
-        dl_dtype.code = kDLUInt;
-        break;
-      } else {
-        NVTE_ERROR("Unsupported %d-bit data type.", dl_dtype.bits);
-      }
-
+  dl_dtype.bits = sizeof(T) * 8;
+  const std::type_info& typeid_T = typeid(T);
+  if (typeid_T == typeid(float) || typeid_T == typeid(half)) {
+    dl_dtype.code = kDLFloat;
+  } else if (typeid_T == typeid(nv_bfloat16)) {
+    dl_dtype.code = kDLBfloat;
+  } else if (typeid_T == typeid(int32_t) || typeid_T == typeid(int64_t)) {
+    dl_dtype.code = kDLInt;
+  } else {
+    NVTE_CHECK(dl_dtype.bits == 8, "Unsupported %d-bit data type.", dl_dtype.bits);
+    dl_dtype.code = kDLUInt;
   }
   return dl_dtype;
 }
@@ -146,7 +126,7 @@ DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1
 }
 
 py::capsule dlpack_to_capsule(DLManagedTensor *dlmt) {
-  py::capsule(dlmt, "dltensor", &dlpack_capsule_deleter);
+  return py::capsule(dlmt, "dltensor", &dlpack_capsule_deleter);
 }
 
 template <typename T = char>
@@ -175,8 +155,6 @@ int64_t dlpack_to_buffer(DLManagedTensor *dlmt, void **buffer) {
 int64_t capsule_to_buffer(py::capsule &capsule, void **buffer) {
   return dlpack_to_buffer(capsule_to_dlpack(capsule), buffer);
 }
-
-}  // namespace userbuffers
 
 }  // namespace transformer_engine
 

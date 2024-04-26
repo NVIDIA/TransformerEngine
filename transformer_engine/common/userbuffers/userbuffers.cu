@@ -2612,18 +2612,18 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 
 template <typename in_dtype = float, typename out_dtype = float>
 __global__ void __launch_bounds__(MAX_THREADS / 4)
-reduce_full_precision(
+reduce_sum(
   void *inputs, void *output, const int num_inputs, const int input_size
 ) {
   const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-  dtype *inputs_ = reinterpret_cast<dtype *>(inputs);
+  in_dtype *inputs_ = reinterpret_cast<in_dtype *>(inputs);
   float accum_buf = static_cast<float>(inputs_[tid]);
   #pragma unroll
   for (int i = 1; i < num_inputs; i++) {
     accum_buf += static_cast<float>(inputs_[tid + input_size * i]);
   }
-  dtype *output_ = reinterpret_cast<dtype *>(output);
-  output_[tid] = (dtype) accum_buf;
+  out_dtype *output_ = reinterpret_cast<out_dtype *>(output);
+  output_[tid] = (out_dtype) accum_buf;
 }
 
 template <typename in_dtype = float, typename out_dtype = float>
@@ -2634,7 +2634,8 @@ void reduce_full_precision(
   size_t num_blocks = (input_size +num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
-  reduce_sum<dtype><<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
+  reduce_sum<in_dtype, out_dtype><<<grid, block, 0, stream>>>(
+    inputs, output, num_inputs, input_size);
 }
 
 template <typename fp8type>

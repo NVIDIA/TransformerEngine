@@ -7,71 +7,9 @@
 #include <transformer_engine/transformer_engine.h>
 #include "common.h"
 
-namespace transformer_engine {
-
-size_t typeToSize(const transformer_engine::DType type) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
-        return TypeInfo<T>::size;
-    );  // NOLINT(*)
-}
-
-bool is_fp8_dtype(const transformer_engine::DType t) {
-  return t == transformer_engine::DType::kFloat8E4M3 ||
-         t == transformer_engine::DType::kFloat8E5M2;
-}
-
-void CheckInputTensor(const Tensor &t, const std::string &name) {
-  const DType type = t.data.dtype;
-  if (is_fp8_dtype(type)) {
-    // FP8 input needs to have scale_inv
-    NVTE_CHECK(t.scale_inv.dptr != nullptr,
-               "FP8 input " + name + " must have inverse of scale.");
-    NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32);
-    NVTE_CHECK(t.scale_inv.shape == std::vector<size_t>{ 1 });
-  } else {
-    NVTE_CHECK(t.scale.dptr == nullptr,
-               "Scale is not supported for non-FP8 input " + name + ".");
-    NVTE_CHECK(t.amax.dptr == nullptr,
-               "Amax is not supported for non-FP8 input " + name + ".");
-    NVTE_CHECK(t.scale_inv.dptr == nullptr,
-               "Scale_inv is not supported for non-FP8 input " + name + ".");
-  }
-  NVTE_CHECK(t.data.dptr != nullptr,
-             "Input " + name + " is not allocated!");
-}
-
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
-  const DType type = t.data.dtype;
-  if (is_fp8_dtype(type)) {
-    // FP8 output needs to have scale, amax and scale_inv
-    NVTE_CHECK(t.amax.dptr != nullptr,
-               "FP8 output " + name + " must have amax tensor.");
-    NVTE_CHECK(t.amax.dtype == DType::kFloat32);
-    NVTE_CHECK(t.amax.shape == std::vector<size_t>{ 1 });
-    NVTE_CHECK(t.scale_inv.dptr != nullptr,
-               "FP8 output " + name + " must have scale.");
-    NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32);
-    NVTE_CHECK(t.scale_inv.shape == std::vector<size_t>{ 1 });
-    NVTE_CHECK(t.scale.dptr != nullptr,
-               "FP8 output " + name + " must have inverse of scale.");
-    NVTE_CHECK(t.scale.dtype == DType::kFloat32);
-    NVTE_CHECK(t.scale.shape == std::vector<size_t>{ 1 });
-  } else {
-    NVTE_CHECK(t.scale.dptr == nullptr,
-               "Scale is not supported for non-FP8 output " + name + ".");
-    NVTE_CHECK(t.amax.dptr == nullptr,
-               "Amax is not supported for non-FP8 output " + name + ".");
-    NVTE_CHECK(t.scale_inv.dptr == nullptr,
-               "Scale_inv is not supported for non-FP8 output " + name + ".");
-  }
-
-  if (!allow_empty) {
-    NVTE_CHECK(t.data.dptr != nullptr,
-               "Output " + name + " is not allocated!");
-  }
-}
-
-}  // namespace transformer_engine
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 NVTETensor nvte_create_tensor(void *dptr,
                               const NVTEShape shape,
@@ -146,3 +84,128 @@ void nvte_tensor_pack_destroy(NVTETensorPack* pack) {
      delete t;
   }
 }
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+namespace transformer_engine {
+
+size_t typeToSize(const transformer_engine::DType type) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
+        return TypeInfo<T>::size;
+    );  // NOLINT(*)
+}
+
+bool is_fp8_dtype(const transformer_engine::DType t) {
+  return t == transformer_engine::DType::kFloat8E4M3 ||
+         t == transformer_engine::DType::kFloat8E5M2;
+}
+
+void CheckInputTensor(const Tensor &t, const std::string &name) {
+  const DType type = t.data.dtype;
+  if (is_fp8_dtype(type)) {
+    // FP8 input needs to have scale_inv
+    NVTE_CHECK(t.scale_inv.dptr != nullptr,
+               "FP8 input " + name + " must have inverse of scale.");
+    NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32);
+    NVTE_CHECK(t.scale_inv.shape == std::vector<size_t>{ 1 });
+  } else {
+    NVTE_CHECK(t.scale.dptr == nullptr,
+               "Scale is not supported for non-FP8 input " + name + ".");
+    NVTE_CHECK(t.amax.dptr == nullptr,
+               "Amax is not supported for non-FP8 input " + name + ".");
+    NVTE_CHECK(t.scale_inv.dptr == nullptr,
+               "Scale_inv is not supported for non-FP8 input " + name + ".");
+  }
+  NVTE_CHECK(t.data.dptr != nullptr,
+             "Input " + name + " is not allocated!");
+}
+
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
+  const DType type = t.data.dtype;
+  if (is_fp8_dtype(type)) {
+    // FP8 output needs to have scale, amax and scale_inv
+    NVTE_CHECK(t.amax.dptr != nullptr,
+               "FP8 output " + name + " must have amax tensor.");
+    NVTE_CHECK(t.amax.dtype == DType::kFloat32);
+    NVTE_CHECK(t.amax.shape == std::vector<size_t>{ 1 });
+    NVTE_CHECK(t.scale_inv.dptr != nullptr,
+               "FP8 output " + name + " must have scale.");
+    NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32);
+    NVTE_CHECK(t.scale_inv.shape == std::vector<size_t>{ 1 });
+    NVTE_CHECK(t.scale.dptr != nullptr,
+               "FP8 output " + name + " must have inverse of scale.");
+    NVTE_CHECK(t.scale.dtype == DType::kFloat32);
+    NVTE_CHECK(t.scale.shape == std::vector<size_t>{ 1 });
+  } else {
+    NVTE_CHECK(t.scale.dptr == nullptr,
+               "Scale is not supported for non-FP8 output " + name + ".");
+    NVTE_CHECK(t.amax.dptr == nullptr,
+               "Amax is not supported for non-FP8 output " + name + ".");
+    NVTE_CHECK(t.scale_inv.dptr == nullptr,
+               "Scale_inv is not supported for non-FP8 output " + name + ".");
+  }
+
+  if (!allow_empty) {
+    NVTE_CHECK(t.data.dptr != nullptr,
+               "Output " + name + " is not allocated!");
+  }
+}
+
+NVTETensor TensorWrapper::data() const noexcept {
+  return tensor_;
+}
+
+const NVTEShape TensorWrapper::shape() const noexcept {
+  if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+  return nvte_tensor_shape(tensor_);
+}
+
+DType TensorWrapper::dtype() const noexcept {
+  if (tensor_ == nullptr) return DType::kNumTypes;
+  return static_cast<DType>(nvte_tensor_type(tensor_));
+}
+
+void * TensorWrapper::dptr() const noexcept {
+  if (tensor_ == nullptr) return nullptr;
+  return nvte_tensor_data(tensor_);
+}
+
+float * TensorWrapper::amax() const noexcept {
+  if (tensor_ == nullptr) return nullptr;
+  return nvte_tensor_amax(tensor_);
+}
+
+float * TensorWrapper::scale() const noexcept {
+  if (tensor_ == nullptr) return nullptr;
+  return nvte_tensor_scale(tensor_);
+}
+
+float * TensorWrapper::scale_inv() const noexcept {
+  if (tensor_ == nullptr) return nullptr;
+  return nvte_tensor_scale_inv(tensor_);
+}
+
+size_t TensorWrapper::ndim() const noexcept {
+  if (tensor_ == nullptr) return 0;
+  return shape().ndim;
+}
+
+size_t TensorWrapper::numel() const noexcept {
+  if (tensor_ == nullptr) return 0;
+  auto shape_ = shape();
+  return std::reduce(shape_.data, shape_.data+shape_.ndim, 1, std::multiplies<size_t>{});
+}
+
+size_t TensorWrapper::element_size() const noexcept {
+  if (tensor_ == nullptr) return 0;
+  return typeToSize(dtype());
+}
+
+size_t TensorWrapper::bytes() const noexcept {
+  if (tensor_ == nullptr) return 0;
+  return numel() * element_size();
+}
+
+}  // namespace transformer_engine

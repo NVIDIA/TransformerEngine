@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <numeric>
+#include <vector>
 #include <stddef.h>
 #include <cuda_runtime_api.h>
 
@@ -165,8 +166,6 @@ void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 }  // extern "C"
 #endif
 
-#include <vector>
-
 /*! \namespace transformer_engine
  *  \brief Namespace containing C++ API of Transformer Engine.
  */
@@ -273,111 +272,73 @@ class TensorWrapper {
    *
    *  \return NVTETensor held by this TensorWrapper.
    */
-  NVTETensor data() const noexcept {
-    return tensor_;
-  }
+  NVTETensor data() const noexcept;
 
   /*! \brief Get the shape of this TensorWrapper.
    *
    *  \return Shape of this TensorWrapper.
    */
-  const NVTEShape shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
-    return nvte_tensor_shape(tensor_);
-  }
+  const NVTEShape shape() const noexcept;
 
   /*! \brief Get the data type of this TensorWrapper.
    *
    *  \return Data type of this TensorWrapper.
    */
-  DType dtype() const noexcept {
-    if (tensor_ == nullptr) return DType::kNumTypes;
-    return static_cast<DType>(nvte_tensor_type(tensor_));
-  }
+  DType dtype() const noexcept;
 
   /*! \brief Get a raw pointer to the tensor's data.
    *
    *  \return A raw pointer to tensor's data.
    */
-  void *dptr() const noexcept {
-    if (tensor_ == nullptr) return nullptr;
-    return nvte_tensor_data(tensor_);
-  }
+  void *dptr() const noexcept;
 
   /*! \brief Get a pointer to the tensor's amax data.
    *
    *  \return A pointer to tensor's amax data.
    */
-  float *amax() const noexcept {
-    if (tensor_ == nullptr) return nullptr;
-    return nvte_tensor_amax(tensor_);
-  }
+  float *amax() const noexcept;
 
   /*! \brief Get a pointer to the tensor's scale data.
    *
    *  \return A pointer to tensor's scale data.
    */
-  float *scale() const noexcept {
-    if (tensor_ == nullptr) return nullptr;
-    return nvte_tensor_scale(tensor_);
-  }
+  float *scale() const noexcept;
 
   /*! \brief Get a pointer to the tensor's inverse of scale data.
    *
    *  \return A pointer to tensor's inverse of scale data.
    */
-  float *scale_inv() const noexcept {
-    if (tensor_ == nullptr) return nullptr;
-    return nvte_tensor_scale_inv(tensor_);
-  }
+  float *scale_inv() const noexcept;
 
   /*! \brief Get the size of this TensorWrapper in the given dimension.
-   *
-   *  \return Size of this TensorWrapper in given dimension.
-   */
-  size_t size(size_t dim) const {
-    if (tensor_ == nullptr) return 0;
-    auto shape_ = shape();
-    assert(dim < shape_.ndim);
-    return shape_.data[dim];
-  }
+  *
+  *  \return Size of this TensorWrapper in given dimension.
+  */
+  size_t size(size_t dim) const;
 
   /*! \brief Get the number of dimensions for this TensorWrapper.
-   *
-   *  \return Number of dimensions for this TensorWrapper.
-   */
-  size_t ndim() const noexcept {
-    if (tensor_ == nullptr) return 0;
-    return shape().ndim;
-  }
+    *
+    *  \return Number of dimensions for this TensorWrapper.
+    */
+  size_t ndim() const noexcept;
 
   /*! \brief Get the number of elements in the tensor.
-   *
-   *  \return Number of elements in the tensor.
-   */
-  size_t numel() const noexcept {
-    if (tensor_ == nullptr) return 0;
-    auto shape_ = shape();
-    return std::reduce(shape_.data, shape_.data+shape_.ndim, 1, std::multiplies<size_t>{});
-  }
+    *
+    *  \return Number of elements in the tensor.
+    */
+  size_t numel() const noexcept;
 
   /*! \brief Get the tensor's element size in bytes.
-   *
-   *  \return Element size in bytes.
-   */
-  size_t element_size() const noexcept {
-    if (tensor_ == nullptr) return 0;
-    return typeToSize(dtype());
-  }
+    *
+    *  \return Element size in bytes.
+    */
+  size_t element_size() const noexcept;
 
   /*! \brief Get the tensor's total size in bytes.
-   *
-   *  \return Total tensor size in bytes.
-   */
-  size_t bytes() const noexcept {
-    if (tensor_ == nullptr) return 0;
-    return numel() * element_size();
-  }
+    *
+    *  \return Total tensor size in bytes.
+    */
+  size_t bytes() const noexcept;
 
  private:
   /*! \brief Wrapped NVTETensor. */

@@ -13,14 +13,14 @@
 #include <any>
 #include <dlpack/dlpack.h>
 #include <pybind11/pybind11.h>
-
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/gemm.h>
+
 #include "../util/logging.h"
 #include "../util/system.h"
+#include "../util/dlpack_helper.h"
 
 #include "userbuffers.h"
-#include "dlpack_helper.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
@@ -33,9 +33,9 @@ namespace userbuffers {
 
 static const size_t _NUM_MAX_UB_STREAMS = 3;
 
-enum class UbufCommType { RS = 0, AG = 1 };
+enum class CommGemmOverlapType { RS = 0, AG = 1 };
 
-enum class UbufOverlapAlgo {
+enum class CommGemmOverlapAlgo {
   BULK_OVERLAP_AG = 0,
   BULK_OVERLAP_RS = 1,
   SPLIT_PIPELINED_AG_P2P = 2,
@@ -46,8 +46,7 @@ enum class UbufOverlapAlgo {
   ATOMIC_GEMM_RS_P2P = 7
 };
 
-class UbufExecutorBase {
- protected:
+struct CommGemmOverlapBase {
   static inline communicator *_ub_comm{nullptr};
   static inline bool _comm_created{false};
 
@@ -61,33 +60,14 @@ class UbufExecutorBase {
   bool _buffer_registered{false};
   bool _is_p2p{false};
 
+  std::function<py::capsule(py::capsule &, const std::string &)> _alloc_copy_allgather;
+  std::function<void(py::capsule &)> _free;
+  std::function<void(const std::string &)> _barrier;
+
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm;
   std::vector<cudaStream_t> _stream_compute;
 
-  void register_gpu_buffer(void *gpuptr, size_t bytes, bool alloc = false) {
-    NVTE_CHECK(_comm_created, "[UB] Communicator must be initialized before buffer registration.");
-    NVTE_CHECK(!_buffer_registered, "[UB] GPU buffer is already registereD->");
-    _ub_reg = register_user_buffer_collective(&gpuptr, bytes, _ub_comm, alloc);
-    _buffer_registered = true;
-  }
-
- private:
-  void _ub_allgather(void *sendbuf, size_t sendbytes, void *recvbuf, size_t recvbytes,
-                     const char *group) {
-    int cur_dev;
-    NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
-    auto send = buffer_to_capsule<uint8_t>(sendbuf, static_cast<int64_t>(sendbytes), cur_dev);
-    auto recv = buffer_to_capsule<uint8_t>(recvbuf, static_cast<int64_t>(recvbytes), cur_dev);
-    _allgather(send, recv, group);
-  }
-
-  void _ub_barrier(const char *group) { _barrier(group); }
-
- public:
-  std::function<void(py::capsule &, py::capsule &, const std::string &)> _allgather;
-  std::function<void(const std::string &)> _barrier;
-
-  UbufExecutorBase(
+  CommGemmOverlapBase(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm
@@ -98,10 +78,13 @@ class UbufExecutorBase {
         printf("!!! [UB] Create UB communicator\n");
       }
       create_communicator_grouped2(&_ub_comm,
+#ifndef UB_MPI_BOOTSTRAP
         worldrank, worldsize, localrank, localsize, nodeid, numnodes,
-        [this](void *sendbuf, size_t sendbytes, void *recvbuf, size_t recvbytes,
-               const char *group) { _ub_allgather(sendbuf, sendbytes, recvbuf, recvbytes, group); },
+        [this](void **globalbuf, void *localbuf, size_t localbytes, const char *group) {
+          _ub_alloc_copy_allgather(globalbuf, localbuf, localbytes, group); },
+        [this](void *ptr, size_t bytes) { _ub_free(ptr, bytes); },
         [this](const char *group) { _ub_barrier(group); },
+#endif
         1, 1, localsize, 1);
       _comm_created = true;
 
@@ -130,25 +113,94 @@ class UbufExecutorBase {
     }
   }
 
-  bool is_atomic_gemm() { return _atomic_gemm; }
-  bool is_p2p_overlap() { return _is_p2p; }
-};
+  ~CommGemmOverlapBase() {
+    destroy_communicator(_ub_comm);
+    _comm_created = false;
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
+      cudaStreamDestroy(_stream_compute[i]);
+    }
+    cudaEventDestroy(_start_compute);
+    cudaEventDestroy(_stop_compute);
+    cudaEventDestroy(_start_comm);
+    cudaEventDestroy(_stop_comm);
+  }
 
-class UbufExecutor : public UbufExecutorBase {
- protected:
+  CommGemmOverlapBase(const CommGemmOverlapBase &other) = delete;
+  CommGemmOverlapBase& operator=(const CommGemmOverlapBase &other) = delete;
+
+  void _ub_alloc_copy_allgather(
+    void **globalbuf, void *localbuf, size_t localbytes, const char *group
+  ) {
+    int64_t group_size;
+    if (strcmp(group, "world")) {
+      group_size = _ub_comm->nranks;
+    } else if (strcmp(group, "inter")) {
+      group_size = _ub_comm->num_nodes;
+    } else if (strcmp(group, "intra")) {
+      group_size = _ub_comm->nvsize;
+    } else {
+      NVTE_ERROR("Invalid group name: must be 'world', 'inter', or 'intra'.");
+    }
+    auto localdata = buffer_to_capsule<uint8_t>(localbuf, static_cast<int64_t>(localbytes));
+    auto globaldata = _alloc_copy_allgather(localdata, group);
+    int64_t globalbytes = capsule_to_buffer(globaldata, globalbuf);
+    NVTE_CHECK(globalbytes == static_cast<int64_t>(localbytes) * group_size,
+               "Incorrect size for allgathered data.");
+  }
+
+  void _ub_free(void *ptr, size_t bytes) {
+    auto data = buffer_to_capsule<uint8_t>(ptr, static_cast<int64_t>(bytes));
+    _free(data);
+  }
+
+  void _ub_barrier(const char *group) { _barrier(group); }
+
+  void register_gpu_buffer(void **gpuptr, size_t bytes, bool alloc = false) {
+    NVTE_CHECK(_comm_created, "[UB] Communicator must be initialized before buffer registration.");
+    NVTE_CHECK(!_buffer_registered, "[UB] GPU buffer is already registered.");
+    _ub_reg = register_user_buffer_collective(gpuptr, bytes, _ub_comm, alloc);
+    _buffer_registered = true;
+  }
+
+  void register_gpu_buffer(py::capsule &gpubuf, bool alloc = false) {
+    void *gpuptr;
+    size_t bytes = capsule_to_buffer(gpubuf, &gpuptr);
+    register_gpu_buffer(&gpuptr, bytes, alloc);
+  }
+
+  void set_collective_callbacks(
+    std::function<py::capsule(py::capsule&, const std::string&)> alloc_copy_allgather_handle,
+    std::function<void(py::capsule&)> free_handle,
+    std::function<void(const std::string&)> barrier_handle
+  ) {
+    _alloc_copy_allgather = alloc_copy_allgather_handle;
+    _free = free_handle;
+    _barrier = barrier_handle;
+  }
+
+  bool is_atomic_gemm() { return _atomic_gemm; }
+
+  bool is_p2p_overlap() { return _is_p2p; }
+};  // CommGemmOverlapBase
+
+struct CommGemmOverlap : CommGemmOverlapBase {
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
 
- public:
-  UbufExecutor(
+  CommGemmOverlap(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm)
-  : UbufExecutorBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes,
-                     num_splits, num_max_streams, num_comm_cga, num_comm_sms,
-                     set_sm_margin, atomic_gemm) {
+  : CommGemmOverlapBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes,
+                        num_splits, num_max_streams, num_comm_cga, num_comm_sms,
+                        set_sm_margin, atomic_gemm) {
     NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_comm));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_d2dcopy, 0));
+  }
+
+  ~CommGemmOverlap() {
+    cudaStreamDestroy(_stream_comm);
+    cudaEventDestroy(_start_d2dcopy);
   }
 
   /*
@@ -156,9 +208,9 @@ class UbufExecutor : public UbufExecutorBase {
   ** This function assumes that input (B) is pre-copied to ubuf
   */
   void bulk_gemm_overlap_ag(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf,
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *workspace,
     bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
@@ -173,8 +225,8 @@ class UbufExecutor : public UbufExecutorBase {
 
     assert(pre_gelu_out->numel() == 0);
     nvte_cublas_gemm(A->data(), B->data(), D->data(), bias->data(), pre_gelu_out->data(),
-                     A_trans, B_trans, grad, workspace->data(), accumulate, use_split_accumulator,
-                     _math_sms, stream_main);
+                    A_trans, B_trans, grad, workspace->data(), accumulate, use_split_accumulator,
+                    _math_sms, stream_main);
 
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, cudaStreamDefault));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
@@ -185,9 +237,9 @@ class UbufExecutor : public UbufExecutorBase {
   ** This function assumes that input (B) is pre-copied to ubuf
   */
   void bulk_gemm_overlap_rs(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf, TensorWrapper *rs_out,
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *rs_out, TensorWrapper *workspace,
     bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
@@ -213,8 +265,8 @@ class UbufExecutor : public UbufExecutorBase {
 
     assert(pre_gelu_out->numel() == 0);
     nvte_cublas_gemm(A->data(), B->data(), D->data(), bias->data(), pre_gelu_out->data(),
-                     A_trans, B_trans, grad, workspace->data(), accumulate, use_split_accumulator,
-                     _math_sms, stream_main);
+                    A_trans, B_trans, grad, workspace->data(), accumulate, use_split_accumulator,
+                    _math_sms, stream_main);
 
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, cudaStreamDefault));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
@@ -224,17 +276,16 @@ class UbufExecutor : public UbufExecutorBase {
   ** Atomic FPROP GEMM + ReduceScatter
   */
   void atomic_gemm_overlap_rs(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf, TensorWrapper *counters, TensorWrapper *rs_out,
-    bool grad, bool accumulate, bool use_split_accumulator
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *counters, TensorWrapper *rs_out,
+    TensorWrapper *workspace, bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
     _ub_comm->cga_size = _cga_size;
 
     size_t m = (A_trans) ? A->size(1) : A->size(0);
-    size_t k = (A_trans) ? A->size(0) : A->size(1);
     size_t n = (B_trans) ? B->size(1) : B->size(0);
     size_t m_chunk = m / _num_splits;
     size_t workspace_size_chunk = workspace->numel() / _stream_compute.size();
@@ -245,7 +296,7 @@ class UbufExecutor : public UbufExecutorBase {
 
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, cudaStreamDefault));
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream_main));
-    for (int i = 0; i < _stream_compute.size(); i++) {
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _stop_comm, 0));
     }
@@ -272,8 +323,8 @@ class UbufExecutor : public UbufExecutorBase {
               &counter_ptr[i], _ub_comm, _stream_comm);
         } else {
           reducescatter2_userbuff_strided_atomic(rs_out_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
-                                                 _num_splits, &counter_ptr[i], _ub_comm,
-                                                 _stream_comm);
+                                                _num_splits, &counter_ptr[i], _ub_comm,
+                                                _stream_comm);
         }
       } else if (env_p != nullptr && env_p[0] == '2') {
         if (is_fp8_dtype(ubuf->dtype())) {
@@ -309,9 +360,9 @@ class UbufExecutor : public UbufExecutorBase {
   ** Split FPROP GEMM + ReduceScatter
   */
   void split_gemm_overlap_rs(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf, TensorWrapper *rs_out,
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *rs_out, TensorWrapper *workspace,
     bool grad, bool accumulate, bool use_split_accumulator, bool gemm_overlap
   ) {
     _ub_comm->use_ce = _use_ce;
@@ -334,7 +385,7 @@ class UbufExecutor : public UbufExecutorBase {
 
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, cudaStreamDefault));
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream_main));
-    for (int i = 0; i < _stream_compute.size(); i++) {
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _stop_comm, 0));
     }
@@ -450,10 +501,9 @@ class UbufExecutor : public UbufExecutorBase {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(cudaStreamDefault, _stop_compute, 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(cudaStreamDefault, _stop_comm, 0));
   }  // split_gemm_overlap_rs
-};  //  UbufExecutor
+};  //  CommGemmOverlap
 
-class UbufExecutorP2P : public UbufExecutorBase {
- protected:
+struct CommGemmOverlapP2P : CommGemmOverlapBase {
   bool _reduce_scatter{false};
   bool _aggregate{false};
   bool _is_reduce_scatter{false};
@@ -463,20 +513,18 @@ class UbufExecutorP2P : public UbufExecutorBase {
   cudaStream_t _stream_send, _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
 
- public:
-  UbufExecutorP2P(
+  CommGemmOverlapP2P(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter)
-  : UbufExecutorBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes,
-                     num_splits, num_max_streams, num_comm_cga, num_comm_sms,
-                     set_sm_margin, atomic_gemm) {
+  : CommGemmOverlapBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes,
+                        num_splits, num_max_streams, num_comm_cga, num_comm_sms,
+                        set_sm_margin, atomic_gemm) {
     _is_p2p = true;
     _aggregate = aggregate;
     _rank_round_tp = (_rank / _tp_size) * _tp_size;
     _next_rank = (_tp_size + _rank + 1) % _rank_round_tp;
     _prev_rank = (_tp_size + _rank - 1) % _rank_round_tp;
-    const char *env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
 
     _is_reduce_scatter = is_reduce_scatter;
     _num_ubuf_chunks = (_is_reduce_scatter) ? static_cast<int>(localsize * 2 - 1)
@@ -486,6 +534,13 @@ class UbufExecutorP2P : public UbufExecutorBase {
     NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_recv));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
+  }
+
+  ~CommGemmOverlapP2P() {
+    cudaStreamDestroy(_stream_send);
+    cudaStreamDestroy(_stream_recv);
+    cudaEventDestroy(_stop_send);
+    cudaEventDestroy(_stop_recv);
   }
 
   /*
@@ -514,11 +569,11 @@ class UbufExecutorP2P : public UbufExecutorBase {
   ** after all ring exchange phases.
   */
   void atomic_gemm_overlap_ag(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf, TensorWrapper *counters,
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *counters,
     TensorWrapper *B_copy, TensorWrapper *D_buffer,
-    bool grad, bool accumulate, bool use_split_accumulator
+    TensorWrapper *workspace, bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
@@ -526,7 +581,6 @@ class UbufExecutorP2P : public UbufExecutorBase {
 
     // Get GEMM dimensions between TN and NN input layouts
     const size_t m = (A_trans) ? A->size(0) : A->size(1);
-    const size_t k = (A_trans) ? A->size(1) : A->size(0);
     auto ubuf_chunks = get_ubuf_chunks(ubuf);
     const size_t n_chunk = ubuf_chunks[0].size(0);
 
@@ -560,14 +614,14 @@ class UbufExecutorP2P : public UbufExecutorBase {
       if (env_p != nullptr && env_p[0] == '1') {
         if (i == 0) {
           userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
-                                           _ub_comm, _next_rank, _prev_rank, _tp_size,
-                                           counter_ptr, true, _stream_recv);
+                                          _ub_comm, _next_rank, _prev_rank, _tp_size,
+                                          counter_ptr, true, _stream_recv);
         }
       } else {
         userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                         _ub_comm, _next_rank,  _stream_recv);
+                        _ub_comm, _next_rank,  _stream_recv);
         userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                         _ub_comm, _prev_rank,  _stream_recv);
+                        _ub_comm, _prev_rank,  _stream_recv);
         producer(counter_ptr, recv_chunk_id, _stream_recv);
       }
       if (i == 0) {
@@ -613,10 +667,10 @@ class UbufExecutorP2P : public UbufExecutorBase {
   ** phases.
   */
   void split_gemm_overlap_ag(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf,  TensorWrapper *B_copy,
-    bool grad, bool accumulate, bool use_split_accumulator
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf,  TensorWrapper *B_copy,
+    TensorWrapper *workspace, bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
@@ -659,9 +713,9 @@ class UbufExecutorP2P : public UbufExecutorBase {
       int recv_offset = comm_bytes * recv_chunk_id;
       int peer_rank = (_tp_id % 2 == 0) ? _next_rank : _prev_rank;
       userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm, peer_rank,
-                       _stream_send);
+                      _stream_send);
       userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, peer_rank,
-                       _stream_recv);
+                      _stream_recv);
       NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _stop_recv, 0));
@@ -694,16 +748,16 @@ class UbufExecutorP2P : public UbufExecutorBase {
             workspace_ptr + ((i % _stream_compute.size()) * workspace_size_chunk)),
             {workspace_size_chunk}, workspace->dtype());
         nvte_cublas_gemm(A->data(), input_b_chunk.data(), output_chunk.data(),
-                         bias->data(), pre_gelu_chunk.data(), A_trans, B_trans, grad,
-                         work_chunk.data(), accumulate, use_split_accumulator, _math_sms,
-                         _stream_compute[i % _stream_compute.size()]);
+                        bias->data(), pre_gelu_chunk.data(), A_trans, B_trans, grad,
+                        work_chunk.data(), accumulate, use_split_accumulator, _math_sms,
+                        _stream_compute[i % _stream_compute.size()]);
 
         if (i < num_steps - 1) {
           // P2P communication
           userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes * 2, _ub_comm,
-                           next_rank, _stream_send);
+                          next_rank, _stream_send);
           userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes * 2, _ub_comm,
-                           prev_rank, _stream_recv);
+                          prev_rank, _stream_recv);
           NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(
@@ -754,16 +808,16 @@ class UbufExecutorP2P : public UbufExecutorBase {
             workspace_ptr + ((i % _stream_compute.size()) * workspace_size_chunk)),
             {workspace_size_chunk}, workspace->dtype());
         nvte_cublas_gemm(A->data(), ubuf_chunks[send_chunk_id].data(), output_chunk.data(),
-                         bias->data(), pre_gelu_chunk.data(), A_trans, B_trans, grad,
-                         work_chunk.data(), accumulate, use_split_accumulator, _math_sms,
-                         _stream_compute[i % _stream_compute.size()]);
+                        bias->data(), pre_gelu_chunk.data(), A_trans, B_trans, grad,
+                        work_chunk.data(), accumulate, use_split_accumulator, _math_sms,
+                        _stream_compute[i % _stream_compute.size()]);
 
         if (i < _tp_size - 1) {
           // P2P communication
           userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
-                           _next_rank, _stream_send);
+                          _next_rank, _stream_send);
           userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                           _prev_rank, _stream_recv);
+                          _prev_rank, _stream_recv);
           NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(
@@ -791,25 +845,21 @@ class UbufExecutorP2P : public UbufExecutorBase {
   ** Split ReduceScatter + GEMM using P2P communication
   */
   void atomic_gemm_overlap_rs(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,  // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf, TensorWrapper *counters, TensorWrapper *rs_out,
-    bool grad, bool accumulate, bool use_split_accumulator
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf, TensorWrapper *counters, TensorWrapper *rs_out,
+    TensorWrapper *workspace, bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
     _ub_comm->cga_size = _cga_size;
-    size_t k = A->size(1);
     size_t n = B->size(0);
 
     // Get communication and GEMM input chunk sizes
-    size_t n_chunk = n / _tp_size;
     auto ubuf_chunks = get_ubuf_chunks(ubuf);
     const int comm_bytes = ubuf_chunks[0].numel() * ubuf_chunks[0].element_size();
-    const size_t input_b_chunk_bytes = n_chunk * k * B->element_size();
 
     // Get input and workspace data pointers
-    char *input_b_ptr = reinterpret_cast<char *>(B->dptr());
     char *workspace_ptr = reinterpret_cast<char *>(workspace->dptr());
     int *counter_ptr = reinterpret_cast<int *>(counters->dptr());
     size_t workspace_size_chunk = workspace->numel() / _stream_compute.size();
@@ -839,9 +889,9 @@ class UbufExecutorP2P : public UbufExecutorBase {
 
       consumer(counter_ptr, send_chunk_id, _stream_recv);
       userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                       _ub_comm, send_rank, _stream_recv);
+                      _ub_comm, send_rank, _stream_recv);
       userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                       _ub_comm, recv_rank, _stream_recv);
+                      _ub_comm, recv_rank, _stream_recv);
     }
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
@@ -857,7 +907,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
       TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
           reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
-                                                   ubuf_chunks[_tp_size - 1].numel(), stream_main);
+                                                  ubuf_chunks[_tp_size - 1].numel(), stream_main);
         )
       )
     }
@@ -867,10 +917,10 @@ class UbufExecutorP2P : public UbufExecutorBase {
   ** Split ReduceScatter + GEMM using P2P communication
   */
   void split_gemm_overlap_rs(cudaStream_t stream_main,
-    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,   // inputs
-    TensorWrapper *D, TensorWrapper *pre_gelu_out,                                        // output
-    TensorWrapper *workspace, TensorWrapper *ubuf,  TensorWrapper *rs_out,
-    bool grad, bool accumulate, bool use_split_accumulator
+    TensorWrapper *A, bool A_trans, TensorWrapper *B, bool B_trans, TensorWrapper *bias,
+    TensorWrapper *D, TensorWrapper *pre_gelu_out,
+    TensorWrapper *ubuf,  TensorWrapper *rs_out,
+    TensorWrapper *workspace, bool grad, bool accumulate, bool use_split_accumulator
   ) {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
@@ -891,7 +941,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
 
     // Catch up the main stream
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
-    for (int i = 0; i < _stream_compute.size(); i++) {
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
     }
 
@@ -910,11 +960,11 @@ class UbufExecutorP2P : public UbufExecutorBase {
           workspace_ptr + ((i % _stream_compute.size()) * workspace_size_chunk)),
           {workspace_size_chunk}, workspace->dtype());
       cudaStream_t gemm_stream = (i == _tp_size - 1) ? stream_main
-                                                     : _stream_compute[i % _stream_compute.size()];
+                                                    : _stream_compute[i % _stream_compute.size()];
       nvte_cublas_gemm(A->data(), input_b_chunk.data(), ubuf_chunks[i].data(),
-                       bias->data(), pre_gelu_out->data(), A_trans, B_trans, grad,
-                       workspace_chunk.data(), accumulate, use_split_accumulator, _math_sms,
-                       gemm_stream);
+                      bias->data(), pre_gelu_out->data(), A_trans, B_trans, grad,
+                      workspace_chunk.data(), accumulate, use_split_accumulator, _math_sms,
+                      gemm_stream);
 
       if (i > 0) {
           // P2P communication chunk
@@ -927,9 +977,9 @@ class UbufExecutorP2P : public UbufExecutorBase {
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _start_comm, 0));
           NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_comm, 0));
           userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                           _ub_comm, send_rank, _stream_send);
+                          _ub_comm, send_rank, _stream_send);
           userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
-                           _ub_comm, recv_rank, _stream_recv);
+                          _ub_comm, recv_rank, _stream_recv);
       }
     }
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv,  _stream_recv));
@@ -946,7 +996,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
       TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
           reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
-                                                   ubuf_chunks[_tp_size - 1].numel(), stream_main)
+                                                  ubuf_chunks[_tp_size - 1].numel(), stream_main)
         )
       )
     }
@@ -958,7 +1008,7 @@ class UbufExecutorP2P : public UbufExecutorBase {
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
   }  // split_gemm_overlap_rs
-};  // UbufExecutorP2P
+};  // CommGemmOverlapP2P
 
 }  // namespace userbuffers
 

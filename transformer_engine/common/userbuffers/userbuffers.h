@@ -8,23 +8,48 @@
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
 #ifndef UB_MPI_BOOTSTRAP
-typedef char *ExtComm;
+typedef char* ExtComm;
 static const ExtComm EXT_COMM_WORLD = "world";
 static const ExtComm EXT_COMM_INTRA = "intra";
 static const ExtComm EXT_COMM_INTER = "inter";
 #else
+#include <stdexcept>
 #include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
+
+#define MPI_CHECK(expr)                                                                          \
+  do {                                                                                           \
+    const int mpicode = (expr);                                                                  \
+    if (mpicode != MPI_SUCCESS) {                                                                \
+      char *mpimsg;                                                                              \
+      int mpilen;                                                                                \
+      MPI_Error_string(mpicode, mpimsg, &mpilen);                                                \
+      char *errmsg;                                                                              \
+      errmsg = malloc(sizeof(__FILE__) + sizeof(__LINE__) + sizeof(__func__) + 16 + mpilen);     \
+      snprintf(errmsg, sizeof(errmsg), "%s:%s in function %s: %s",                               \
+               __FILE__, __LINE__, __func__, mpimsg);                                            \
+      throw std::runtime_error(errmsg)                                                           \
+    }                                                                                            \
+  } while (false)
 
 typedef MPI_Comm ExtComm;
 
-void ub_allgather(void *global, void *local, size_t bytes, ExtComm comm) {
-  MPI_Allgather(local, bytes, MPI_BYTE, global, bytes, MPI_BYTE, c);
+void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, ExtComm comm) {
+  int myrank, nranks;
+  MPI_CHECK(MPI_Comm_rank(comm, &myrank));
+  MPI_CHECK(MPI_Comm_size(comm, &nranks));
+  *globaldata = malloc(nranks * localbytes);
+  memcpy(*globaldata + myrank * bytes, localdata, localbytes);
+  MPI_CHECK(MPI_Allgather(*globaldata + myrank * localbytes, localbytes, MPI_BYTE,
+                          *globaldata, localbytes, MPI_BYTE, comm));
 }
 
-void ub_barrier(ExtComm c) {
-  MPI_Barrier(c);
+void ub_free(void *ptr, size_t bytes) {
+  free(ptr);
 }
 
+void ub_barrier(ExtComm comm) {
+  MPI_CHECK(MPI_Barrier(comm));
+}
 #endif
 
 #include <cuda.h>
@@ -151,7 +176,8 @@ struct communicator {
   volatile int tail;
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
-  std::function<void(void*, size_t, void*, size_t, ExtComm)> _allgather;
+  std::function<void(void**, void*, size_t, ExtComm)> _alloc_copy_allgather;
+  std::function<void(void*, size_t)> _free;
   std::function<void(ExtComm)> _barrier;
 
   ExtComm comm_world,
@@ -173,7 +199,8 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 int create_communicator(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 );
@@ -182,14 +209,16 @@ int create_communicator(communicator **comm
 int create_communicator_grouped(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes);
 int create_communicator_grouped2(communicator **comm
 #ifndef UB_MPI_BOOTSTRAP
 , int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void*, size_t, void*, size_t, ExtComm)> ext_allgather
+, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
+, std::function<void(void*, size_t)> ext_free
 , std::function<void(ExtComm)> ext_barrier
 #endif
 , int pipegpus, int pipenodes, int tensorgpus,  int tensornodes);

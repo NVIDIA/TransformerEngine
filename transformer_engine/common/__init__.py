@@ -38,26 +38,6 @@ def _load_library():
     return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
 
 
-def _load_userbuffers():
-    """Load shared library with userbuffers"""
-
-    system = platform.system()
-    if system == "Linux":
-        extension = "so"
-    elif system == "Darwin":
-        extension = "dylib"
-    elif system == "Windows":
-        extension = "dll"
-    else:
-        raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libtransformer_engine_userbuffers." + extension
-    dll_path = get_te_path()
-    dll_path = os.path.join(dll_path, lib_name)
-
-    if os.path.exists(dll_path):
-        return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
-    return None
-
-
 _TE_LIB_CTYPES = _load_library()
-_UB_LIB_CTYPES = _load_userbuffers()
+
+import transformer_engine_common_cpp as cpp_extensions

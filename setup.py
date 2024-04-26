@@ -14,6 +14,7 @@ import subprocess
 from subprocess import CalledProcessError
 import sys
 import sysconfig
+import platform
 from typing import List, Optional, Tuple, Union
 
 import setuptools
@@ -23,6 +24,17 @@ from te_version import te_version
 
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
+
+# Find the library file extension for the OS type
+system = platform.system()
+if system == "Linux":
+    _LIB_EXTENSION = "so"
+elif system == "Darwin":
+    _LIB_EXTENSION = "dylib"
+elif system == "Windows":
+    _LIB_EXTENSION = "dll"
+else:
+    raise RuntimeError(f"Unsupported operating system ({system})")
 
 @lru_cache(maxsize=1)
 def with_debug_build() -> bool:
@@ -132,13 +144,10 @@ def found_pybind11() -> bool:
         return True
     return False
 
-def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple
+def cuda_path() -> Tuple[str, str]:
+    """CUDA root path and NVCC binary path as a tuple.
 
-    Throws FileNotFoundError if NVCC is not found.
-
-    """
-
+    Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
     nvcc_bin: Optional[Path] = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
@@ -149,6 +158,7 @@ def cuda_version() -> Tuple[int, ...]:
         # Check if nvcc is in path
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
+            cuda_home = Path(nvcc_bin.strip("/bin/nvcc"))
             nvcc_bin = Path(nvcc_bin)
     if nvcc_bin is None:
         # Last-ditch guess in /usr/local/cuda
@@ -157,7 +167,12 @@ def cuda_version() -> Tuple[int, ...]:
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
+    return cuda_home, nvcc_bin
+
+def cuda_version() -> Tuple[int, ...]:
+    """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
+    _, nvcc_bin = cuda_path()
     output = subprocess.run(
         [nvcc_bin, "-V"],
         capture_output=True,
@@ -167,15 +182,6 @@ def cuda_version() -> Tuple[int, ...]:
     match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
-
-@lru_cache(maxsize=1)
-def with_userbuffers() -> bool:
-    """Check if userbuffers support is enabled"""
-    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")) and int(os.getenv("UB_MPI_BOOTSTRAP", "0")):
-        assert os.getenv("MPI_HOME"), \
-            "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1 and UB_MPI_BOOTSTRAP=1"
-        return True
-    return False
 
 @lru_cache(maxsize=1)
 def frameworks() -> List[str]:
@@ -423,10 +429,12 @@ def setup_common_extension() -> CMakeExtension:
 
     """
     cmake_flags = []
-    if "jax" in frameworks():
-        cmake_flags.append("-DENABLE_JAX=ON")
-    if with_userbuffers():
-        cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
+
+    if int(os.getenv("UB_MPI_BOOTSTRAP", "0")):
+        assert os.getenv("MPI_HOME"), \
+            "MPI_HOME must be set if UB_MPI_BOOTSTRAP=1"
+        cmake_flags.append("-DUB_MPI_BOOTSTRAP")
+
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / "transformer_engine",
@@ -446,11 +454,12 @@ def setup_pytorch_extension() -> setuptools.Extension:
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
         # We need to compile system.cpp because the pytorch extension uses
-        # transformer_engine::getenv. This is a workaround to avoid direct
-        # linking with libtransformer_engine.so, as the pre-built PyTorch
-        # wheel from conda or PyPI was not built with CXX11_ABI, and will
-        # cause undefined symbol issues.
+        # transformer_engine::getenv and transformer_engine::TensorWrapper.
+        # This is a workaround to avoid direct linking with libtransformer_engine.so,
+        # as the pre-built PyTorch wheel from conda or PyPI was not built with CXX11_ABI,
+        # and will cause undefined symbol issues.
         root_path / "transformer_engine" / "common" / "util" / "system.cpp",
+        root_path / "transformer_engine" / "common" / "transformer_engine.cpp"
     ] + \
     _all_files_in_dir(extensions_dir)
 
@@ -463,7 +472,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -478,9 +487,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
-    if with_userbuffers():
-        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
-        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
 
     # Version-dependent CUDA options
     try:
@@ -503,11 +509,61 @@ def setup_pytorch_extension() -> setuptools.Extension:
         name="transformer_engine_extensions",
         sources=sources,
         include_dirs=include_dirs,
-        # libraries=["transformer_engine"], ### TODO (tmoon) Debug linker errors
+        libraries=[ "transformer_engine_common_cpp" ],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+    )
+
+
+def setup_jax_extension() -> setuptools.Extension:
+
+    # Find CUDA library dirs
+    cuda_home, _ = cuda_path()
+    if _LIB_EXTENSION == "dll":
+        lib_dir = os.path.join('lib', 'x64')
+    else:
+        if (not os.path.exists(os.path.join(cuda_home, 'lib64')) and
+                os.path.exists(os.path.join(cuda_home, 'lib'))):
+            lib_dir = 'lib'
+        else:
+            lib_dir = 'lib64'
+    library_dirs = [os.path.join(cuda_home, lib_dir)]
+
+    # Link libraries
+    libraries = [
+        'cudart',
+        'cublas',
+        'cublasLt',
+        'transformer_engine'
+    ]
+
+    # Source files
+    src_dir = root_path / "transformer_engine" / "jax" / "csrc"
+    sources = [
+        src_dir / "extensions.cpp",
+        src_dir / "modules.cpp",
+        src_dir / "utils.cu",
+    ]
+
+    # Header files
+    include_dirs = [
+        cuda_home / "include",
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "jax" / "csrc",
+        root_path / "transformer_engine",
+    ]
+
+    # Generate Pybind11 extension
+    from pybind11.setup_helpers import Pybind11Extension
+    return Pybind11Extension(
+        "transformer_engine_jax",
+        sources=sources,
+        include_dirs=include_dirs,
+        library_dirs=library_dirs,
+        libraries=libraries,
+        extra_compile_args=["-O3"]
     )
 
 
@@ -587,8 +643,12 @@ def main():
 
     # Extensions
     ext_modules = [setup_common_extension()]
+
     if "pytorch" in frameworks():
         ext_modules.append(setup_pytorch_extension())
+
+    if "jax" in frameworks():
+        ext_modules.append(setup_jax_extension())
 
     if "paddle" in frameworks():
         ext_modules.append(setup_paddle_extension())
