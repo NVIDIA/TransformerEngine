@@ -125,7 +125,6 @@ def _check_valid_batch_dims(bdims):
             f"but got {dim=}"
 
 
-# The value of activations are explicitedly defined to avoid order rearrangement in the future
 ActivationEnum = {
     ('gelu',): NVTE_Activation_Enum.GELU,
     ('gelu', 'linear'): NVTE_Activation_Enum.GEGLU,

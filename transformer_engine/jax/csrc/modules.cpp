@@ -44,7 +44,7 @@ size_t get_activation_len(NVTE_Activation_Enum act_enum) {
     case NVTE_Activation_Enum::SILU: return 1;
     case NVTE_Activation_Enum::SWIGLU: return 2;
     default:
-      throw std::runtime_error("Not Implemented");
+      NVTE_ERROR("Unsupported ActivationEnum");
       break;
     return -1;
   }
