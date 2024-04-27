@@ -49,7 +49,7 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash,
   // Create unique name for the socket.
   int len =
       snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
-  if (len > (sizeof(cliaddr.sun_path) - 1)) {
+  if (len > static_cast<int>(sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot bind provided name to socket. Name too large");
     return ncclInternalError;
   }
@@ -195,7 +195,7 @@ ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen,
 
   int len =
       snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
-  if (len > (sizeof(cliaddr.sun_path) - 1)) {
+  if (len > static_cast<int>(sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot connect to provided name for socket. Name too large");
     return ncclInternalError;
   }

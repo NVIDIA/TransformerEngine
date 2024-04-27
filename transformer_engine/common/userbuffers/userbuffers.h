@@ -9,9 +9,6 @@
 
 #ifndef UB_MPI_BOOTSTRAP
 typedef char* ExtComm;
-static const ExtComm EXT_COMM_WORLD = "world";
-static const ExtComm EXT_COMM_INTRA = "intra";
-static const ExtComm EXT_COMM_INTER = "inter";
 #else
 #include <stdexcept>
 #include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
@@ -20,7 +17,7 @@ static const ExtComm EXT_COMM_INTER = "inter";
   do {                                                                                           \
     const int mpicode = (expr);                                                                  \
     if (mpicode != MPI_SUCCESS) {                                                                \
-      char *mpimsg;                                                                              \
+      char mpimsg[MPI_MAX_ERROR_STRING];                                                         \
       int mpilen;                                                                                \
       MPI_Error_string(mpicode, mpimsg, &mpilen);                                                \
       char *errmsg;                                                                              \
@@ -144,6 +141,7 @@ struct communicator {
   CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
   void* ucbase_ptr[NVTE_MAX_REGIONS];  // only for cuMem allocated memory
   size_t mem_size[NVTE_MAX_REGIONS];
+  bool mem_dealloc[NVTE_MAX_REGIONS];
 
   void* mc_ptr[NVTE_MAX_REGIONS];
   void* mc_baseptr;
@@ -196,38 +194,34 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
-int create_communicator(communicator **comm
-#ifndef UB_MPI_BOOTSTRAP
-, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
-, std::function<void(void*, size_t)> ext_free
-, std::function<void(ExtComm)> ext_barrier
-#endif
-);
-/*  creates communicator, allocates all internal buffers if necessary */
 
-int create_communicator_grouped(communicator **comm
+/*  creates communicator, allocates all internal buffers if necessary */
 #ifndef UB_MPI_BOOTSTRAP
-, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
-, std::function<void(void*, size_t)> ext_free
-, std::function<void(ExtComm)> ext_barrier
+int create_communicator_grouped2(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
+
+int create_communicator_grouped(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  int pipegpus, int pipenodes);
+
+int create_communicator(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier);
+#else
+int create_communicator_grouped2(communicator **comm,
+  int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
+
+int create_communicator_grouped(communicator **comm,
+  int pipegpus, int pipenodes);
+
+int create_communicator(communicator **comm);
 #endif
-, int pipegpus, int pipenodes);
-int create_communicator_grouped2(communicator **comm
-#ifndef UB_MPI_BOOTSTRAP
-, int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes
-, std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather
-, std::function<void(void*, size_t)> ext_free
-, std::function<void(ExtComm)> ext_barrier
-#endif
-, int pipegpus, int pipenodes, int tensorgpus,  int tensornodes);
-/*  creates communicator with
-    allreduce1 to happen in datagpus x datanodes groups,
-    allreduce2 to happen in tensorgpus x tensor nodes,
-        where num_nodes = pipenodes x tensornodes x datanodes
-            nvlink_size = pipegpus x tensorgpus x datagpus
- */
 
 // int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
 /*
@@ -350,9 +344,9 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
 
 void destroy_communicator(communicator *comm);
 
-template <typename in_type, typename out_type>
-void reduce_full_precision(void *input, void *output, int num_inputs,
-                           int input_size, cudaStream_t stream);
+template <typename in_type>
+void reduce_bf16_out(void *input, void *output, int num_inputs,
+                     int input_size, cudaStream_t stream);
 
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,

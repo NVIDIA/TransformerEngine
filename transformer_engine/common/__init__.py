@@ -39,5 +39,3 @@ def _load_library():
 
 
 _TE_LIB_CTYPES = _load_library()
-
-import transformer_engine_common_cpp as cpp_extensions

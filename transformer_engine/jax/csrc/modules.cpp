@@ -157,13 +157,12 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    float *amax = reinterpret_cast<float *>(buffers[1]);
+    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *input_cast = buffers[4];
     auto *input_cast_trans = buffers[5];
     float *amax_out = reinterpret_cast<float *>(buffers[6]);
-    assert(amax == amax_out);
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -231,12 +230,11 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    float *amax = reinterpret_cast<float *>(buffers[1]);
+    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     float *amax_out = reinterpret_cast<float *>(buffers[5]);
-    assert(amax == amax_out);
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -323,7 +321,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
                              size_t opaque_len) {
     auto *input = buffers[0];
     auto *act_input = buffers[1];
-    float *amax = reinterpret_cast<float *>(buffers[2]);
+    // float *amax = reinterpret_cast<float *>(buffers[2]);  --  unused but equal to amax_out
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
@@ -333,7 +331,6 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     void *workspace_ptr = buffers[9];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-    assert(amax == amax_out);
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -450,7 +447,7 @@ pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hi
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
-    float *amax = reinterpret_cast<float *>(buffers[1]);
+    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
@@ -460,7 +457,6 @@ void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
     void *workspace_ptr = buffers[8];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-    assert(amax == amax_out);
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -692,10 +688,9 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto *output = buffers[6];
     auto *mu = buffers[7];
     auto *rsigma = buffers[8];
-    auto *amax_out = buffers[9];
+    // auto *amax_out = buffers[9];  --  unused but equal to amax
     auto *workspace = buffers[10];
     auto *barrier = buffers[11];
-    assert(amax_out == amax);
 
     const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
     auto batch_size = desc.batch_size;
@@ -708,7 +703,7 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
+    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     auto out_dtype = DType::kFloat8E4M3;
 
@@ -744,7 +739,7 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto eps = desc.eps;
     auto out_dtype = in_dtype;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
+    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                          eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
@@ -769,7 +764,7 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dbeta_part_dtype = desc.dbeta_part_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
+    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     auto *ograd = buffers[0];
     auto *mu = buffers[1];
@@ -799,10 +794,9 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
     auto *rsigma = buffers[6];
-    auto *amax_out = buffers[7];
+    // auto *amax_out = buffers[7];  --  unused but equal to amax_out
     auto *workspace = buffers[8];
     auto *barrier = buffers[9];
-    assert(amax_out == amax);
 
     void *bias = nullptr;
     void *mu = nullptr;
@@ -818,7 +812,7 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
+    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
     auto out_dtype = DType::kFloat8E4M3;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -852,7 +846,7 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
+    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
     auto out_dtype = in_dtype;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -902,12 +896,11 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    auto *amax = reinterpret_cast<float *>(buffers[1]);
+    // auto *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
     auto *scale = reinterpret_cast<float *>(buffers[2]);
     auto *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     auto *amax_out = reinterpret_cast<float *>(buffers[5]);
-    assert(amax == amax_out);
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto shape = desc.shape.to_vector();

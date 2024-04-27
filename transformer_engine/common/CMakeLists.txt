@@ -67,13 +67,6 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
-# Check for GDRCopy
-find_library(GDRCOPY_LIBRARY gdrapi HINTS "${GDRCOPY_LIBRARY_DIR}" "$ENV{GDRCOPY_LIBRARY_DIR}")
-if(NOT GDRCOPY_LIBRARY)
-     message(FATAL_ERROR "Could not find GDRCopy, please set GDRCOPY_LIBRARY_DIR")
-endif()
-list(APPEND transformer_engine_LIBS ${GDRCOPY_LIBRARY})
-
 # Check for MPI (optional)
 option(UB_MPI_BOOTSTRAP "Bootstrap userbuffers with MPI." OFF)
 message(STATUS "Userbuffers MPI bootstrap: ${UB_MPI_BOOTSTRAP}")
@@ -121,7 +114,6 @@ set(USERBUFFERS_CUDA_SUPPRESS
     -Xcudafe --diag_suppress=2464)   # deprecated conversion from a string literal to "char *"
 set(USERBUFFERS_CXX_SUPPRESS
     -Wno-pointer-arith
-    -Wno-write-strings
     -Wno-return-local-addr)
 set_source_files_properties(userbuffers/userbuffers.cu
                             PROPERTIES
@@ -143,19 +135,12 @@ install(TARGETS transformer_engine DESTINATION .)
 #######################################################################################
 # PyBind11 Extensions
 #######################################################################################
-
-add_library(transformer_engine_common_cpp SHARED pybind.cpp)
+find_package(pybind11 CONFIG REQUIRED)
+pybind11_add_module(transformer_engine_common_cpp pybind.cpp)
 target_include_directories(transformer_engine_common_cpp PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(transformer_engine_common_cpp LIBS)
-list(APPEND transformer_engine_common_cpp_LIBS transformer_engine)
-
-# Check for PyBind11
-find_package(pybind11 CONFIG REQUIRED)
-list(APPEND transformer_engine_common_cpp_LIBS
-     pybind11::module
-     pybind11::embed)
-target_include_directories(transformer_engine_common_cpp PRIVATE ${pybind11_INCLUDE_DIRS})
+target_link_libraries(transformer_engine_common_cpp PUBLIC transformer_engine)
 
 # Check for DLPack headers
 set(DLPACK_FRONTEND_INCLUDE_DIR
@@ -168,14 +153,8 @@ if(NOT EXISTS "${DLPACK_FRONTEND_INCLUDE_DIR}")
 endif()
 target_include_directories(transformer_engine_common_cpp PRIVATE ${DLPACK_FRONTEND_INCLUDE_DIR})
 
-# Link libraries
-target_link_libraries(transformer_engine_common_cpp PUBLIC ${transformer_engine_common_cpp_LIBS})
-
 # Install
 set_source_files_properties(pybind.cpp
                             PROPERTIES
                             COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
-set_target_properties(transformer_engine_common_cpp
-                      PROPERTIES
-                      CXX_VISIBILITY_PRESET hidden)
 install(TARGETS transformer_engine_common_cpp DESTINATION .)

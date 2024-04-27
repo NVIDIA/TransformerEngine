@@ -77,40 +77,42 @@ struct CommGemmOverlapBase {
       if (worldrank == 0) {
         printf("!!! [UB] Create UB communicator\n");
       }
-      create_communicator_grouped2(&_ub_comm,
 #ifndef UB_MPI_BOOTSTRAP
+      create_communicator_grouped2(&_ub_comm,
         worldrank, worldsize, localrank, localsize, nodeid, numnodes,
         [this](void **globalbuf, void *localbuf, size_t localbytes, const char *group) {
           _ub_alloc_copy_allgather(globalbuf, localbuf, localbytes, group); },
         [this](void *ptr, size_t bytes) { _ub_free(ptr, bytes); },
         [this](const char *group) { _ub_barrier(group); },
-#endif
         1, 1, localsize, 1);
+#else
+      create_communicator_grouped2(&_ub_comm, 1, 1, localsize, 1);
+#endif
       _comm_created = true;
-
-      _tp_id = _ub_comm->myrank % _tp_size;
-      _num_splits = num_splits;
-      _cga_size = num_comm_cga;
-      _use_ce = 0;
-
-      for (int i = 0; i < std::min(_num_splits, num_max_streams); i++) {
-        cudaStream_t new_stream;
-        NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&new_stream, cudaStreamNonBlocking, -1));
-        _stream_compute.push_back(new_stream);
-      }
-
-      cudaDeviceProp prop;
-      cudaGetDeviceProperties(&prop, 0);
-      _comm_sms = num_comm_sms;
-      _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sms \
-                                  : prop.multiProcessorCount;
-      _math_sms -= getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-
-      NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
-      NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
-      NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_comm, 0));
-      NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_comm, 0));
     }
+
+    _tp_id = _ub_comm->myrank % _tp_size;
+    _num_splits = num_splits;
+    _cga_size = num_comm_cga;
+    _use_ce = 0;
+
+    for (int i = 0; i < std::min(_num_splits, num_max_streams); i++) {
+      cudaStream_t new_stream;
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&new_stream, cudaStreamNonBlocking, -1));
+      _stream_compute.push_back(new_stream);
+    }
+
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    _comm_sms = num_comm_sms;
+    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sms \
+                                : prop.multiProcessorCount;
+    _math_sms -= getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_comm, 0));
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_comm, 0));
   }
 
   ~CommGemmOverlapBase() {
@@ -853,7 +855,6 @@ struct CommGemmOverlapP2P : CommGemmOverlapBase {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _comm_sms;
     _ub_comm->cga_size = _cga_size;
-    size_t n = B->size(0);
 
     // Get communication and GEMM input chunk sizes
     auto ubuf_chunks = get_ubuf_chunks(ubuf);
@@ -904,11 +905,10 @@ struct CommGemmOverlapP2P : CommGemmOverlapBase {
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
-          reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
-                                                  ubuf_chunks[_tp_size - 1].numel(), stream_main);
-        )
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(ubuf->dtype(), in_type,
+        reduce_bf16_out<in_type>(
+          reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
+          _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
       )
     }
   }  // atomic_gemm_overlap_rs
@@ -993,11 +993,10 @@ struct CommGemmOverlapP2P : CommGemmOverlapBase {
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(ubuf->dtype(), in_type,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(rs_out->dtype(), out_type,
-          reduce_full_precision<in_type, out_type>(reduce_buf_ptr, rs_out_ptr, _tp_size,
-                                                  ubuf_chunks[_tp_size - 1].numel(), stream_main)
-        )
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(ubuf->dtype(), in_type,
+        reduce_bf16_out<in_type>(
+          reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
+          _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
       )
     }
 
