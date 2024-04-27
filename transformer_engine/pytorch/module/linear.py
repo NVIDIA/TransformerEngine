@@ -293,8 +293,8 @@ class _Linear(torch.autograd.Function):
                 if cpu_offloading:
                     if fuse_wgrad_accumulation:
                         weight.main_grad.weight_offloading = True
-                    if fp8 and weight_t_fp8 is not None:
-                        weight_t_fp8.weight_offloading = True
+                    if fp8 and weight_fp8 is not None:
+                        weight_fp8.weight_offloading = True
                     weight.weight_offloading = True
 
                     if saved_inputmat is not None:
@@ -836,9 +836,6 @@ class Linear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=(device == 'meta'))
 
-        self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
-        self.weight1_fp8: Optional[Float8Tensor] = None
-
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.parallel_mode == "row" and self.apply_bias:
@@ -929,14 +926,15 @@ class Linear(TransformerEngineBaseModule):
 
             # Cast weights to FP8 if needed
             weight_fp8 = None
-            if not isinstance(weight_tensor, Float8Tensor):
+            if self.fp8 and not isinstance(weight_tensor, Float8Tensor):
                 update_workspace = (
                     is_first_microbatch is None
                     or is_first_microbatch
                 )
                 with_transpose = torch.is_grad_enabled()
                 if (
-                    is_fp8_activation_recompute_enabled()
+                    not with_transpose
+                    and is_fp8_activation_recompute_enabled()
                     and not in_fp8_activation_recompute_phase()
                 ):
                     with_transpose = True
@@ -990,9 +988,3 @@ class Linear(TransformerEngineBaseModule):
         if self.return_bias:
             return out, cast_if_needed(bias_tensor, self.activation_dtype)
         return out
-
-    def get_fp8_weights_scratchpad(self, *args): ### TODO Remove
-        pass
-
-    def set_fp8_weights(self, *args): ### TODO Remove
-        pass

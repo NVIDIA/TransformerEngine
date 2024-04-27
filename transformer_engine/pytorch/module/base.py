@@ -252,7 +252,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False
-        self.fp8_weight_shapes = []
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
@@ -453,60 +452,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
         self.activation_dtype = dtype
 
-    def set_fp8_weights(self) -> None:
-        """Construct workspace buffers for FP8 weights, if needed
-
-        These workspace buffers are used for FP8 training when the
-        module parameters are not natively in FP8 and there are
-        multiple microbatches per training step. The buffers, with
-        names like `weight1_fp8` and `weight1_t_fp8`, cache the FP8
-        values and transposed FP8 values in between microbatches. They
-        are not registered as module parameters or buffers since we
-        don't want them to be affected by `.to` and since they aren't
-        needed for checkpointing.
-
-        """
-        if not self.fp8 or self.primary_weights_in_fp8:
-            return
-
-        for i, shape in enumerate(self.fp8_weight_shapes, start=1):
-            weight_cast_attr = f"weight{i}_fp8"
-            weight_transpose_attr = f"weight{i}_t_fp8"
-
-            if (
-                hasattr(self, weight_cast_attr)
-                and getattr(self, weight_cast_attr).shape == shape
-            ):
-                return
-
-            setattr(
-                self,
-                weight_cast_attr,
-                Float8Tensor(
-                    data=torch.empty(
-                        shape,
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-            setattr(
-                self,
-                weight_transpose_attr,
-                Float8Tensor(
-                    data=torch.empty(
-                        shape[1],
-                        shape[0],
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
         Set the tensor parallel group for the given
@@ -591,11 +536,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
-
-            # Create persistent tensors for fp8 weights and their transposes
-            # only when fp8 weight caching is used and weights are not in fp8
-            if is_first_microbatch is not None and not self.primary_weights_in_fp8:
-                self.set_fp8_weights()
 
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, \
@@ -755,49 +695,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def get_fp8_weights_empty_tensors(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[Float8Tensor]:
-        """
-        Returns empty tensors to be later used to store fp8 version of weights
-        and their transposes (for the bwd pass) for this batch (or microbatch).
-        When `is_first_microbatch` is `None`, this is especially useful since
-        we then don't need to store the fp8 weights that are needed for one time
-        only in the forward pass. Note that we still need to store the tensor
-        for the fp8 weight transpose which is at least needed in the backward
-        pass but that's taken care of by storing the transpose tensor in
-        `ctx.save_for_backward`.
-        """
-        assert is_first_microbatch is None, "Should only be here when "\
-                                            "`is_first_microbatch` is None!"
-        fp8_weight_tensors = []
-        for shape in self.fp8_weight_shapes:
-            fp8_weight_tensors.append(
-                Float8Tensor(
-                    data=torch.empty(
-                        shape,
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-            fp8_weight_tensors.append(
-                Float8Tensor(
-                    data=torch.empty(
-                        shape[1],
-                        shape[0],
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-        return fp8_weight_tensors
-
     def register_parameter(self, name, param, **kwargs):
         """
         Thin wrapper around PyTorch parameter registration to stash additional parameter
@@ -847,13 +744,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     @abstractmethod
     def forward(self):
-        """Needs override."""
-
-    @abstractmethod
-    def get_fp8_weights_scratchpad(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
         """Needs override."""
 
     def get_fp8_workspace(
