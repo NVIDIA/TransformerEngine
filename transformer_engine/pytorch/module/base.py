@@ -755,8 +755,35 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         cache_name: Optional[str] = None,
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
-        with_transpose: bool = True,
-    ) -> Optional[Float8Tensor]:
+        with_transpose: bool = False,
+    ) -> Float8Tensor:
+        """Get FP8 workspace buffer and maybe update its values
+
+        The workspace buffer may be cached for future function calls.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor, optional
+            Values to copy into workspace. Required if the workspace
+            is being constructed or updated.
+        fp8_meta_forward: bool, optional
+            Whether to access FP8 meta tensors for the forward pass or
+            backward pass. Required if the workspace is being
+            constructed.
+        fp8_meta_index: int, optional
+            Index to access in FP8 meta tensors. Required if the
+            workspace is being constructed.
+        cache_name: str, optional
+            Key for caching.
+        update_workspace: bool, default = `True`
+            Update workspace with values from `tensor`.
+        skip_update_flag: torch.Tensor, optional
+            GPU flag to skip updating the workspace. Take precedence
+            over `update_workspace` if provided.
+        with_transpose: bool, default = `False`
+            Whether to initialize cached transpose in workspace.
+
+        """
 
         # Construct workspace if needed
         out = None
