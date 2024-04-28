@@ -491,8 +491,10 @@ def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
 
 @jit_fuser
 def flash_attn_fwd_out_correction(out, out_per_step, seq_dim,
-                                  softmax_lse, softmax_lse_per_step):
+                                  softmax_lse, softmax_lse_per_step,
+                                  accumulate_in_fp32):
     """Merge partial outputs of each step in Attention with context parallelism"""
+    if accumulate_in_fp32: out_per_step = out_per_step.to(softmax_lse.dtype)
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step*softmax_lse_corrected_exp
@@ -518,7 +520,8 @@ class AttnFuncWithCP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                 dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format,
-                attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention):
+                attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention,
+                accumulate_in_fp32):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -779,8 +782,8 @@ class AttnFuncWithCP(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i-1)%2]):
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        out = torch.empty_like(q, dtype=torch.float32).zero_()
+                        softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if causal:
                             # [b, np, sq] -> [b, np, 2, sq//2]
                             softmax_lse_ = softmax_lse.view(
@@ -812,13 +815,15 @@ class AttnFuncWithCP(torch.autograd.Function):
                                               out_per_step[i],
                                               seq_dim,
                                               softmax_lse,
-                                              softmax_lse_per_step[i])
+                                              softmax_lse_per_step[i],
+                                              accumulate_in_fp32)
             else:
                 flash_attn_fwd_out_correction(out_,
                                               out_per_step[i],
                                               seq_dim,
                                               softmax_lse_[..., 1, :],
-                                              softmax_lse_per_step[i])
+                                              softmax_lse_per_step[i],
+                                              accumulate_in_fp32)
 
         kv = p2p_comm_buffers[-1]
         if use_fused_attention:
@@ -828,7 +833,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 out = out.view(-1, *out.shape[-3:])
         else:
             out = out.view(-1, *out.shape[-2:])
-        ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+        ctx.save_for_backward(q, kv, out.to(q.dtype), softmax_lse, cu_seqlens_q, cu_seqlens_k)
         ctx.rng_states = rng_states
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -843,7 +848,9 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.attn_biases = attn_biases
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
-        return out
+        ctx.accumulate_in_fp32 = accumulate_in_fp32
+
+        return out.to(q.dtype)
 
     @staticmethod
     def backward(ctx, dout):
@@ -1243,14 +1250,14 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, \
-                None, None, None, None, None, None, attn_dbias, None, None
+                None, None, None, None, None, None, attn_dbias, None, None, None
 
 
 def attn_forward_func_with_cp(
     is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
     dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd",
     attn_mask_type="causal", attn_bias_type="no_bias", attn_bias=None, deterministic=False,
-    use_fused_attention=False
+    use_fused_attention=False, accumulate_in_fp32=True
 ) -> torch.Tensor:
     """Attention implementation with context parallelism"""
     assert(qkv_format in ["bshd", "sbhd"]
@@ -1264,7 +1271,8 @@ def attn_forward_func_with_cp(
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format,
-        attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention
+        attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention,
+        accumulate_in_fp32
     )
     return out
 
@@ -1923,6 +1931,7 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        accumulate_in_fp32: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1936,6 +1945,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.accumulate_in_fp32 = accumulate_in_fp32
 
     def forward(
         self,
@@ -2074,7 +2084,8 @@ class FlashAttention(torch.nn.Module):
                     softmax_scale=1.0/self.norm_factor,
                     qkv_format="bshd" if qkv_format=="sbhd" else qkv_format,
                     attn_mask_type=attn_mask_type,
-                    deterministic=self.deterministic
+                    deterministic=self.deterministic,
+                    accumulate_in_fp32=self.accumulate_in_fp32,
                 )
         else:
 
@@ -2909,6 +2920,7 @@ class FusedAttention(TransformerEngineBaseModule):
         deterministic: bool = False,
         tp_size: int = 1,
         tp_group: Optional[dist_group_type] = None,
+        accumulate_in_fp32: bool = True,
     ) -> None:
         super().__init__()
 
@@ -2937,6 +2949,7 @@ class FusedAttention(TransformerEngineBaseModule):
 
         self.tp_size = tp_size
         self.tp_group = tp_group
+        self.accumulate_in_fp32 = accumulate_in_fp32
 
     def get_fp8_weights_scratchpad(
         self,
@@ -3056,6 +3069,7 @@ class FusedAttention(TransformerEngineBaseModule):
                     attn_bias_type=core_attention_bias_type,
                     attn_bias=core_attention_bias,
                     use_fused_attention=True,
+                    accumulate_in_fp32=self.accumulate_in_fp32
                 )
         else:
             with self.prepare_forward(query_layer,
