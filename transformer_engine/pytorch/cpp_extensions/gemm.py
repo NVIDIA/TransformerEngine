@@ -64,6 +64,8 @@ def fp8_gemm(
     bias_dtype = TE_DType[bias_dtype]
 
     out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
+    if A.nelement() == 0 or B.nelement() == 0:
+        return out, gelu_input
 
     args = (
         A,
@@ -191,6 +193,8 @@ def gemm(
         grad_bias = empty_tensor
 
     bias = bias if use_bias else empty_tensor
+    if A.nelement() == 0 or B.nelement() == 0:
+        return out, grad_bias, gelu_input
 
     assert A.dtype == dtype and B.dtype == dtype, \
         f'Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}'
