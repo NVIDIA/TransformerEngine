@@ -27,7 +27,7 @@ model.load_state_dict(model_state_dict)
 print("Model loaded")
 
 tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-inputs = tokenizer(["I love when", "I "] * 32, return_tensors="pt", padding=True)
+inputs = tokenizer(["I love when"] * 32, return_tensors="pt", padding=True)
 
 inputs['input_ids'] = inputs['input_ids'].cuda()
 inputs['attention_mask'] = inputs['attention_mask'].cuda()
@@ -48,7 +48,7 @@ with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=40,
-                use_cuda_graphs=False
+                use_cuda_graphs=True
             )
 
 
@@ -56,7 +56,7 @@ end_time = time.time()
 duration = end_time - start_time
 
 generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-for text in generated_texts[:2]:
+for text in generated_texts[:12]:
     print("-" * 50)
     print(text)
 

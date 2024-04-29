@@ -82,6 +82,9 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
 
+Z = torch.zeros((200, 200)).to(torch.bfloat16).cuda()
+T = torch.zeros((200, 200)).to(torch.int32).cuda()
+
 META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
 META_O    = tex.FP8FwdTensors.GEMM2_INPUT
@@ -2329,6 +2332,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta, tp_size, tp_group):
+        
         if fp8:
             if _NVTE_DEBUG:
                 print('[DotProductAttention]: using FP8 forward')
@@ -2790,9 +2794,6 @@ class FusedAttention(TransformerEngineBaseModule):
                     )
 
 
-        if self.layer_number == 1:
-            print(output.shape)
-
 
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
@@ -2924,6 +2925,8 @@ class DotProductAttention(torch.nn.Module):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.channels = channels
+
+
 
 
         self.hidden_size_per_attention_head = channels // num_attention_heads
@@ -3192,7 +3195,16 @@ class DotProductAttention(torch.nn.Module):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        value_layer = value_layer.contiguous()
+        if inference_params.thd:
+            inference_params.value_layer.copy_(value_layer.contiguous())
+            value_layer = inference_params.value_layer
+            inference_params.key_layer.copy_(key_layer.contiguous())
+            key_layer = inference_params.key_layer
+        else:
+            key_layer = key_layer.contiguous()
+            value_layer = value_layer.contiguous()
+        
+
         
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
@@ -3262,37 +3274,71 @@ class DotProductAttention(torch.nn.Module):
                 key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
                 value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
             else:
-                bs = query_layer.shape[0]    
-                cuda.attention_copy(
-                    inference_key_memory, 
-                    inference_params.seq_len, 
-                    key_layer, 
-                    inference_params.max_sequence_length,  
-                    bs,
-                    self.channels
-                    )
-                cuda.attention_copy(
-                    inference_value_memory, 
-                    inference_params.seq_len, 
-                    value_layer, 
-                    inference_params.max_sequence_length,  
-                    bs,
-                    self.channels) 
+                bs = query_layer.shape[0]  
+                import ctypes
+                current_stream = torch.cuda.current_stream()
 
-                seqlens_q = torch.ones([bs], dtype=torch.int32, device="cuda")
-                cu_seqlens_q = torch.zeros(bs + 1, dtype=torch.int32, device="cuda")
-                cu_seqlens_kv = torch.zeros(bs + 1, dtype=torch.int32, device="cuda")
-                cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-                cu_seqlens_kv[1:] = torch.cumsum(inference_params.seq_len + 1, dim=0)
+                stream_ptr_capsule = ctypes.pythonapi.PyCapsule_New(current_stream.cuda_stream, None, None) if current_stream.cuda_stream != 0 else None
+
+
+                if stream_ptr_capsule is not None:
+                    cuda.attention_copy(
+                        inference_key_memory, 
+                        inference_params.seq_len, 
+                        key_layer, 
+                        inference_params.max_sequence_length,  
+                        bs,
+                        self.channels,
+                        stream_ptr_capsule
+                        )
+                    cuda.attention_copy(
+                        inference_value_memory, 
+                        inference_params.seq_len, 
+                        value_layer, 
+                        inference_params.max_sequence_length,  
+                        bs,
+                        self.channels,
+                        stream_ptr_capsule)
+                else:
+                    cuda.attention_copy2(
+                        inference_key_memory, 
+                        inference_params.seq_len, 
+                        key_layer, 
+                        inference_params.max_sequence_length,  
+                        bs,
+                        self.channels
+                        )
+                    cuda.attention_copy2(
+                        inference_value_memory, 
+                        inference_params.seq_len, 
+                        value_layer, 
+                        inference_params.max_sequence_length,  
+                        bs,
+                        self.channels)
+                
+                        
+                inference_params.seqlens_q.copy_(torch.ones([bs], dtype=torch.int32, device="cuda"))
+                inference_params.cu_seqlens_q.copy_(torch.zeros(bs + 1, dtype=torch.int32, device="cuda"))
+                inference_params.cu_seqlens_kv.copy_(torch.zeros(bs + 1, dtype=torch.int32, device="cuda"))
+                inference_params.cu_seqlens_q[1:].copy_(torch.cumsum(inference_params.seqlens_q, dim=0))
+                inference_params.cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + 1, dim=0))
+
+                seqlens_q = inference_params.seqlens_q
+                cu_seqlens_q = inference_params.cu_seqlens_q
+                cu_seqlens_kv = inference_params.cu_seqlens_kv
 
                 max_seqlen_q = 1
                 max_seqlen_kv = inference_params.max_sequence_length
                 
 
-                seq_offsets_q = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q 
-                seq_offsets_k = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv
-                seq_offsets_k[1:] = seq_offsets_k[1:] + inference_params.begin_offsets * self.channels
-                seq_offsets_v = seq_offsets_k.clone()
+                inference_params.seq_offsets_q.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q)
+                inference_params.seq_offsets_k.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
+                inference_params.seq_offsets_k[1:].copy_(inference_params.seq_offsets_k[1:] )
+                inference_params.seq_offsets_v.copy_(inference_params.seq_offsets_k)
+
+                seq_offsets_q = inference_params.seq_offsets_q
+                seq_offsets_k = inference_params.seq_offsets_k
+                seq_offsets_v = inference_params.seq_offsets_v
 
 
                 query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
@@ -3552,6 +3598,7 @@ class DotProductAttention(torch.nn.Module):
 
         if len(query_layer.shape) == 4:
             use_flash_attention=True
+            
 
         if use_flash_attention:
             if _NVTE_DEBUG:
@@ -4318,32 +4365,53 @@ class MultiheadAttention(torch.nn.Module):
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
-
+        
         if rotary_pos_emb is not None:
-            assert (not isinstance(query_layer, Float8Tensor)
-                and not isinstance(key_layer, Float8Tensor)
-                ), "RoPE is not supported for Float8Tensors!"
-            # duplicate the pos_emb for self attention
-            if not isinstance(rotary_pos_emb, tuple):
-                rotary_pos_emb = ((rotary_pos_emb,) * 2)
+            if inference_params.thd:
+                import ctypes
+                current_stream = torch.cuda.current_stream()
+                stream_ptr_capsule = ctypes.pythonapi.PyCapsule_New(current_stream.cuda_stream, None, None) if current_stream.cuda_stream != 0 else None
 
-            q_pos_emb, k_pos_emb = rotary_pos_emb
+                d = query_layer.shape[-1]
+                b = query_layer.shape[0]
 
-            # adjust key and value for inference
-            if inference_params is not None:
-                if self.qkv_format == "sbhd":
-                    sequence_length = key_layer.size(0)
-                elif self.qkv_format == "bshd":
-                    sequence_length = key_layer.size(1)
+                if stream_ptr_capsule is not None:
+                    cuda.get_values(inference_params.position_embedding_matrix, inference_params.seq_len + 1, inference_params.q_pos_emb, d, b, stream_ptr_capsule)
+                    cuda.get_values(inference_params.position_embedding_matrix, inference_params.seq_len + 1, inference_params.k_pos_emb, d, b, stream_ptr_capsule)
+                else:
+                    cuda.get_values2(inference_params.position_embedding_matrix, inference_params.seq_len + 1, inference_params.q_pos_emb, d, b)
+                    cuda.get_values2(inference_params.position_embedding_matrix, inference_params.seq_len + 1, inference_params.k_pos_emb, d, b)
+                inference_params.query_layer.copy_(apply_rotary_pos_emb(query_layer, inference_params.q_pos_emb, self.qkv_format, fused=True))
+                inference_params.key_layer.copy_(apply_rotary_pos_emb(key_layer, inference_params.k_pos_emb, self.qkv_format, fused=True))
+            else:
+                assert (not isinstance(query_layer, Float8Tensor)
+                    and not isinstance(key_layer, Float8Tensor)
+                    ), "RoPE is not supported for Float8Tensors!"
+                # duplicate the pos_emb for self attention
+                if not isinstance(rotary_pos_emb, tuple):
+                    rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
-                sequence_start = inference_params.sequence_len_offset
-                sequence_end = sequence_start + sequence_length
+                q_pos_emb, k_pos_emb = rotary_pos_emb
 
-                q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
-                k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+                # adjust key and value for inference
+                if inference_params is not None:
+                    if self.qkv_format == "sbhd":
+                        sequence_length = key_layer.size(0)
+                    elif self.qkv_format == "bshd":
+                        sequence_length = key_layer.size(1)
 
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+                    sequence_start = inference_params.sequence_len_offset
+                    sequence_end = sequence_start + sequence_length
+                    
+                    q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
+                    k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+
+                    query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
+                    key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+        query_layer = query_layer.contiguous()
+        key_layer = key_layer.contiguous()
+            
+
         
 
         # ===========================
@@ -4351,8 +4419,8 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
 
         context_layer = self.core_attention(
-            query_layer,
-            key_layer,
+            inference_params.query_layer if inference_params.thd else query_layer,
+            inference_params.key_layer if inference_params.thd else key_layer,
             value_layer,
             qkv_format=self.qkv_format,
             cu_seqlens_q=None,
