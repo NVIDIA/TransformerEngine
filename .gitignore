@@ -27,5 +27,3 @@ docs/_build
 docs/doxygen
 *.log
 CMakeFiles/CMakeSystem.cmake
-CPPLINT.cfg
-pylintrc
