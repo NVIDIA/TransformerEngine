@@ -9,7 +9,11 @@ from contextlib import nullcontext
 import torch
 import pytest
 
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import (
+    fp8_autocast,
+    FP8GlobalStateManager,
+    fp8_model_init,
+)
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -107,6 +111,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
+batch_sizes_with_zero = [0, 1, 2]
 
 all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 all_normalizations = ["LayerNorm", "RMSNorm"]
@@ -454,6 +459,45 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
         device="cuda",
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes_with_zero)
+@pytest.mark.parametrize("model", ["small", "weird"])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("use_bias", all_boolean)
+def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+    config = model_configs[model]
+    ffn_hidden_size = 4 * config.hidden_size
+    num_tokens = bs*config.seq_len
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_model_init(enabled=use_fp8 and fp8_model_params):
+        te_linear = (
+            Linear(
+                config.hidden_size,
+                ffn_hidden_size,
+                bias=use_bias,
+                params_dtype=dtype
+            )
+            .cuda()
+        )
+
+    inp_hidden_states = torch.randn(
+        num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        out = te_linear(inp_hidden_states)
+    loss = out.sum()
+    loss.backward()
+    assert out.shape == (num_tokens, ffn_hidden_size)
 
 
 @pytest.mark.parametrize("dtype", param_types)
