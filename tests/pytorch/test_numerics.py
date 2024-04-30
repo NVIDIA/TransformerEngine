@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -611,21 +610,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    fp8 = False
-    fp8_recipe = None
-    if dtype == 'fp8':
-        fp8 = True
-        fp8_recipe = recipe.DelayedScaling(
-            margin=0,
-            interval=1,
-            fp8_format=recipe.Format.HYBRID,
-            amax_history_len=1,
-            amax_compute_algo="most_recent",
-            )
-
-    dtype = torch.bfloat16 if dtype == 'fp8' else dtype
-    #with fp8_model_init(enabled=fp8):
-    block = TransformerLayer(
+    return TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
         config.num_attention_heads,
@@ -640,15 +625,11 @@ def _test_e2e_checkpointing_get_model(config, dtype):
         params_dtype=dtype,
         device="cuda",
     )
-    return block, fp8_recipe
 
 
-def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="checkpoint.pt"):
+def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path="checkpoint.pt"):
     reset_rng_states()
 
-    fp8 = True if dtype == 'fp8' else False
-    orig_dtype = dtype
-    dtype = torch.bfloat16 if dtype == 'fp8' else dtype
     te_inp_hidden_states = torch.randn(
         (config.seq_len, bs, config.hidden_size),
         dtype=dtype,
@@ -657,16 +638,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
     )
     te_inp_hidden_states.retain_grad()
 
-    block, fp8_recipe = _test_e2e_checkpointing_get_model(config, orig_dtype)
+    block = _test_e2e_checkpointing_get_model(config, dtype)
 
     for _ in range(steps // 2):
-        with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
-            te_out = block(
-                te_inp_hidden_states,
-                None,
-            )
-            loss = te_out.sum()
-            loss.backward()
+        te_out = block(
+            te_inp_hidden_states,
+            None,
+        )
+        loss = te_out.sum()
+        loss.backward()
 
     if checkpoint:
         # This process is necessary so that we can start afresh with
@@ -674,19 +654,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
         # loading from a checkpoint gives bitwise identical results.
         # Since gradients are being accumulated, it is important to
         # restore them post loading the checkpoint.
-        #torch.save(block.state_dict(), path)
-        sd = block.state_dict()
-        for k,v in sd.items():
-            if 'extra_state' in k:
-                print(k)
-
-        # simulate old checkpoints where _extra_state didn't exist for fused attn
-        #del sd['self_attention.core_attention._extra_state']
-        #for k,v in sd.items():
-        #    if 'extra_state' in k:
-        #        print(k)
-
-        torch.save(sd, path)
+        torch.save(block.state_dict(), path)
 
         param_grads = []
         for p in block.parameters():
@@ -698,19 +666,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
         _cuda_rng_state = torch.cuda.get_rng_state()
 
         del block
-        block, fp8_recipe = _test_e2e_checkpointing_get_model(config, orig_dtype)
-        with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
-            print('------- loading ')
-            block.load_state_dict(torch.load(path))
-            print('------- state_dict()')
-            sd = block.state_dict()
-            for k,v in sd.items():
-                if 'extra_state' in k:
-                    print(k)
-            state=sd['self_attention.core_attention.fused_attention._extra_state']
-            state.seek(0)
-            state = torch.load(state, map_location='cuda')
-            print('------ state ',state)
+        block = _test_e2e_checkpointing_get_model(config, dtype)
+        block.load_state_dict(torch.load(path))
         reset_rng_states()
 
         for p in block.parameters():
@@ -720,13 +677,12 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
         assert not param_grads, "Oops!"
 
     for _ in range(steps // 2):
-        with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
-            te_out = block(
-                te_inp_hidden_states,
-                None,
-            )
-            loss = te_out.sum()
-            loss.backward()
+        te_out = block(
+            te_inp_hidden_states,
+            None,
+        )
+        loss = te_out.sum()
+        loss.backward()
 
     torch.cuda.synchronize()
 
@@ -740,8 +696,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
     return outputs
 
 
-@pytest.mark.parametrize("dtype", ['fp8'])#torch.bfloat16])#param_types)
-@pytest.mark.parametrize("bs", [2])#batch_sizes)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
@@ -749,7 +705,6 @@ def test_gpt_checkpointing(dtype, bs, model):
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
     # Check that results match
-    dtype = torch.bfloat16 if dtype == 'fp8' else dtype
     tols = dtype_tols(dtype)
     if dtype in (torch.float16, torch.bfloat16):
         tols.update(dict(rtol=2e-2, atol=2e-3))
