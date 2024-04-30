@@ -2927,17 +2927,6 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-        def remove_extra_states_check(self, incompatible_keys):
-            """
-            Temporarily remove core_attention._extra_state as a missing key
-            when loading older TransformerEngine checkpoints. Will phase out
-            this hook in TransformerEngine 2.0.
-            """
-            for key in incompatible_keys.missing_keys:
-                if 'core_attention._extra_state' in key:
-                    incompatible_keys.missing_keys.remove(key)
-        self.register_load_state_dict_post_hook(remove_extra_states_check)
-
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         """
         Override to save to core_attention._extra_state.
@@ -3316,9 +3305,14 @@ class DotProductAttention(torch.nn.Module):
             when loading older TransformerEngine checkpoints. Will phase out
             this hook in TransformerEngine 2.0.
             """
+            num = 0
+            keys = []
             for key in incompatible_keys.missing_keys:
                 if 'core_attention._extra_state' in key:
-                    incompatible_keys.missing_keys.remove(key)
+                    num = num + 1
+                    keys.append(key)
+            for i in range(num):
+                incompatible_keys.missing_keys.remove(keys[i])
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
     def _checkpointed_attention_forward(
