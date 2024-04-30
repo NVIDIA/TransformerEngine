@@ -187,7 +187,7 @@ class TestFP8Dot:
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('m,n,k', [(128, 256, 512),
+    @pytest.mark.parametrize('m,n,k', [(256, 128, 512),
                                        (16384, 1024, 2816),
                                        (16384, 2816, 1024),
                                        (16384, 1024, 1024)])
@@ -211,10 +211,10 @@ class TestFP8Dot:
         a = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
         k1 = jax.random.normal(subkeys[1], (k, len(activation_type), n), jnp.bfloat16)
         k2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16)
-        s = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
+        s = jax.random.normal(subkeys[3], (k,), jnp.bfloat16)
         if use_bias:
-            b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
-            b2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
+            b1 = jax.random.normal(subkeys[4], (len(activation_type), n), jnp.bfloat16)
+            b2 = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
         else:
             b1 = jnp.empty((0,), jnp.bfloat16)
             b2 = jnp.empty((0,), jnp.bfloat16)
