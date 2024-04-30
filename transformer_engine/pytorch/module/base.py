@@ -370,7 +370,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state = None
 
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
-        print('get_extra_state: ',self.__class__,fp8_checkpoint, self.fp8_meta["fp8_checkpoint"], self.fp8, self.fp8_calibration)
 
         if fp8_checkpoint:
             state = {}
@@ -380,7 +379,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
-            print('>>>>saving.... ',state["scale_fwd"])
 
             # Store other pickelable values.
             extra = {}
@@ -410,7 +408,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
-        print('>>>>loaded.... ',state["scale_fwd"] if state is not None else None)
         if state is None:
             return
 

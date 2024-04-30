@@ -707,7 +707,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=2, path="
             for k,v in sd.items():
                 if 'extra_state' in k:
                     print(k)
-            state=sd['self_attention.core_attention._extra_state']
+            state=sd['self_attention.core_attention.fused_attention._extra_state']
             state.seek(0)
             state = torch.load(state, map_location='cuda')
             print('------ state ',state)

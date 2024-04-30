@@ -2929,20 +2929,16 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-    def _save_to_state_dict(self, destination, prefix, keep_vars):
-        """
-        Override to save to core_attention._extra_state.
-        """
-        super()._save_to_state_dict(destination, prefix.replace('fused_attention.',''), keep_vars)
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs):
-        """
-        Override to load from core_attention._extra_state.
-        """
-        super()._load_from_state_dict(state_dict, prefix.replace('fused_attention.',''),
-            local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
+        def remove_extra_states_check(self, incompatible_keys):
+            """
+            Temporarily remove fused_attention._extra_state as a missing key
+            when loading older TransformerEngine checkpoints. Will phase out
+            this hook in TransformerEngine 2.0.
+            """
+            for key in incompatible_keys.missing_keys:
+                if 'fused_attention._extra_state' in key:
+                    incompatible_keys.missing_keys.remove(key)
+        self.register_load_state_dict_post_hook(remove_extra_states_check)
 
     def get_fp8_weights_scratchpad(
         self,
@@ -3301,22 +3297,6 @@ class DotProductAttention(torch.nn.Module):
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
-        def remove_extra_states_check(self, incompatible_keys):
-            """
-            Temporarily remove fused_attention._extra_state as a missing key
-            when loading older TransformerEngine checkpoints. Will phase out
-            this hook in TransformerEngine 2.0.
-            """
-            num = 0
-            keys = []
-            for key in incompatible_keys.missing_keys:
-                if 'core_attention._extra_state' in key:
-                    num = num + 1
-                    keys.append(key)
-            for i in range(num):
-                incompatible_keys.missing_keys.remove(keys[i])
-        self.register_load_state_dict_post_hook(remove_extra_states_check)
-
     def _checkpointed_attention_forward(
         self,
         attention_func: Callable,
@@ -3361,16 +3341,6 @@ class DotProductAttention(torch.nn.Module):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
-
-    def get_extra_state(self) -> torch.Tensor:
-        """
-        Override to add core_attention._extra_state to state_dict when _save_to_state_dict().
-        """
-
-    def set_extra_state(self, state: torch.Tensor) -> None:
-        """
-        Override to load core_attention._extra_state when _load_from_state_dict().
-        """
 
     @no_torch_dynamo(recursive=False)
     def forward(
