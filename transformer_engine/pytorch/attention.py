@@ -1757,11 +1757,12 @@ class _PrepareQKVForFA(torch.autograd.Function):
        to separate contiguous q, k, v tensors in (b, s, ...) layout."""
 
     @staticmethod
-    def forward(ctx,
-                query_layer: torch.Tensor,
-                key_layer: torch.Tensor,
-                value_layer: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
@@ -1773,10 +1774,11 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return query_layer, key_layer, value_layer
 
     @staticmethod
-    def backward(ctx,
-                 dq: torch.Tensor,
-                 dk: torch.Tensor,
-                 dv: torch.Tensor
+    def backward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        dq: torch.Tensor,
+        dk: torch.Tensor,
+        dv: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
