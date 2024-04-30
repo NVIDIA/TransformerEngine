@@ -211,10 +211,10 @@ class TestFP8Dot:
         a = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
         k1 = jax.random.normal(subkeys[1], (k, len(activation_type), n), jnp.bfloat16)
         k2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16)
-        s = jax.random.normal(subkeys[3], (k,), jnp.bfloat16)
+        s = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
         if use_bias:
-            b1 = jax.random.normal(subkeys[4], (len(activation_type), n), jnp.bfloat16)
-            b2 = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
+            b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
+            b2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
             b1 = jnp.empty((0,), jnp.bfloat16)
             b2 = jnp.empty((0,), jnp.bfloat16)
