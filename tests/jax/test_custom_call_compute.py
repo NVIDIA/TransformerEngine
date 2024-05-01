@@ -319,10 +319,10 @@ class TestFP8Dot:
         if use_bias:
             assert_allclose(jnp.asarray(primitive_b2_grad, np.float32),
                             jnp.asarray(ref_b2_grad, np.float32),
-                            dtype=jnp.bfloat16)
+                            dtype=FP8Helper.BWD_DTYPE)
             assert_allclose(jnp.asarray(primitive_b1_grad, np.float32),
                             jnp.asarray(ref_b1_grad, np.float32),
-                            dtype=jnp.bfloat16)
+                            dtype=FP8Helper.BWD_DTYPE)
 
 
 @pytest.fixture(name="random_inputs")
