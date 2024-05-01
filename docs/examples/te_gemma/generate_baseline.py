@@ -20,7 +20,7 @@ model = init_baseline_model(hyperparams).cuda()
 model = model.to(torch.bfloat16)
 
 tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-inputs = tokenizer(["I love when"] * 32, return_tensors="pt", padding=True)
+inputs = tokenizer(["Some random initial str ", "Another string ... "] * 32, return_tensors="pt", padding=True)
 
 inputs['input_ids'] = inputs['input_ids'].cuda()
 inputs['attention_mask'] = inputs['attention_mask'].cuda()
@@ -29,9 +29,11 @@ inputs['attention_mask'] = inputs['attention_mask'].cuda()
 # Początek pomiaru czasu
 start_time = time.time()
 
+import pdb 
+pdb.set_trace()
 outputs = model.generate(
     **inputs,
-    max_new_tokens=40
+    max_new_tokens=1000
 )
 
 # Koniec pomiaru czasu
@@ -42,7 +44,7 @@ duration = end_time - start_time
 
 
 
-print(outputs)
+print(duration)
 
 # Decode the output tensor to text
 generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)

@@ -13,11 +13,6 @@ from transformers.generation import *
 from transformers.generation.utils import *
 
 import torch
-from torch import nn
-from torch.utils.cpp_extension import load
-
-
-
 import transformer_engine as te
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
 from transformer_engine.pytorch.fp8 import fp8_model_init
@@ -28,13 +23,6 @@ from transformers.models.gemma.modeling_gemma import GemmaModel, GemmaForCausalL
 from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
 from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
-
-cuda = load(
-    name='attention_copy',
-    sources=['attention_copy.cu'],
-    verbose=True
-)
-
 
 @contextmanager
 def replace_decoder(te_decoder_cls):
@@ -71,7 +59,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             fuse_qkv_params=config.fuse_qkv_params,
             normalization="RMSNorm",
             activation="geglu",
-            attn_input_format="bshd",
+            attn_input_format=config.qkv_format,
             num_gqa_groups=config.num_key_value_heads,
             attention_hidden_size=4096,
             layer_number=(layer_idx+1)
@@ -91,73 +79,36 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
         forward pass of the `TransformerLayer`. Also, make sure the output
         format matches the output of the HF's `GemmaDecoderLayer`.
         """
-        return (super().forward(hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb, inference_params=inference_params, self_attn_mask_type=self_attn_mask_type),)
+        return (super().forward(
+            hidden_states, 
+            attention_mask=attention_mask, 
+            rotary_pos_emb=self.te_rope_emb, 
+            inference_params=inference_params, 
+            self_attn_mask_type=self_attn_mask_type
+            ),)
 
 class TeGraphed(torch.nn.Module):
-    def __init__(self, model, lm_head, inference_params, normalizer, generation_config, thd=True):
+    def __init__(self, model, lm_head, inference_params, dtype, generation_config):
         super().__init__()
         self.model = model
         self.inference_params = inference_params
-        self.inference_params.thd = thd
-        self.thd=thd
-        self.normalizer = normalizer 
+        self.normalizer = torch.tensor(self.model.config.hidden_size**0.5, dtype=dtype) 
         self.generation_config = generation_config
         self.lm_head = lm_head
 
-        
-        self.attn_mask =  torch.ones([inference_params.max_batch_size, inference_params.max_sequence_length]).to(dtype=torch.bool)
-
-    def forward(self,
-                hidden_states, 
-                unfinished_sequences, 
-                seq_len, 
-                vl_space, 
-                kl_space, 
-                ql_space,
-                seqlens_q, 
-                cu_seqlens_q, 
-                cu_seqlens_kv, 
-                seq_offsets_q, 
-                seq_offsets_k, 
-                seq_offsets_v, 
-                position_embedding_matrix,
-                k_pos_emb,
-                q_pos_emb,
-                *args
-                ):
+    def forward(self, hidden_states, unfinished_sequences):
         hidden_states.data[:] = hidden_states.data[:] * self.normalizer
-        inference_params = InferenceParams(self.inference_params.max_batch_size, self.inference_params.max_sequence_length)
-        inference_params.thd = self.thd
-        inference_params.seq_len = seq_len
-        inference_params.value_layer = vl_space
-        inference_params.key_layer = kl_space
-        inference_params.query_layer = ql_space
-        inference_params.seqlens_q = seqlens_q
-        inference_params.cu_seqlens_q = cu_seqlens_q
-        inference_params.cu_seqlens_kv = cu_seqlens_kv
-        inference_params.seq_offsets_q = seq_offsets_q
-        inference_params.seq_offsets_k = seq_offsets_k
-        inference_params.seq_offsets_v = seq_offsets_v
-        inference_params.position_embedding_matrix = position_embedding_matrix
-        inference_params.k_pos_emb = k_pos_emb
-        inference_params.q_pos_emb = q_pos_emb
-
-        assert len(args) == 28 * 2
-
-
-        for i in range(0, len(args), 2):
-            inference_params.key_value_memory_dict[i // 2 + 1] = (args[i], args[i + 1])
 
         for decoder_layer in self.model.layers:
             hidden_states.copy_(decoder_layer(
                         hidden_states,
-                        inference_params=inference_params,
+                        inference_params=self.inference_params,
                         self_attn_mask_type='padding',
                         attention_mask=None
                     )[0])
             
 
-        seq_len.copy_(seq_len + 1)
+        self.inference_params.seq_len.copy_(self.inference_params.seq_len + 1)
 
         hidden_states.copy_(self.model.norm(hidden_states))
         logits = self.lm_head(hidden_states)
@@ -167,11 +118,10 @@ class TeGraphed(torch.nn.Module):
 
         # Sequences, which are finished should contain padding - taken from huggingface transformers.
         next_tokens = next_tokens * unfinished_sequences + self.generation_config.pad_token_id * (1 - unfinished_sequences)
-
         unfinished_sequences.copy_(unfinished_sequences & ~(next_tokens == self.generation_config.eos_token_id))
-        
         hidden_states.copy_(self.model.embed_tokens(next_tokens).unsqueeze(1))
-        return next_tokens, logits
+
+        return next_tokens
 
 class TEGemmaForCausalLM:
     """
@@ -193,12 +143,12 @@ class TEGemmaForCausalLM:
         return gemma_for_causal_lm
 
     @classmethod
-    def from_pretrained_local(cls, pretrained_model_name_or_path, *args, config, fp8_init=False, **kwargs):
+    def from_pretrained_local(cls, pretrained_model_name_or_path, *args, config, fp8_init=False, qkv_format="bshd", **kwargs):
         """
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
-        
+        config.qkv_format = qkv_format
         with fp8_model_init(fp8_init):
             vanilla_model = cls(config)
         is_local = os.path.isdir(pretrained_model_name_or_path)
@@ -236,35 +186,35 @@ class TEGemmaForCausalLM:
 
         return vanilla_model
     
-    @torch.no_grad()
-    def generate(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        generation_config: Optional[GenerationConfig] = None,
-        max_new_tokens = 0,
-        use_cuda_graphs = False,
-        **kwargs,
+    @staticmethod
+    def _padding_to_beginning(inputs, lengths):
+        """
+        Gets the tensor with sequence padded from the beginning and
+        return tensor padded from its end.
+
+        Parameters
+        ----------
+        inputs : Tensor, tensor with shape [b, s] containing token numbers. 
+                 It's padded from the beggining.
+        lengths: Tensor, tensor with shape [s] with lengths of the sequences.
+
+        """
+        max_seq_len = torch.max(lengths)
+        batch_size, max_seq_len = inputs.shape
+        new_input_ids = inputs.clone()
+        for i in range(batch_size):
+            new_input_ids[i,:lengths[i]] = inputs[i, (max_seq_len-lengths[i]):max_seq_len]
+            new_input_ids[i,lengths[i]:] = inputs[i, 0:(max_seq_len-lengths[i])]
+        inputs.copy_(new_input_ids)
+    
+    def _generate_context_phase(
+            self,
+            input_ids,
+            inference_params,
+            pad_token_id,
+            eos_token_id,
+            unfinished_sequences
     ):
-        
-        batch_size, seq_len = input_ids.shape
-        generation_config, _ = self._prepare_generation_config(generation_config, **kwargs)
-        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
-
-        # inference_params object is a cache, where keys and values of previous tokens are stored
-        inference_params = te.pytorch.InferenceParams(
-            max_batch_size=batch_size, 
-            max_sequence_length=max(128, input_ids.shape[1] + max_new_tokens)
-        )
-
-        # mask has shape [batch_size, num_heads, 1, max_seq_len] and contains False 
-        # when coressponding token is padding and True otherwise.
-        pad_attention_mask = input_ids.ne(generation_config.pad_token_id).unsqueeze(1).unsqueeze(2)
-        
-        #############################################################################################
-        #                                        Encode part                                        #
-        #############################################################################################
-
-
 
         hidden_states = self.model.embed_tokens(input_ids)
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
@@ -274,188 +224,98 @@ class TEGemmaForCausalLM:
         for decoder_layer in self.model.layers:
             hidden_states = decoder_layer(
                 hidden_states,
-                # In the case of arbiutrary mask, the meaning of True and False is switched, so negation is needed.
-                attention_mask=pad_attention_mask,
+                attention_mask=None,
                 self_attn_mask_type="padding_causal",
                 inference_params=inference_params
             )[0]
 
+
         hidden_states = self.model.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         logits = logits.float()
-        logits = logits[:, -1, :]
-        next_tokens = torch.argmax(logits, dim=-1)
+        logits = logits[torch.arange(logits.size(0)), inference_params.seq_len - 1, :]
+        next_tokens = torch.argmax(logits, dim=1)
+
         # Sequences, which are finished should contain padding - taken from huggingface transformers.
-        next_tokens = next_tokens * unfinished_sequences + generation_config.pad_token_id * (1 - unfinished_sequences)
+        next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
         output_tokens.append(next_tokens)
 
-        unfinished_sequences = unfinished_sequences & ~(next_tokens == generation_config.eos_token_id)
-
+        unfinished_sequences = unfinished_sequences & ~(next_tokens == eos_token_id)
         hidden_states = self.model.embed_tokens(next_tokens).unsqueeze(1)
-        lengths = torch.sum(pad_attention_mask, dim=-1).squeeze()
 
-        
-        def process(x):
-            """
-            Args:
-                x: Tensor with shape [s, b, h, d], where s is sequence length, b is batch size, h is number of heads, and d is hidden dimension.
-                l: List of integers representing the actual lengths of each sequence in the batch before padding.
-
-            Returns:
-                torch.Tensor: Tensor with switched contents such that padded zeros are moved to the end of the sequence.
-            """
-            s1, b, h, d = x.shape
-            s = torch.max(lengths)
-            new_x = torch.zeros_like(x)
-            
-            for i in range(b):
-                seq_length = lengths[i]
-                
-                # Check if the sequence length is not the full length of the sequence dimension
-                if seq_length < s:
-                    # Place the original data to the end part of the new tensor
-                    new_x[:seq_length, i, :, :] = x[s - seq_length:s, i, :, :]
-                    # Place the padding at the beginning of the new tensor
-                    new_x[seq_length:, i, :, :] = 0
-                else:
-                    # If seq_length is the full length, just copy the entire sequence as is
-                    new_x[:, i, :, :] = x[:, i, :, :]
-
-            return new_x.permute((1, 0, 2, 3)).contiguous().cuda()
-
-        inference_params.seq_len = lengths.to(torch.int32)
-        seq_len_offset = torch.max(lengths).item() 
-
-
-        seqlens_q = torch.zeros((batch_size), dtype=torch.int32).cuda()
-        cu_seqlens_q = torch.zeros((batch_size + 1), dtype=torch.int32).cuda()
-        cu_seqlens_kv = torch.zeros((batch_size + 1), dtype=torch.int32).cuda()
-        seq_offsets_q = torch.zeros((batch_size + 1), dtype=torch.int32).cuda()
-        seq_offsets_k = torch.zeros((batch_size + 1), dtype=torch.int32).cuda()
-        seq_offsets_v = torch.zeros((batch_size + 1), dtype=torch.int32).cuda()
-
-
-
-
-        
         for k, v in inference_params.key_value_memory_dict.items():
-            key_layer = process(v[0])
-            value_layer = process(v[1])
+            key_layer = v[0].permute((1, 0, 2, 3)).contiguous().cuda()
+            value_layer = v[1].permute((1, 0, 2, 3)).contiguous().cuda()
             inference_params.key_value_memory_dict[k] = (key_layer, value_layer)
+        
+        return hidden_states, output_tokens
 
-        #############################################################################################
-        #                                      Generate part                                        #
-        #############################################################################################
-        print("generate part")
+    
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        max_new_tokens = 0,
+        use_cuda_graphs = False,
+        **kwargs,
+    ): 
+        batch_size, _ = input_ids.shape
+        generation_config, _ = self._prepare_generation_config(generation_config, **kwargs)
+        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+
+        # inference_params object is a cache, where keys and values of previous tokens are stored
+        inference_params = te.pytorch.InferenceParams(
+            max_batch_size=batch_size, 
+            max_sequence_length=input_ids.shape[1] + max_new_tokens
+        )
+
+        # lengths is a tensor of shape [s] representing lengths of sequences.
+        lengths = torch.sum(input_ids.ne(generation_config.pad_token_id), dim=-1).squeeze()
+        inference_params.seq_len = lengths.to(torch.int32).clone().cuda()
+        
+        TEGemmaForCausalLM._padding_to_beginning(input_ids, lengths)
+        
+        hidden_states, output_tokens = TEGemmaForCausalLM._generate_context_phase(
+            self,
+            input_ids,
+            inference_params,
+            generation_config.pad_token_id,
+            generation_config.eos_token_id,
+            unfinished_sequences
+        )
 
 
         graphed_generator = TeGraphed(
             lm_head=self.lm_head,
             model=self.model, 
             inference_params=inference_params, 
-            normalizer=normalizer, 
             generation_config=generation_config, 
-            thd=True
+            dtype=hidden_states.dtype,
         )
 
-        tensor_pointers = [(kc, vc) for kc, vc in inference_params.key_value_memory_dict.values()]
-        tensor_pointers = [element for tuple_ in tensor_pointers for element in tuple_]
+        args = (hidden_states, unfinished_sequences)
 
-        copy_hidden = hidden_states.clone()
-        copy_unfinished_sequences = unfinished_sequences.clone()
-        copy_tensor_pointers = [t.clone() for t in tensor_pointers]
-        copy_seq_len = inference_params.seq_len.clone()
-
-        vl_space = torch.zeros((batch_size, 1, 16, 256)).to(torch.bfloat16).cuda()
-        kl_space = torch.zeros((batch_size, 1, 16, 256)).to(torch.bfloat16).cuda()
-        ql_space = torch.zeros((batch_size, 1, 16, 256)).to(torch.bfloat16).cuda()
-        q_pos_emb = torch.zeros((batch_size, 1, 1, 256)).to(torch.float32).cuda()
-        k_pos_emb = torch.zeros((batch_size, 1, 1, 256)).to(torch.float32).cuda()
-
-
-        te_rope = RotaryPositionEmbedding(256)
-        position_embedding_matrix = te_rope(8192).to(torch.float32).cuda()
-        
-        
-        graphed_layers = None
+        saved_args = [arg.clone() for arg in args] # Warmup iterations of graph will change the arguments, we want to revert that.
         if use_cuda_graphs:
             fp8_format = Format.HYBRID
             fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
-
-            print("recording...")
             graphed_layers = te.pytorch.make_graphed_callables(
                 graphed_generator, 
-                (
-                    hidden_states, 
-                    unfinished_sequences, 
-                    inference_params.seq_len, 
-                    vl_space, 
-                    kl_space, 
-                    ql_space,
-                    seqlens_q, 
-                    cu_seqlens_q, 
-                    cu_seqlens_kv, 
-                    seq_offsets_q, 
-                    seq_offsets_k, 
-                    seq_offsets_v, 
-                    position_embedding_matrix,
-                    k_pos_emb,
-                    q_pos_emb,
-                    *tensor_pointers
-                ), 
+                args, 
                 fp8_enabled=True, 
                 fp8_recipe=fp8_recipe, 
-                allow_unused_input=True
-                )
-            print("recorded...")
-        hidden_states.data[:] = copy_hidden
-        unfinished_sequences.data[:] = copy_unfinished_sequences
-        inference_params.seq_len.data[:] = copy_seq_len
-
-
-        i = 0
-        for t in tensor_pointers:
-            t.data[:] = copy_tensor_pointers[i]
-            i = i + 1
+                allow_unused_input=True,
+                num_warmup_iters=10
+            )
+            
+        for i in range(len(saved_args)):
+            args[i].copy_(saved_args[i])
+        inference_params.seq_len.copy_(lengths.to(torch.int32))
 
         for i in range(max_new_tokens):
-            next_tokens, logits = graphed_layers(
-                    hidden_states, 
-                    unfinished_sequences, 
-                    inference_params.seq_len, 
-                    vl_space, 
-                    kl_space, 
-                    ql_space,
-                    seqlens_q, 
-                    cu_seqlens_q, 
-                    cu_seqlens_kv, 
-                    seq_offsets_q, 
-                    seq_offsets_k, 
-                    seq_offsets_v, 
-                    position_embedding_matrix,
-                    k_pos_emb,
-                    q_pos_emb,
-                    *tensor_pointers
-                ) if use_cuda_graphs else graphed_generator(
-                    hidden_states, 
-                    unfinished_sequences, 
-                    inference_params.seq_len, 
-                    vl_space, 
-                    kl_space, 
-                    ql_space,
-                    seqlens_q, 
-                    cu_seqlens_q, 
-                    cu_seqlens_kv, 
-                    seq_offsets_q, 
-                    seq_offsets_k, 
-                    seq_offsets_v, 
-                    position_embedding_matrix,
-                    k_pos_emb,
-                    q_pos_emb,
-                    *tensor_pointers
-                )
+            next_tokens = graphed_layers(*args) if use_cuda_graphs else graphed_generator(*args)
             output_tokens.append(next_tokens.clone())
-            seq_len_offset += 1
 
         result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
         return result

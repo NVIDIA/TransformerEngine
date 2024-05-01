@@ -1608,3 +1608,60 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
     return qkv;
 }
+
+
+extern "C"
+__global__ void attn_copy(__nv_bfloat16* A, int* seq_len, __nv_bfloat16* B, int max_seq_len, int b, int s) {
+    for(int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+        int per_block = s / blockDim.x;
+        int remainder = s % blockDim.x;
+        int copy_block_offset_begin = per_block * threadIdx.x + min(threadIdx.x, remainder);
+
+        int offset = seq_len[batch_idx];
+
+        __nv_bfloat16* begin_A_copy = A + max_seq_len * s * batch_idx + s * offset; 
+        __nv_bfloat16* begin_B_copy = B + s * batch_idx;
+
+        int limit = copy_block_offset_begin + per_block + (threadIdx.x < remainder ? 1 : 0);
+        
+        for(int i = copy_block_offset_begin; i < limit; i++) {
+            *(begin_A_copy + i) = *(begin_B_copy + i);
+        }
+    } 
+}
+
+extern "C"
+__global__ void gv(float* src, int* seq_len, float* dst,  int d, int b) {
+    // src [s, 1, 1, d]
+    // dst [b]
+    for(int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+        int per_block = d / blockDim.x;
+        int remainder = d % blockDim.x;
+        int copy_block_offset_begin = per_block * threadIdx.x + min(threadIdx.x, remainder);
+
+        int offset = seq_len[batch_idx];
+
+        float* begin_src_copy = src + d * offset; 
+        float* begin_dst_copy = dst + d * batch_idx;
+
+        int limit = copy_block_offset_begin + per_block + (threadIdx.x < remainder ? 1 : 0);
+        
+        for(int i = copy_block_offset_begin; i < limit; i++) {
+            *(begin_dst_copy + i) = *(begin_src_copy + i);
+        }
+    } 
+}
+
+
+
+void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B, int max_seq_len, int b, int s) {
+    attn_copy<<<16, 32, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<__nv_bfloat16*>(A.data_ptr<torch::BFloat16>()),
+                          seq_len.data_ptr<int>(),
+                          reinterpret_cast<__nv_bfloat16*>(B.data_ptr<torch::BFloat16>()), max_seq_len, b, s);
+}
+
+void get_values(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B,  int d, int b) {
+    gv<<<16, 32, 0, at::cuda::getCurrentCUDAStream()>>>(A.data_ptr<float>(),
+                          seq_len.data_ptr<int>(),
+                          B.data_ptr<float>(),  d, b);
+}

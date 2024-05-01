@@ -19,7 +19,7 @@ from transformer_engine.common.recipe import Format, DelayedScaling
 
 hyperparams.model_name = "../../../../gemma-weights"
 hyperparams.fuse_qkv_params = True
-model = init_te_gemma_model(hyperparams, fp8_model_init=True).cuda()
+model = init_te_gemma_model(hyperparams, fp8_model_init=True, qkv_format="thd").cuda()
 
 print("Loading model")
 model_state_dict = torch.load('model_fp8_state_dict.pth')
@@ -27,7 +27,7 @@ model.load_state_dict(model_state_dict)
 print("Model loaded")
 
 tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-inputs = tokenizer(["I love when"] * 32, return_tensors="pt", padding=True)
+inputs = tokenizer(["Some random initial str ", "Another string ... "] * 32, return_tensors="pt", padding=True)
 
 inputs['input_ids'] = inputs['input_ids'].cuda()
 inputs['attention_mask'] = inputs['attention_mask'].cuda()
@@ -47,7 +47,7 @@ with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
             model.eval()
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=40,
+                max_new_tokens=1000,
                 use_cuda_graphs=True
             )
 

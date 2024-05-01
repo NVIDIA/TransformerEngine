@@ -182,6 +182,9 @@ std::vector<at::Tensor> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
+void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B, int max_seq_len, int b, int s);
+void get_values(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B,  int d, int b);
+
 /***************************************************************************************************
  * GEMM
  **************************************************************************************************/

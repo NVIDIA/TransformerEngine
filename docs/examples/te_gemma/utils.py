@@ -87,7 +87,7 @@ def init_baseline_model(hyperparams):
 
     return model
 
-def init_te_gemma_model(hyperparams, fp8_model_init=False):
+def init_te_gemma_model(hyperparams, fp8_model_init=False, qkv_format="thd"):
     # Init the model
     from te_gemma import TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
@@ -98,6 +98,7 @@ def init_te_gemma_model(hyperparams, fp8_model_init=False):
             config=config,
             torch_dtype=torch.bfloat16,
             fp8_init=fp8_model_init,
+            qkv_format=qkv_format
     )
     # Needed for the cases when using TEGemmaForCausalLM
 
