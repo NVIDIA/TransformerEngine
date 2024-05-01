@@ -10,7 +10,7 @@ target_include_directories(transformer_engine_userbuffers PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Configure dependencies
-find_package(MPI REQUIRED)
+find_package(MPI REQUIRED COMPONENTS CXX)
 target_link_libraries(transformer_engine_userbuffers PUBLIC
                       CUDA::cudart
                       CUDA::cuda_driver
