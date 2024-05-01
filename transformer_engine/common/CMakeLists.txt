@@ -136,11 +136,27 @@ install(TARGETS transformer_engine DESTINATION .)
 # PyBind11 Extensions
 #######################################################################################
 find_package(pybind11 CONFIG REQUIRED)
-pybind11_add_module(transformer_engine_common_cpp pybind.cpp)
+pybind11_add_module(transformer_engine_common_cpp
+                    gemm/cublaslt_gemm.cu
+                    userbuffers/ipcsocket.cc
+                    userbuffers/userbuffers.cu
+                    userbuffers/userbuffers-host.cpp
+                    transformer_engine.cpp
+                    pybind.cpp)
 target_include_directories(transformer_engine_common_cpp PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
-set(transformer_engine_common_cpp LIBS)
-target_link_libraries(transformer_engine_common_cpp PUBLIC transformer_engine)
+target_include_directories(transformer_engine_common_cpp PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+
+set(transformer_engine_common_cpp_LIBS)
+list(APPEND transformer_engine_common_cpp_LIBS
+     CUDA::cublas
+     CUDA::cuda_driver
+     CUDA::cudart
+     CUDA::nvrtc
+     CUDA::nvToolsExt
+     transformer_engine)
+target_link_libraries(transformer_engine_common_cpp PUBLIC ${transformer_engine_common_cpp_LIBS})
 
 # Check for DLPack headers
 set(DLPACK_FRONTEND_INCLUDE_DIR

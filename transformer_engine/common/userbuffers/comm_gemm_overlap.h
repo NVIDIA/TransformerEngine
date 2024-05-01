@@ -25,17 +25,24 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
+// Hacky type restriction to comply with userbuffers
+#if __CUDA_ARCH__ >= 800
+#include <cuda_bf16.h>
+#define half nv_bfloat16
+#else
+#include <cuda_fp16.h>
+#endif
+
 namespace py = pybind11;
 
-namespace transformer_engine {
+static const size_t NVTE_MAX_USERBUFFER_STREAMS = 3;
 
-namespace userbuffers {
+enum class NVTE_Comm_Overlap_Type {
+  REDUCE_SCATTER = 0,
+  ALL_GATHER = 1
+};
 
-static const size_t _NUM_MAX_UB_STREAMS = 3;
-
-enum class CommGemmOverlapType { RS = 0, AG = 1 };
-
-enum class CommGemmOverlapAlgo {
+enum class NVTE_Comm_Overlap_Algo {
   BULK_OVERLAP_AG = 0,
   BULK_OVERLAP_RS = 1,
   SPLIT_PIPELINED_AG_P2P = 2,
@@ -46,7 +53,11 @@ enum class CommGemmOverlapAlgo {
   ATOMIC_GEMM_RS_P2P = 7
 };
 
-struct CommGemmOverlapBase {
+namespace transformer_engine {
+
+namespace userbuffers {
+
+struct PYBIND11_EXPORT CommGemmOverlapBase {
   static inline communicator *_ub_comm{nullptr};
   static inline bool _comm_created{false};
 
@@ -164,7 +175,7 @@ struct CommGemmOverlapBase {
     _buffer_registered = true;
   }
 
-  void register_gpu_buffer(py::capsule &gpubuf, bool alloc = false) {
+  void register_gpu_buffer(py::capsule *gpubuf, bool alloc = false) {
     void *gpuptr;
     size_t bytes = capsule_to_buffer(gpubuf, &gpuptr);
     register_gpu_buffer(&gpuptr, bytes, alloc);
@@ -185,7 +196,7 @@ struct CommGemmOverlapBase {
   bool is_p2p_overlap() { return _is_p2p; }
 };  // CommGemmOverlapBase
 
-struct CommGemmOverlap : CommGemmOverlapBase {
+struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
 
@@ -505,7 +516,7 @@ struct CommGemmOverlap : CommGemmOverlapBase {
   }  // split_gemm_overlap_rs
 };  //  CommGemmOverlap
 
-struct CommGemmOverlapP2P : CommGemmOverlapBase {
+struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   bool _reduce_scatter{false};
   bool _aggregate{false};
   bool _is_reduce_scatter{false};
@@ -905,11 +916,15 @@ struct CommGemmOverlapP2P : CommGemmOverlapBase {
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(ubuf->dtype(), in_type,
-        reduce_bf16_out<in_type>(
+      if (ubuf->dtype() == DType::kFloat32) {
+        reduce_bf16_out<float>(
           reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
           _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
-      )
+      } else {
+        reduce_bf16_out<half>(
+            reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
+            _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
+      }
     }
   }  // atomic_gemm_overlap_rs
 
@@ -993,11 +1008,15 @@ struct CommGemmOverlapP2P : CommGemmOverlapBase {
                                             _tp_size, ubuf_chunks[_tp_size - 1].numel(),
                                             stream_main);
     } else {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(ubuf->dtype(), in_type,
-        reduce_bf16_out<in_type>(
+      if (ubuf->dtype() == DType::kFloat32) {
+        reduce_bf16_out<float>(
           reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
           _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
-      )
+      } else {
+        reduce_bf16_out<half>(
+            reinterpret_cast<void *>(reduce_buf_ptr), reinterpret_cast<void *>(rs_out_ptr),
+            _tp_size, static_cast<int>(ubuf_chunks[_tp_size - 1].numel()), stream_main);
+      }
     }
 
     for (int i = 0; i < _stream_compute.size(); i++) {

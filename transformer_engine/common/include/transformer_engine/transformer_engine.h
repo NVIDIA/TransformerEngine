@@ -94,13 +94,13 @@ NVTETensor nvte_create_tensor(void *dptr,
  */
 void nvte_destroy_tensor(NVTETensor tensor);
 
-/*! \brief Get a tensor's data type.
+/*! \brief Get a raw pointer to the tensor's data.
  *
  *  \param[in] tensor Tensor.
  *
- *  \return A data type of the input tensor.
+ *  \return A raw pointer to tensor's data.
  */
-NVTEDType nvte_tensor_type(const NVTETensor tensor);
+void *nvte_tensor_data(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data shape.
  *
@@ -110,13 +110,54 @@ NVTEDType nvte_tensor_type(const NVTETensor tensor);
  */
 NVTEShape nvte_tensor_shape(const NVTETensor tensor);
 
-/*! \brief Get a raw pointer to the tensor's data.
+/*! \brief Get a tensor's number of dimensions.
  *
  *  \param[in] tensor Tensor.
  *
- *  \return A raw pointer to tensor's data.
+ *  \return Number of tensor dimensions.
  */
-void *nvte_tensor_data(const NVTETensor tensor);
+size_t nvte_tensor_ndims(const NVTETensor tensor);
+
+/*! \brief Get the size of a specific tensor dimension.
+ *
+ *  \param[in] tensor Tensor.
+ *  \param[in] size_t Dimension index.
+ *
+ *  \return Size of the tensor at the specified dimension.
+ */
+size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
+
+/*! \brief Get a tensor's total number of elements.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Number of elements in the tensor.
+ */
+size_t nvte_tensor_numel(const NVTETensor tensor);
+
+/*! \brief Get a tensor's total number of elements.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Number of elements in the tensor.
+ */
+size_t nvte_tensor_numel(const NVTETensor tensor);
+
+/*! \brief Get the byte size for the tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Byte size of the tensor's data type.
+ */
+size_t nvte_tensor_element_size(const NVTETensor tensor);
+
+/*! \brief Get a tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A data type of the input tensor.
+ */
+NVTEDType nvte_tensor_type(const NVTETensor tensor);
 
 /*! \brief Get a pointer to the tensor's amax data.
  *
@@ -272,73 +313,110 @@ class TensorWrapper {
    *
    *  \return NVTETensor held by this TensorWrapper.
    */
-  NVTETensor data() const noexcept;
+  NVTETensor data() const noexcept {
+    return tensor_;
+  }
 
   /*! \brief Get the shape of this TensorWrapper.
    *
    *  \return Shape of this TensorWrapper.
    */
-  const NVTEShape shape() const noexcept;
-
-  /*! \brief Get the data type of this TensorWrapper.
-   *
-   *  \return Data type of this TensorWrapper.
-   */
-  DType dtype() const noexcept;
-
-  /*! \brief Get a raw pointer to the tensor's data.
-   *
-   *  \return A raw pointer to tensor's data.
-   */
-  void *dptr() const noexcept;
-
-  /*! \brief Get a pointer to the tensor's amax data.
-   *
-   *  \return A pointer to tensor's amax data.
-   */
-  float *amax() const noexcept;
-
-  /*! \brief Get a pointer to the tensor's scale data.
-   *
-   *  \return A pointer to tensor's scale data.
-   */
-  float *scale() const noexcept;
-
-  /*! \brief Get a pointer to the tensor's inverse of scale data.
-   *
-   *  \return A pointer to tensor's inverse of scale data.
-   */
-  float *scale_inv() const noexcept;
+  const NVTEShape shape() const noexcept {
+    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    return nvte_tensor_shape(tensor_);
+  }
 
   /*! \brief Get the size of this TensorWrapper in the given dimension.
-  *
-  *  \return Size of this TensorWrapper in given dimension.
-  */
-  size_t size(size_t dim) const;
+   *
+   *  \param[in] size_t Dimension index.
+   *
+   *  \return Size of this TensorWrapper in given dimension.
+   */
+  size_t size(const size_t dim) const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_size(tensor_, dim);
+  }
 
   /*! \brief Get the number of dimensions for this TensorWrapper.
     *
     *  \return Number of dimensions for this TensorWrapper.
     */
-  size_t ndim() const noexcept;
+  size_t ndim() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_ndims(tensor_);
+  }
 
   /*! \brief Get the number of elements in the tensor.
     *
     *  \return Number of elements in the tensor.
     */
-  size_t numel() const noexcept;
+  size_t numel() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_numel(tensor_);
+  }
 
   /*! \brief Get the tensor's element size in bytes.
     *
     *  \return Element size in bytes.
     */
-  size_t element_size() const noexcept;
+  size_t element_size() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_element_size(tensor_);
+  }
 
   /*! \brief Get the tensor's total size in bytes.
     *
     *  \return Total tensor size in bytes.
     */
-  size_t bytes() const noexcept;
+  size_t bytes() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+  }
+
+  /*! \brief Get the data type of this TensorWrapper.
+   *
+   *  \return Data type of this TensorWrapper.
+   */
+  DType dtype() const noexcept {
+    if (tensor_ == nullptr) return DType::kNumTypes;
+    return static_cast<DType>(nvte_tensor_type(tensor_));
+  }
+
+  /*! \brief Get a raw pointer to the tensor's data.
+   *
+   *  \return A raw pointer to tensor's data.
+   */
+  void * dptr() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_data(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's amax data.
+   *
+   *  \return A pointer to tensor's amax data.
+   */
+  float * amax() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_amax(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's scale data.
+   *
+   *  \return A pointer to tensor's scale data.
+   */
+  float * scale() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_scale(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's inverse of scale data.
+   *
+   *  \return A pointer to tensor's inverse of scale data.
+   */
+  float * scale_inv() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_scale_inv(tensor_);
+  }
 
  private:
   /*! \brief Wrapped NVTETensor. */

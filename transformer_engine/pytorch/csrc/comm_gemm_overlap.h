@@ -68,7 +68,7 @@ TensorWrapper torch_tensor_to_te(
                        reinterpret_cast<float *>(scale_inv));
 }
 
-struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
+struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
   torch::Tensor _counters;
   torch::Tensor _ubuf;
   torch::Tensor _ubuf_scale_inv;
@@ -126,8 +126,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
     TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
-    CommGemmOverlapType comm_type_ = static_cast<CommGemmOverlapType>(comm_type);
-    if (comm_type_ == CommGemmOverlapType::AG) {
+    NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
+    if (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) {
       CommGemmOverlap::bulk_gemm_overlap_ag(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
       &D_, &pre_gelu_out_, &workspace_, &ubuf_,
@@ -142,12 +142,12 @@ struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
 
     // Get the current userbuf offset
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
-    if (comm_type_ == CommGemmOverlapType::RS) {
+    if (comm_type_ == NVTE_Comm_Overlap_Type::REDUCE_SCATTER) {
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
     }
 
     // Generate output tensor from userbuf data pointer
-    int output_c_dim0 = (comm_type_ == CommGemmOverlapType::AG) ? _ubuf.size(0)
+    int output_c_dim0 = (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) ? _ubuf.size(0)
                                                          : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     torch::Tensor output_tensor = torch::from_blob(
@@ -234,8 +234,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
   */
   void copy_input_to_ubuf(torch::Tensor input, int comm_type) {
     char *ubuf_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
-    CommGemmOverlapType comm_type_ = static_cast<CommGemmOverlapType>(comm_type);
-    if (comm_type_ == CommGemmOverlapType::AG) {
+    NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
+    if (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) {
       if ((input.numel() * _tp_size) != _ubuf.numel() ||
           input.element_size() != _ubuf.element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
@@ -257,12 +257,13 @@ struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
 
   torch::Tensor& get_ubuf_output(int comm_type) {
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
-    CommGemmOverlapType comm_type_ = static_cast<CommGemmOverlapType>(comm_type);
-    if (comm_type_ != CommGemmOverlapType::AG && comm_type_ != CommGemmOverlapType::RS)
+    NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
+    if ((comm_type_ != NVTE_Comm_Overlap_Type::ALL_GATHER) &&
+        (comm_type_ != NVTE_Comm_Overlap_Type::REDUCE_SCATTER))
       NVTE_ERROR("Invalid comm_type");
-    if (comm_type_ == CommGemmOverlapType::RS)
+    if (comm_type_ == NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
-    int output_c_dim0 = (comm_type_ == CommGemmOverlapType::AG) ? _ubuf.size(0)
+    int output_c_dim0 = (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) ? _ubuf.size(0)
                                                                 : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     torch::Tensor output_tensor = torch::from_blob(
@@ -278,7 +279,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
   bool is_fp8_ubuf() { return (_ubuf.element_size() == 1); }
 };  // UbufCommOverlap
 
-struct UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOverlapP2P {
+struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOverlapP2P {
   torch::Tensor _counters;
   torch::Tensor _ubuf_scale_inv;
   torch::Tensor _ubuf;
@@ -510,12 +511,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOverlapP2P {
 
   torch::Tensor get_ubuf_output(int comm_type) {
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
-    CommGemmOverlapType _comm_type = static_cast<CommGemmOverlapType>(comm_type);
-    if (_comm_type != CommGemmOverlapType::AG && _comm_type != CommGemmOverlapType::RS)
+    NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
+    if ((comm_type_ != NVTE_Comm_Overlap_Type::ALL_GATHER) &&
+        (comm_type_ != NVTE_Comm_Overlap_Type::REDUCE_SCATTER))
       NVTE_ERROR("Invalid comm_type");
-    if (_comm_type == CommGemmOverlapType::RS)
+    if (comm_type_ == NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _self_chunk_id * _ubuf.element_size();
-    int output_c_dim0 = (_comm_type == CommGemmOverlapType::AG) ? _ubuf.size(0)
+    int output_c_dim0 = (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) ? _ubuf.size(0)
                                                                 : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());

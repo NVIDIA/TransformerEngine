@@ -134,13 +134,13 @@ py::capsule buffer_to_capsule(void *data, int64_t bytes, int device_id = -1, int
   return dlpack_to_capsule(buffer_to_dlpack<T>(data, bytes, device_id, dtype));
 }
 
-DLManagedTensor * capsule_to_dlpack(py::capsule &capsule) {
-  if (strcmp(capsule.name(), "used_dltensor") != 0) {
+DLManagedTensor * capsule_to_dlpack(py::capsule *capsule) {
+  if (strcmp(capsule->name(), "used_dltensor") != 0) {
     // something else is already using the data in the capsule
     return nullptr;
   }
-  capsule.set_name("used_dltensor");
-  return capsule.get_pointer<DLManagedTensor>();
+  capsule->set_name("used_dltensor");
+  return capsule->get_pointer<DLManagedTensor>();
 }
 
 int64_t dlpack_to_buffer(DLManagedTensor *dlmt, void **buffer) {
@@ -152,7 +152,7 @@ int64_t dlpack_to_buffer(DLManagedTensor *dlmt, void **buffer) {
   return bytes;
 }
 
-int64_t capsule_to_buffer(py::capsule &capsule, void **buffer) {
+int64_t capsule_to_buffer(py::capsule *capsule, void **buffer) {
   return dlpack_to_buffer(capsule_to_dlpack(capsule), buffer);
 }
 

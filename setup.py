@@ -454,12 +454,18 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-        # We need to compile system.cpp because the pytorch extension uses
-        # transformer_engine::getenv. This is a workaround to avoid direct
-        # linking with libtransformer_engine.so, as the pre-built PyTorch
-        # wheel from conda or PyPI was not built with CXX11_ABI, and will
-        # cause undefined symbol issues.
+        # # We need to compile system.cpp because the pytorch extension uses
+        # # transformer_engine::getenv. This is a workaround to avoid direct
+        # # linking with libtransformer_engine.so, as the pre-built PyTorch
+        # # wheel from conda or PyPI was not built with CXX11_ABI, and will
+        # # cause undefined symbol issues.
         root_path / "transformer_engine" / "common" / "util" / "system.cpp",
+        # # Likewise we also compile transformer_engine.cpp to use TensorWrapper.
+        root_path / "transformer_engine" / "common" / "transformer_engine.cpp",
+        # # Finally, the userbuffers code also needs to be compiled in.
+        root_path / "transformer_engine" / "common" / "userbuffers" / "ipcsocket.cc",
+        root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers-host.cpp",
+        root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers.cu",
     ] + \
     _all_files_in_dir(extensions_dir)
 
@@ -474,7 +480,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Compiler flags
     cxx_flags = [
         "-O3",
-        "-fvisibility=hidden",
         "-Wno-return-local-addr",
     ]
     nvcc_flags = [
@@ -505,16 +510,19 @@ def setup_pytorch_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
+    # Add PyBind flags
+    import pybind11
+    include_dirs.append(pybind11.get_include())
+    cxx_flags.append("-fvisibility=hidden")
+
     # Construct PyTorch CUDA extension
-    sources = [str(path) for path in sources]
-    include_dirs = [str(path) for path in include_dirs]
     from torch.utils.cpp_extension import CUDAExtension
     return CUDAExtension(
         name="transformer_engine_extensions",
-        sources=sources,
-        include_dirs=include_dirs,
+        sources=[ str(path) for path in sources ],
+        include_dirs=[ str(path) for path in include_dirs ],
         library_dirs=[ str(root_path) ],
-        libraries=[ "transformer_engine" ],
+        # libraries=[ "transformer_engine" ], ### TODO (tmoon) Debug linker errors
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
@@ -569,6 +577,7 @@ def setup_jax_extension() -> setuptools.Extension:
         "--forward-unknown-opts",
     ]
 
+    # Add PyBind11 to the extension
     from pybind11.setup_helpers import Pybind11Extension
     class Pybind11CUDAExtension(Pybind11Extension):
         """Modified Pybind11Extension to allow combined CXX + NVCC compile flags."""

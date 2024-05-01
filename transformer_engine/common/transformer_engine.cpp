@@ -3,7 +3,6 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include <transformer_engine/transformer_engine.h>
 #include "common.h"
 
@@ -44,6 +43,33 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   ret.data = t.data.shape.data();
   ret.ndim = t.data.shape.size();
   return ret;
+}
+
+size_t nvte_tensor_ndim(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor*>(tensor);
+  return t.data.shape.size();
+}
+
+size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor*>(tensor);
+  size_t idx = (dim < 0) ? t.data.shape.size() + dim
+                         : dim;
+  NVTE_CHECK(idx >= 0 && idx < t.data.shape.size(), "Invalid dimension index!");
+  return t.data.shape[idx];
+}
+
+size_t nvte_tensor_numel(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor*>(tensor);
+  size_t numel = 1;
+  for (auto size : t.data.shape) {
+    numel *= size;
+  }
+  return numel;
+}
+
+size_t nvte_tensor_element_size(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor*>(tensor);
+  return transformer_engine::typeToSize(t.data.dtype);
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -151,61 +177,6 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     NVTE_CHECK(t.data.dptr != nullptr,
                "Output " + name + " is not allocated!");
   }
-}
-
-NVTETensor TensorWrapper::data() const noexcept {
-  return tensor_;
-}
-
-const NVTEShape TensorWrapper::shape() const noexcept {
-  if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
-  return nvte_tensor_shape(tensor_);
-}
-
-DType TensorWrapper::dtype() const noexcept {
-  if (tensor_ == nullptr) return DType::kNumTypes;
-  return static_cast<DType>(nvte_tensor_type(tensor_));
-}
-
-void * TensorWrapper::dptr() const noexcept {
-  if (tensor_ == nullptr) return nullptr;
-  return nvte_tensor_data(tensor_);
-}
-
-float * TensorWrapper::amax() const noexcept {
-  if (tensor_ == nullptr) return nullptr;
-  return nvte_tensor_amax(tensor_);
-}
-
-float * TensorWrapper::scale() const noexcept {
-  if (tensor_ == nullptr) return nullptr;
-  return nvte_tensor_scale(tensor_);
-}
-
-float * TensorWrapper::scale_inv() const noexcept {
-  if (tensor_ == nullptr) return nullptr;
-  return nvte_tensor_scale_inv(tensor_);
-}
-
-size_t TensorWrapper::ndim() const noexcept {
-  if (tensor_ == nullptr) return 0;
-  return shape().ndim;
-}
-
-size_t TensorWrapper::numel() const noexcept {
-  if (tensor_ == nullptr) return 0;
-  auto shape_ = shape();
-  return std::reduce(shape_.data, shape_.data+shape_.ndim, 1, std::multiplies<size_t>{});
-}
-
-size_t TensorWrapper::element_size() const noexcept {
-  if (tensor_ == nullptr) return 0;
-  return typeToSize(dtype());
-}
-
-size_t TensorWrapper::bytes() const noexcept {
-  if (tensor_ == nullptr) return 0;
-  return numel() * element_size();
 }
 
 }  // namespace transformer_engine

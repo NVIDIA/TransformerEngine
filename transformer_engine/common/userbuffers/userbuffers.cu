@@ -2612,7 +2612,7 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 
 template <typename in_type>
 __global__ void __launch_bounds__(MAX_THREADS / 4)
-reduce_bf16_out_cuda(
+reduce_bf16_cuda(
   void *inputs, void *output, const int num_inputs, const int input_size
 ) {
   const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -2634,7 +2634,7 @@ void reduce_bf16_out(
   size_t num_blocks = (input_size +num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
-  reduce_bf16_out_cuda<in_type><<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
+  reduce_bf16_cuda<in_type><<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
 }
 
 template void reduce_bf16_out<half>(

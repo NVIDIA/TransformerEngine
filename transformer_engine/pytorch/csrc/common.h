@@ -29,6 +29,7 @@
 #include <cuda_runtime.h>
 #include <cudnn.h>
 #include <torch/extension.h>
+#include <torch/custom_class.h>
 #include <torch/torch.h>
 
 #include "common/util/logging.h"
