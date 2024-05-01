@@ -204,8 +204,8 @@ class TestFP8Dot:
             b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
             b2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
-            b1 = jnp.empty((0,), jnp.bfloat16)
-            b2 = jnp.empty((0,), jnp.bfloat16)
+            b1 = None
+            b2 = None
 
         init_fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM * 2)
         init_fp8_metas_amax = jnp.zeros(

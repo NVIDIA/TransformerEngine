@@ -272,8 +272,11 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
                                 (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
     if use_bias:
-        bias_1_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1.shape
-        dot_1_output += jnp.reshape(bias_1, bias_1_shape)
+        bias_1_shape = bias_1.shape
+        bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
+        dot_1_output += jnp.reshape(bias_1, bias_1_new_shape)
+    else:
+        bias_1_shape = None
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
@@ -304,15 +307,18 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     if use_bias:
-        bias_2_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2.shape
-        dot_2_output += jnp.reshape(bias_2, bias_2_shape)
+        bias_2_shape = bias_2.shape
+        bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
+        dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
+    else:
+        bias_2_shape = None
 
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax,
-           x_contracting_dims, xt_batch_dims, bias_1.shape, bias_2.shape)
+           x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape)
 
     return dot_2_output, ctx
 
@@ -360,7 +366,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                        grad_scale_inv, bwd_dtype,
                        static_axis_boundary=-1,
                        transpose_axis_boundary=-1)
-        dbias_2 = jnp.empty(bias_2_shape, grad.dtype)
+        dbias_2 = None
 
     casted_activation_lu_out_t = transpose(casted_activation_lu_out,
                                            static_axis_boundary=-1,
@@ -410,7 +416,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 bwd_dtype,
                 static_axis_boundary=-1,
                 activation_type=activation_type)
-            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
+            dbias_1 = None
     else:
         if use_bias:
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax=\
@@ -436,7 +442,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 bwd_dtype,
                 static_axis_boundary=-1,
                 transpose_axis_boundary=-2)
-            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
+            dbias_1 = None
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
