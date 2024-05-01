@@ -4180,10 +4180,13 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        if dz_aval.shape[-2] == 1 or dz_aval.shape[-2] == 2:
+        # Phuong: input shape [batch_size, n_out] should have transpose_axis_boundary = -1
+        if transpose_axis_boundary == -2:
             gi_hidden_size = reduce(operator.mul, dz_aval.shape[-2:])
-        else:
+        elif transpose_axis_boundary == -1:
             gi_hidden_size = dz_aval.shape[-1]
+        else:
+            raise NotImplementedError
         t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
