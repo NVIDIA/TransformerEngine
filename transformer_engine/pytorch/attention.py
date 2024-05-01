@@ -2929,7 +2929,7 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
-        def remove_extra_states_check(self, incompatible_keys):
+        def remove_extra_states_check(self, incompatible_keys): # pylint: disable=unused-argument
             """
             Temporarily remove fused_attention._extra_state as a missing key
             when loading older TransformerEngine checkpoints. Will phase out
