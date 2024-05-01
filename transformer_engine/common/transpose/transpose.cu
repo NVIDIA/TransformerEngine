@@ -6,13 +6,15 @@
 
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/transpose.h>
+
+#include <algorithm>
+
 #include <cuda_runtime.h>
-#include <iostream>
-#include <cfloat>
+
 #include "../common.h"
-#include "../utils.cuh"
-#include "../util/string.h"
 #include "../util/rtc.h"
+#include "../util/string.h"
+#include "../utils.cuh"
 
 namespace transformer_engine {
 
@@ -25,7 +27,80 @@ namespace {
 constexpr size_t warps_per_tile = 4;
 constexpr size_t block_size = THREADS_PER_WARP * warps_per_tile;
 
-}  // namespace
+/* Performance heuristics for optimized kernel parameters */
+struct KernelConfig {
+  /** Vector load size */
+  size_t load_size;
+  /** Vector store size */
+  size_t store_size;
+
+  /* Whether config is valid */
+  bool valid = false;
+  /* Number of CUDA blocks */
+  size_t num_blocks = 0;
+
+  /* Number of active SMs */
+  size_t active_sm_count = 0;
+  /* Elements per L1 cache load */
+  size_t elements_per_load = 0;
+  /* Elements per L1 cache store */
+  size_t elements_per_store = 0;
+
+  KernelConfig(size_t row_length,
+               size_t num_rows,
+               size_t type_size,
+               size_t load_size_,
+               size_t store_size_)
+    : load_size{load_size_}
+    , store_size{store_size_} {
+    // Check that tiles are correctly aligned
+    constexpr size_t cache_line_size = 128;
+    if (load_size % type_size != 0
+        || store_size % type_size != 0
+        || cache_line_size % type_size != 0) {
+      return;
+    }
+    const size_t row_tile_elements = load_size * THREADS_PER_WARP / type_size;
+    const size_t col_tile_elements = store_size * THREADS_PER_WARP / type_size;
+    valid = (row_length % row_tile_elements == 0
+             && num_rows % col_tile_elements == 0);
+    if (!valid) {
+      return;
+    }
+
+    // Number of CUDA blocks
+    num_blocks = (row_length / row_tile_elements) * (num_rows / col_tile_elements);
+
+    // Parameters for performance model
+    constexpr size_t warps_per_sm = 16;  // Rough estimate for saturated SMs
+    active_sm_count = std::min(DIVUP(num_blocks * warps_per_tile, warps_per_sm),
+                               static_cast<size_t>(cuda::sm_count()));
+    elements_per_load = (std::min(cache_line_size, row_tile_elements * type_size)
+                         / type_size);
+    elements_per_store = (std::min(cache_line_size, col_tile_elements * type_size)
+                          / type_size);
+  }
+
+  /* Compare by estimated cost */
+  bool operator<(const KernelConfig &other) const {
+    if (this->valid && other.valid) {
+      // cost ~ (1/elements_per_load + 1/elements_per_store) / active_sms
+      // Note: Integer arithmetic ensures stable ordering
+      const auto &l1 = this->elements_per_load;
+      const auto &s1 = this->elements_per_store;
+      const auto &p1 = this->active_sm_count;
+      const auto &l2 = other.elements_per_load;
+      const auto &s2 = other.elements_per_store;
+      const auto &p2 = other.active_sm_count;
+      const auto scale = l1 * s1 * p1 * l2 * s2 * p2;
+      const auto cost1 = (scale/l1 + scale/s1) / p1;
+      const auto cost2 = (scale/l2 + scale/s2) / p2;
+      return cost1 < cost2;
+    } else {
+      return this->valid && !other.valid;
+    }
+  }
+};
 
 template <size_t load_size, size_t store_size, typename Type>
 __global__ void
@@ -127,6 +202,8 @@ transpose_general_kernel(const Type * __restrict__ const input,
   }
 }
 
+}  // namespace
+
 void transpose(const Tensor &input,
                const Tensor &noop,
                Tensor *output_,
@@ -170,82 +247,36 @@ void transpose(const Tensor &input,
     const bool aligned = (row_length % THREADS_PER_WARP == 0
                           && num_rows % THREADS_PER_WARP == 0);
     if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
-      // Determine kernel config
-      size_t load_size = 8;
-      size_t store_size = 8;
-      auto is_tile_aligned = [&](size_t load_size_, size_t store_size_) -> bool {
-        return (row_length % (load_size / type_size * THREADS_PER_WARP) == 0
-                && num_rows % (store_size / type_size * THREADS_PER_WARP) == 0);
+      // Pick kernel config
+      std::vector<KernelConfig> kernel_configs;
+      kernel_configs.reserve(16);
+      auto add_config = [&](size_t load_size, size_t store_size) {
+        kernel_configs.emplace_back(row_length, num_rows, type_size,
+                                    load_size, store_size);
       };
-      auto num_blocks = [&](size_t load_size_, size_t store_size_) -> int {
-        const size_t row_tile_size = load_size_ / type_size * THREADS_PER_WARP;
-        const size_t col_tile_size = store_size_ / type_size * THREADS_PER_WARP;
-        return (row_length / row_tile_size) * (num_rows / col_tile_size);
-      };
-      do {
-        const int sm_count = cuda::sm_count();
-
-        // Try maximizing SM occupancy without sacrificing cache
-        // efficiency
-        // Note: 32 threads/warp access 128B L1 cache line, so 4B
-        // loads/stores achieve full cache efficiency
-        if constexpr (type_size > 4) break;
-        if (is_tile_aligned(load_size, store_size)
-            && num_blocks(load_size, store_size) >= 4*sm_count) {
-          break;
-        }
-        load_size = 4; store_size = 8;
-        if (is_tile_aligned(load_size, store_size)
-            && num_blocks(load_size, store_size) >= 4*sm_count) {
-          break;
-        }
-        load_size = 4; store_size = 4;
-        if (is_tile_aligned(load_size, store_size)
-            && num_blocks(load_size, store_size) >= sm_count) {
-          break;
-        }
-
-        // Simple performance model to balance SM occupancy and cache
-        // efficiency
-        auto cost = [&](int load_size_, int store_size_) -> double {
-          int active_sms = std::min(sm_count, num_blocks(load_size_, store_size_));
-          // Amortize memory accesses over 128B L1 cache line
-          int elements_per_load = std::min(128, load_size_) / type_size;
-          int elements_per_store = std::min(128, store_size_) / type_size;
-          return (1.0 / elements_per_load + 1.0 / elements_per_store) / active_sms;
-        };
-        if constexpr (type_size > 2) break;
-        if (is_tile_aligned(load_size, store_size)
-            && cost(2, 4) >= cost(load_size, store_size)) {
-          break;
-        }
-        load_size = 2; store_size = 4;
-        if (is_tile_aligned(load_size, store_size)
-            && cost(2, 2) >= cost(load_size, store_size)) {
-          break;
-        }
-        load_size = 2; store_size = 2;
-        if constexpr (type_size > 1) break;
-        if (is_tile_aligned(load_size, store_size)
-            && cost(1, 2) >= cost(load_size, store_size)) {
-          break;
-        }
-        load_size = 1; store_size = 2;
-        if (is_tile_aligned(load_size, store_size)
-            && cost(1, 1) >= cost(load_size, store_size)) {
-          break;
-        }
-        load_size = 1; store_size = 1;
-      } while (false);
-      NVTE_CHECK(is_tile_aligned(load_size, store_size),
-                 "memory accesses are not properly aligned");
+      add_config(8, 8);
+      add_config(4, 8); add_config(8, 4);
+      add_config(4, 4);
+      add_config(2, 8); add_config(8, 2);
+      add_config(2, 4); add_config(4, 2);
+      add_config(2, 2);
+      add_config(1, 8); add_config(8, 1);
+      add_config(1, 4); add_config(4, 1);
+      add_config(1, 2); add_config(2, 1);
+      add_config(1, 1);
+      const auto &kernel_config = *std::min_element(kernel_configs.begin(),
+                                                    kernel_configs.end());
+      NVTE_CHECK(kernel_config.valid, "invalid kernel config");
+      const size_t load_size = kernel_config.load_size;
+      const size_t store_size = kernel_config.store_size;
+      const size_t num_blocks = kernel_config.num_blocks;
 
       // Compile NVRTC kernel if needed and launch
       auto& rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = concat_strings("transpose"
                                                       ",type=", type_name,
                                                       ",load_size=", load_size,
-                                                      ",store_size", store_size);
+                                                      ",store_size=", store_size);
       if (!rtc_manager.is_compiled(kernel_label)) {
         std::string code = string_code_transpose_rtc_transpose_cu;
         code = regex_replace(code, "__TYPE__", type_name);
@@ -259,7 +290,7 @@ void transpose(const Tensor &input,
                             "transformer_engine/common/transpose/rtc/transpose.cu");
       }
       rtc_manager.launch(kernel_label,
-                         num_blocks(load_size, store_size), block_size, 0, stream,
+                         num_blocks, block_size, 0, stream,
                          static_cast<const Type *>(input.data.dptr),
                          static_cast<const fp32 *>(noop.data.dptr),
                          static_cast<Type*>(output.data.dptr),

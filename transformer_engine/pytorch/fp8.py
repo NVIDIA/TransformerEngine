@@ -502,12 +502,12 @@ def fp8_model_init(enabled: bool = True) -> None:
 
              This functionality is *EXPERIMENTAL*.
     """
+    _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+    FP8GlobalStateManager.FP8_PARAMETERS = enabled
     try:
-        _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
-        FP8GlobalStateManager.FP8_PARAMETERS = enabled
         yield
     finally:
-        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters # pylint: disable=used-before-assignment
+        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
 
 
 @contextmanager
@@ -555,16 +555,16 @@ def fp8_autocast(
                distributed group over which amaxes for the fp8 tensors
                are reduced at the end of each training step.
     """
+    fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
+    FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
+                                             calibrating=calibrating,
+                                             fp8_recipe=fp8_recipe,
+                                             fp8_group=fp8_group,
+                                             _graph=_graph)
     try:
-        fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
-        FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
-                                                 calibrating=calibrating,
-                                                 fp8_recipe=fp8_recipe,
-                                                 fp8_group=fp8_group,
-                                                 _graph=_graph)
         yield
     finally:
-        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
+        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state)
         FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
 
 
@@ -598,11 +598,24 @@ def _default_sf_compute(
     scale: torch.Tensor,
     fp8_max: float,
     margin: int,
+    _fp32_max: float = torch.finfo(torch.float32).max,  # finfo not available in jitter
 ) -> torch.Tensor:
-    """Default function to convert amax to scaling factor."""
+    """Default function to convert amax to scaling factor.
+    Computing the scaling factor requires consideration of the following scenarios:
+    1. amax == 0:
+       No action is possible, set scale to the previous scale (or 1).
+    2. 0 < amax < tiny_amax
+       The amax is too tiny that the scale becomes infinite in FP32.
+       Set scale = FP32_max
+    3. tiny_amax <= amax < FP32_max:
+       Set scale = FP8_max (or scaled_max) / amax
+    4. When amax == inf or amax == nan:
+       No action is possible, set scale to the previous scale (or 1).
+    """
     sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
+    sf = torch.where(torch.isinf(sf), torch.full_like(sf, _fp32_max), sf)
     scale.copy_(sf)
     return scale
 

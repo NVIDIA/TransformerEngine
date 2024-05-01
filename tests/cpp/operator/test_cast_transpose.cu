@@ -81,7 +81,10 @@ std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {65536, 128},
                                                      {256, 256},
                                                      {120, 2080},
-                                                     {8, 8}};
+                                                     {8, 8},
+                                                     {1, 3221},       // Prime 456
+                                                     {2333, 1},       // Prime 345
+                                                     {1481, 677}};    // Primes 234, 123
 }  // namespace
 
 class CTTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,

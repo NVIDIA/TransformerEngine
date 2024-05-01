@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include "common/common.h"
 #include "common/util/logging.h"
@@ -71,17 +72,28 @@ pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shap
     return PackOpaque(desc);
 }
 
-pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
-                                             size_t wkspace_size, size_t barrier_size,
-                                             size_t *dgamma_part_sizes, size_t *dbeta_part_sizes,
-                                             DType x_dtype, DType w_dtype, DType wkspace_dtype,
-                                             DType barrier_dtype, DType dgamma_part_dtype,
-                                             DType dbeta_part_dtype, bool zero_centered_gamma,
-                                             float eps, int sm_margin) {
-    return PackOpaque(CustomCallNormDescriptor{
-        batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_sizes, dbeta_part_sizes,
-        x_dtype, w_dtype, wkspace_dtype, barrier_dtype, dgamma_part_dtype, dbeta_part_dtype,
-        zero_centered_gamma, eps, sm_margin});
+pybind11::bytes PackCustomCallNormDescriptor(
+    size_t batch_size, size_t hidden_size, size_t wkspace_size, size_t barrier_size,
+    const std::vector<size_t> &dgamma_part_shape, const std::vector<size_t> &dbeta_part_shape,
+    DType x_dtype, DType w_dtype, DType wkspace_dtype, DType barrier_dtype, DType dgamma_part_dtype,
+    DType dbeta_part_dtype, bool zero_centered_gamma, float eps, int sm_margin) {
+    CustomCallNormDescriptor desc;
+    desc.batch_size = batch_size;
+    desc.hidden_size = hidden_size;
+    desc.wkspace_size = wkspace_size;
+    desc.barrier_size = barrier_size;
+    desc.dgamma_part_shape.from_vector(dgamma_part_shape);
+    desc.dbeta_part_shape.from_vector(dbeta_part_shape);
+    desc.x_dtype = x_dtype;
+    desc.w_dtype = w_dtype;
+    desc.wkspace_dtype = wkspace_dtype;
+    desc.barrier_dtype = barrier_dtype;
+    desc.dgamma_part_dtype = dgamma_part_dtype;
+    desc.dbeta_part_dtype = dbeta_part_dtype;
+    desc.zero_centered_gamma = zero_centered_gamma;
+    desc.eps = eps;
+    desc.sm_margin = sm_margin;
+    return PackOpaque(desc);
 }
 
 pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t padding_size,
@@ -223,30 +235,6 @@ void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
     nvte_dgelu(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(), stream);
 }
 
-pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                         DType in_dtype, DType out_dtype) {
-    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto gelu_input_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
-    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
-    auto dbias_shape = std::vector<size_t>{hidden_size};
-
-    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-    auto gelu_input_tensor = TensorWrapper(nullptr, gelu_input_shape, in_dtype);
-    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
-    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
-    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
-
-    TensorWrapper dummy_workspace;
-
-    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
-                                    output_tensor.data(), output_trans_tensor.data(),
-                                    dbias_tensor.data(), dummy_workspace.data(), nullptr);
-
-    auto work_shape = MakeShapeVector(dummy_workspace.shape());
-    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
-}
-
 void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
@@ -288,6 +276,69 @@ void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *op
     nvte_cast_transpose_dbias_dgelu(input_tensor.data(), gelu_input_tensor.data(),
                                     output_tensor.data(), output_trans_tensor.data(),
                                     dbias_tensor.data(), workspace.data(), stream);
+}
+
+// HERE
+pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype) {
+    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
+    auto dbias_shape = std::vector<size_t>{hidden_size};
+
+    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
+    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
+    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+
+    TensorWrapper dummy_workspace;
+
+    nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(),
+                              output_trans_tensor.data(), dbias_tensor.data(),
+                              dummy_workspace.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(dummy_workspace.shape());
+    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
+}
+
+void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    auto *output_trans = buffers[5];
+    auto *dbias = buffers[6];
+    float *amax_out = reinterpret_cast<float *>(buffers[7]);
+    void *workspace_ptr = buffers[8];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+    auto output_trans_shape = std::vector<size_t>{n, m};
+    auto dbias_shape = std::vector<size_t>{n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
+
+    auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
+
+    nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(),
+                              output_trans_tensor.data(), dbias_tensor.data(),
+                              workspace.data(), stream);
 }
 
 void GatedGeluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
@@ -389,6 +440,241 @@ void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *op
         TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
 
     nvte_dgeglu_cast_transpose(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(),
+                               output_trans_tensor.data(), stream);
+}
+
+void SiluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
+              cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+    auto input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+
+    auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
+                                       scale, scale_inverse);
+
+    nvte_swish(input_tensor.data(), output_tensor.data(), stream);
+}
+
+void Silu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *output = buffers[1];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    SiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr, output);
+}
+
+void SiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    assert(amax == amax_out);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    SiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
+             output);
+}
+
+void DSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    auto *output = buffers[2];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
+
+    nvte_dswish(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(), stream);
+}
+
+pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype) {
+    auto input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto dact_input_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_shape = std::vector<size_t>{batch_size, hidden_size};
+    auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
+    auto dbias_shape = std::vector<size_t>{hidden_size};
+
+    auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
+    auto dact_input_tensor = TensorWrapper(nullptr, dact_input_shape, in_dtype);
+    auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
+    auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+
+    TensorWrapper dummy_workspace;
+
+    // For now, all dbias_dact(-s) have the same workspace size
+    nvte_cast_transpose_dbias_dgelu(input_tensor.data(), dact_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), dummy_workspace.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(dummy_workspace.shape());
+    return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
+}
+
+void DSiluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    float *amax = reinterpret_cast<float *>(buffers[2]);
+    float *scale = reinterpret_cast<float *>(buffers[3]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[4]);
+    auto *output = buffers[5];
+    auto *output_trans = buffers[6];
+    auto *dbias = buffers[7];
+    float *amax_out = reinterpret_cast<float *>(buffers[8]);
+    void *workspace_ptr = buffers[9];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n};
+    auto output_shape = std::vector<size_t>{m, n};
+    auto output_trans_shape = std::vector<size_t>{n, m};
+    auto dbias_shape = std::vector<size_t>{n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
+
+    auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
+
+    nvte_cast_transpose_dbias_dswish(input_tensor.data(), silu_input_tensor.data(),
+                                    output_tensor.data(), output_trans_tensor.data(),
+                                    dbias_tensor.data(), workspace.data(), stream);
+}
+
+void GatedSiluImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
+                   cudaStream_t stream, float *scale_inverse, float *amax, void *output) {
+    auto input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n};
+
+    auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+
+    auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype), amax,
+                                       scale, scale_inverse);
+
+    nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
+}
+
+void GatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *output = buffers[1];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GatedSiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr,
+                  output);
+}
+
+void GatedSiluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    float *amax = reinterpret_cast<float *>(buffers[1]);
+    float *scale = reinterpret_cast<float *>(buffers[2]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[3]);
+    auto *output = buffers[4];
+    float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    assert(amax == amax_out);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+
+    GatedSiluImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out,
+                  output);
+}
+
+void DGatedSilu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    auto *output = buffers[2];
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = std::vector<size_t>{m, n};
+    auto silu_input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n * 2};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, desc.out_dtype);
+
+    nvte_dswiglu(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(), stream);
+}
+
+void DGatedSiluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len) {
+    auto *input = buffers[0];
+    auto *silu_input = buffers[1];
+    float *amax = reinterpret_cast<float *>(buffers[2]);
+    float *scale = reinterpret_cast<float *>(buffers[3]);
+    float *scale_inv = reinterpret_cast<float *>(buffers[4]);
+    auto *output = buffers[5];
+    auto *output_trans = buffers[6];
+    float *amax_out = reinterpret_cast<float *>(buffers[7]);
+
+    const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    assert(amax == amax_out);
+    if (!use_fp8(desc.out_dtype)) {
+        scale = nullptr;
+        scale_inv = nullptr;
+        amax_out = nullptr;
+    }
+    auto m = desc.shape.dims[0];
+    auto n = desc.shape.dims[1];
+    auto input_shape = desc.shape.to_vector();
+    auto silu_input_shape = std::vector<size_t>{m, n * 2};
+    auto output_shape = std::vector<size_t>{m, n * 2};
+    auto output_trans_shape = std::vector<size_t>{n * 2, m};
+
+    auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
+    auto silu_input_tensor = TensorWrapper(silu_input, silu_input_shape, desc.in_dtype);
+    auto output_tensor =
+        TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
+    auto output_trans_tensor =
+        TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+
+    nvte_dswiglu_cast_transpose(input_tensor.data(), silu_input_tensor.data(), output_tensor.data(),
                                output_trans_tensor.data(), stream);
 }
 
@@ -529,7 +815,7 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
 }
 
 void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace_size,
-                           size_t barrier_size, size_t *dgamma_part_sizes, size_t *dbeta_part_sizes,
+                           size_t barrier_size, Shape dgamma_part_shape, Shape dbeta_part_shape,
                            bool zero_centered_gamma, float eps, void *input, DType in_dtype,
                            void *weight, DType w_dtype, void *ograd, void *workspace,
                            DType wkspace_dtype, void *barrier, DType barrier_dtype, void *mu,
@@ -563,14 +849,14 @@ void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace
     auto workspace_tensor = TensorWrapper(workspace, workspace_shape, wkspace_dtype);
     auto barrier_shape = std::vector<size_t>{barrier_size};
     auto barrier_tensor = TensorWrapper(barrier, barrier_shape, barrier_dtype);
-    auto dgamma_part_shape = std::vector<size_t>{dgamma_part_sizes[0], dgamma_part_sizes[1]};
-    auto dgamma_part_tensor = TensorWrapper(dgamma_part, dgamma_part_shape, dgamma_dtype);
+    auto dgamma_part_tensor =
+        TensorWrapper(dgamma_part, dgamma_part_shape.to_vector(), dgamma_dtype);
 
     if (is_layer_norm) {
         auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
         auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
-        auto dbeta_part_shape = std::vector<size_t>{dbeta_part_sizes[0], dbeta_part_sizes[1]};
-        auto dbeta_part_tensor = TensorWrapper(dbeta_part, dbeta_part_shape, dbeta_dtype);
+        auto dbeta_part_tensor =
+            TensorWrapper(dbeta_part, dbeta_part_shape.to_vector(), dbeta_dtype);
 
         layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(),
                            rsigma_tensor.data(), gamma_tensor.data(), xgrad_tensor.data(),
@@ -664,8 +950,8 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto hidden_size = desc.hidden_size;
     auto wkspace_size = desc.wkspace_size;
     auto barrier_size = desc.barrier_size;
-    auto *dgamma_part_sizes = desc.dgamma_part_sizes;
-    auto *dbeta_part_sizes = desc.dbeta_part_sizes;
+    auto dgamma_part_shape = desc.dgamma_part_shape;
+    auto dbeta_part_shape = desc.dbeta_part_shape;
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto wkspace_dtype = desc.wkspace_dtype;
@@ -689,8 +975,8 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *dgamma_part = buffers[10];
     auto *dbeta_part = buffers[11];
 
-    LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_sizes,
-                          dbeta_part_sizes, zero_centered_gamma, eps, input, in_dtype, weight,
+    LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
+                          dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
                           w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
                           rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
                           dbeta_part_dtype, stream);
@@ -786,8 +1072,9 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
     auto hidden_size = desc.hidden_size;
     auto wkspace_size = desc.wkspace_size;
     auto barrier_size = desc.barrier_size;
-    auto dgamma_part_sizes = desc.dgamma_part_sizes;
-    size_t dbeta_part_sizes[2] = {0, 0};
+    auto dgamma_part_shape = desc.dgamma_part_shape;
+    Shape dbeta_part_shape;
+    dbeta_part_shape.from_vector({0, 0});
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto wkspace_dtype = desc.wkspace_dtype;
@@ -797,8 +1084,8 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
 
-    LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_sizes,
-                          dbeta_part_sizes, zero_centered_gamma, eps, input, in_dtype, weight,
+    LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
+                          dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
                           w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
                           rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
                           dbeta_part_dtype, stream);
