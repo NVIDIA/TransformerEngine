@@ -103,12 +103,18 @@ def _fp8_dot_fwd_rule(
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         contracting_dims):
+
+    maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
+    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
+
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
     x_shape_suf = x.shape[min(lhs_contracting_dims):]
     kernel_shape_pre = kernel.shape[:max(rhs_contracting_dims) + 1]
     assert x_shape_suf == kernel_shape_pre
 
+    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
     amax = FP8Helper.update_amax_history(amax)
 
     gemm_x_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
@@ -130,7 +136,7 @@ def _fp8_dot_fwd_rule(
                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     ctx = (casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
-           updated_kernel_amax, x.shape, kernel.shape)
+           updated_kernel_amax, x.shape, kernel.shape, maybe_fp32_to_fm32)
     return output, ctx
 
 
@@ -138,7 +144,8 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
     casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, \
-        updated_x_amax, updated_kernel_amax, x_shape, kernel_shape = ctx
+        updated_x_amax, updated_kernel_amax, x_shape, kernel_shape, \
+        maybe_fp32_to_fm32 = ctx
 
     gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
@@ -170,7 +177,7 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax)
     amax = amax.at[gemm_grad_idx, 0].set(updated_grad_amax[0])
 
-    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
+    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
 
     return dgrad, wgrad, fp8_max, amax, scale, scale_inv
 
