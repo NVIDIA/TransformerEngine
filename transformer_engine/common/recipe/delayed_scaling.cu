@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <string>
+#include <limits>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -151,6 +152,13 @@ kernel(const float* amax_history_ptr,
     } else {
       scale = scale_ptr[bid];
     }
+    // When the amax is too tiny that the scale becoming infinite in FP32,
+    // we set the scale to the max value of FP32. In this case, the tensor’s
+    // amax won't get mapped to the FP8 max representable, but rather
+    // something below that, but this is the best thing we can do.
+    if (isinf(scale)) {
+        scale = std::numeric_limits<float>::max();
+    }
     updated_scale_ptr[bid] = scale;
 
     // Update scale inverse
@@ -197,16 +205,18 @@ kernel_bulk(
       const auto last_amax = ((amax_reduction_buffer != nullptr)
             && (amax_reduction_buffer[offset_in_buffer+count] != 0.0f)) ?
             amax_reduction_buffer[offset_in_buffer+count] : amax_history[0];
-      for (size_t off = 0; off < length; off += bsize) {
-        const size_t i = off + tid;
-        float a = 0;
-        if (i < length) {
-          a = (i < length - 1) ? amax_history[(i+1)*stride] : last_amax;
-          amax = fmaxf(amax, a);
-        }
-        __syncthreads();  // Inplace roll
-        if (i < length) {
-          amax_history[i*stride] = (i > 0) ? a : 0;
+      if (last_amax != 0.0f) {
+        for (size_t off = 0; off < length; off += bsize) {
+          const size_t i = off + tid;
+          float a = 0;
+          if (i < length) {
+            a = (i < length - 1) ? amax_history[(i+1)*stride] : last_amax;
+            amax = fmaxf(amax, a);
+          }
+          __syncthreads();  // Inplace roll
+          if (i < length) {
+            amax_history[i*stride] = (i > 0) ? a : 0;
+          }
         }
       }
 
@@ -237,11 +247,29 @@ kernel_bulk(
 
     // Update scale and scale inverse
     if (tid == 0) {
+      // Computing the scaling factor requires consideration of the following scenarios:
+      // 1. amax == 0:
+      //    No action is possible, set scale to the previous scale (or 1).
+      // 2. 0 < amax < tiny_amax
+      //    The amax is too tiny that the scale becomes infinite in FP32.
+      //    Set scale = FP32_max
+      // 3. tiny_amax <= amax < FP32_max:
+      //    Set scale = FP8_max (or scaled_max) / amax
+      // 4. When amax == inf or amax == nan:
+      //    No action is possible, set scale to the previous scale (or 1).
+
       float scale;
       if (isfinite(amax) && amax > 0) {
         scale = scaled_max / amax;
       } else {
         scale = p.param[bid].scale[count];
+      }
+      // When the amax is too tiny that the scale becoming infinite in FP32,
+      // we set the scale to the max value of FP32. In this case, the tensor’s
+      // amax won't get mapped to the FP8 max representable, but rather
+      // something below that, but this is the best thing we can do.
+      if (isinf(scale)) {
+          scale = std::numeric_limits<float>::max();
       }
       p.param[bid].scale[count] = scale;
       p.param[bid].scale_inv[count] = 1 / scale;
