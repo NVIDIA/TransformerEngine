@@ -81,9 +81,6 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
 
-Z = torch.zeros((200, 200)).to(torch.bfloat16).cuda()
-T = torch.zeros((200, 200)).to(torch.int32).cuda()
-
 META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
 META_O    = tex.FP8FwdTensors.GEMM2_INPUT
