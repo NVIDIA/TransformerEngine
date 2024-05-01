@@ -1019,7 +1019,7 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       }
     }
 
-    for (int i = 0; i < _stream_compute.size(); i++) {
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
       NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, _stream_compute[i]));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
     }

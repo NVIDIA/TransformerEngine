@@ -138,8 +138,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_ADD_PYBIND11_BINDINGS(m)
 
   // Comm+GEMM Overlap
-  py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap", te_common.attr("CommGemmOverlapBase"),
-                                     py::module_local())
+  py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap",
+                                     te_common.attr("CommGemmOverlapBase"), py::module_local())
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool>())
     .def("bulk_overlap", &te_ub::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &te_ub::UbufCommOverlap::split_overlap_rs)
@@ -150,8 +150,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("set_ubuf_scale_inv", &te_ub::UbufCommOverlap::set_ubuf_scale_inv)
     .def("set_collective_callbacks", &te_ub::UbufCommOverlap::set_collective_callbacks);
 
-  py::class_<te_ub::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap", te_common.attr("CommGemmOverlapBase"),
-                                        py::module_local())
+  py::class_<te_ub::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap",
+                                        te_common.attr("CommGemmOverlapBase"), py::module_local())
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, bool, bool, bool, bool>())
     .def("split_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_ag)
     .def("split_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_rs)

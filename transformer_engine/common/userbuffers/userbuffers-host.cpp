@@ -413,7 +413,7 @@ int create_communicator(communicator **comm) {
 #endif
 
 void destroy_communicator(communicator *comm) {
-  for (int i=0; i<NVTE_MAX_REGIONS; i++) {
+  for (int i=0; i < NVTE_MAX_REGIONS; i++) {
     if (comm->mem_dealloc[i]) {
       cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[i]), comm->mem_size[i]);
       cuMemRelease(comm->uchandles[i][comm->nvrank]);

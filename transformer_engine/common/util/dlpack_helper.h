@@ -8,7 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_USERBUFFERS_DLPACK_HELPER_H_
 
 #include <cassert>
-#include <typeinfo>
+#include <type_traits>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -53,7 +53,7 @@ DType get_te_dtype(DLDataType dtype) {
 
 template <typename T>
 DLDataType get_dlpack_dtype(int dtype = -1) {
-  if (typeid(T) == typeid(DType)) {
+  if (std::is_same<T, DType>()) {
     NVTE_CHECK((dtype >= 0) && (dtype < static_cast<int>(DType::kNumTypes)),
       "Missing/invalid NVTEDtype in arguments when templating type conversion with <NVTEDtype>.");
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(static_cast<DType>(dtype), D,
@@ -63,12 +63,11 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   DLDataType dl_dtype{};
   dl_dtype.lanes = 1;
   dl_dtype.bits = sizeof(T) * 8;
-  const std::type_info& typeid_T = typeid(T);
-  if (typeid_T == typeid(float) || typeid_T == typeid(half)) {
+  if (std::is_same<T, float>() || std::is_same<T, half>()) {
     dl_dtype.code = kDLFloat;
-  } else if (typeid_T == typeid(nv_bfloat16)) {
+  } else if (std::is_same<T, nv_bfloat16>()) {
     dl_dtype.code = kDLBfloat;
-  } else if (typeid_T == typeid(int32_t) || typeid_T == typeid(int64_t)) {
+  } else if (std::is_same<T, int32_t>() || std::is_same<T, int64_t>()) {
     dl_dtype.code = kDLInt;
   } else {
     NVTE_CHECK(dl_dtype.bits == 8, "Unsupported %d-bit data type.", dl_dtype.bits);

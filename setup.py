@@ -454,15 +454,15 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-        # # We need to compile system.cpp because the pytorch extension uses
-        # # transformer_engine::getenv. This is a workaround to avoid direct
-        # # linking with libtransformer_engine.so, as the pre-built PyTorch
-        # # wheel from conda or PyPI was not built with CXX11_ABI, and will
-        # # cause undefined symbol issues.
+        # We need to compile system.cpp because the pytorch extension uses
+        # transformer_engine::getenv. This is a workaround to avoid direct
+        # linking with libtransformer_engine.so, as the pre-built PyTorch
+        # wheel from conda or PyPI was not built with CXX11_ABI, and will
+        # cause undefined symbol issues.
         root_path / "transformer_engine" / "common" / "util" / "system.cpp",
-        # # Likewise we also compile transformer_engine.cpp to use TensorWrapper.
+        # Likewise we also compile transformer_engine.cpp to use TensorWrapper.
         root_path / "transformer_engine" / "common" / "transformer_engine.cpp",
-        # # Finally, the userbuffers code also needs to be compiled in.
+        # Finally, the userbuffers code also needs to be compiled in for CommGemmOverlap.
         root_path / "transformer_engine" / "common" / "userbuffers" / "ipcsocket.cc",
         root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers-host.cpp",
         root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers.cu",
@@ -522,7 +522,12 @@ def setup_pytorch_extension() -> setuptools.Extension:
         sources=[ str(path) for path in sources ],
         include_dirs=[ str(path) for path in include_dirs ],
         library_dirs=[ str(root_path) ],
-        # libraries=[ "transformer_engine" ], ### TODO (tmoon) Debug linker errors
+        libraries=[
+            # torch.utils.cpp_extension.CUDAExtension internally links to 'cudart',
+            # but we also need 'cuda' for the virtual memory API calls in userbuffers.
+            "cuda",
+            # "transformer_engine"  ### TODO (tmoon) Debug linker errors
+        ],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
