@@ -44,10 +44,6 @@ def attention_mask_func(
     attention_scores: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:
     """Get attention mask"""
-    #attention_scores.masked_fill_(attention_mask<=0, -10000.0)
-    #attention_mask = attention_mask.logical_not()
-    #attention_mask = ~ attention_mask
-    #attention_scores = attention_scores.where(attention_mask<=0, attention_scores, -10000.0)
     attention_scores.masked_fill_(attention_mask, -10000.0)
     return attention_scores
 

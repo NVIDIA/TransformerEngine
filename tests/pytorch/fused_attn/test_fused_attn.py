@@ -226,6 +226,7 @@ def get_swa(seq_q, seq_kv, w=None):
     m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
     mu = torch.triu(m, diagonal=seq_kv-seq_q-w[0])
     ml = torch.tril(mu, diagonal=seq_kv-seq_q+w[1])
+    ml = ~ ml
     return w, ml
 
 
