@@ -15,7 +15,7 @@ from .cpp_extensions import act_lu, act_lu_fp8, dact_lu
 from .cpp_extensions import dact_lu_dbias_cast_transpose, dgated_act_lu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
-from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize, dequantize
+from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
@@ -50,67 +50,6 @@ def _activation_lu_bwd_rule(activation_type, ctx, g):
     return (dx,)
 
 _activation_lu.defvjp(_activation_lu_fwd_rule, _activation_lu_bwd_rule)
-
-
-def activation_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                      scale_inv: jnp.ndarray, fwd_dtype:jnp.dtype, bwd_dtype: jnp.dtype,
-                      activation_type: Sequence[Union[str, Callable]]):
-    """
-    Activation Unit
-    """
-    transpose_indices = (1, 2, 0)
-    dx_trans_no_use = jnp.empty([x.shape[i] for i in transpose_indices], dtype=x.dtype)
-    dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
-
-    output = _activation_lu_fp8(x, dx_trans_no_use, dbias_no_use, amax,
-                                scale, scale_inv, fwd_dtype, bwd_dtype, activation_type)
-    return output
-
-@partial(jax.custom_vjp, nondiff_argnums=(6,7,8))
-def _activation_lu_fp8(x: jnp.ndarray,
-                       dx_trans_no_use: jnp.ndarray, dbias_no_use: jnp.ndarray,
-                       amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
-                       fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype,
-                       activation_type: Sequence[Union[str, Callable]]):
-
-    output = _activation_lu_fp8_fwd_rule(x, dx_trans_no_use, dbias_no_use, amax,
-                                         scale, scale_inv, fwd_dtype, bwd_dtype,
-                                         activation_type)
-
-    return output
-
-def _activation_lu_fp8_fwd_rule(x,
-                                dx_trans_no_use,    # pylint: disable=unused-argument
-                                dbias_no_use,   # pylint: disable=unused-argument
-                                amax,
-                                scale, scale_inv,
-                                fwd_dtype, bwd_dtype,   # pylint: disable=unused-argument
-                                activation_type):
-    activation_lu_out, _ = act_lu_fp8(x, amax, scale, scale_inv, fwd_dtype,
-                                      activation_type)
-
-    activation_lu_out = dequantize(activation_lu_out, x.dtype, scale_inv)
-    ctx = (x, amax, scale, scale_inv)
-    return activation_lu_out, ctx
-
-def _activation_lu_fp8_bwd_rule(fwd_dtype, bwd_dtype,   # pylint: disable=unused-argument
-                                activation_type, ctx, g):
-    x, amax, scale, scale_inv = ctx
-
-    if len(activation_type) > 1: #gated, no bias
-        dactivation_lu, dactivation_lu_trans, amax_out = \
-        dgated_act_lu_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype, -1, activation_type)
-        dbias = jnp.empty(x.shape[-1], x.dtype)
-    else: #not gated, with bias
-        dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
-        dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, bwd_dtype,
-                                     -1, -2, activation_type)
-    dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
-    dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)
-    ctx = (dactivation_lu, dactivation_lu_trans, dbias, amax_out, scale, scale_inv)
-    return ctx
-
-_activation_lu_fp8.defvjp(_activation_lu_fp8_fwd_rule, _activation_lu_fp8_bwd_rule)
 
 
 def fused_layernorm_fp8_mlp(x: jnp.ndarray,
@@ -208,7 +147,6 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         activation_type,
         use_bias):
 
-#    is_gated = len(activation_type) > 1
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 1, Hidden_out)
     # Kernel_2 should be in shape of (Hidden_in, Hidden_out)
@@ -221,11 +159,6 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[0]
     assert kernel_1.shape[-1] == kernel_2.shape[0]
-
-    # Squeeze act axis
-    # (hidden_in, 1, hidden_out) -> (hidden_in, hidden_out)
-#    if not is_gated:
-#        kernel_1 = jnp.squeeze(kernel_1, axis=-2)
 
     amax = FP8Helper.update_amax_history(amax)
 
