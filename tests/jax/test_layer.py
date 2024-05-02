@@ -117,31 +117,27 @@ ATTRS = [{}, {
     _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('silu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.8,
+    _KEY_OF_HIDDEN_DROPOUT: 0.8,
+    _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
     _KEY_OF_MLP_ACTIVATIONS: (('silu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('silu', 'linear')),
-    _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_NUM_HEADS: 8,
     _KEY_OF_NUM_GQA_GROUPS: 4,
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
-    _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('silu',)),
-    _KEY_OF_FUSE_MLP_WI: True
+    _KEY_OF_USE_BIAS: True,
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
