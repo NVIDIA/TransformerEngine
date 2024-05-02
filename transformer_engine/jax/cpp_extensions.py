@@ -1069,7 +1069,7 @@ class SoftmaxPrimitive(BasePrimitive):
     """
     Softmax Primitive
     """
-    max_k_seqlen_supported = 4096
+    max_k_seqlen_supported = 16384
     name = "te_softmax_internal_placeholder"
 
     @staticmethod
@@ -1324,8 +1324,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
            ):
@@ -1483,8 +1482,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
            ):
@@ -1695,11 +1693,10 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
-           ):
+                and k_seqlen == q_seqlen):
             if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
                 batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
                 return attn_batches % batch_per_block == 0
