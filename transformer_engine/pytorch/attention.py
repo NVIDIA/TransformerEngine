@@ -2711,6 +2711,17 @@ class FusedAttention(TransformerEngineBaseModule):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
+        def remove_extra_states_check(self, incompatible_keys): # pylint: disable=unused-argument
+            """
+            Temporarily remove fused_attention._extra_state as a missing key
+            when loading older TransformerEngine checkpoints. Will phase out
+            this hook in TransformerEngine 2.0.
+            """
+            for key in incompatible_keys.missing_keys:
+                if 'fused_attention._extra_state' in key:
+                    incompatible_keys.missing_keys.remove(key)
+        self.register_load_state_dict_post_hook(remove_extra_states_check)
+
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -3063,6 +3074,7 @@ class DotProductAttention(torch.nn.Module):
                                                   layer_number=layer_number,
                                                   deterministic=self.deterministic,
                                                   **attn_kwargs)
+
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
