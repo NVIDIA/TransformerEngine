@@ -27,16 +27,14 @@ from transformer_engine_jax import NVTE_Fused_Attn_Backend
 from utils import assert_allclose
 
 
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
+@pytest.fixture(autouse=True, scope='module')
+def init():
     """
-    Clear all live arrays to keep the resource clean
+    WAR for CUDA uninitialize error
     """
     # Calling customcalls before jax may cause CUDA uninitialize error
     _ = jnp.zeros(0)
     yield
-    for arr in jax.live_arrays():
-        arr.delete()
 
 
 def general_dot_product_attention(query: ArrayLike, key: ArrayLike, value: ArrayLike,

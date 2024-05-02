@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+from contextlib import nullcontext
 import functools
 import operator
 from typing import Callable, Sequence, Union
@@ -10,7 +11,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax import lax
 from jax import jit, value_and_grad
 from flax import linen as nn
 
@@ -18,7 +18,7 @@ from utils import assert_allclose
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
-from transformer_engine.jax.layernorm import layernorm
+from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.mlp import activation_lu, activation_lu_fp8, fused_layernorm_fp8_mlp
 
 
@@ -43,16 +43,6 @@ def _convert_to_activation_function(fn_or_string):
     if callable(fn_or_string):
         return fn_or_string
     raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
-
-
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
 
 
 class TestFP8Dot:
@@ -416,88 +406,150 @@ class TestActivationLuFP8(TestActivationLu):
                         dtype=FP8Helper.BWD_DTYPE)
 
 
-class TestRMSNorm:
+class TestNorm:
+    """
+    Test transformer_engine.jax.layernorm APIs
+    """
 
-    @pytest.mark.parametrize('n, hidden', LN_CASES)
-    @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward_backward(self, n, hidden, dtype):
-        key = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(key, 2)
-
-        x = jax.random.uniform(subkeys[0], (n, hidden), dtype, -2, 1)
-        scale = jax.random.uniform(subkeys[1], (hidden,), jnp.float32, -2, 1)
-        scale = jnp.asarray(scale, dtype)
-        epsilon = 1e-6
-
-        def reference_rmsnorm(x, scale):
-            x = jnp.asarray(x, jnp.float32)
-            mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-            y = jnp.asarray(x * lax.rsqrt(mean2 + epsilon), dtype)
-            return y * scale
-
-        jitted_primitive = jit(
-            value_and_grad(lambda x, scale: jnp.mean(layernorm(x, scale, None, "rmsnorm")), (0, 1)))
-
-        jitted_reference = jit(
-            value_and_grad(lambda x, scale: jnp.mean(reference_rmsnorm(x, scale)), (0, 1)))
-
-        primitive_out, (primitive_dx, primitive_dgamma) = jitted_primitive(x, scale)
-        reference_out, (reference_dx, reference_dgamma) = jitted_reference(x, scale)
-
-        assert_allclose(primitive_out, reference_out, dtype=dtype)
-        assert_allclose(primitive_dx, reference_dx, dtype=dtype)
-        assert_allclose(primitive_dgamma, reference_dgamma, dtype=dtype)
-
-
-class TestLayerNorm:
-
-    @pytest.mark.parametrize('n, hidden', LN_CASES)
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('zero_centered_gamma', [False, True])
-    def test_forward_backward(self, n, hidden, zero_centered_gamma, dtype):
-        key = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(key, 3)
-
-        x = jax.random.uniform(subkeys[0], (n, hidden), dtype, -1, 1)
-        scale_range = (-1, 1) if zero_centered_gamma else (0, 2)
-        scale = jax.random.uniform(subkeys[1], (hidden,), jnp.float32, *scale_range)
-        scale = jnp.asarray(scale, dtype)
-        bias = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -1, 1)
-        bias = jnp.asarray(bias, dtype)
-        epsilon = 1e-6
-
-        def reference_layernorm(x, scale, bias, zero_centered_gamma, eps):
-            x_ = jnp.asarray(x, jnp.float32)
+    def reference_layernorm(self, x, scale, bias, zero_centered_gamma, eps):
+        """
+        JAX native layernorm implementations
+        - bias is not None: layernorm
+        - bias is None: rmsnorm
+        """
+        x_ = jnp.asarray(x, jnp.float32)
+        if bias is None:
+            mean = 0.
+        else:
             mean = jnp.mean(x_, axis=-1, keepdims=True)
-            var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
-            normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
-            # Align TE implementation
-            if zero_centered_gamma:
-                return jnp.asarray(normed_input * (scale + 1) + bias).astype(x.dtype)
-            return jnp.asarray(normed_input * scale + bias).astype(x.dtype)
+        var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+        normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
+        if zero_centered_gamma:
+            scale += 1.
+        if bias is None:
+            bias = 0.
+        return jnp.asarray(normed_input * scale + bias).astype(x.dtype)
 
-        def compute_loss(x):
-            # Higher precision to compute the loss
-            x_ = x.astype(jnp.float32)
-            return jnp.mean(jnp.square(x_)).astype(x.dtype)
+    @pytest.mark.parametrize('n, hidden', LN_CASES)
+    @pytest.mark.parametrize('dtype', DTYPES)
+    @pytest.mark.parametrize('ln_type', ['layernorm', 'rmsnorm'])
+    @pytest.mark.parametrize('zero_centered_gamma', [False, True])
+    @pytest.mark.parametrize('epsilon', [1e-2, 1e-6])
+    def test_layernorm_forward_backward(self, n, hidden, ln_type, zero_centered_gamma, epsilon,
+                                        dtype):
+        """
+        Test transformer_engine.jax.layernorm.layernorm
+        """
+        expect_assert = False
+        if ln_type == 'rmsnorm' and zero_centered_gamma:
+            # zero_centered_gamma is not supported for rmsnorm, expect an assertion.
+            expect_assert = True
 
-        jitted_primitive = jit(
-            value_and_grad(
-                lambda x, scale, bias: compute_loss(
-                    layernorm(x, scale, bias, "layernorm", zero_centered_gamma, epsilon)),
-                (0, 1, 2)))
+        with pytest.raises(AssertionError, match=r".*zero_centered_gamma is not supported.*"
+                          ) if expect_assert else nullcontext():
+            key = jax.random.PRNGKey(0)
+            subkeys = jax.random.split(key, 3)
 
-        jitted_reference = jit(
-            value_and_grad(
-                lambda x, scale, bias: compute_loss(
-                    reference_layernorm(x, scale, bias, zero_centered_gamma, epsilon)), (0, 1, 2)))
+            x = jax.random.uniform(subkeys[0], (n, hidden), dtype, -1, 1)
+            gamma_range = (-1, 1) if zero_centered_gamma else (0, 2)
+            gamma = jax.random.uniform(subkeys[1], (hidden,), jnp.float32, *gamma_range)
+            gamma = jnp.asarray(gamma, dtype)
+            if ln_type == 'layernorm':
+                beta = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -1, 1)
+                beta = jnp.asarray(beta, dtype)
+            else:
+                beta = None
 
-        primitive_out, (primitive_dx, primitive_dgamma,
-                        primitive_dbeta) = jitted_primitive(x, scale, bias)
-        reference_out, (reference_dx, reference_dgamma,
-                        reference_dbeta) = jitted_reference(x, scale, bias)
+            def compute_loss(x):
+                # Higher precision to compute the loss
+                x_ = x.astype(jnp.float32)
+                return jnp.mean(jnp.square(x_)).astype(x.dtype)
 
-        assert_allclose(primitive_out, reference_out, dtype=dtype)
-        assert_allclose(primitive_dx, reference_dx, dtype=dtype)
-        assert_allclose(primitive_dgamma, reference_dgamma, dtype=dtype)
-        assert_allclose(primitive_dbeta, reference_dbeta, dtype=dtype)
+            jitted_primitive = jit(
+                value_and_grad(
+                    lambda x, gamma, beta: compute_loss(
+                        layernorm(x, gamma, beta, ln_type, zero_centered_gamma, epsilon)),
+                    (0, 1, 2)))
+
+            jitted_reference = jit(
+                value_and_grad(
+                    lambda x, gamma, beta: compute_loss(
+                        self.reference_layernorm(x, gamma, beta, zero_centered_gamma, epsilon)),
+                    (0, 1, 2)))
+
+            primitive_out, (primitive_dx, primitive_dgamma,
+                            primitive_dbeta) = jitted_primitive(x, gamma, beta)
+            reference_out, (reference_dx, reference_dgamma,
+                            reference_dbeta) = jitted_reference(x, gamma, beta)
+
+            assert_allclose(primitive_out, reference_out, dtype=dtype)
+            assert_allclose(primitive_dx, reference_dx, dtype=dtype)
+            assert_allclose(primitive_dgamma, reference_dgamma, dtype=dtype)
+            if beta is not None:
+                assert_allclose(primitive_dbeta, reference_dbeta, dtype=dtype)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('m,n,k', GEMM_CASES)
+    @pytest.mark.parametrize('ln_type', ['layernorm', 'rmsnorm'])
+    @pytest.mark.parametrize('zero_centered_gamma', [True, False])
+    @pytest.mark.parametrize('epsilon', [1e-2, 1e-6])
+    def test_ln_fp8_dot_forward_backward(self, m, n, k, ln_type, zero_centered_gamma, epsilon):
+        """
+        Test transformer_engine.jax.layernorm.layernorm_fp8_dot
+        """
+        expect_assert = False
+        if ln_type == 'rmsnorm' and zero_centered_gamma:
+            # zero_centered_gamma is not supported for rmsnorm, expect an assertion.
+            expect_assert = True
+
+        with pytest.raises(AssertionError, match=r".*zero_centered_gamma is not supported.*"
+                          ) if expect_assert else nullcontext():
+            key = jax.random.PRNGKey(0)
+            subkeys = jax.random.split(key, 4)
+
+            a = jax.random.normal(subkeys[0], (m, k)).astype(jnp.bfloat16)
+            b = jax.random.normal(subkeys[1], (k, n)).astype(jnp.bfloat16)
+
+            gamma = jax.random.normal(subkeys[2], (k,)).astype(jnp.bfloat16)
+            if ln_type == 'layernorm':
+                beta = jax.random.normal(subkeys[3], (k,)).astype(jnp.bfloat16)
+            else:
+                beta = None
+
+            fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM)
+            fp8_metas_amax = jnp.zeros((FP8Helper.NUM_META_PER_GEMM, FP8Helper.AMAX_HISTORY_LEN),
+                                       jnp.float32)
+            fp8_metas_scale = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
+            fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
+
+            def primitive_func(x, y, gamma, beta, fp8_max, fp8_metas_amax, fp8_metas_scale,
+                               fp8_metas_scale_inv):
+                fp8_meta_pkg = FP8MetaPackage(1, fp8_max, fp8_metas_amax, fp8_metas_scale,
+                                              fp8_metas_scale_inv)
+                primitive_out = layernorm_fp8_dot(x, y, gamma, beta, fp8_meta_pkg, ln_type,
+                                                  zero_centered_gamma)
+                return jnp.mean(primitive_out)
+
+            def ref_func(x, y, gamma, beta, zero_centered_gamma):
+                x = self.reference_layernorm(x, gamma, beta, zero_centered_gamma, epsilon)
+                return jnp.mean(jnp.dot(x, y))
+
+            value_n_grad_primitive_func = value_and_grad(primitive_func, range(8))
+            value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2, 3))
+
+            ref_out, (ref_a_grad, ref_b_grad, ref_gamma_grad,
+                      ref_beta_grad) = value_n_grad_ref_func(a, b, gamma, beta, zero_centered_gamma)
+
+            for _ in range(3):
+                primitive_out, (primitive_a_grad, primitive_b_grad, primitive_gamma_grad,
+                                primitive_beta_grad, fp8_max, fp8_metas_amax, fp8_metas_scale,
+                                fp8_metas_scale_inv) = value_n_grad_primitive_func(
+                                    a, b, gamma, beta, fp8_max, fp8_metas_amax, fp8_metas_scale,
+                                    fp8_metas_scale_inv)
+
+            assert_allclose(primitive_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
+            assert_allclose(primitive_a_grad, ref_a_grad, dtype=FP8Helper.BWD_DTYPE)
+            assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
+            assert_allclose(primitive_gamma_grad, ref_gamma_grad, dtype=FP8Helper.BWD_DTYPE)
+            if beta is not None:
+                assert_allclose(primitive_beta_grad, ref_beta_grad, dtype=FP8Helper.BWD_DTYPE)
