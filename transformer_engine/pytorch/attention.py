@@ -223,7 +223,7 @@ def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     the samples in a batch.
     """
     mask = mask.squeeze(1).squeeze(1)
-    reduced_mask = mask.sum(dim=1)
+    reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
     cu_seqlens = torch.cat((zero, cu_seqlens))
@@ -241,13 +241,13 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
     mask = mask.squeeze(1).squeeze(1)
     bs, seqlen = mask.shape
 
-    reduced_mask = mask.sum(dim=1)
+    reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.reshape(-1)
-    indices = mask.nonzero()
+    indices = mask.logical_not().nonzero()
     indices = indices.unsqueeze(-1)
 
     num_nonzeros = indices.shape[0]
