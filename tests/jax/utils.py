@@ -625,7 +625,7 @@ class MultiHeadAttention(nn.Module):
                 # position should only attend to those key positions that have already
                 # been generated and cached, not the remaining zero elements.
                 mask = combine_masks(
-                    mask,
+                    jnp.logical_not(mask),
                     jnp.broadcast_to(
                         jnp.arange(length) <= cur_index,
                 # (1, 1, length) represent (head dim, query length, key length)

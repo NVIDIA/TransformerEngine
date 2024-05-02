@@ -68,7 +68,7 @@ def general_dot_product_attention(query: ArrayLike, key: ArrayLike, value: Array
     if mask is not None:
         if mask.ndim != logits.ndim:
             mask = jnp.expand_dims(mask, axis=-3)
-        logits = jnp.where(mask, logits, jnp.finfo(dtype).min)
+        logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
     softmax_out = jax.nn.softmax(logits).astype(dtype)
 
@@ -96,9 +96,9 @@ def make_decoder_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
     """
     q_idxs = jnp.broadcast_to(jnp.arange(q_tokens.shape[-1], dtype=jnp.int32), q_tokens.shape)
     kv_idxs = jnp.broadcast_to(jnp.arange(kv_tokens.shape[-1], dtype=jnp.int32), kv_tokens.shape)
-    causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
-    padding_mask = make_attention_mask(q_tokens > 0, kv_tokens > 0)
-    return combine_masks(causal_mask, padding_mask)
+    inv_causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
+    inv_padding_mask = make_attention_mask(q_tokens > 0, kv_tokens > 0)
+    return jnp.logical_not(combine_masks(inv_causal_mask, inv_padding_mask))
 
 
 def jax_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
@@ -109,7 +109,7 @@ def jax_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
     if is_causal_mask(attn_mask_type):
         mask = make_decoder_mask(q_token, kv_token)
     else:
-        mask = make_attention_mask(q_token > 0, kv_token > 0)
+        mask = jnp.logical_not(make_attention_mask(q_token > 0, kv_token > 0))
 
     output = general_dot_product_attention(query,
                                            key,
@@ -132,10 +132,7 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
     if is_causal_mask(attn_mask_type):
         mask = make_decoder_mask(q_token, kv_token)
     else:
-        mask = make_attention_mask(q_token > 0, kv_token > 0)
-
-    # mask invert
-    mask = jnp.logical_not(mask)
+        mask = jnp.logical_not(make_attention_mask(q_token > 0, kv_token > 0))
 
     qkv_layout = kwargs.pop('qkv_layout')
     match qkv_layout:
