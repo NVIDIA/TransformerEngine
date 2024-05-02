@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax.linen.attention import combine_masks
 from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
@@ -64,27 +65,6 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
     raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
 
 
-def combine_masks(*masks: Optional[Array], dtype: DType = jnp.float32):
-    """Combine attention masks.
-
-  Args:
-    *masks: set of attention mask arguments to combine, some can be None.
-    dtype: final mask dtype
-
-  Returns:
-    Combined mask, reduced by logical and, returns None if no masks given.
-  """
-    masks = [m for m in masks if m is not None]
-    if not masks:
-        return None
-    assert all(map(lambda x: x.ndim == masks[0].ndim,
-                   masks)), (f'masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}')
-    mask, *other_masks = masks
-    for other_mask in other_masks:
-        mask = jnp.logical_and(mask, other_mask)
-    return mask.astype(dtype)
-
-
 def combine_biases(*masks: Optional[Array]):
     """Combine attention biases.
 
@@ -105,96 +85,109 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
-def dot_product_attention(query: Array,
-                          key: Array,
-                          value: Array,
-                          transpose_batch_sequence: bool,
-                          bias: Optional[Array] = None,
-                          dropout_rng: Optional[PRNGKey] = None,
-                          dropout_rate: float = 0.,
-                          deterministic: bool = False,
-                          dtype: DType = jnp.float32,
-                          float32_logits: bool = False):
+class DotProductAttention(nn.Module):
+    transpose_batch_sequence: bool = True
+    scale_attn_logits: bool = True
+    dropout_rate: float = 0.
+    dtype: DType = jnp.float32
+    float32_logits: bool = False
     """Computes dot-product attention given query, key, and value.
 
-  This is the core function for applying attention based on
-  https://arxiv.org/abs/1706.03762. It calculates the attention weights given
-  query and key and combines the values using the attention weights.
+    This is the core function for applying attention based on
+    https://arxiv.org/abs/1706.03762. It calculates the attention weights given
+    query and key and combines the values using the attention weights.
 
-  Args:
-    query: queries for calculating attention with shape of `[batch, q_length,
-      num_heads, qk_depth_per_head]`.
-    key: keys for calculating attention with shape of `[batch, kv_length,
-      num_gqa_groups, qk_depth_per_head]`.
-    value: values to be used in attention with shape of `[batch, kv_length,
-      num_gqa_groups, v_depth_per_head]`.
-    bias: bias for the attention weights. This should be broadcastable to the
-      shape `[batch, num_heads, q_length, kv_length]` This can be used for
-      incorporating causal masks, padding masks, proximity bias, etc.
-    dropout_rng: JAX PRNGKey: to be used for dropout
-    dropout_rate: dropout rate
-    deterministic: bool, deterministic or not (to apply dropout)
-    dtype: the dtype of the computation (default: float32)
-    float32_logits: bool, if True then compute logits in float32 to avoid
-      numerical issues with bfloat16.
+    Args:
+        dropout_rate: dropout rate
+        dtype: the dtype of the computation (default: float32)
+        float32_logits: bool, if True then compute logits in float32 to avoid
+        numerical issues with bfloat16.
+    """
 
-  Returns:
-    Output of shape `[batch, length, num_heads, v_depth_per_head]`.
-  """
-    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
-    batch_dim = 1 if transpose_batch_sequence else 0
-    assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
-        'q, k, v batch dims must match.')
-    sequence_dim = 0 if transpose_batch_sequence else 1
-    assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 bias: Optional[Array] = None,
+                 deterministic: bool = False):
+        """
+        Args:
+            query: queries for calculating attention with shape of `[batch, q_length,
+            num_heads, qk_depth_per_head]`.
+            key: keys for calculating attention with shape of `[batch, kv_length,
+            num_gqa_groups, qk_depth_per_head]`.
+            value: values to be used in attention with shape of `[batch, kv_length,
+            num_gqa_groups, v_depth_per_head]`.
+            bias: bias for the attention weights. This should be broadcastable to the
+            shape `[batch, num_heads, q_length, kv_length]` This can be used for
+            incorporating causal masks, padding masks, proximity bias, etc.
+            dropout_rng: JAX PRNGKey: to be used for dropout
+            deterministic: bool, deterministic or not (to apply dropout)
+        Returns:
+            Output of shape `[batch, length, num_heads, v_depth_per_head]`.
+        """
+        assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
+        batch_dim = 1 if self.transpose_batch_sequence else 0
+        assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
+            'q, k, v batch dims must match.')
+        sequence_dim = 0 if self.transpose_batch_sequence else 1
+        assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
+        assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
+        assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
-    # Casting logits and softmax computation for float32 for model stability.
-    if float32_logits:
-        query = query.astype(jnp.float32)
-        key = key.astype(jnp.float32)
+        if self.scale_attn_logits:
+            head_dim = query.shape[-1]
+            depth_scaling = jnp.sqrt(head_dim).astype(self.dtype)
+            query = query / depth_scaling
 
-    # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
-    h_q, h_kv = query.shape[-2], key.shape[-2]
-    assert (h_q % h_kv == 0) and (h_q >= h_kv)
-    group_size = h_q // h_kv
-    grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
+        # Casting logits and softmax computation for float32 for model stability.
+        if self.float32_logits:
+            query = query.astype(jnp.float32)
+            key = key.astype(jnp.float32)
 
-    if transpose_batch_sequence:
-        attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
-    else:
-        attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
+        # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
+        h_q, h_kv = query.shape[-2], key.shape[-2]
+        assert (h_q % h_kv == 0) and (h_q >= h_kv)
+        group_size = h_q // h_kv
+        grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
 
-    # reshape back to normal DPA shape for bias/softmax/dropout
-    b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
-    attn_weights_without_groups_shape = (b, h * g, q, k)
-    attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
+        if self.transpose_batch_sequence:
+            attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
+        else:
+            attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
 
-    # Apply attention bias: masking, dropout, proximity bias, etc.
-    if bias is not None:
-        attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+        # reshape back to normal DPA shape for bias/softmax/dropout
+        b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
+        attn_weights_without_groups_shape = (b, h * g, q, k)
+        attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
-    # Normalize the attention weights across `kv_length` dimension.
-    attn_weights = jax_nn.softmax(attn_weights).astype(dtype)
+        # Apply attention bias: masking, dropout, proximity bias, etc.
+        if bias is not None:
+            attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
-    # Apply attention dropout.
-    if not deterministic and dropout_rate > 0.:
-        keep_prob = 1.0 - dropout_rate
-        # T5 broadcasts along the "length" dim, but unclear which one that
-        # corresponds to in positional dimensions here, assuming query dim.
-        dropout_shape = list(attn_weights.shape)
-        keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-        multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
-        attn_weights = attn_weights * multiplier
+        # Normalize the attention weights across `kv_length` dimension.
+        attn_weights = jax_nn.softmax(attn_weights).astype(self.dtype)
 
-    attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+        # Apply attention dropout.
+        if not deterministic and self.dropout_rate > 0.:
+            keep_prob = 1.0 - self.dropout_rate
+            # T5 broadcasts along the "length" dim, but unclear which one that
+            # corresponds to in positional dimensions here, assuming query dim.
+            dropout_shape = list(attn_weights.shape)
+            dropout_rng = self.make_rng('dropout')
+            keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
+            multiplier = (keep.astype(attn_weights.dtype) /
+                          jnp.asarray(keep_prob, dtype=self.dtype))
+            attn_weights = attn_weights * multiplier
 
-    # Take the linear combination of `value`.
-    if transpose_batch_sequence:
-        return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
+        attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
 
-    return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
+        # Take the linear combination of `value`.
+        if self.transpose_batch_sequence:
+            return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
+
+        return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
 class DenseGeneral(nn.Module):
@@ -253,8 +246,9 @@ class DenseGeneral(nn.Module):
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    self.features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
         else:
             bias = None
 
@@ -284,8 +278,10 @@ class MlpBlock(nn.Module):
     activations: Sequence[Union[str, Callable]] = ('relu',)
     kernel_init: Initializer = None
     intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
+    use_bias: bool = False
     dtype: Any = jnp.float32
-    fuse_wi: bool = False
+    fuse_wi: bool = True
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -306,6 +302,8 @@ class MlpBlock(nn.Module):
                              dtype=self.dtype,
                              kernel_init=self.kernel_init,
                              kernel_axes=('embed', 'mlp'),
+                             use_bias=self.use_bias,
+                             bias_axes=('mlp'),
                              name=dense_name)(inputs)
             x = jnp.split(x, num_activations, axis=-1)
             for idx, act_fn in enumerate(self.activations):
@@ -318,16 +316,18 @@ class MlpBlock(nn.Module):
                                  dtype=self.dtype,
                                  kernel_init=self.kernel_init,
                                  kernel_axes=('embed', 'mlp'),
+                                 use_bias=self.use_bias,
+                                 bias_axes=('mlp'),
                                  name=dense_name)(inputs)
                 x = _convert_to_activation_function(act_fn)(x)
                 activations.append(x)
 
         # Take elementwise product of above intermediate activations.
         x = functools.reduce(operator.mul, activations)
-        dropout_broadcast_dims = (0,) if self.transpose_batch_sequence else (1,)
         # Apply dropout and final dense output projection.
-        x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=dropout_broadcast_dims)(
-            x, deterministic=deterministic)    # Broadcast along length.
+        x = nn.Dropout(rate=self.intermediate_dropout_rate,
+                       broadcast_dims=self.intermediate_dropout_dims)(
+                           x, deterministic=deterministic)    # Broadcast along length.
         if self.transpose_batch_sequence:
             x = nn_partitioning.with_sharding_constraint(x, ('length', 'batch', 'mlp'))
         else:
@@ -336,6 +336,8 @@ class MlpBlock(nn.Module):
                               dtype=self.dtype,
                               kernel_init=self.kernel_init,
                               kernel_axes=('mlp', 'embed'),
+                              use_bias=self.use_bias,
+                              bias_axes=('embed'),
                               name='wo')(x)
         return output
 
@@ -369,7 +371,6 @@ def apply_rotary_pos_emb_consecutive(
     min_timescale: int = 1,
     max_timescale: int = 10000,
 ):
-
     embedding_dim = inputs.shape[-1]
     half_embedding_dim = embedding_dim // 2
     fraction = 2 * jnp.arange(0, half_embedding_dim) / embedding_dim
@@ -429,6 +430,7 @@ class MultiHeadAttention(nn.Module):
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv: bool = True
+    use_bias: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -478,12 +480,16 @@ class MultiHeadAttention(nn.Module):
                                          axis=-1,
                                          features=self.num_heads * self.head_dim,
                                          kernel_axes=('embed', 'joined_kv'),
+                                         use_bias=self.use_bias,
+                                         bias_axes=('joined_kv'),
                                          dtype=self.dtype)
 
         kv_projection = functools.partial(DenseGeneral,
                                           axis=-1,
                                           features=self.num_gqa_groups * self.head_dim,
                                           kernel_axes=('embed', 'joined_kv'),
+                                          use_bias=self.use_bias,
+                                          bias_axes=('joined_kv'),
                                           dtype=self.dtype)
 
         # NOTE: T5 does not explicitly rescale the attention logits by
@@ -519,26 +525,27 @@ class MultiHeadAttention(nn.Module):
                                         features=self.num_heads * self.head_dim * 3,
                                         kernel_axes=('embed', 'joined_kv'),
                                         kernel_init=qkv_init,
+                                        use_bias=self.use_bias,
+                                        bias_axes=('joined_kv'),
                                         name='qkv',
                                         dtype=self.dtype)(inputs_kv)
                 query, key, value = jnp.split(
                     qkv_proj, [self.num_heads * self.head_dim, self.num_heads * self.head_dim * 2],
                     axis=-1)
-                if self.scale_attn_logits:
-                    query = query / depth_scaling
             else:
-                query = q_projection(kernel_init=query_init, name='query')( \
-                        (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
+                query = q_projection(kernel_init=query_init, name='query')(inputs_q)
+
                 kv_proj = DenseGeneral(axis=-1,
                                        features=self.num_gqa_groups * self.head_dim * 2,
                                        kernel_axes=('embed', 'joined_kv'),
                                        kernel_init=self.kernel_init,
+                                       use_bias=self.use_bias,
+                                       bias_axes=('joined_kv'),
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 key, value = jnp.split(kv_proj, [self.num_gqa_groups * self.head_dim], axis=-1)
         else:
-            query = q_projection(kernel_init=query_init, name='query')( \
-                    (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
+            query = q_projection(kernel_init=query_init, name='query')(inputs_q)
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
@@ -546,15 +553,18 @@ class MultiHeadAttention(nn.Module):
             batch_dim = 1 if self.transpose_batch_sequence else 0
             seq_dim = 1 - batch_dim
 
-            position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+            q_position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
+            k_position = jnp.expand_dims(jnp.arange(query.shape[seq_dim]), axis=batch_dim)
 
             if self.rotary_pos_emb_group_method == 'alternate':
                 apply_rotary_pos_emb = apply_rotary_pos_emb_alternate
             else:
                 apply_rotary_pos_emb = apply_rotary_pos_emb_consecutive
 
-            query = apply_rotary_pos_emb(query, position)
-            key = apply_rotary_pos_emb(key, position)
+            query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+            query = apply_rotary_pos_emb(query, q_position)
+            key = apply_rotary_pos_emb(key, k_position)
 
         query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
         key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
@@ -656,21 +666,16 @@ class MultiHeadAttention(nn.Module):
         if bias is not None:
             attention_bias = combine_biases(attention_bias, bias)
 
-        dropout_rng = None
-        if not deterministic and self.dropout_rate > 0.:
-            dropout_rng = self.make_rng('dropout')
-
         # Apply attention.
-        x = dot_product_attention(query,
-                                  key,
-                                  value,
-                                  transpose_batch_sequence=self.transpose_batch_sequence,
-                                  bias=attention_bias,
-                                  dropout_rng=dropout_rng,
-                                  dropout_rate=self.dropout_rate,
-                                  deterministic=deterministic,
-                                  dtype=self.dtype,
-                                  float32_logits=self.float32_logits)
+        x = DotProductAttention(transpose_batch_sequence=self.transpose_batch_sequence,
+                                scale_attn_logits=self.scale_attn_logits,
+                                dropout_rate=self.dropout_rate,
+                                dtype=self.dtype,
+                                float32_logits=self.float32_logits)(query,
+                                                                    key,
+                                                                    value,
+                                                                    bias=attention_bias,
+                                                                    deterministic=deterministic)
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -685,6 +690,8 @@ class MultiHeadAttention(nn.Module):
             axis=-1,
             kernel_init=self.kernel_init,
             kernel_axes=('joined_kv', 'embed'),
+            use_bias=self.use_bias,
+            bias_axes=('embed'),
             dtype=self.dtype,
             name='out')(x)
         return out
@@ -858,27 +865,36 @@ class RelativePositionBiases(nn.Module):
 
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
+    enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
     head_dim: int = 64
-    dropout_rate: float = 0.1
+    hidden_dropout: float = 0.1
+    hidden_dropout_dims: Sequence[int] = ()
+    attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
     mlp_activations: Sequence[str] = ('relu',)
+    use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     output_layernorm: bool = False
     drop_path: float = 0.0
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
-    fuse_mlp_wi: bool = False
+    fuse_mlp_wi: bool = True
+    self_attn_bias_type: Any = None
+    self_attn_mask_type: Any = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -887,21 +903,25 @@ class EncoderLayer(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
+        del self.self_attn_mask_type    # dummy, just align to TE's impl
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
 
-        if self.relative_embedding is None:
-            rel_emb = RelativePositionBiases(num_buckets=32,
-                                             max_distance=128,
-                                             num_heads=self.num_attention_heads,
-                                             dtype=self.dtype,
-                                             embedding_init=nn.initializers.variance_scaling(
-                                                 1.0, 'fan_avg', 'uniform'),
-                                             name='relpos_bias')
+        if self.enable_relative_embedding:
+            if self.relative_embedding is None:
+                rel_emb = RelativePositionBiases(num_buckets=32,
+                                                 max_distance=128,
+                                                 num_heads=self.num_attention_heads,
+                                                 dtype=self.dtype,
+                                                 embedding_init=nn.initializers.variance_scaling(
+                                                     1.0, 'fan_avg', 'uniform'),
+                                                 name='relpos_bias')
+            else:
+                rel_emb = self.relative_embedding
+            encoder_bias = rel_emb(inputs.shape[sequence_dim], inputs.shape[sequence_dim], True)
         else:
-            rel_emb = self.relative_embedding
-        encoder_bias = rel_emb(inputs.shape[sequence_dim], inputs.shape[sequence_dim], True)
+            encoder_bias = None
 
         # Attention block.
         residual = inputs
@@ -909,6 +929,7 @@ class EncoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_attention_layer_norm")(inputs)
@@ -924,20 +945,21 @@ class EncoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                fuse_qkv=self.fuse_qkv_params,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+                               use_bias=self.use_bias,
                                name='attention')(x,
                                                  x,
                                                  encoder_mask,
                                                  encoder_bias,
                                                  deterministic=deterministic)
-        x = nn.Dropout(rate=self.dropout_rate,
-                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
+        x = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=self.hidden_dropout_dims)(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -947,6 +969,7 @@ class EncoderLayer(nn.Module):
         # MLP block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(x)
@@ -959,13 +982,15 @@ class EncoderLayer(nn.Module):
             transpose_batch_sequence=self.transpose_batch_sequence,
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
-            intermediate_dropout_rate=self.dropout_rate,
+            intermediate_dropout_rate=self.intermediate_dropout,
+            intermediate_dropout_dims=self.intermediate_dropout_dims,
+            use_bias=self.use_bias,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(y, deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate,
-                       broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
+        y = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=self.hidden_dropout_dims)(y, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
             y = nn.Dropout(rate=self.drop_path,
@@ -974,6 +999,7 @@ class EncoderLayer(nn.Module):
 
         if self.output_layernorm:
             y = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layernorm")(y)
@@ -982,27 +1008,36 @@ class EncoderLayer(nn.Module):
 
 class DecoderLayer(nn.Module):
     """Transformer decoder layer that attends to the encoder."""
+    enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
     num_attention_heads: int = 8
     num_gqa_groups: int | None = None
     head_dim: int = 64
-    dropout_rate: float = 0.1
+    hidden_dropout: float = 0.1
+    hidden_dropout_dims: Sequence[int] = ()
+    attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
     mlp_activations: Sequence[str] = ('relu',)
+    use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     drop_path: float = 0.0
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_group_method: str = 'consecutive'
     fuse_qkv_params: bool = True
-    fuse_mlp_wi: bool = False
+    fuse_mlp_wi: bool = True
+    self_attn_bias_type: Any = None
+    self_attn_mask_type: Any = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1018,22 +1053,26 @@ class DecoderLayer(nn.Module):
                  deterministic=False,
                  decode=False,
                  max_decode_length=None):
-
+        del self.self_attn_mask_type    # dummy, just align to TE's impl
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
-        l = max_decode_length if decode and max_decode_length else inputs.shape[sequence_dim]
-        if self.relative_embedding is None:
-            rel_emb = RelativePositionBiases(num_buckets=32,
-                                             max_distance=128,
-                                             num_heads=self.num_attention_heads,
-                                             dtype=self.dtype,
-                                             embedding_init=nn.initializers.variance_scaling(
-                                                 1.0, 'fan_avg', 'uniform'),
-                                             name='relpos_bias')
+
+        if self.enable_relative_embedding:
+            l = max_decode_length if decode and max_decode_length else inputs.shape[sequence_dim]
+            if self.relative_embedding is None:
+                rel_emb = RelativePositionBiases(num_buckets=32,
+                                                 max_distance=128,
+                                                 num_heads=self.num_attention_heads,
+                                                 dtype=self.dtype,
+                                                 embedding_init=nn.initializers.variance_scaling(
+                                                     1.0, 'fan_avg', 'uniform'),
+                                                 name='relpos_bias')
+            else:
+                rel_emb = self.relative_embedding
+            decoder_bias = rel_emb(l, l, False)
         else:
-            rel_emb = self.relative_embedding
-        decoder_bias = rel_emb(l, l, False)
+            decoder_bias = None
 
         # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
         residual = inputs
@@ -1041,6 +1080,7 @@ class DecoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_self_attention_layer_norm")(inputs)
@@ -1056,21 +1096,22 @@ class DecoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
+                               use_bias=self.use_bias,
                                name='self_attention')(x,
                                                       x,
                                                       decoder_mask,
                                                       decoder_bias,
                                                       deterministic=deterministic,
                                                       decode=decode)
-        x = nn.Dropout(rate=self.dropout_rate,
-                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
+        x = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=self.hidden_dropout_dims)(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -1080,6 +1121,7 @@ class DecoderLayer(nn.Module):
         # Encoder-Decoder block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_cross_attention_layer_norm')(x)
@@ -1091,24 +1133,26 @@ class DecoderLayer(nn.Module):
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
-                               dropout_rate=self.dropout_rate,
+                               dropout_rate=self.attention_dropout,
                                float32_logits=self.float32_attention_logits,
                                scale_attn_logits=self.scale_attn_logits,
                                scaled_query_init=self.scaled_query_init,
                                enable_rotary_pos_emb=self.enable_rotary_pos_emb,
                                rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
                                fuse_qkv=self.fuse_qkv_params,
+                               use_bias=self.use_bias,
                                name='encoder_decoder_attention')(y,
                                                                  encoded,
                                                                  encoder_decoder_mask,
                                                                  deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate,
-                       broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
+        y = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=self.hidden_dropout_dims)(y, deterministic=deterministic)
         y = y + residual
 
         # MLP block.
         residual = y
         z = LayerNorm(layernorm_type=self.layernorm_type,
+                      epsilon=self.layernorm_epsilon,
                       zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(y)
@@ -1118,13 +1162,15 @@ class DecoderLayer(nn.Module):
             transpose_batch_sequence=self.transpose_batch_sequence,
             intermediate_dim=self.mlp_dim,
             activations=self.mlp_activations,
-            intermediate_dropout_rate=self.dropout_rate,
+            intermediate_dropout_rate=self.intermediate_dropout,
+            intermediate_dropout_dims=self.intermediate_dropout_dims,
+            use_bias=self.use_bias,
             dtype=self.dtype,
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(z, deterministic=deterministic)
-        z = nn.Dropout(rate=self.dropout_rate,
-                       broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
+        z = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=self.hidden_dropout_dims)(z, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)
             z = nn.Dropout(rate=self.drop_path,
@@ -1133,6 +1179,7 @@ class DecoderLayer(nn.Module):
 
         if self.output_layernorm:
             z = LayerNorm(layernorm_type=self.layernorm_type,
+                          epsilon=self.layernorm_epsilon,
                           zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layernorm")(z)
@@ -1210,6 +1257,21 @@ def assert_allclose(
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 
 
+def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
+    flatten_expected, _ = jax.tree_util.tree_flatten_with_path(expected)
+    flatten_actual, _ = jax.tree_util.tree_flatten_with_path(actual)
+
+    for (expected_path, expected_value), (actual_path,
+                                          actual_value) in zip(flatten_expected, flatten_actual):
+        assert expected_path == actual_path
+        key_str = jax.tree_util.keystr(expected_path)
+        assert_allclose(expected_value,
+                        actual_value,
+                        rtol=rtol,
+                        atol=atol,
+                        err_msg=f'Value of expected{key_str} and actual{key_str} is not close')
+
+
 def dtype_tols(
     dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
@@ -1259,3 +1321,36 @@ def dtype_tols(
         rtol=eps_relaxed,
         atol=max(ulp, eps_relaxed),
     )
+
+
+def sync_params_values(dst, src, transformations, sep='/'):
+    """
+    This function will reconstuct a tree with dst's tree_def/shape and src's value.
+    transformations is a map that records the key mappings between dst and src.
+    If no dst key found in the transformerations, it will fall back to src key = dst key.
+    transformations = {
+        dst key map 0: src key map 0,
+        dst key map 1: src key map 1,
+        ...
+        # if dst key = src key, we don't need to add it
+    }
+    """
+    src_values = {}
+    for key, value in jax.tree_util.tree_leaves_with_path(src):
+        normalized_key = sep.join(x.key for x in key)
+        src_values[normalized_key] = value
+
+    flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
+    synced_dst_values = []
+
+    for key, value in flatten_dst:
+        normalized_key = sep.join(x.key for x in key)
+        if normalized_key in transformations:
+            corresponding_src_key = transformations[normalized_key]
+        else:
+            corresponding_src_key = normalized_key
+        synced_dst_values.append(src_values[corresponding_src_key])
+
+    synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
+
+    return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
