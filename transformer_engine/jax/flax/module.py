@@ -1034,21 +1034,25 @@ class LayerNormMLP(TransformerEngineBase):
         if use_fused_layernorm_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            bias_1_shape = intermediate_dim if self.use_bias else 0
-            bias_1 = nn_partitioning.param_with_axes('wi_bias',
-                                                     self.bias_init,
-                                                     bias_1_shape,
-                                                     jnp.float32,
-                                                     axes=self.bias_axes_1)
-            bias_1 = bias_1.astype(self.dtype)
+            if self.use_bias:
+                bias_1_shape = intermediate_dim
+                bias_1 = nn_partitioning.param_with_axes('wi_bias',
+                                                         self.bias_init,
+                                                         bias_1_shape,
+                                                         jnp.float32,
+                                                         axes=self.bias_axes_1)
+                bias_1 = bias_1.astype(self.dtype)
 
-            bias_2_shape = (hidden_size,) if self.use_bias else (0,)
-            bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                     self.bias_init,
-                                                     bias_2_shape,
-                                                     jnp.float32,
-                                                     axes=self.bias_axes_2)
-            bias_2 = bias_2.astype(self.dtype)
+                bias_2_shape = (hidden_size,)
+                bias_2 = nn_partitioning.param_with_axes('wo_bias',
+                                                         self.bias_init,
+                                                         bias_2_shape,
+                                                         jnp.float32,
+                                                         axes=self.bias_axes_2)
+                bias_2 = bias_2.astype(self.dtype)
+            else:
+                bias_1 = jnp.empty(0, self.dtype)
+                bias_2 = jnp.empty(0, self.dtype)
 
             out = fused_layernorm_fp8_mlp(y,
                                          scale,

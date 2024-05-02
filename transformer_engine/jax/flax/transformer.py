@@ -1103,7 +1103,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
 
-            # No changes to memory layout, should trigger bicast only (Ideally no Perf impact)
+            # No changes to memory layout, should trigger bitcast only (Ideally no Perf impact)
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
 
@@ -1161,8 +1161,6 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     bias = dynamic_vector_slice_in_dim(jnp.squeeze(bias, axis=0),
                                                        jnp.reshape(cur_index, (-1)), 1, -2)
 
-        scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
-
         LEADING_AXES = (BATCH_AXES, SEQLEN_AXES)
         if self.transpose_batch_sequence:
             LEADING_AXES = (SEQLEN_AXES, BATCH_AXES)
@@ -1192,6 +1190,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
             dpa_args = [query, key, value]
 
+        scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
         x = DotProductAttention(head_dim=self.head_dim,
                                 num_attention_heads=self.num_attention_heads,
                                 num_gqa_groups=self.num_gqa_groups,
