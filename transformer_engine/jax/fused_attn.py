@@ -121,7 +121,7 @@ def _fused_attn_fwd_qkvpacked_rule(qkv: jnp.ndarray, bias: jnp.ndarray | None, m
         actual_seqlen = jnp.full((batch,), seqlen, dtype=jnp.int32)
     else:
         assert mask is not None
-        actual_seqlen = jnp.sum(mask==False, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        actual_seqlen = jnp.sum(not mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
     output, softmax_aux, rng_state = fused_attn_fwd_qkvpacked(
         qkv,
         bias,
@@ -207,12 +207,13 @@ def _fused_attn_fwd_kvpacked_rule(q, kv, bias, mask, seed, attn_bias_type, attn_
         kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
     else:
         assert mask is not None
-        q_actual_seqlen = jnp.sum(mask==False, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        q_actual_seqlen = jnp.sum(not mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         if attn_mask_type == AttnMaskType.PADDING_MASK:
-            kv_actual_seqlen = jnp.sum(mask==False, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+            kv_actual_seqlen = jnp.sum(
+                not mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         else:
             # When mask is causal, the actual seqlen is not the last row, use max to find it
-            kv_actual_seqlen = jnp.max(jnp.sum(mask==False, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+            kv_actual_seqlen = jnp.max(jnp.sum(not mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
     output, softmax_aux, rng_state = fused_attn_fwd_kvpacked(
         q,
@@ -302,12 +303,13 @@ def _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_ty
         kv_actual_seqlen = jnp.full((batch,), s_kv, dtype=jnp.int32)
     else:
         assert mask is not None
-        q_actual_seqlen = jnp.sum(mask==False, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+        q_actual_seqlen = jnp.sum(not mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         if attn_mask_type == AttnMaskType.PADDING_MASK:
-            kv_actual_seqlen = jnp.sum(mask==False, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
+            kv_actual_seqlen = jnp.sum(
+                not mask, axis=-1, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
         else:
             # When mask is causal, the actual seqlen is not the last row, use max to find it
-            kv_actual_seqlen = jnp.max(jnp.sum(mask==False, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+            kv_actual_seqlen = jnp.max(jnp.sum(not mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
     output, softmax_aux, rng_state = fused_attn_fwd(q,
                                                     k,
