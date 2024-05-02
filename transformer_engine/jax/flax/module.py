@@ -1051,8 +1051,8 @@ class LayerNormMLP(TransformerEngineBase):
                                                          axes=self.bias_axes_2)
                 bias_2 = bias_2.astype(self.dtype)
             else:
-                bias_1 = jnp.empty(0, self.dtype)
-                bias_2 = jnp.empty(0, self.dtype)
+                bias_1 = None
+                bias_2 = None
 
             out = fused_layernorm_fp8_mlp(y,
                                          scale,

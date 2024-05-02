@@ -4177,13 +4177,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        # Phuong: input shape [batch_size, n_out] should have transpose_axis_boundary = -1
-        if transpose_axis_boundary == -2:
-            gi_hidden_size = reduce(operator.mul, dz_aval.shape[-2:])
-        elif transpose_axis_boundary == -1:
-            gi_hidden_size = dz_aval.shape[-1]
-        else:
-            raise NotImplementedError
+        gi_hidden_size = reduce(operator.mul, dz_aval.shape[transpose_axis_boundary:])
         t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
@@ -4226,13 +4220,9 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         ir_dz_type = ir.RankedTensorType(dz.type)
         ir_dz_shape = ir_dz_type.shape
-        if ir_dz_shape[-2] == 1 or dz_aval.shape[-2] == 2:
-            batch_szie = reduce(operator.mul, ir_dz_shape[:-2])
-            ir_hidden_szie = reduce(operator.mul, ir_dz_shape[-2:])
-        else:
-            batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
-            ir_hidden_szie = ir_dz_shape[-1]
-        contracted_dz_shape = (batch_szie, ir_hidden_szie)
+        batch_size = reduce(operator.mul, ir_dz_shape[:transpose_axis_boundary])
+        ir_hidden_size = reduce(operator.mul, ir_dz_shape[transpose_axis_boundary:])
+        contracted_dz_shape = (batch_size, ir_hidden_size)
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
         ir_amax_dtype = ir_amax_type.element_type
@@ -4241,7 +4231,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         ir_scale_inv_shape = ir_amax_shape
         transposed_dz_shape = _multidim_transpose(ir_dz_shape, static_axis_boundary,
                                                  transpose_axis_boundary)
-        dbias_shape = (*ir_dz_shape[:static_axis_boundary + 1], ir_hidden_szie)
+        dbias_shape = (*ir_dz_shape[:static_axis_boundary + 1], ir_hidden_size)
 
         wkspace_aval = ctx.avals_out[-1]
 
