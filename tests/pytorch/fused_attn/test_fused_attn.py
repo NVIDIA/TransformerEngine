@@ -70,7 +70,8 @@ def reset_global_fp8_state():
 def _cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     encoded_version = ext.get_cudnn_version()
-    major, encoded_version = divmod(encoded_version, 1000)
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
 
