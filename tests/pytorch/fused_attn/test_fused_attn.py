@@ -194,12 +194,16 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
             return False
     return True
 
-
-def _is_unfused_attention_supported(config: ModelConfig) -> bool:
+def _is_unfused_attention_supported(
+    config: ModelConfig,
+    qkv_format: str,
+    ) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
     if ("padding" in config.attn_mask_type):
         return False
     if ("causal" in config.attn_mask_type and config.attn_type == 'cross'):
+        return False
+    if qkv_format == 'thd':
         return False
     return True
 
@@ -258,7 +262,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         )
 
     # Skip if only unfused backend is supported
-    unfused_attn_supported = _is_unfused_attention_supported(config)
+    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
     if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
@@ -269,6 +274,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     flash_attn_supported = _is_flash_attention_supported(config)
     if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
+    if (qkv_format == 'thd' and 'padding' not in config.attn_mask_type):
+        pytest.skip("THD layout requires padding/padding_causal mask type.")
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
@@ -318,8 +325,16 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     if fused_attn_supported and flash_attn_supported:
         if _NVTE_DEBUG:
             print("[test_dot_product_attention]: fused attn vs flash attn")
+            print("fused_attn_fwd min {:.8f} max {:.8f}".format(
+                fused_attn_fwd.min().item(), fused_attn_fwd.max().item()))  
+            print("flash_attn_fwd min {:.8f} max {:.8f}".format(
+                flash_attn_fwd.min().item(), flash_attn_fwd.max().item()))  
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
+            print("fused_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
+                fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item()))  
+            print("flash_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
+                flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item()))  
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backend) == 2:
         if _NVTE_DEBUG:
@@ -493,6 +508,34 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
 
+qkv_layouts_thd = [
+    't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+    ]
+
+model_configs_layout_thd = {
+    #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    "layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #th3d/thd_t2hd
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #th3d/thd_t2hd
+    "layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd
+    "layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd
+    "layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
+    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    "layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
+}
+
+@pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
+@pytest.mark.parametrize("model", model_configs_layout_thd.keys())
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with different QKV layouts"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
 
 def _run_dot_product_attention(
         dtype: torch.dtype,
@@ -536,6 +579,10 @@ def _run_dot_product_attention(
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+    #print('seqlens_q',seqlens_q)
+    #print('seqlens_kv',seqlens_kv)
+    #print('cu_seqlens_q',cu_seqlens_q)
+    #print('cu_seqlens_kv',cu_seqlens_kv)
 
     # Create attention mask if padding
     attention_mask = None
@@ -616,6 +663,34 @@ def _run_dot_product_attention(
     for i in range(3):
         inp[i].requires_grad = True
 
+    # Create ragged offsets for q/k/v
+    seq_offsets_q, seq_offsets_k, seq_offsets_v = None, None, None
+    qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
+    if qkv_format == 'thd':
+        if qkv_group == 'hd_hd_hd':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+        if qkv_group == '3hd':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
+            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
+        if qkv_group == 'h3d':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
+            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
+        if qkv_group == 'hd_2hd':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
+        if qkv_group == 'hd_h2d':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
+    #print('seq_offsets_q',seq_offsets_q)
+    #print('seq_offsets_k',seq_offsets_k)
+    #print('seq_offsets_v',seq_offsets_v)
+
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
     qkv_format_kv = qkv_format_kv.replace('s', 'sq')
@@ -666,6 +741,9 @@ def _run_dot_product_attention(
             qkv_format=qkv_format,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            seq_offsets_q=seq_offsets_q,
+            seq_offsets_k=seq_offsets_k,
+            seq_offsets_v=seq_offsets_v,
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
             core_attention_bias_type=config.attn_bias_type,
@@ -715,7 +793,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
     )
     flash_attn_supported = _is_flash_attention_supported(config)
-    unfused_attn_supported = _is_unfused_attention_supported(config)
+    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
     if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
