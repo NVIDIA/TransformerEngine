@@ -166,6 +166,16 @@ def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return relu
 
 
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
+def onnx_fp8_srelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for fp8_srelu"""
+    # pylint: disable=unused-argument
+    srelu = compute_in_fp32(g, inputs, torch.onnx.symbolic_opset9.srelu)
+    if scale_inv:
+        srelu = quantize(g, srelu, scale_inv, fp8_tensor)
+    return srelu
+
+
 @symbolic_helper.parse_args("v", "i")
 def onnx_swiglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for swiglu"""
@@ -408,6 +418,7 @@ register_custom_op_symbolic('tex_ts::cast_to_fp8_noalloc_ts', onnx_cast_to_fp8_n
 register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
 register_custom_op_symbolic('tex_ts::gelu_ts', onnx_fp8_gelu, VER)
 register_custom_op_symbolic('tex_ts::relu_ts', onnx_fp8_relu, VER)
+register_custom_op_symbolic('tex_ts::srelu_ts', onnx_fp8_srelu, VER)
 register_custom_op_symbolic('tex_ts::reglu_ts', onnx_fp8_reglu, VER)
 register_custom_op_symbolic('tex_ts::geglu_ts', onnx_fp8_geglu, VER)
 register_custom_op_symbolic('tex_ts::swiglu_ts', onnx_fp8_swiglu, VER)

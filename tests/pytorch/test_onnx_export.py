@@ -69,7 +69,7 @@ ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
