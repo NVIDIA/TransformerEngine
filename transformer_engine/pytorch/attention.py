@@ -3575,6 +3575,11 @@ class DotProductAttention(torch.nn.Module):
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
             if self.device_compute_capability == (9, 0):
                 use_flash_attention = False
+        
+        if self.qkv_format == "thd":
+            use_flash_attention = False
+            use_fused_attention = True
+            fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if use_flash_attention:
             if _NVTE_DEBUG:

@@ -892,7 +892,7 @@ def fused_attn_fwd(
             cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype,
             seq_offsets_q, seq_offsets_k, seq_offsets_v,
-            d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
+            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
 
