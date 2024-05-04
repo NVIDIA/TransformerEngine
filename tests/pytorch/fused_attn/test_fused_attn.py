@@ -664,32 +664,46 @@ def _run_dot_product_attention(
         inp[i].requires_grad = True
 
     # Create ragged offsets for q/k/v
-    seq_offsets_q, seq_offsets_k, seq_offsets_v = None, None, None
+    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
     qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
     if qkv_format == 'thd':
+        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q
         if qkv_group == 'hd_hd_hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-        if qkv_group == '3hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-        if qkv_group == 'h3d':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-        if qkv_group == 'hd_2hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
-        if qkv_group == 'hd_h2d':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
-    #print('seq_offsets_q',seq_offsets_q)
-    #print('seq_offsets_k',seq_offsets_k)
-    #print('seq_offsets_v',seq_offsets_v)
+            seq_offsets_q = num_heads * head_dim * cu_seqlens_q
+            seq_offsets_k = num_gqa_groups * head_dim * cu_seqlens_kv
+            seq_offsets_v = num_gqa_groups * head_dim * cu_seqlens_kv
+        if qkv_group in ['3hd', 'h3d']:
+            seq_offsets_q = num_heads * head_dim * 3 * cu_seqlens_q
+            seq_offsets_k = num_heads * head_dim * 3 * cu_seqlens_q
+            seq_offsets_v = num_heads * head_dim * 3 * cu_seqlens_q
+        if qkv_group in ['hd_2hd', 'hd_h2d']:
+            seq_offsets_q = num_heads * head_dim * cu_seqlens_q
+            seq_offsets_k = num_gqa_groups * head_dim * 2 * cu_seqlens_kv
+            seq_offsets_v = num_gqa_groups * head_dim * 2 * cu_seqlens_kv
+        #if qkv_group == 'hd_hd_hd':
+        #    seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+        #    seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+        #    seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+        #if qkv_group == '3hd':
+        #    seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+        #    seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
+        #    seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
+        #if qkv_group == 'h3d':
+        #    seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+        #    seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
+        #    seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
+        #if qkv_group == 'hd_2hd':
+        #    seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+        #    seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+        #    seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
+        #if qkv_group == 'hd_h2d':
+        #    seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
+        #    seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+        #    seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
+    print('seq_offsets_q',seq_offsets_q)
+    print('seq_offsets_k',seq_offsets_k)
+    print('seq_offsets_v',seq_offsets_v)
+    print('seq_offsets_o',seq_offsets_o)
 
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
@@ -744,6 +758,7 @@ def _run_dot_product_attention(
             seq_offsets_q=seq_offsets_q,
             seq_offsets_k=seq_offsets_k,
             seq_offsets_v=seq_offsets_v,
+            seq_offsets_o=seq_offsets_o,
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
             core_attention_bias_type=config.attn_bias_type,
