@@ -2989,8 +2989,13 @@ class DotProductAttention(torch.nn.Module):
 
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
+    
+        self._allocator = StaticBufferAllocator()
 
-        self.offset_module = OffsetsModule()
+
+    def alloc(self, size, dtype, device):
+        return self._allocator(size, dtype, device)
+
 
     def _checkpointed_attention_forward(
         self,
@@ -3231,7 +3236,6 @@ class DotProductAttention(torch.nn.Module):
             qkv_format = self.qkv_format
 
         
-
         if inference_params is not None:
             assert self.layer_number is not None, "Layer number must be set!"
 
@@ -3242,8 +3246,7 @@ class DotProductAttention(torch.nn.Module):
             (inference_key_memory, inference_value_memory,
             ) = inference_params.key_value_memory_dict[self.layer_number]
 
-
-            if not qkv_format == "thd":
+            if qkv_format in ["bshd", "sbhd"]:
                 batch_start = inference_params.batch_size_offset
                 batch_end = batch_start + key_layer.size(1)
                 assert batch_end <= inference_key_memory.size(1)
@@ -3259,80 +3262,49 @@ class DotProductAttention(torch.nn.Module):
                     sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
                 key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
                 value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-            else:
+            elif qkv_format == "thd":
+                """
+                    inference_params.seq_len - lengths of processed sequences
+                """
+                bs = query_layer.shape[0] 
 
-                if query_layer.shape[1] == 1:
-                    bs = query_layer.shape[0] 
-
-                    tex.attention_copy(
-                        inference_key_memory, 
-                        inference_params.seq_len, 
-                        key_layer, 
-                        inference_params.max_sequence_length,  
-                        bs,
-                        self.channels)
-                    tex.attention_copy(
-                        inference_value_memory, 
-                        inference_params.seq_len, 
-                        value_layer, 
-                        inference_params.max_sequence_length,  
-                        bs,
-                        self.channels)
+                tex.attention_copy(
+                    inference_key_memory, 
+                    inference_params.seq_len, 
+                    inference_params.incoming_seq_len,
+                    key_layer, 
+                    inference_params.max_incoming_seqence_length,
+                    inference_params.max_sequence_length,  
+                    bs,
+                    self.channels)
+                tex.attention_copy(
+                    inference_value_memory, 
+                    inference_params.seq_len, 
+                    inference_params.incoming_seq_len,
+                    value_layer, 
+                    inference_params.max_incoming_seqence_length,
+                    inference_params.max_sequence_length,  
+                    bs,
+                    self.channels)
                     
-                    max_seqlen_q = 1
-                    max_seqlen_kv = inference_params.max_sequence_length
-                    cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v = self.offset_module(bs, inference_params, max_seqlen_q, max_seqlen_kv, self.channels)
+                max_seqlen_q = inference_params.max_incoming_seqence_length
+                max_seqlen_kv = inference_params.max_sequence_length
+                cu_seqlens_q = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
+                cu_seqlens_kv = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_q = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_k = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_v = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
 
+                cu_seqlens_q.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda"))
+                cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + 1, dim=0))
 
-                    query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
-                    key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
-                    value_layer = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16)
-                else:
-                    bs = query_layer.shape[0]  
-
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-
-                    batch_start = inference_params.batch_size_offset
-                    batch_end = batch_start + key_layer.size(1)
-                    assert batch_end <= inference_key_memory.size(1)
-
-                    sequence_start = inference_params.sequence_len_offset
-                    sequence_end = sequence_start + key_layer.size(0)
-                    assert sequence_end <= inference_key_memory.size(0)
-
-                    # Copy keys and values into KV-cache
-                    inference_key_memory[
-                        sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
-                    inference_value_memory[
-                        sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
-                    key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-                    value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-
-                    seqlens = (torch.zeros(bs + 1, dtype=torch.int32, device="cuda"))
-                    seqlens[1:] = inference_params.seq_len
-                    cu_seqlens_q = (torch.zeros(bs + 1, dtype=torch.int32, device="cuda"))
-                    cu_seqlens_kv = (torch.zeros(bs + 1, dtype=torch.int32, device="cuda"))
-                    cu_seqlens_q[1:] = (torch.cumsum(inference_params.seq_len, dim=0))
-                    cu_seqlens_kv[1:] = (torch.cumsum(inference_params.seq_len, dim=0))
-
-                    max_seqlen_q = query_layer.shape[1]
-                    max_seqlen_kv =  key_layer.shape[0]
-                    
-                    seq_offsets_q = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q
-                    seq_offsets_k = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv
-                    seq_offsets_v = seq_offsets_k
-                    
-
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-                    key_layer = key_layer.contiguous()
-                    value_layer = value_layer.contiguous()
-
-
-                    query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16).contiguous()
-                    key_layer = key_layer.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16).contiguous()
-                    value_layer = value_layer.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16).contiguous()
+                seq_offsets_q.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q)
+                seq_offsets_k.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
+                seq_offsets_v.copy_(seq_offsets_k)
+                
+                query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
+                key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
+                value_layer = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16)
 
 
             if qkv_format == "bshd":
@@ -4042,7 +4014,7 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
-        self._allocator = BufferAllocator()
+        self._allocator = StaticBufferAllocator()
 
 
 
@@ -4353,12 +4325,15 @@ class MultiheadAttention(torch.nn.Module):
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
         if rotary_pos_emb is not None:
-            if self.qkv_format == "thd" and query_layer.shape[1] == 1:
-                if not isinstance(rotary_pos_emb, tuple):
-                    rotary_pos_emb = ((rotary_pos_emb,) * 2)
-
-                d = query_layer.shape[-1]
-                b = query_layer.shape[0]
+            assert (not isinstance(query_layer, Float8Tensor)
+                and not isinstance(key_layer, Float8Tensor)
+                ), "RoPE is not supported for Float8Tensors!"
+            # duplicate the pos_emb for self attention
+            if not isinstance(rotary_pos_emb, tuple):
+                rotary_pos_emb = ((rotary_pos_emb,) * 2)
+            
+            if self.qkv_format == "thd" and inference_params is not None:
+                b, d = query_layer.shape[0], query_layer.shape[-1]
 
                 q_pos_emb = self.alloc((b, 1, 1, d), torch.float32, "cuda")
                 k_pos_emb = self.alloc((b, 1, 1, d), torch.float32, "cuda")
@@ -4369,12 +4344,6 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer.copy_(apply_rotary_pos_emb(query_layer, q_pos_emb, "bshd", fused=True))
                 key_layer.copy_(apply_rotary_pos_emb(key_layer, k_pos_emb, "bshd", fused=True))
             else:
-                assert (not isinstance(query_layer, Float8Tensor)
-                    and not isinstance(key_layer, Float8Tensor)
-                    ), "RoPE is not supported for Float8Tensors!"
-                # duplicate the pos_emb for self attention
-                if not isinstance(rotary_pos_emb, tuple):
-                    rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
                 q_pos_emb, k_pos_emb = rotary_pos_emb
 
@@ -4442,24 +4411,15 @@ class MultiheadAttention(torch.nn.Module):
             outputs += (layernorm_output,)
         return outputs if len(outputs) > 1 else outputs[0]
 
-class OffsetsModule(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, bs, inference_params, max_seqlen_q, max_seqlen_kv, channels):
 
-        cu_seqlens_q = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_kv = torch.zeros(bs + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + 1, dim=0))
-
-
-        seq_offsets_q = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * channels * max_seqlen_q
-        seq_offsets_k = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * channels * max_seqlen_kv
-        seq_offsets_v = seq_offsets_k.clone()
-
-        return cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v
-
-class BufferAllocator(torch.nn.Module):
+class StaticBufferAllocator(torch.nn.Module):
+    """
+        This class is used when we use te.make_graphed_callable(). 
+        CUDA Graphs require all tensors to be static. Neverthless, 
+        torch API make_graphed_callable() takes care of output of torch modules,
+        and makes them static. Thus by wrapping allocation of memory into
+        torch.nn.Module, we can greatly simplify our code.
+    """
     def __init__(self):
         super().__init__()
     
