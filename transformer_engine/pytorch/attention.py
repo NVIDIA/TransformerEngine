@@ -4339,12 +4339,25 @@ class MultiheadAttention(torch.nn.Module):
                 k_pos_emb = self.alloc((b, 1, 1, d), torch.float32, "cuda")
                 q_freq, k_freq = rotary_pos_emb
 
-                tex.get_values(q_freq, inference_params.seq_len + 1, q_pos_emb, d, b)
-                tex.get_values(k_freq, inference_params.seq_len + 1, k_pos_emb, d, b)
+                tex.get_values(
+                    q_freq, 
+                    inference_params.seq_len + 1, 
+                    inference_params.incoming_seq_len, 
+                    q_pos_emb, 
+                    d, 
+                    b
+                )
+                tex.get_values(
+                    k_freq, 
+                    inference_params.seq_len + 1, 
+                    inference_params.incoming_seq_len, 
+                    k_pos_emb, 
+                    d, 
+                    b
+                )
                 query_layer.copy_(apply_rotary_pos_emb(query_layer, q_pos_emb, "bshd", fused=True))
                 key_layer.copy_(apply_rotary_pos_emb(key_layer, k_pos_emb, "bshd", fused=True))
             else:
-
                 q_pos_emb, k_pos_emb = rotary_pos_emb
 
                 # adjust key and value for inference
@@ -4353,8 +4366,6 @@ class MultiheadAttention(torch.nn.Module):
                         sequence_length = key_layer.size(0)
                     elif self.qkv_format == "bshd":
                         sequence_length = key_layer.size(1)
-                    elif self.qkv_format == "thd":
-                        sequence_length = key_layer.size(1)
 
                     sequence_start = inference_params.sequence_len_offset
                     sequence_end = sequence_start + sequence_length
@@ -4362,8 +4373,8 @@ class MultiheadAttention(torch.nn.Module):
                     q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
                     k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
 
-                    query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format if self.qkv_format != "thd" else "bshd", fused=True)
-                    key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format if self.qkv_format != "thd" else "bshd", fused=True)
+                query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
+                key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
         query_layer = query_layer.contiguous()
         key_layer = key_layer.contiguous()
 
