@@ -166,18 +166,18 @@ class TestFP8Recipe:
             ref_scale_inv_backward,
         )
 
+    @pytest.mark.parametrize("amax_history_len", [31, 1024])
+    @pytest.mark.parametrize("amax_compute_algo", ["max", "most_recent"])
     def test_fp8_scale_update_with_linear_fuser_op(
         self,
+        amax_history_len: int,
+        amax_compute_algo: str,
         num_steps: int = 4,
         in_shape: tuple[int] = (16, 16),
         dtype: torch.dtype = torch.float32,
+        margin: float = 2,
     ):
         device = torch.device("cuda")
-
-        ### TODO Non-default recipe
-        amax_history_len: int = 1024
-        amax_compute_algo: str = "max"
-        margin: float = 0
 
         # Construct linear op
         op = te.fuser.ops.UnfusedLinear(in_shape[-1], in_shape[-1])
@@ -216,7 +216,15 @@ class TestFP8Recipe:
                 op.weight.fill_(w_history[-1])
 
             # Forward and backward pass
-            with te.fp8_autocast(enabled=True):
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+            recipe = transformer_engine.common.recipe.DelayedScaling(
+                margin=margin,
+                interval=1,
+                fp8_format=fp8_format,
+                amax_history_len=amax_history_len,
+                amax_compute_algo=amax_compute_algo,
+            )
+            with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
                 y = op(x)
             y.backward(dy)
 
