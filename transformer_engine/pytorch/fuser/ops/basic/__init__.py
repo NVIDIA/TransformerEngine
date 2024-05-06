@@ -4,18 +4,18 @@
 
 from .all_gather import AllGather
 from .all_reduce import AllReduce
+from .basic_linear import BasicLinear
 from .bias import Bias
 from .identity import Identity
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
-from .unfused_linear import UnfusedLinear
 
 __all__ = [
     "AllGather",
     "AllReduce",
+    "BasicLinear",
     "Bias",
     "Identity",
     "ReduceScatter",
     "Reshape",
-    "UnfusedLinear",
 ]

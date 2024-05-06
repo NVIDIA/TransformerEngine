@@ -22,8 +22,8 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
 )
+from transformer_engine.pytorch.fuser.ops.basic import BasicLinear, Bias
 from transformer_engine.pytorch.fuser.ops.op import FusedOperation
-from transformer_engine.pytorch.fuser.ops.unfused import Bias, UnfusedLinear
 from transformer_engine.pytorch.module.base import get_workspace
 from .._common import (
     canonicalize_device,
@@ -47,12 +47,12 @@ class ForwardLinearBiasActivation(FusedOperation):
     def __init__(
         self,
         *,
-        linear: UnfusedLinear,
+        linear: BasicLinear,
         bias: Optional[Bias],
         activation: None,
     ) -> None:
 
-        # Unfused operations that comprise this fused operation
+        # Basic operations that comprise this fused operation
         op_idxs = dict(
             linear=0,
             bias=None,
@@ -69,27 +69,27 @@ class ForwardLinearBiasActivation(FusedOperation):
         # Initialize base class
         super().__init__(ops)
 
-        # Index of each unfused operations
+        # Index of each basic operations
         self._op_idxs: dict[str, Optional[int]] = op_idxs
 
     def fuser_forward(
         self,
-        unfused_op_ctxs: list[OperationContext],
+        basic_op_ctxs: list[OperationContext],
         input: torch.Tensor,
-        unfused_op_kwargs: list[dict[str, Any]],
+        basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
 
-        # Get unfused operations
+        # Get basic operations
         idx = self._op_idxs["linear"]
-        linear_op = self.unfused_ops[idx]
-        linear_op_ctx = unfused_op_ctxs[idx]
-        linear_op_kwargs = unfused_op_kwargs[idx]
+        linear_op = self.basic_ops[idx]
+        linear_op_ctx = basic_op_ctxs[idx]
+        linear_op_kwargs = basic_op_kwargs[idx]
         if self._op_idxs["bias"] is None:
             bias_op = None
         else:
             idx = self._op_idxs["bias"]
-            bias_op = self.unfused_ops[idx]
-            if unfused_op_kwargs[idx]:
+            bias_op = self.basic_ops[idx]
+            if basic_op_kwargs[idx]:
                 raise ValueError(
                     "Bias operation forward does not expect keyword arguments"
                 )
@@ -239,7 +239,7 @@ def fuse_forward_linear_bias_activation(
     ----------
     ops: list of tuples
         Forward pass operations and the indices of the corresponding
-        unfused operations.
+        basic operations.
 
     Returns
     -------
@@ -257,7 +257,7 @@ def fuse_forward_linear_bias_activation(
         # Check if first op is linear
         window, ops = ops[:1], ops[1:]
         op1, _ = window[0]
-        if not isinstance(op1, UnfusedLinear):
+        if not isinstance(op1, BasicLinear):
             continue
         if op1.tensor_parallel_mode == "row":
             # Row tensor-parallelism requires communication after the
@@ -281,8 +281,8 @@ def fuse_forward_linear_bias_activation(
             bias=window[1][0],
             activation=None,
         )
-        unfused_op_idxs = [unfused_op_idxs[0] for _, unfused_op_idxs in window]
-        window = [(op, unfused_op_idxs)]
+        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
+        window = [(op, basic_op_idxs)]
 
     # Return list of ops
     out.extend(window)

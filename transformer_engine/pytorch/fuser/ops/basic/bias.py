@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import BasicOperation
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
 )
 
 
-class Bias(UnfusedOperation):
+class Bias(BasicOperation):
     """Apply additive bias
 
     This is equivalent to the additive bias in `torch.nn.Linear`.

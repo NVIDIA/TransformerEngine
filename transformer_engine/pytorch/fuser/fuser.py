@@ -10,9 +10,9 @@ import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.fuser.ops.op import (
+    BasicOperation,
     FusableOperation,
     OperationContext,
-    UnfusedOperation,
 )
 from transformer_engine.pytorch.fuser.ops.fused_forward import (
     fuse_forward_linear_bias_activation,
@@ -34,9 +34,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         input_: torch.Tensor,
         forward_ops: list[tuple[FusableOperation, list[int]]],
         backward_ops: list[tuple[FusableOperation, list[int]]],
-        unfused_ops: list[UnfusedOperation],
-        unfused_op_ctxs: list[OperationContext],
-        unfused_op_kwargs: list[dict[str, Any]],
+        basic_ops: list[BasicOperation],
+        basic_op_ctxs: list[OperationContext],
+        basic_op_kwargs: list[dict[str, Any]],
         *params: torch.nn.Parameter,
     ) -> torch.Tensor:
         """Forward pass
@@ -49,18 +49,18 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Input to first operation in pipeline
         forward_ops: list of tuple
             Forward pass operations and the indices of the
-            corresponding unfused operations. The order should match
-            unfused_ops.
+            corresponding basic operations. The order should match
+            basic_ops.
         backward_ops: list of tuple
             Backward pass operations and the indices of the
-            corresponding unfused operations. The order should be the
-            reverse of unfused_ops.
-        unfused_ops: list of UnfusedOperation
-            Unfused operations
-        unfused_op_ctxs: list of OperationContext
-            Context for UnfusedOperation
-        unfused_op_kwargs: list of dict
-            Keyword arguments to UnfusedOperation
+            corresponding basic operations. The order should be the
+            reverse of basic_ops.
+        basic_ops: list of BasicOperation
+            Basic operations
+        basic_op_ctxs: list of OperationContext
+            Context for BasicOperation
+        basic_op_kwargs: list of dict
+            Keyword arguments to BasicOperation
         *params: torch.nn.Parameter
             Parameters in operation pipeline
 
@@ -69,13 +69,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Apply forward ops
         x = input_
         requires_grad = x.requires_grad
-        for op, unfused_op_idxs in forward_ops:
+        for op, basic_op_idxs in forward_ops:
 
             # Forward op
             x = op.fuser_forward(
-                [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
+                [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
-                [unfused_op_kwargs[idx] for idx in unfused_op_idxs],
+                [basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
 
             # Check if backward op is required
@@ -83,13 +83,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 requires_grad = any(
                     param.requires_grad for param in op.parameters()
                 )
-            for idx in unfused_op_idxs:
-                unfused_op_ctxs[idx]._requires_grad = requires_grad
+            for idx in basic_op_idxs:
+                basic_op_ctxs[idx]._requires_grad = requires_grad
             x.requires_grad_(requires_grad=requires_grad)
 
         # Flatten list of saved tensors
         to_save = []
-        for ctx in unfused_op_ctxs:
+        for ctx in basic_op_ctxs:
             range_start = len(to_save)
             if ctx.to_save is not None:
                 to_save.extend(ctx.to_save)
@@ -100,8 +100,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Other context for backward pass
         func_ctx.backward_ops = backward_ops
-        func_ctx.unfused_ops = unfused_ops
-        func_ctx.unfused_op_ctxs = unfused_op_ctxs
+        func_ctx.basic_ops = basic_ops
+        func_ctx.basic_op_ctxs = basic_op_ctxs
         func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         return x
@@ -116,41 +116,41 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Operations and autograd state
         backward_ops = func_ctx.backward_ops
-        unfused_ops = func_ctx.unfused_ops
-        unfused_op_ctxs = func_ctx.unfused_op_ctxs
+        basic_ops = func_ctx.basic_ops
+        basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Unflatten list of saved tensors
         saved_tensors = func_ctx.saved_tensors
-        for ctx in unfused_op_ctxs:
+        for ctx in basic_op_ctxs:
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
 
         # Apply backward ops
         dx = grad_output
-        grad_params = [None for _ in range(len(unfused_ops))]
-        for op, unfused_op_idxs in backward_ops:
+        grad_params = [None for _ in range(len(basic_ops))]
+        for op, basic_op_idxs in backward_ops:
 
             # Stop if no more gradients are required
             if all(
-                not unfused_op_ctxs[idx]._requires_grad
-                for idx in unfused_op_idxs
+                not basic_op_ctxs[idx]._requires_grad
+                for idx in basic_op_idxs
             ):
                 dx = None
                 break
 
             # Backward op
             dx, fused_op_dparams = op.fuser_backward(
-                [unfused_op_ctxs[idx] for idx in unfused_op_idxs],
+                [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
             )
-            for idx, unfused_op_dparams in zip(unfused_op_idxs, fused_op_dparams):
-                grad_params[idx] = unfused_op_dparams
-                clear_tensor_data(*unfused_op_ctxs[idx].saved_tensors)
+            for idx, basic_op_dparams in zip(basic_op_idxs, fused_op_dparams):
+                grad_params[idx] = basic_op_dparams
+                clear_tensor_data(*basic_op_ctxs[idx].saved_tensors)
 
         # Flatten list of parameter gradients
         grad_params_flat = []
         for idx, dparams in enumerate(grad_params):
-            params = list(unfused_ops[idx].parameters())
+            params = list(basic_ops[idx].parameters())
             if dparams is None:
                 dparams = [None for _ in range(len(params))]
             else:
@@ -170,9 +170,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             dx,    # input_
             None,  # forward_ops
             None,  # backward_ops
-            None,  # unfused_ops
-            None,  # unfused_op_ctxs
-            None,  # unfused_op_kwargs
+            None,  # basic_ops
+            None,  # basic_op_ctxs
+            None,  # basic_op_kwargs
             *grad_params_flat,  # params
         )
 
@@ -194,22 +194,22 @@ class OperationFuser:
         fuse_ops: bool = True,
     ):
 
-        # Get list of unfused operations
-        unfused_ops = []
+        # Get list of basic operations
+        basic_ops = []
         for op in ops:
             if op.is_fused_op:
-                unfused_ops.extend(op.unfused_ops)
+                basic_ops.extend(op.basic_ops)
             else:
-                unfused_ops.append(op)
-        self._num_unfused_ops: int = len(unfused_ops)
-        self._unfused_ops: list[UnfusedOperation] = unfused_ops
+                basic_ops.append(op)
+        self._num_basic_ops: int = len(basic_ops)
+        self._basic_ops: list[BasicOperation] = basic_ops
 
         # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusableOperation, list[int]]]
         self._backward_ops: list[tuple[FusableOperation, list[int]]]
         self._forward_ops = [
             (op, (idx,))
-            for idx, op in enumerate(self._unfused_ops)
+            for idx, op in enumerate(self._basic_ops)
         ]
         self._backward_ops = list(reversed(self._forward_ops))
 
@@ -234,36 +234,36 @@ class OperationFuser:
     def __call__(
         self,
         input: torch.Tensor,
-        unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
+        basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
 
         # Initialization before forward pass
-        for op in self._unfused_ops:
+        for op in self._basic_ops:
             op.pre_forward()
 
         # Construct autograd contexts
-        num_unfused_ops = len(self._unfused_ops)
-        unfused_op_ctxs = []
-        for idx, op in enumerate(self._unfused_ops):
+        num_basic_ops = len(self._basic_ops)
+        basic_op_ctxs = []
+        for idx, op in enumerate(self._basic_ops):
             next_op, prev_op = None, None
-            if idx < num_unfused_ops - 1:
-                next_op = self._unfused_ops[idx+1]
+            if idx < num_basic_ops - 1:
+                next_op = self._basic_ops[idx+1]
             if idx > 0:
-                prev_op = self._unfused_ops[idx-1]
+                prev_op = self._basic_ops[idx-1]
             ctx = OperationContext(
                 op=op,
                 next_op=next_op,
                 prev_op=prev_op,
             )
-            unfused_op_ctxs.append(ctx)
+            basic_op_ctxs.append(ctx)
 
         # Canonicalize op kwargs
-        if unfused_op_kwargs is None:
-            unfused_op_kwargs = [dict() for _ in range(num_unfused_ops)]
+        if basic_op_kwargs is None:
+            basic_op_kwargs = [dict() for _ in range(num_basic_ops)]
 
         # Flatten list of parameters
         params = []
-        for op in self._unfused_ops:
+        for op in self._basic_ops:
             params.extend(op.parameters())
 
         # Fuser forward pass
@@ -271,8 +271,8 @@ class OperationFuser:
             input,
             self._forward_ops,
             self._backward_ops,
-            self._unfused_ops,
-            unfused_op_ctxs,
-            unfused_op_kwargs,
+            self._basic_ops,
+            basic_op_ctxs,
+            basic_op_kwargs,
             *params,
         )

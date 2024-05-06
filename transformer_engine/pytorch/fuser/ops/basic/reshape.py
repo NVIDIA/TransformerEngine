@@ -8,11 +8,11 @@ from collections.abc import Iterable
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import BasicOperation
 from .._common import reshape
 
 
-class Reshape(UnfusedOperation):
+class Reshape(BasicOperation):
     """Reshape tensor
 
     See `torch.reshape`.

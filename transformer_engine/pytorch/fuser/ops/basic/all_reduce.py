@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import BasicOperation
 from .._common import is_float8_tensor
 
 
-class AllReduce(UnfusedOperation):
+class AllReduce(BasicOperation):
     """All-reduce tensor
 
     Equivalent to summing tensors from all processes. It is assumed

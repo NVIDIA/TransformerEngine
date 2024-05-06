@@ -9,13 +9,13 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import FusedOperation
-from transformer_engine.pytorch.fuser.ops.unfused import (
+from transformer_engine.pytorch.fuser.ops.basic import (
     AllReduce,
+    BasicLinear,
     Bias,
     ReduceScatter,
-    UnfusedLinear,
 )
+from transformer_engine.pytorch.fuser.ops.op import FusedOperation
 
 
 class Linear(FusedOperation):
@@ -79,7 +79,7 @@ class Linear(FusedOperation):
             sequence_parallel,
             local_in_features,
             local_out_features,
-        ) = UnfusedLinear._canonicalize_tensor_parallelism(
+        ) = BasicLinear._canonicalize_tensor_parallelism(
             mode=tensor_parallel_mode,
             process_group=tensor_parallel_group,
             sequence_parallel=sequence_parallel,
@@ -87,7 +87,7 @@ class Linear(FusedOperation):
             out_features=out_features,
         )
 
-        # Construct unfused ops
+        # Construct basic ops
         ops = []
         linear_kwargs = dict(
             in_features=in_features,
@@ -115,7 +115,7 @@ class Linear(FusedOperation):
             linear_kwargs["tensor_parallel_group"] = None
             linear_kwargs["sequence_parallel"] = False
             bias_kwargs["size"] *= tensor_parallel_size
-            ops.append(UnfusedLinear(**linear_kwargs))
+            ops.append(BasicLinear(**linear_kwargs))
             if bias:
                 ops.append(Bias(**bias_kwargs))
             if sequence_parallel:
@@ -124,7 +124,7 @@ class Linear(FusedOperation):
                 ops.append(AllReduce(tensor_parallel_group))
         else:
             # Column TP or no TP: (gather + GEMM) + bias
-            ops.append(UnfusedLinear(**linear_kwargs))
+            ops.append(BasicLinear(**linear_kwargs))
             if bias:
                 ops.append(Bias(**bias_kwargs))
 
@@ -132,5 +132,5 @@ class Linear(FusedOperation):
         super().__init__(ops)
 
         # Register parameters
-        self.register_parameter("weight", self.unfused_ops[0].weight)
-        self.register_parameter("bias", self.unfused_ops[1].bias if bias else None)
+        self.register_parameter("weight", self.basic_ops[0].weight)
+        self.register_parameter("bias", self.basic_ops[1].bias if bias else None)

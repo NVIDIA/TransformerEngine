@@ -30,11 +30,11 @@ class OperationContext:
     """
 
     # Corresponding operation
-    op: UnfusedOperation
+    op: BasicOperation
     # Next operation in pipeline
-    next_op: Optional[UnfusedOperation] = None
+    next_op: Optional[BasicOperation] = None
     # Previous operation in pipeline
-    prev_op: Optional[UnfusedOperation] = None
+    prev_op: Optional[BasicOperation] = None
 
     # Tensors that have been saved from forward function
     # Note: Available in the backward function, matching tensors from
@@ -66,7 +66,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     @property
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
-        """Whether this op has been fused out of smaller, unfused ops"""
+        """Whether this op has been fused out of smaller, basic ops"""
         ...
 
     def pre_forward(self) -> None:
@@ -75,9 +75,9 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def fuser_forward(
         self,
-        unfused_op_ctxs: list[OperationContext],
+        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        unfused_op_kwargs: list[dict[str, Any]],
+        basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
         """Forward pass
 
@@ -85,13 +85,13 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         Parameters
         ----------
-        unfused_op_ctxs: list of OperationContext
-            Contexts for corresponding unfused operations
+        basic_op_ctxs: list of OperationContext
+            Contexts for corresponding basic operations
         input_: torch.Tensor
             Input tensor
-        unfused_op_kwargs: list of dict
+        basic_op_kwargs: list of dict
             Keyword arguments to forward functions of corresponding
-            unfused operations
+            basic operations
 
         Returns
         -------
@@ -105,7 +105,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def fuser_backward(
         self,
-        unfused_op_ctxs: list[OperationContext],
+        basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         """Backward pass
@@ -114,8 +114,8 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         Parameters
         ----------
-        unfused_op_ctxs: list of OperationContext
-            Contexts for corresponding unfused operations.
+        basic_op_ctxs: list of OperationContext
+            Contexts for corresponding basic operations.
         grad_output: torch.Tensor
             Loss gradient w.r.t. operation output.
 
@@ -124,7 +124,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         torch.Tensor:
             Loss gradient w.r.t. operation input
         Iterable of iterable of torch.Tensor:
-            Loss gradients w.r.t. parameters for corresponding unfused
+            Loss gradients w.r.t. parameters for corresponding basic
             operations
 
         """
@@ -134,7 +134,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         )
 
 
-class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
+class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
     """Single tensor operation supported by the operation fuser
 
     This class holds parameters and state, even if the actual forward
@@ -323,23 +323,23 @@ class UnfusedOperation(FusableOperation, metaclass=abc.ABCMeta):
 
     def fuser_forward(
         self,
-        unfused_op_ctxs: list[OperationContext],
+        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        unfused_op_kwargs: list[dict[str, Any]],
+        basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
         return self.op_forward(
-            unfused_op_ctxs[0],
+            basic_op_ctxs[0],
             input_,
-            **unfused_op_kwargs[0],
+            **basic_op_kwargs[0],
         )
 
     def fuser_backward(
         self,
-        unfused_op_ctxs: list[OperationContext],
+        basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         grad_input, grad_params = self.op_backward(
-            unfused_op_ctxs[0],
+            basic_op_ctxs[0],
             grad_output,
         )
         return grad_input, [grad_params]
@@ -355,28 +355,28 @@ class FusedOperation(FusableOperation):
 
     If the forward or backward passes are defined, they must be
     functionally equivalent to the forward/backward passes of the
-    corresponding unfused ops. This class should hold no parameters or
-    other state, but should access them from the unfused ops.
+    corresponding basic ops. This class should hold no parameters or
+    other state, but should access them from the basic ops.
 
     Parameters
     ----------
-    unfused_ops: iterable of FusableOperation
-        Unfused ops that are interchangeable with this op
+    basic_ops: iterable of FusableOperation
+        Basic ops that are interchangeable with this op
 
     """
 
     def __init__(
         self,
-        unfused_ops: Iterable[FusableOperation],
+        basic_ops: Iterable[FusableOperation],
     ) -> None:
         super().__init__()
 
-        # Unfused operations that comprise this fused operation
-        self.unfused_ops: torch.nn.ModuleList = torch.nn.ModuleList(unfused_ops)
-        if len(self.unfused_ops) == 0:
+        # Basic operations that comprise this fused operation
+        self.basic_ops: torch.nn.ModuleList = torch.nn.ModuleList(basic_ops)
+        if len(self.basic_ops) == 0:
             raise ValueError(
                 "Attempted to construct a fused operation "
-                "without specifying its corresponding unfused operations"
+                "without specifying its corresponding basic operations"
             )
 
     @property
@@ -385,16 +385,16 @@ class FusedOperation(FusableOperation):
 
     def pre_forward(self) -> None:
         """Preprocessing before forward pass"""
-        for op in self.unfused_ops:
+        for op in self.basic_ops:
             op.pre_forward()
 
     def forward(
         self,
         input: torch.Tensor,
-        unfused_op_kwargs: Optional[list[dict[str, Any]]] = None,
+        basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
         """Apply operation"""
-        if unfused_op_kwargs is None:
-            unfused_op_kwargs = [dict() for _ in range(len(self.unfused_ops))]
+        if basic_op_kwargs is None:
+            basic_op_kwargs = [dict() for _ in range(len(self.basic_ops))]
         from ..fuser import OperationFuser
-        return OperationFuser([self], fuse_ops=False)(input, unfused_op_kwargs)
+        return OperationFuser([self], fuse_ops=False)(input, basic_op_kwargs)

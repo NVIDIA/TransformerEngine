@@ -290,7 +290,7 @@ def _test_reduce_scatter(
     torch.testing.assert_close(y_test, y_ref, **dtype_tols(dtype))
     torch.testing.assert_close(dx_test, dx_ref, rtol=0, atol=0)
 
-def _test_unfused_linear(
+def _test_basic_linear(
     *,
     local_weight_shape: tuple[int, int] = (16, 16),
     batch_size: int = 16,
@@ -391,7 +391,7 @@ def _test_unfused_linear(
 
     # Implementation with fusable operation
     with te.fp8_model_init(enabled=fp8_weight):
-        op = te_fuser.ops.UnfusedLinear(
+        op = te_fuser.ops.BasicLinear(
             in_features,
             out_features,
             device=device,
@@ -616,16 +616,16 @@ def run_parallel_tests() -> None:
         print(f"Running _test_reduce_scatter")
     _test_reduce_scatter()
 
-    # Unfused linear op
+    # Basic linear op
     for config in itertools.product(
         (False, True) if fp8_available else (False,),
         ("column", "row"),
         (False, True),
     ):
         if rank == 0:
-            print(f"Running _test_unfused_linear with {config=}")
+            print(f"Running _test_basic_linear with {config=}")
         fp8, tensor_parallel_mode, sequence_parallel = config
-        _test_unfused_linear(
+        _test_basic_linear(
             fp8_compute=fp8,
             fp8_input=fp8,
             fp8_weight=fp8,
@@ -644,7 +644,7 @@ def run_parallel_tests() -> None:
         fp8, tensor_parallel_mode = config
         dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
         _test_linear(
-            bias=True,  # bias=False is tested in _test_unfused_linear
+            bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,
             fp8_compute=fp8,
             fp8_input=fp8,

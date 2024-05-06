@@ -129,7 +129,7 @@ class TestFuser:
 
         # Construct model
         with te.fp8_model_init():
-            model = te_fuser.ops.unfused.UnfusedLinear(
+            model = te_fuser.ops.basic.BasicLinear(
                 size,
                 size,
                 device=device,
@@ -409,7 +409,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("fp8_weight", (False, True))
     @pytest.mark.parametrize("fp8_grad_output", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    def test_unfused_linear(
+    def test_basic_linear(
         self,
         *,
         weight_shape: tuple[int, int],
@@ -470,7 +470,7 @@ class TestBasicOps:
 
         # Implementation with fusable operation
         with te.fp8_model_init(enabled=fp8_weight):
-            op = te_fuser.ops.UnfusedLinear(
+            op = te_fuser.ops.BasicLinear(
                 in_features,
                 out_features,
                 device=device,
@@ -809,13 +809,13 @@ class TestFusedOps:
         # Implementation with fusable operations
         with te.fp8_model_init(enabled=True):
             model = te_fuser.Sequential(
-                te_fuser.ops.UnfusedLinear(
+                te_fuser.ops.BasicLinear(
                     in_shape[-1],
                     in_shape[-1],
                     device=device,
                     dtype=dtype,
                 ),
-                te_fuser.ops.UnfusedLinear(
+                te_fuser.ops.BasicLinear(
                     in_shape[-1],
                     in_shape[-1],
                     device=device,

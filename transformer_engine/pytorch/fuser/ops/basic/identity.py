@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import BasicOperation
 
 
-class Identity(UnfusedOperation):
+class Identity(BasicOperation):
     """Return input tensor"""
 
     def __init__(self) -> None:

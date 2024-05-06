@@ -22,7 +22,7 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
 )
-from transformer_engine.pytorch.fuser.ops.op import UnfusedOperation
+from transformer_engine.pytorch.fuser.ops.op import BasicOperation
 from transformer_engine.pytorch.module.base import get_workspace
 from .._common import (
     canonicalize_device,
@@ -39,7 +39,7 @@ def _wait_async(handle: Optional[Any]) -> None:
         handle.wait()
 
 
-class UnfusedLinear(UnfusedOperation):
+class BasicLinear(BasicOperation):
     """Apply linear transformation: :math:`y = x A^T`
 
     This is a drop-in replacement for `torch.nn.Linear` with
@@ -645,7 +645,7 @@ class UnfusedLinear(UnfusedOperation):
             if self._accumulate_into_main_grad:
                 if not hasattr(self.weight, "main_grad"):
                     raise RuntimeError(
-                        "UnfusedLinear op is configured with "
+                        "BasicLinear op is configured with "
                         "accumulate_into_main_grad=True, "
                         "but weight parameter does not have main_grad attribute"
                     )
