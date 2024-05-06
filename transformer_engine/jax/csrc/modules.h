@@ -43,14 +43,24 @@ struct Shape {
     }
 };
 
+enum class NVTE_Activation_Enum {
+  GELU,
+  GEGLU,
+  SILU,
+  SWIGLU,
+};
+
+size_t get_activation_len(NVTE_Activation_Enum act_enum);
+
 struct CustomCallCommonDescriptor {
     Shape shape;
     DType in_dtype;
     DType out_dtype;
+    size_t act_enum;
 };
 
 pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
-                                               DType out_dtype);
+                                               DType out_dtype, size_t act_enum = 0);
 
 struct CustomCallCommonWkDescriptor {
     Shape shape;
@@ -58,19 +68,21 @@ struct CustomCallCommonWkDescriptor {
     DType in_dtype;
     DType out_dtype;
     DType wk_dtype;
+    size_t act_enum;
 };
 
 pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shape,
-                                                 const std::vector<size_t> &wkshape, DType in_dtype,
-                                                 DType out_dtype, DType wk_dtype);
+                                                 const std::vector<size_t> &wkshape,
+                                                 DType in_dtype, DType out_dtype, DType wk_dtype,
+                                                 size_t act_enum = 0);
 
 struct CustomCallNormDescriptor {
     size_t batch_size;
     size_t hidden_size;
     size_t wkspace_size;
     size_t barrier_size;
-    size_t *dgamma_part_sizes;  // 2D tensor
-    size_t *dbeta_part_sizes;   // 2D tensor
+    Shape dgamma_part_shape;
+    Shape dbeta_part_shape;
     DType x_dtype;
     DType w_dtype;
     DType wkspace_dtype;
@@ -82,13 +94,11 @@ struct CustomCallNormDescriptor {
     int sm_margin;
 };
 
-pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
-                                             size_t wkspace_size, size_t barrier_size,
-                                             size_t *dgamma_part_sizes, size_t *dbeta_part_sizes,
-                                             DType x_dtype, DType w_dtype, DType wkspace_dtype,
-                                             DType barrier_dtype, DType dgamma_part_dtype,
-                                             DType dbeta_part_dtype, bool zero_centered_gamma,
-                                             float eps, int sm_margin);
+pybind11::bytes PackCustomCallNormDescriptor(
+    size_t batch_size, size_t hidden_size, size_t wkspace_size, size_t barrier_size,
+    const std::vector<size_t> &dgamma_part_shape, const std::vector<size_t> &dbeta_part_shape,
+    DType x_dtype, DType w_dtype, DType wkspace_dtype, DType barrier_dtype, DType dgamma_part_dtype,
+    DType dbeta_part_dtype, bool zero_centered_gamma, float eps, int sm_margin);
 
 struct SoftmaxDescriptor {
     size_t batch_size;
@@ -142,25 +152,25 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                          DType in_dtype, DType out_dtype);
 
-void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
 
-void GatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype);
 
-void GatedGeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
 
-void DGatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
 
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,

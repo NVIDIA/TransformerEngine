@@ -56,16 +56,6 @@ def enable_fused_attn():
         del os.environ["NVTE_FUSED_ATTN"]
 
 
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
-
-
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, \
@@ -543,11 +533,25 @@ class LayerNormMLPAttr:
         ACTIVATION: ('gelu', 'linear')
     }, {
         INTERMEDIATE_DIM: 2048,
-        USE_BIAS: True,
+        USE_BIAS: False,
         ENABLE_LN: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: True,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: False,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
     }]
 
 

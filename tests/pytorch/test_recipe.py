@@ -9,9 +9,10 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine_extensions as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
-    amax_and_scale_update,
+    _amax_and_scale_update,
     get_default_fp8_recipe,
 )
 import transformer_engine.pytorch.fuser
@@ -231,16 +232,10 @@ class TestFP8Recipe:
                 test_amax_history = fp8_meta.amax_history[:, 0]
                 tols = dict(rtol=0, atol=0)
                 torch.testing.assert_close(
-                    test_amax_history[0],
-                    ref_amax_history[-1],
+                    test_amax_history[-(step+1):],
+                    ref_amax_history[:(step+1)],
                     **tols,
                 )
-                if step > 0:
-                    torch.testing.assert_close(
-                        test_amax_history[-step:],
-                        ref_amax_history[:step],
-                        **tols,
-                    )
 
             def check_scale(
                 fp8_meta,
@@ -249,19 +244,13 @@ class TestFP8Recipe:
             ):
                 """Check that scale and scale reciprocal match expected values"""
 
-                # Initial scale
-                if step == 0:
-                    torch.testing.assert_close(fp8_meta.scale.item(), 1.0)
-                    torch.testing.assert_close(fp8_meta.scale_inv.item(), 1.0)
-                    return
-
                 # Compute amax
                 if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-amax_history_len:]
+                    ref_amax_history = ref_amax_history[-(amax_history_len+1):]
                 if amax_compute_algo == "max":
-                    ref_amax = max(ref_amax_history[:-1])
+                    ref_amax = max(ref_amax_history)
                 elif amax_compute_algo == "most_recent":
-                    ref_amax = ref_amax_history[-2]
+                    ref_amax = ref_amax_history[-1]
                 else:
                     raise RuntimeError(f"{amax_compute_algo=} is not supported")
 
@@ -289,3 +278,98 @@ class TestFP8Recipe:
             check_scale(x_fp8_meta, x_history, "forward")
             check_scale(w_fp8_meta, w_history, "forward")
             check_scale(dy_fp8_meta, dy_history, "backward")
+
+    @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
+    @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
+    @pytest.mark.parametrize(
+        "fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=["E4M3", "E5M2"]
+    )
+    def test_scale_update_numeric_scenarios(self, amax_case, fused_update, fp8_dtype):
+
+        if fp8_dtype == tex.DType.kFloat8E4M3:
+            fp8_format = transformer_engine.common.recipe.Format.E4M3
+            fp8_max = fp8_format.value.max_fwd
+        elif fp8_dtype == tex.DType.kFloat8E5M2:
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+            fp8_max = fp8_format.value.max_bwd
+        else:
+            raise ValueError(f"{fp8_dtype=} is not supported")
+
+        scaling_factor_compute_algo = None
+        if fused_update:
+            scaling_factor_compute_algo = (
+                lambda amax, scale, fp8_max, recipe:
+                te.fp8._default_sf_compute(amax, scale, fp8_max, recipe.margin)
+            )
+        recipe = transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=fp8_format, scaling_factor_compute_algo=scaling_factor_compute_algo
+        )
+
+        # Setup fp8_meta dictionary
+        def setup_fp8_meta():
+            with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+                module = te.Linear(16, 16)
+                y = module(torch.zeros([16, 16], device="cuda"))
+            y.backward(torch.zeros_like(y))
+            return module.fp8_meta
+
+        fp8_meta = setup_fp8_meta()
+        forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+
+        # Replace the fp8_meta[forward_key] with a new TensorMeta for test purpose
+        fp8_meta[forward_key] = tex.FP8TensorMeta()
+        fp8_meta[forward_key].scale = torch.ones(1, dtype=torch.float32, device="cuda")
+        fp8_meta[forward_key].scale_inv = torch.ones(1, dtype=torch.float32, device="cuda")
+
+        # test different scenarios
+        if amax_case == "zero":
+            fp8_meta[forward_key].amax_history = torch.tensor([[0]], dtype=torch.float32, device="cuda")
+            expected_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+        elif amax_case == "tiny":
+            # calculate the minimum amax value that results in a FP32 maximum scale
+            fp32_max = torch.tensor(torch.finfo(torch.float32).max)
+            tiny_amax = fp8_max / fp32_max
+            # make the amax less than the minimum amax so that the scale will be infinite
+            amax_value = tiny_amax / 2
+            fp8_meta[forward_key].amax_history = torch.tensor(
+                [[amax_value]], dtype=torch.float32, device="cuda"
+            )
+            # expected scale is FP32_max
+            expected_scale = fp32_max.view(1).cuda()
+        elif amax_case == "normal":
+            # plus a small epsilon to avoid zero amax
+            amax_value = torch.rand(1, dtype=torch.float32, device="cuda") + 1e-5
+            fp8_meta[forward_key].amax_history = amax_value.view(1, 1)
+            expected_scale = fp8_max / amax_value
+        elif amax_case == "inf":
+            fp8_meta[forward_key].amax_history = torch.tensor(
+                [[torch.inf]], dtype=torch.float32, device="cuda"
+            )
+            expected_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+        elif amax_case == "nan":
+            fp8_meta[forward_key].amax_history = torch.tensor(
+                [[torch.nan]], dtype=torch.float32, device="cuda"
+            )
+            expected_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+
+        if fused_update:
+            tex.fused_amax_and_scale_update_after_reduction(
+                fp8_meta[forward_key].amax_history.clone().view(-1),
+                [fp8_meta[forward_key].amax_history],
+                [fp8_meta[forward_key].scale],
+                [fp8_meta[forward_key].scale_inv],
+                recipe.amax_compute_algo,
+                fp8_dtype,
+                recipe.margin,
+            )
+        else:
+            _amax_and_scale_update(
+                fp8_meta[forward_key].amax_history,
+                fp8_meta[forward_key].scale,
+                fp8_meta[forward_key].scale_inv,
+                fp8_max,
+                recipe,
+            )
+
+        torch.testing.assert_close(fp8_meta[forward_key].scale, expected_scale)
+        torch.testing.assert_close(fp8_meta[forward_key].scale_inv, torch.reciprocal(expected_scale))

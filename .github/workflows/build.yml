@@ -31,7 +31,7 @@ jobs:
     name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nvidia/jax:latest
+      image: ghcr.io/nvidia/jax:jax
       options: --user root
     steps:
       - name: 'Checkout'

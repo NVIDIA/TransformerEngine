@@ -55,7 +55,7 @@ class Net(nn.Module):
         return x
 
 
-@partial(jax.jit, static_argnums=(0, 1, 2, 3, 4, 5))
+@partial(jax.jit)
 def train_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes gradients, loss and accuracy for a single batch."""
 
