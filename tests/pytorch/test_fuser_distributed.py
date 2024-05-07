@@ -15,6 +15,7 @@ import sys
 import pytest
 import torch
 
+import transformer_engine
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 import transformer_engine.pytorch.fuser as te_fuser
@@ -597,6 +598,141 @@ def _test_linear(
         db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(db_test, db_ref, **tols)
 
+def _test_fp8_scale_update(
+    *,
+    amax_history_len: int = 31,
+    amax_compute_algo: str = "max",
+    margin: float = 2,
+    local_weight_shape: tuple[int, int] = (16, 16),
+    batch_size: int = 16,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = "cuda",
+    tensor_parallel_mode: str = "column",
+) -> None:
+
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
+
+    # Tensor dimensions
+    local_out_features, local_in_features = local_weight_shape
+    out_features, in_features = local_out_features, local_in_features
+    if tensor_parallel_mode == "column":
+        out_features *= world_size
+    elif tensor_parallel_mode == "row":
+        in_features *= world_size
+    in_shape = [batch_size, in_features]
+    out_shape = [batch_size, out_features]
+
+    # Random data
+    reset_rng()
+    x_ref, x_test = make_reference_and_test_tensors(
+        in_shape,
+        test_dtype=dtype,
+        test_device=device,
+    )
+    w_ref, w_test = make_reference_and_test_tensors(
+        (out_features, in_features),
+        test_dtype=dtype,
+        test_device=device,
+    )
+    dy_ref, dy_test = make_reference_and_test_tensors(
+        out_shape,
+        test_dtype=dtype,
+        test_device=device,
+        requires_grad=False,
+    )
+
+    def ref_amax_and_scale(
+        ref: torch.Tensor,
+        stage: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expected absmax and FP8 scale"""
+        amax = ref.abs().amax()
+        max_val ={
+            "forward": 448.0,
+            "backward": 57344.0,
+        }[stage]
+        scale = (max_val / amax) / (2 ** margin)
+        amax = amax.to(dtype=torch.float32, device="cpu")
+        scale = scale.to(dtype=torch.float32, device="cpu")
+        return amax, scale
+
+    # Compute expected amaxes and FP8 scales
+    x_amax_ref, x_scale_ref = ref_amax_and_scale(x_ref, "forward")
+    w_amax_ref, w_scale_ref = ref_amax_and_scale(w_ref, "forward")
+    dy_amax_ref, dy_scale_ref = ref_amax_and_scale(dy_ref, "backward")
+
+    # Convert to distributed tensors
+    with torch.no_grad():
+        if tensor_parallel_mode == "column":
+            local_out_features = out_features // world_size
+            local_slice = slice(
+                rank * local_out_features,
+                (rank+1) * local_out_features,
+            )
+            w_ref = w_ref[local_slice, :]
+            w_test = w_test[local_slice, :]
+            dy_ref = dy_ref[..., local_slice]
+            dy_test = dy_test[..., local_slice].clone()
+        elif tensor_parallel_mode == "row":
+            local_in_features = in_features // world_size
+            local_slice = slice(
+                rank * local_in_features,
+                (rank+1) * local_in_features,
+            )
+            w_ref = w_ref[:, local_slice]
+            w_test = w_test[:, local_slice]
+            x_ref = x_ref[..., local_slice]
+            x_test = x_test[..., local_slice].clone()
+    x_test.requires_grad_()
+
+    # Initialize fusable operation
+    op = te_fuser.ops.BasicLinear(
+        in_features,
+        out_features,
+        device=device,
+        dtype=dtype,
+        tensor_parallel_mode=tensor_parallel_mode,
+        tensor_parallel_group=process_group,
+    )
+    with torch.no_grad():
+        op.weight.copy_(w_test)
+        del w_test
+
+    # Forward and backward pass
+    fp8_format = transformer_engine.common.recipe.Format.HYBRID
+    recipe = transformer_engine.common.recipe.DelayedScaling(
+        margin=margin,
+        interval=1,
+        fp8_format=fp8_format,
+        amax_history_len=amax_history_len,
+        amax_compute_algo=amax_compute_algo,
+    )
+    with te.fp8_autocast(fp8_recipe=recipe):
+        y_test = op(x_test)
+    y_test.backward(dy_test)
+
+    # Check results
+    forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+    backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+    x_fp8_meta = op.get_fp8_meta("input")[forward_key]
+    w_fp8_meta = op.get_fp8_meta("param")[forward_key]
+    dy_fp8_meta = op.get_fp8_meta("grad_output")[backward_key]
+    x_amax_test = x_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
+    w_amax_test = w_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
+    dy_amax_test = dy_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
+    x_scale_test = x_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
+    w_scale_test = w_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
+    dy_scale_test = dy_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
+    torch.testing.assert_close(x_amax_test, x_amax_ref)
+    torch.testing.assert_close(w_amax_test, w_amax_ref)
+    torch.testing.assert_close(dy_amax_test, dy_amax_ref)
+    torch.testing.assert_close(x_scale_test, x_scale_ref)
+    torch.testing.assert_close(w_scale_test, w_scale_ref)
+    torch.testing.assert_close(dy_scale_test, dy_scale_ref)
+
 def run_parallel_tests() -> None:
     """Run parallel tests"""
 
@@ -652,6 +788,13 @@ def run_parallel_tests() -> None:
             fp8_grad_output=fp8,
             tensor_parallel_mode=tensor_parallel_mode,
         )
+
+    # FP8 scale update
+    if fp8_available:
+        if rank == 0:
+            print(f"Running _test_fp8_scale_update")
+        _test_fp8_scale_update()
+
 
 # Parallel job sizes
 _world_sizes = [torch.cuda.device_count()]

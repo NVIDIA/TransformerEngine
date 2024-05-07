@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Optional
+from typing import Iterable, Optional
 
 import pytest
 import torch
@@ -51,7 +51,7 @@ class TestFP8Recipe:
             amax_history_len=amax_history_len,
             amax_compute_algo=amax_compute_algo,
         )
-        with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+        with te.fp8_autocast(fp8_recipe=recipe):
             module = te.Linear(16, 16)
             y = module(torch.zeros([16, 16], device="cuda"))
         y.backward(torch.zeros_like(y))
@@ -172,15 +172,15 @@ class TestFP8Recipe:
         self,
         amax_history_len: int,
         amax_compute_algo: str,
+        margin: float = 2,
         num_steps: int = 4,
         in_shape: tuple[int] = (16, 16),
         dtype: torch.dtype = torch.float32,
-        margin: float = 2,
+        device: torch.device = "cuda",
     ):
-        device = torch.device("cuda")
 
         # Construct linear op
-        op = te.fuser.ops.UnfusedLinear(in_shape[-1], in_shape[-1])
+        op = te.fuser.ops.BasicLinear(in_shape[-1], in_shape[-1])
 
         # Get FP8 meta tensors
         forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
@@ -224,11 +224,14 @@ class TestFP8Recipe:
                 amax_history_len=amax_history_len,
                 amax_compute_algo=amax_compute_algo,
             )
-            with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+            with te.fp8_autocast(fp8_recipe=recipe):
                 y = op(x)
             y.backward(dy)
 
-            def check_amax_history(fp8_meta, ref_amax_history):
+            def check_amax_history(
+                fp8_meta: dict,
+                ref_amax_history: Iterable[float],
+            ) -> None:
                 """Check that amax history matches expected values"""
                 if len(ref_amax_history) > amax_history_len:
                     ref_amax_history = ref_amax_history[-amax_history_len:]
@@ -246,9 +249,9 @@ class TestFP8Recipe:
                 )
 
             def check_scale(
-                fp8_meta,
-                ref_amax_history,
-                stage,
+                fp8_meta: dict,
+                ref_amax_history: Iterable[float],
+                stage: str,
             ):
                 """Check that scale and scale reciprocal match expected values"""
 
@@ -315,7 +318,7 @@ class TestFP8Recipe:
 
         # Setup fp8_meta dictionary
         def setup_fp8_meta():
-            with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+            with te.fp8_autocast(fp8_recipe=recipe):
                 module = te.Linear(16, 16)
                 y = module(torch.zeros([16, 16], device="cuda"))
             y.backward(torch.zeros_like(y))
