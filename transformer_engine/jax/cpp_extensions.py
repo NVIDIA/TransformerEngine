@@ -2659,8 +2659,11 @@ class ActLuPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[0])
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        impl = ActLuPrimitive.impl
-        return mesh, impl, out_sharding, arg_shardings
+
+        def sharded_impl(x, act_enum):
+            return ActLuPrimitive.impl(x, act_enum=act_enum)
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
 
 
 register_primitive(ActLuPrimitive)
@@ -2783,8 +2786,11 @@ class DActLuPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
-        impl = DActLuPrimitive.impl
-        return mesh, impl, out_shardings, arg_shardings
+
+        def sharded_impl(dz, x, act_enum):
+            return DActLuPrimitive.impl(dz, x, act_enum=act_enum)
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
 
 
 register_primitive(DActLuPrimitive)
