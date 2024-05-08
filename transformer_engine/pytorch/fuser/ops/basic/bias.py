@@ -115,6 +115,8 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         input: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
         x = input
         b = self.bias.reshape([1] * (x.dim() - 1) + [self.local_size])
@@ -124,6 +126,8 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> tuple[torch.Tensor, tuple[()]]:
         dy = grad_output
         if dy.dim() > 1:

@@ -35,7 +35,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         forward_ops: list[tuple[FusableOperation, list[int]]],
         backward_ops: list[tuple[FusableOperation, list[int]]],
         basic_ops: list[BasicOperation],
-        basic_op_ctxs: list[OperationContext],
         basic_op_kwargs: list[dict[str, Any]],
         *params: torch.nn.Parameter,
     ) -> torch.Tensor:
@@ -57,8 +56,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             reverse of basic_ops.
         basic_ops: list of BasicOperation
             Basic operations
-        basic_op_ctxs: list of OperationContext
-            Context for BasicOperation
         basic_op_kwargs: list of dict
             Keyword arguments to BasicOperation
         *params: torch.nn.Parameter
@@ -66,15 +63,28 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         """
 
+        # Operation autograd contexts
+        basic_op_ctxs = [OperationContext() for _ in range(len(basic_ops))]
+
         # Apply forward ops
         x = input_
         requires_grad = x.requires_grad
         for op, basic_op_idxs in forward_ops:
 
             # Forward op
+            prev_ops = [
+                basic_ops[idx-1] if idx > 0 else None
+                for idx in basic_op_idxs
+            ]
+            next_ops = [
+                basic_ops[idx+1] if (idx < len(basic_op_idxs) - 1) else None
+                for idx in basic_op_idxs
+            ]
             x = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
+                prev_ops,
+                next_ops,
                 [basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
 
@@ -94,7 +104,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if ctx.to_save is not None:
                 to_save.extend(ctx.to_save)
             range_end = len(to_save)
-            ctx._to_save = None
+            ctx.to_save = None
             ctx._saved_tensors_range = (range_start, range_end)
         func_ctx.save_for_backward(*to_save)
 
@@ -139,9 +149,19 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 break
 
             # Backward op
+            prev_ops = [
+                basic_ops[idx-1] if idx > 0 else None
+                for idx in basic_op_idxs
+            ]
+            next_ops = [
+                basic_ops[idx+1] if (idx < len(basic_op_idxs) - 1) else None
+                for idx in basic_op_idxs
+            ]
             dx, fused_op_dparams = op.fuser_backward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
+                prev_ops,
+                next_ops,
             )
             for idx, basic_op_dparams in zip(basic_op_idxs, fused_op_dparams):
                 grad_params[idx] = basic_op_dparams
@@ -171,7 +191,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             None,  # forward_ops
             None,  # backward_ops
             None,  # basic_ops
-            None,  # basic_op_ctxs
             None,  # basic_op_kwargs
             *grad_params_flat,  # params
         )
@@ -241,25 +260,9 @@ class OperationFuser:
         for op in self._basic_ops:
             op.pre_forward()
 
-        # Construct autograd contexts
-        num_basic_ops = len(self._basic_ops)
-        basic_op_ctxs = []
-        for idx, op in enumerate(self._basic_ops):
-            next_op, prev_op = None, None
-            if idx < num_basic_ops - 1:
-                next_op = self._basic_ops[idx+1]
-            if idx > 0:
-                prev_op = self._basic_ops[idx-1]
-            ctx = OperationContext(
-                op=op,
-                next_op=next_op,
-                prev_op=prev_op,
-            )
-            basic_op_ctxs.append(ctx)
-
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
-            basic_op_kwargs = [dict() for _ in range(num_basic_ops)]
+            basic_op_kwargs = [dict() for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
         params = []
@@ -272,7 +275,6 @@ class OperationFuser:
             self._forward_ops,
             self._backward_ops,
             self._basic_ops,
-            basic_op_ctxs,
             basic_op_kwargs,
             *params,
         )

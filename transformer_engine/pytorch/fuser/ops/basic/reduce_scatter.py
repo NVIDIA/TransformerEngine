@@ -35,6 +35,8 @@ class ReduceScatter(BasicOperation):
         self,
         ctx: OperationContext,
         input: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Trivial case
@@ -67,6 +69,8 @@ class ReduceScatter(BasicOperation):
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Trivial case

@@ -76,6 +76,8 @@ class ForwardLinearBiasActivation(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input: torch.Tensor,
+        basic_op_prev_ops: list[Optional[BasicOperation]],
+        basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
 

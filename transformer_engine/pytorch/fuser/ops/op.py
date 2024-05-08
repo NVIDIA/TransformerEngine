@@ -24,17 +24,9 @@ from ._common import canonicalize_device, is_float8_tensor
 class OperationContext:
     """State needed to apply an operation
 
-    Coordinates interactions between ops in compute pipeline, and
-    between forward and backward passes.
+    Saves state from forward pass for use in backward pass.
 
     """
-
-    # Corresponding operation
-    op: BasicOperation
-    # Next operation in pipeline
-    next_op: Optional[BasicOperation] = None
-    # Previous operation in pipeline
-    prev_op: Optional[BasicOperation] = None
 
     # Tensors that have been saved from forward function
     # Note: Available in the backward function, matching tensors from
@@ -66,7 +58,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     @property
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
-        """Whether this op has been fused out of smaller, basic ops"""
+        """Whether this op is the fusion of one or more basic ops"""
         ...
 
     def pre_forward(self) -> None:
@@ -77,9 +69,15 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        basic_op_prev_ops: list[Optional[BasicOperation]],
+        basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
         """Forward pass
+
+        This op is either a basic op or the fusion of basic ops, so
+        several of this function's arguments are lists of arguments to
+        forward functions of corresponding basic ops.
 
         Called by `OperationFuser`.
 
@@ -89,6 +87,14 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for corresponding basic operations
         input_: torch.Tensor
             Input tensor
+        basic_op_prev_ops: list of BasicOperation
+            Basic operations that preceed each of the corresponding
+            basic operations (or `None` if corresponding basic op is
+            first)
+        basic_op_next_ops: list of BasicOperation
+            Basic operations that follow each of the corresponding
+            basic operations (or `None` if corresponding basic op is
+            last)
         basic_op_kwargs: list of dict
             Keyword arguments to forward functions of corresponding
             basic operations
@@ -107,8 +113,14 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
+        basic_op_prev_ops: list[Optional[BasicOperation]],
+        basic_op_next_ops: list[Optional[BasicOperation]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         """Backward pass
+
+        This op is either a basic op or the fusion of basic ops, so
+        several of this function's arguments are lists of arguments to
+        backward functions of corresponding basic ops.
 
         Called by `OperationFuser`.
 
@@ -118,6 +130,14 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for corresponding basic operations.
         grad_output: torch.Tensor
             Loss gradient w.r.t. operation output.
+        basic_op_prev_ops: list of BasicOperation
+            Basic operations that preceed each of the corresponding
+            basic operations (or `None` if corresponding basic op is
+            first)
+        basic_op_next_ops: list of BasicOperation
+            Basic operations that follow each of the corresponding
+            basic operations (or `None` if corresponding basic op is
+            last)
 
         Returns
         -------
@@ -277,6 +297,8 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
@@ -301,6 +323,8 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         """Backward pass
 
@@ -325,11 +349,15 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        basic_op_prev_ops: list[Optional[BasicOperation]],
+        basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> torch.Tensor:
         return self.op_forward(
             basic_op_ctxs[0],
             input_,
+            basic_op_prev_ops[0],
+            basic_op_next_ops[0],
             **basic_op_kwargs[0],
         )
 
@@ -337,10 +365,14 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
+        basic_op_prev_ops: list[Optional[BasicOperation]],
+        basic_op_next_ops: list[Optional[BasicOperation]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         grad_input, grad_params = self.op_backward(
             basic_op_ctxs[0],
             grad_output,
+            basic_op_prev_ops[0],
+            basic_op_next_ops[0],
         )
         return grad_input, [grad_params]
 

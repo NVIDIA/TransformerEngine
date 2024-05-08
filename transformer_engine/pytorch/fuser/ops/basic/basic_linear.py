@@ -304,6 +304,8 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         input: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Check if FP8 is enabled
@@ -311,8 +313,8 @@ class BasicLinear(BasicOperation):
         with_fp8_output = (
             with_fp8_compute
             and self.tensor_parallel_mode != "row"
-            and ctx.next_op is not None
-            and ctx.next_op.num_fp8_scales("input") > 0
+            and next_op is not None
+            and next_op.num_fp8_scales("input") > 0
         )
 
         # Check input tensor
@@ -384,7 +386,7 @@ class BasicLinear(BasicOperation):
         # Construct output tensor
         y = None
         if with_fp8_output:
-            fp8_meta = ctx.next_op.get_fp8_meta("input")
+            fp8_meta = next_op.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             data = torch.empty(
                 (x.size(0), w.size(0)),
@@ -469,6 +471,8 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
         # Check if FP8 is enabled
@@ -477,8 +481,8 @@ class BasicLinear(BasicOperation):
             with_fp8_compute
             and ctx.requires_dgrad
             and self.tensor_parallel_mode != "column"
-            and ctx.prev_op is not None
-            and ctx.prev_op.num_fp8_scales("grad_output") > 0
+            and prev_op is not None
+            and prev_op.num_fp8_scales("grad_output") > 0
         )
 
         # Check grad output tensor
@@ -563,7 +567,7 @@ class BasicLinear(BasicOperation):
 
             # Construct grad input tensor
             if with_fp8_grad_input:
-                fp8_meta = ctx.prev_op.get_fp8_meta("grad_output")
+                fp8_meta = prev_op.get_fp8_meta("grad_output")
                 fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
                 data = torch.empty(
                     (dy.size(0), self.weight.size(1)),
