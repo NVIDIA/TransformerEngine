@@ -87,7 +87,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             self_attn_mask_type=self_attn_mask_type
             ),)
 
-class TeGraphed(torch.nn.Module):
+class GemmaGenerator(torch.nn.Module):
     def __init__(self, model, lm_head, inference_params, dtype, generation_config):
         super().__init__()
         self.model = model
@@ -106,7 +106,6 @@ class TeGraphed(torch.nn.Module):
                         self_attn_mask_type='padding',
                         attention_mask=None
                     )[0])
-            
 
         self.inference_params.seq_len.copy_(self.inference_params.seq_len + 1)
 
@@ -286,7 +285,7 @@ class TEGemmaForCausalLM:
         )
 
 
-        graphed_generator = TeGraphed(
+        generator = GemmaGenerator(
             lm_head=self.lm_head,
             model=self.model, 
             inference_params=inference_params, 
@@ -300,8 +299,8 @@ class TEGemmaForCausalLM:
         if use_cuda_graphs:
             fp8_format = Format.HYBRID
             fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
-            graphed_layers = te.pytorch.make_graphed_callables(
-                graphed_generator, 
+            graphed_generator = te.pytorch.make_graphed_callables(
+                generator, 
                 args, 
                 fp8_enabled=True, 
                 fp8_recipe=fp8_recipe, 
@@ -314,7 +313,7 @@ class TEGemmaForCausalLM:
         inference_params.seq_len.copy_(lengths.to(torch.int32))
 
         for i in range(max_new_tokens):
-            next_tokens = graphed_layers(*args) if use_cuda_graphs else graphed_generator(*args)
+            next_tokens = graphed_generator(*args) if use_cuda_graphs else generator(*args)
             output_tokens.append(next_tokens.clone())
 
         result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
