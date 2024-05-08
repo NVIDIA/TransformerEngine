@@ -135,11 +135,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     if (((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
                 || (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90)))
-            && (max_seqlen_q % 64 == 0)
-            && (max_seqlen_kv % 64 == 0)
             && ((cudnn_runtime_version < 8907 && num_attn_heads == num_gqa_groups)
                 || (cudnn_runtime_version >= 8907))
-            && ((head_dim <= 128) && (head_dim % 8 == 0))
             && ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || ((cudnn_runtime_version >= 8906)
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
@@ -162,7 +159,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_THD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
-      flag_arb = true;
+      flag_arb = true; 
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))
             && (flag_arb == true)) {
