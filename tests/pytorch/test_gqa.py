@@ -15,11 +15,11 @@ dtype = torch.bfloat16
 num_attn_head = 16
 ffn_hidden_size=1024
 
-@pytest.mark.parametrize("channels_per_head", [128, 256])
+@pytest.mark.parametrize("kv_channels", [128, 256])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("num_gqa_groups", [1, 2, 4, 8, 16])
 def test_gqa(
-    channels_per_head,
+    kv_channels,
     hidden_size,
     num_gqa_groups
 ) -> None:
@@ -29,10 +29,10 @@ def test_gqa(
         ffn_hidden_size,
         num_attn_head,
         num_gqa_groups,
-        channels_per_head=channels_per_head
+        kv_channels=kv_channels
     )
 
     # Run forward pass
     x = torch.randn((batch_size, 1, hidden_size)).cuda()
-    y = model(x)
+    model(x)
 
