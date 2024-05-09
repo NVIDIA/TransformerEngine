@@ -16,6 +16,9 @@ namespace te = transformer_engine;
 namespace te_ub = te::userbuffers;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // Load te_common = py::module_::import("transformer_engine_pybind") into TE/PyTorch
+  NVTE_ADD_PYBIND11_BINDINGS(m)
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
   m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD");
@@ -133,9 +136,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("GRAD_INPUT2", te::FP8BwdTensors::GRAD_INPUT2)
     .value("GRAD_OUTPUT3", te::FP8BwdTensors::GRAD_OUTPUT3)
     .value("GRAD_INPUT3", te::FP8BwdTensors::GRAD_INPUT3);
-
-  // Load te_common = py::module_::import("transformer_engine_common_cpp") into TE/PyTorch
-  NVTE_ADD_PYBIND11_BINDINGS(m)
 
   // Comm+GEMM Overlap
   py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap",

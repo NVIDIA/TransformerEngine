@@ -6,9 +6,10 @@
 
 #include <pybind11/pybind11.h>
 
-#define NVTE_ADD_PYBIND11_BINDINGS(ext_mod)                                                       \
-    auto te_common = pybind11::module_::import("transformer_engine_common_cpp");                  \
+#define NVTE_ADD_PYBIND11_BINDINGS(ext_mod)                                                      \
+    auto te_common = pybind11::module_::import("transformer_engine_pybind");                     \
     ext_mod.attr("DType") = te_common.attr("DType");                                             \
+    ext_mod.attr("NVTE_Activation_Type") = te_common.attr("NVTE_Activation_Type");               \
     ext_mod.attr("NVTE_Bias_Type") = te_common.attr("NVTE_Bias_Type");                           \
     ext_mod.attr("NVTE_Mask_Type") = te_common.attr("NVTE_Mask_Type");                           \
     ext_mod.attr("NVTE_QKV_Layout") = te_common.attr("NVTE_QKV_Layout");                         \

@@ -17,6 +17,23 @@
 extern "C" {
 #endif
 
+/*! \enum NVTE_Activation_Type
+ *  \brief TE activation function type.
+ */
+enum class NVTE_Activation_Type {
+  GELU      = 0,  /*!< Gaussian Error Linear Unit */
+  GEGLU     = 1,  /*!< Gated Gaussian Error Linear Unit */
+  SILU      = 2,  /*!< Sigmoid Linear Unit */
+  SWIGLU    = 3,  /*!< Gated Sigmoid Linear Unit */
+  RELU      = 4,  /*!< Rectified Linear Unit */
+  REGLU     = 5,  /*!< Gated Rectified Linear Unit */
+  QGELU     = 6,  /*!< Quick-GeLU Approximation */
+  QGEGLU    = 7,  /*!< Gated Quick-GeLU Approximation */
+  SRELU     = 8,  /*!< S-Shaped ReLU */
+  SREGLU    = 9,  /*!< Gated S-Shaped ReLU */
+};
+
+
 /*! \brief Compute GELU activation of the input.
  *
  *  \param[in]     input     Input tensor for GELU activation.

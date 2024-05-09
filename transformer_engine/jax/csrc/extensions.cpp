@@ -8,10 +8,10 @@
 
 #include <cublasLt.h>
 
-#include "common/include/transformer_engine/fused_attn.h"
-#include "common/include/transformer_engine/transformer_engine.h"
 #include "jax/csrc/modules.h"
 #include "jax/csrc/utils.h"
+
+#include "common/util/pybind_helper.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -55,6 +55,9 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
+    // Load te_common = py::module_::import("transformer_engine_pybind") into TE/JAX
+    NVTE_ADD_PYBIND11_BINDINGS(m);
+
     m.def("registrations", &Registrations);
     m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,
           pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
@@ -74,44 +77,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
     m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
-
-    pybind11::enum_<DType>(m, "DType", pybind11::module_local())
-        .value("kByte", DType::kByte)
-        .value("kInt32", DType::kInt32)
-        .value("kInt64", DType::kInt64)
-        .value("kFloat32", DType::kFloat32)
-        .value("kFloat16", DType::kFloat16)
-        .value("kBFloat16", DType::kBFloat16)
-        .value("kFloat8E4M3", DType::kFloat8E4M3)
-        .value("kFloat8E5M2", DType::kFloat8E5M2);
-
-    pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
-        .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
-        .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-        .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-
-    pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
-        .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
-        .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-        .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
-
-    pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
-        .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
-        .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
-        .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
-
-    pybind11::enum_<NVTE_Activation_Enum>(m, "NVTE_Activation_Enum", pybind11::module_local())
-        .value("GELU", NVTE_Activation_Enum::GELU)
-        .value("GEGLU", NVTE_Activation_Enum::GEGLU)
-        .value("SILU", NVTE_Activation_Enum::SILU)
-        .value("SWIGLU", NVTE_Activation_Enum::SWIGLU);
-
-    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-        .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
-        .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-        .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
 }
 
 }  // namespace jax

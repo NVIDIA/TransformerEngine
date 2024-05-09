@@ -11,14 +11,15 @@
 
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/fused_attn.h>
+#include <transformer_engine/activation.h>
 
-#include "../userbuffers/comm_gemm_overlap.h"
+#include "userbuffers/comm_gemm_overlap.h"
 
 namespace transformer_engine {
 
 namespace ub = userbuffers;
 
-PYBIND11_MODULE(transformer_engine_common_cpp, m) {
+PYBIND11_MODULE(transformer_engine_pybind, m) {
   py::enum_<DType>(m, "DType", py::module_local())
     .value("kByte", DType::kByte)
     .value("kInt32", DType::kInt32)
@@ -28,6 +29,18 @@ PYBIND11_MODULE(transformer_engine_common_cpp, m) {
     .value("kBFloat16", DType::kBFloat16)
     .value("kFloat16", DType::kFloat16)
     .value("kFloat32", DType::kFloat32);
+
+  pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
+        .value("GELU", NVTE_Activation_Type::GELU)
+        .value("GEGLU", NVTE_Activation_Type::GEGLU)
+        .value("SILU", NVTE_Activation_Type::SILU)
+        .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
+        .value("RELU", NVTE_Activation_Type::RELU)
+        .value("REGLU", NVTE_Activation_Type::REGLU)
+        .value("QGELU", NVTE_Activation_Type::QGELU)
+        .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
+        .value("SRELU", NVTE_Activation_Type::SRELU)
+        .value("SREGLU", NVTE_Activation_Type::SREGLU);
 
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", py::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)

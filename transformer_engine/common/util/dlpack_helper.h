@@ -25,14 +25,14 @@ namespace py = pybind11;
 namespace transformer_engine {
 
 DType get_te_dtype(DLDataType dtype) {
-  NVTE_CHECK(dtype.lanes == 1, "Unsupported number of data lanes: %d", dtype.lanes);
+  NVTE_CHECK(dtype.lanes == 1, "Unsupported number of data lanes: ", dtype.lanes);
   if (dtype.code == kDLFloat) {
     if (dtype.bits == 16) {
       return DType::kFloat16;
     } else if (dtype.bits == 32) {
       return DType::kFloat32;
     } else {
-      NVTE_ERROR("Unsupported %d-bit float type.", dtype.bits);
+      NVTE_ERROR("Unsupported ", dtype.bits, "-bit float type.");
     }
   } else if (dtype.code == kDLBfloat) {
     NVTE_CHECK(dtype.bits == 16, "BFloat16 type must be 16-bits.");
@@ -43,23 +43,16 @@ DType get_te_dtype(DLDataType dtype) {
     } else if (dtype.bits == 64) {
       return DType::kInt64;
     } else {
-      NVTE_ERROR("Unsupported %d-bit int type.", dtype.bits);
+      NVTE_ERROR("Unsupported ", dtype.bits, "-bit int type.");
     }
   } else {
-    NVTE_CHECK(dtype.bits == 8, "Unsupported %d-bit data type.", dtype.bits);
+    NVTE_CHECK(dtype.bits == 8, "Unsupported ", dtype.bits, "-bit data type.");
     return DType::kByte;
   }
 }
 
 template <typename T>
-DLDataType get_dlpack_dtype(int dtype = -1) {
-  if (std::is_same<T, DType>()) {
-    NVTE_CHECK((dtype >= 0) && (dtype < static_cast<int>(DType::kNumTypes)),
-      "Missing/invalid NVTEDtype in arguments when templating type conversion with <NVTEDtype>.");
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(static_cast<DType>(dtype), D,
-      return get_dlpack_dtype<D>();
-    )
-  }
+DLDataType get_dlpack_dtype() {
   DLDataType dl_dtype{};
   dl_dtype.lanes = 1;
   dl_dtype.bits = sizeof(T) * 8;
@@ -70,10 +63,16 @@ DLDataType get_dlpack_dtype(int dtype = -1) {
   } else if (std::is_same<T, int32_t>() || std::is_same<T, int64_t>()) {
     dl_dtype.code = kDLInt;
   } else {
-    NVTE_CHECK(dl_dtype.bits == 8, "Unsupported %d-bit data type.", dl_dtype.bits);
+    NVTE_CHECK(dl_dtype.bits == 8, "Unsupported ", dl_dtype.bits, "-bit data type.");
     dl_dtype.code = kDLUInt;
   }
   return dl_dtype;
+}
+
+DLDataType get_dlpack_dtype(DType dtype) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, D,
+    return get_dlpack_dtype<D>();
+  )
 }
 
 static void dlpack_capsule_deleter(PyObject *self) {
@@ -103,9 +102,9 @@ done:
 }
 
 template <typename T = char>
-DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1, int dtype = -1) {
+DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1) {
   // Convert data type and compute number of tensor elements
-  DLDataType dl_dtype = get_dlpack_dtype<T>(dtype);
+  DLDataType dl_dtype = get_dlpack_dtype<T>();
   assert(bytes % dl_dtype.bits == 0);
   int64_t numel = bytes / (dl_dtype.bits / 8);
 
@@ -124,13 +123,25 @@ DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, int device_id = -1
   return dlmt;
 }
 
+DLManagedTensor * buffer_to_dlpack(void *data, int64_t bytes, DType dtype, int device_id = -1) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, D,
+    return buffer_to_dlpack<D>(data, bytes, device_id);
+  )
+}
+
 py::capsule dlpack_to_capsule(DLManagedTensor *dlmt) {
   return py::capsule(dlmt, "dltensor", &dlpack_capsule_deleter);
 }
 
 template <typename T = char>
-py::capsule buffer_to_capsule(void *data, int64_t bytes, int device_id = -1, int dtype = -1) {
-  return dlpack_to_capsule(buffer_to_dlpack<T>(data, bytes, device_id, dtype));
+py::capsule buffer_to_capsule(void *data, int64_t bytes, int device_id = -1) {
+  return dlpack_to_capsule(buffer_to_dlpack<T>(data, bytes, device_id));
+}
+
+py::capsule buffer_to_capsule(void *data, int64_t bytes, DType dtype, int device_id = -1) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, D,
+    return buffer_to_capsule<D>(data, bytes, device_id);
+  )
 }
 
 DLManagedTensor * capsule_to_dlpack(py::capsule *capsule) {

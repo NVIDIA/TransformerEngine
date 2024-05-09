@@ -115,7 +115,7 @@ def found_pybind11() -> bool:
     try:
         subprocess.run(
             [
-                "cmake",
+                str(cmake_bin()),
                 "--find-package",
                 "-DMODE=EXIST",
                 "-DNAME=pybind11",
@@ -186,6 +186,48 @@ def cuda_version() -> Tuple[int, ...]:
     match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
+
+def cudnn_path() -> Tuple[str, str]:
+    """cuDNN include and library paths.
+
+    Throws FileNotFoundError if libcudnn.so is not found."""
+    cmake_module_path = str(root_path / "transformer_engine" / "cmake")
+    try:
+        find_cudnn = subprocess.run(
+            [
+                str(cmake_bin()),
+                "--find-package",
+                f"-DCMAKE_MODULE_PATH={cmake_module_path}",
+                "-DCMAKE_FIND_DEBUG_MODE=ON",
+                "-DMODE=EXIST",
+                "-DCOMPILER_ID=CXX",
+                "-DLANGUAGE=CXX",
+                "-DNAME=CUDNN",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise FileNotFoundError("Could not find a cuDNN installation.") from e
+
+    cudnn_include = None
+    cudnn_link = None
+    lib_ext = lib_extension()
+    path_divider = '\\' if lib_ext == "dll" else '/'
+    for line in find_cudnn.stderr.splitlines():
+        if "cudnn.h" in line:
+            cudnn_include = line.lstrip(' ').rstrip(path_divider + 'cudnn.h')
+        elif "libcudnn." + lib_ext in line:
+            cudnn_link = line.lstrip(' ').rstrip(path_divider + 'libcudnn.so')
+        if cudnn_include is not None and cudnn_link is not None:
+            break
+    if cudnn_include is None or cudnn_link is None:
+        raise FileNotFoundError("Could not find a cuDNN installation.")
+
+    return Path(cudnn_include), Path(cudnn_link)
+
+CUDNN_INCLUDE, CUDNN_LINK = cudnn_path()
 
 @lru_cache(maxsize=1)
 def frameworks() -> List[str]:
@@ -429,12 +471,25 @@ def setup_common_extension() -> CMakeExtension:
     Also builds JAX or userbuffers support if needed.
 
     """
-    cmake_flags = []
+    # FindPythonInterp and FindPythonLibs are deprecated in newer CMake versions,
+    # but PyBind11 still tries to use them unless we set PYBIND11_FINDPYTHON=ON.
+    cmake_flags = [ "-DPYBIND11_FINDPYTHON=ON" ]
 
+    # Optionally switch userbuffers bootstrapping to the old MPI method.
+    # NOTE: This requires launching PyTorch distributed runs with
+    #       `mpiexec -np <N> -x MASTER_ADDR=<host addr> -x MASTER_PORT=<host port> -x PATH ...`
+    #       instead of `torchrun --nproc-per-node=<N> ...`
     if int(os.getenv("UB_MPI_BOOTSTRAP", "0")):
         assert os.getenv("MPI_HOME"), \
             "MPI_HOME must be set if UB_MPI_BOOTSTRAP=1"
-        cmake_flags.append("-DUB_MPI_BOOTSTRAP")
+        cmake_flags += [ "-DUB_MPI_BOOTSTRAP=ON" ]
+
+    # If we need to build TE/PyTorch extensions later, we need to compile core TE library with
+    # the same C++ ABI version as PyTorch.
+    if "pytorch" in frameworks():
+        import torch
+        if "-D_GLIBCXX_USE_CXX11_ABI=1" in torch._C._show_config():  # pylint: disable=unsupported-membership-test
+            cmake_flags += [ "-DUSE_CXX11_ABI=ON" ]
 
     return CMakeExtension(
         name="transformer_engine",
@@ -454,20 +509,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-        # We need to compile system.cpp because the pytorch extension uses
-        # transformer_engine::getenv. This is a workaround to avoid direct
-        # linking with libtransformer_engine.so, as the pre-built PyTorch
-        # wheel from conda or PyPI was not built with CXX11_ABI, and will
-        # cause undefined symbol issues.
-        root_path / "transformer_engine" / "common" / "util" / "system.cpp",
-        # Likewise we also compile transformer_engine.cpp to use TensorWrapper.
-        root_path / "transformer_engine" / "common" / "transformer_engine.cpp",
-        # Finally, the userbuffers code also needs to be compiled in for CommGemmOverlap.
-        root_path / "transformer_engine" / "common" / "userbuffers" / "ipcsocket.cc",
-        root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers-host.cpp",
-        root_path / "transformer_engine" / "common" / "userbuffers" / "userbuffers.cu",
-    ] + \
-    _all_files_in_dir(extensions_dir)
+    ] + _all_files_in_dir(extensions_dir)
 
     # Header files
     include_dirs = [
@@ -513,7 +555,21 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Add PyBind flags
     import pybind11
     include_dirs.append(pybind11.get_include())
-    cxx_flags.append("-fvisibility=hidden")
+    if lib_extension() == "dll":
+        cxx_flags += ["/EHsc", "/bigobj"]
+    else:
+        cxx_flags += ["-fvisibility=hidden"]
+
+    # Link to core Transformer Engine library
+    linker_kwargs = {}
+    if lib_extension() == 'dll':
+        # Windows does not support -Wl,-rpath so we need to specify core TE library as a relative
+        # path to the DLL file.
+        linker_kwargs['libraries'] = [ str(Path('./libtransformer_engine.dll')) ]
+    else:
+        linker_kwargs['libraries'] = [ "transformer_engine" ]
+        linker_kwargs['library_dirs'] = [ '.' ]
+        linker_kwargs['extra_link_args'] = [ '-Wl,-rpath,.' ]
 
     # Construct PyTorch CUDA extension
     from torch.utils.cpp_extension import CUDAExtension
@@ -521,43 +577,16 @@ def setup_pytorch_extension() -> setuptools.Extension:
         name="transformer_engine_extensions",
         sources=[ str(path) for path in sources ],
         include_dirs=[ str(path) for path in include_dirs ],
-        library_dirs=[ str(root_path) ],
-        libraries=[
-            # torch.utils.cpp_extension.CUDAExtension internally links to 'cudart',
-            # but we also need 'cuda' for the virtual memory API calls in userbuffers.
-            "cuda",
-            # "transformer_engine"  ### TODO (tmoon) Debug linker errors
-        ],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        **linker_kwargs,
     )
 
 
 def setup_jax_extension() -> setuptools.Extension:
     """Setup PyBind11 extension for JAX support"""
-
-    # Linked libraries
-    if lib_extension() == "dll":
-        lib_dir = os.path.join('lib', 'x64')
-    else:
-        if (not os.path.exists(os.path.join(CUDA_HOME, 'lib64')) and
-                os.path.exists(os.path.join(CUDA_HOME, 'lib'))):
-            lib_dir = 'lib'
-        else:
-            lib_dir = 'lib64'
-    library_dirs = [
-        os.path.join(CUDA_HOME, lib_dir),
-        str(root_path),
-    ]
-    libraries = [
-        'cudart',
-        'cublas',
-        'cublasLt',
-        'transformer_engine',
-    ]
-
     # Source files
     src_dir = root_path / "transformer_engine" / "jax" / "csrc"
     sources = [
@@ -569,6 +598,7 @@ def setup_jax_extension() -> setuptools.Extension:
     # Header files
     include_dirs = [
         CUDA_HOME / "include",
+        CUDNN_INCLUDE,
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "jax" / "csrc",
         root_path / "transformer_engine",
@@ -578,9 +608,39 @@ def setup_jax_extension() -> setuptools.Extension:
     cxx_flags = [ "-O3" ]
     nvcc_flags = [
         "-O3",
-        "--allow-unsupported-compiler",
         "--forward-unknown-opts",
     ]
+
+    # Linked libraries
+    libraries = [
+        'cudart',
+        'cublas',
+        'cublasLt',
+        'cudnn',
+    ]
+    linker_kwargs = {}
+    if lib_extension() == 'dll':
+        # Windows does not support -Wl,-rpath so we need to specify shared libraries with full path
+        # in order to dynamically load them at runtime without errors.
+        cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
+        libraries = [ cuda_lib_dir / f'lib{lib}.dll' for lib in libraries ]
+
+        # Core TE library has to be relative to the module install path to deploy correctly.
+        libraries += [ Path('./libtransformer_engine.dll') ]
+        linker_kwargs['libraries'] = [ str(path) for path in libraries ]
+    else:
+        cuda_lib_dir = CUDA_HOME / 'lib64'
+        if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
+            cuda_lib_dir = CUDA_HOME / 'lib'
+        linker_kwargs['libraries'] = libraries + [ 'transformer_engine' ]
+        linker_kwargs['library_dirs'] = [
+            str(cuda_lib_dir),
+            str(CUDNN_LINK),
+            '.'  # for core TE library
+        ]
+        linker_kwargs['extra_link_args'] = [
+            f"-Wl,-rpath,{path}" for path in linker_kwargs['library_dirs']
+        ]
 
     # Add PyBind11 to the extension
     from pybind11.setup_helpers import Pybind11Extension
@@ -599,12 +659,11 @@ def setup_jax_extension() -> setuptools.Extension:
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        library_dirs=[str(path) for path in library_dirs],
-        libraries=libraries,
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
-        }
+        },
+        **linker_kwargs,
     )
 
 

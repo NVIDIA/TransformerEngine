@@ -11,20 +11,19 @@
 typedef char* ExtComm;
 #else
 #include <stdexcept>
-#include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
+#include <mpi.h>
 
-#define MPI_CHECK(expr)                                                                          \
+#define UB_MPI_CHECK(expr)                                                                          \
   do {                                                                                           \
     const int mpicode = (expr);                                                                  \
     if (mpicode != MPI_SUCCESS) {                                                                \
       char mpimsg[MPI_MAX_ERROR_STRING];                                                         \
       int mpilen;                                                                                \
       MPI_Error_string(mpicode, mpimsg, &mpilen);                                                \
-      char *errmsg;                                                                              \
-      errmsg = malloc(sizeof(__FILE__) + sizeof(__LINE__) + sizeof(__func__) + 16 + mpilen);     \
-      snprintf(errmsg, sizeof(errmsg), "%s:%s in function %s: %s",                               \
-               __FILE__, __LINE__, __func__, mpimsg);                                            \
-      throw std::runtime_error(errmsg)                                                           \
+      std::vector<char> errmsg(1024);  \
+      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s",  \
+               __FILE__, __LINE__, __func__, mpimsg);  \
+      throw std::runtime_error(errmsg.data());  \
     }                                                                                            \
   } while (false)
 
@@ -32,11 +31,11 @@ typedef MPI_Comm ExtComm;
 
 void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, ExtComm comm) {
   int myrank, nranks;
-  MPI_CHECK(MPI_Comm_rank(comm, &myrank));
-  MPI_CHECK(MPI_Comm_size(comm, &nranks));
+  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
+  UB_MPI_CHECK(MPI_Comm_size(comm, &nranks));
   *globaldata = malloc(nranks * localbytes);
   memcpy(*globaldata + myrank * bytes, localdata, localbytes);
-  MPI_CHECK(MPI_Allgather(*globaldata + myrank * localbytes, localbytes, MPI_BYTE,
+  memcpy(*globaldata + myrank * localbytes, localdata, localbytes);
                           *globaldata, localbytes, MPI_BYTE, comm));
 }
 
@@ -45,7 +44,7 @@ void ub_free(void *ptr, size_t bytes) {
 }
 
 void ub_barrier(ExtComm comm) {
-  MPI_CHECK(MPI_Barrier(comm));
+  UB_MPI_CHECK(MPI_Barrier(comm));
 }
 #endif
 
@@ -196,7 +195,6 @@ void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
-#ifndef UB_MPI_BOOTSTRAP
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
@@ -213,15 +211,13 @@ int create_communicator(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
   std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier);
-#else
-int create_communicator_grouped2(communicator **comm,
+
+int create_communicator_grouped2_mpi(communicator **comm,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
 
-int create_communicator_grouped(communicator **comm,
-  int pipegpus, int pipenodes);
+int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipenodes);
 
-int create_communicator(communicator **comm);
-#endif
+int create_communicator_mpi(communicator **comm);
 
 // int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
 /*

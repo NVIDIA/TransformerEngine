@@ -24,6 +24,9 @@ static char EXT_COMM_INTRA[] = "intra";
 static char EXT_COMM_INTER[] = "inter";
 #else
 #include <mpi.h>
+static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
+static MPI_Comm EXT_COMM_INTRA;
+static MPI_Comm EXT_COMM_INTER;
 #endif
 
 #define MULTICAST_GB_TOTAL 512
@@ -86,32 +89,17 @@ int pipe_rank(communicator *comm, int step) {
   return newnode * numlocal + newlocal;
 }
 
-#ifndef UB_MPI_BOOTSTRAP
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
   std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
-#else
-int create_communicator_grouped2(communicator **comm,
-  int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
-#endif
   *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
-#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
   (*comm)->_free = ext_free;
   (*comm)->_barrier = ext_barrier;
-#else
-  int myrank, numranks;
-  (*comm)->comm_world = MPI_COMM_WORLD;
-  MPI_Comm_rank((*comm)->comm_world, &myrank);
-  MPI_Comm_size((*comm)->comm_world, &numranks);
-  (*comm)->_alloc_copy_allgather = &ub_allgather;
-  (*comm)->_free = &ub_free;
-  (*comm)->_barrier = &ub_barrier;
-#endif
   (*comm)->nranks = numranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
@@ -146,37 +134,7 @@ int create_communicator_grouped2(communicator **comm,
             sec_timeout, (*comm)->ub_timeout, device_clock);
   }
 
-#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_intra = EXT_COMM_INTRA;
-#else
-  // split communicator
-  char host_name[MPI_MAX_PROCESSOR_NAME];
-  char(*host_names)[MPI_MAX_PROCESSOR_NAME];
-  int namelen, bytes, color, mylocal, numlocal;
-  int rank = (*comm)->myrank, size = (*comm)->nranks;
-  MPI_Get_processor_name(host_name, &namelen);
-  bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
-  host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
-  strcpy(host_names[rank], host_name);  // NOLINT(*)
-  for (int n = 0; n < size; n++)
-    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, (*comm)->comm_world);
-  qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
-
-  color = 0;
-  for (int n = 0; n < size; n++) {
-    if (n > 0 && strcmp(host_names[n - 1], host_names[n]))
-      color++;
-    if (strcmp(host_name, host_names[n]) == 0)
-      break;
-  }
-  free(host_names);
-
-  MPI_Comm_split((*comm)->comm_world, color, rank, &(*comm)->comm_intra);
-  // find intranode numbers and make internode communicator
-  // figure out mylocal
-  MPI_Comm_rank((*comm)->comm_intra, &mylocal);
-  MPI_Comm_size((*comm)->comm_intra, &numlocal);
-#endif
   (*comm)->nvrank = mylocal;
   (*comm)->nvsize = numlocal;
 
@@ -235,22 +193,7 @@ int create_communicator_grouped2(communicator **comm,
 
   (*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
 
-#ifndef UB_MPI_BOOTSTRAP
   (*comm)->comm_inter = EXT_COMM_INTER;
-#else
-  CUDACHECK(cudaFree(0));
-  int datanodegroup_id =
-      myrank / numlocal / datanodes;  // data reduction group node belongs, equals 0 for all if both
-                                      // pipenodes=1 and tensornodes=1
-  // mpi communicator only needed for SHARP which is always
-  // allreduce1/data-parallel
-  MPI_Comm_split((*comm)->comm_world, mylocal + numlocal * datanodegroup_id,
-                 rank, &(*comm)->comm_inter);
-  // different rails from same group are in different subcommunicators
-  int mynode, numnodes;
-  MPI_Comm_size((*comm)->comm_inter, &numnodes);
-  MPI_Comm_rank((*comm)->comm_inter, &mynode);
-#endif
   (*comm)->first_node = nodeid - mynode;
   (*comm)->num_nodes = numnodes;
   (*comm)->my_node = mynode;
@@ -382,7 +325,6 @@ int create_communicator_grouped2(communicator **comm,
   return 0;
 }
 
-#ifndef UB_MPI_BOOTSTRAP
 int create_communicator_grouped(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
@@ -401,16 +343,73 @@ int create_communicator(communicator **comm,
                                       ext_alloc_copy_allgather, ext_free, ext_barrier,
                                       1, 1, 1, 1);
 }
+
+int create_communicator_grouped2_mpi(communicator **comm,
+  int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
+#ifdef UB_MPI_BOOTSTRAP
+  // get global numbers
+  int myrank, numranks;
+  MPI_Comm_rank(EXT_COMM_WORLD, &myrank);
+  MPI_Comm_size(EXT_COMM_WORLD, &numranks);
+
+  // find intranode numbers and make internode communicator
+  char host_name[MPI_MAX_PROCESSOR_NAME];
+  char(*host_names)[MPI_MAX_PROCESSOR_NAME];
+  int namelen, bytes, color;
+  int rank = (*comm)->myrank, size = (*comm)->nranks;
+  MPI_Get_processor_name(host_name, &namelen);
+  bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
+  host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
+  strcpy(host_names[rank], host_name);  // NOLINT(*)
+  for (int n = 0; n < size; n++)
+    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, EXT_COMM_WORLD);
+  qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
+
+  color = 0;
+  for (int n = 0; n < size; n++) {
+    if (n > 0 && strcmp(host_names[n - 1], host_names[n]))
+      color++;
+    if (strcmp(host_name, host_names[n]) == 0)
+      break;
+  }
+  free(host_names);
+
+  int mylocal, numlocal;
+  MPI_Comm_split(EXT_COMM_WORLD, color, rank, &EXT_COMM_INTRA);
+  MPI_Comm_rank(EXT_COMM_INTRA, &mylocal);
+  MPI_Comm_size(EXT_COMM_INTRA, &numlocal);
+
+  // find internode numbers and make internode communicator
+  CUDACHECK(cudaFree(0));
+  int allnodes = numranks / numlocal;
+  int datanodes = allnodes / pipenodes / tensornodes;
+  // data reduction group node belongs, equals 0 for all if both pipenodes=1 and tensornodes=1
+  int datanodegroup_id = myrank / numlocal / datanodes;
+  // mpi communicator only needed for SHARP which is always allreduce1/data-parallel
+  MPI_Comm_split(EXT_COMM_WORLD, mylocal + numlocal * datanodegroup_id, rank, &EXT_COMM_INTER);
+  // different rails from same group are in different subcommunicators
+  int mynode, numnodes;
+  MPI_Comm_size(EXT_COMM_INTER, &numnodes);
+  MPI_Comm_rank(EXT_COMM_INTER, &mynode);
+
+  // finally call the abstracted constructor with MPI info
+  return create_communicator_grouped2(comm,
+    myrank, numranks, mylocal, numlocal, mynode, numnodes,
+    &ub_alloc_copy_allgather, &ub_free, &ub_barrier,
+    pipegpus, pipenodes, tensorgpus, tensornodes);
 #else
-int create_communicator_grouped(communicator **comm,
-  int pipegpus, int pipenodes) {
-  return create_communicator_grouped2(comm, pipegpus, pipenodes, 1, 1);
+  NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
+                std::string("building Transformer Engine with UB_MPI_BOOTSTRAP=1"));
+#endif
 }
 
-int create_communicator(communicator **comm) {
-  return create_communicator_grouped2(comm, 1, 1, 1, 1);
+int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipenodes) {
+  return create_communicator_grouped2_mpi(comm, pipegpus, pipenodes, 1, 1);
 }
-#endif
+
+int create_communicator_mpi(communicator **comm, int pipegpus, int pipenodes) {
+  return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
+}
 
 void destroy_communicator(communicator *comm) {
   for (int i=0; i < NVTE_MAX_REGIONS; i++) {

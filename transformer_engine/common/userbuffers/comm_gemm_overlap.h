@@ -97,7 +97,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
         [this](const char *group) { _ub_barrier(group); },
         1, 1, localsize, 1);
 #else
-      create_communicator_grouped2(&_ub_comm, 1, 1, localsize, 1);
+      create_communicator_grouped2_mpi(&_ub_comm, 1, 1, localsize, 1);
 #endif
       _comm_created = true;
     }
