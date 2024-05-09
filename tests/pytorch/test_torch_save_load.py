@@ -65,7 +65,6 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
             self.inp_type = tex.DType.kFloat8E4M3
             self.weights_type = tex.DType.kFloat8E4M3
             self.outp_type = precision
-        
 
         def forward(self, inp, weight):
             inp_fp8 = cast_to_fp8(
