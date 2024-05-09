@@ -26,6 +26,19 @@ extern "C" {
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 
+enum class NVTE_Activation_Type {
+  GELU,
+  GEGLU,
+  SILU,
+  SWIGLU,
+  RELU,
+  REGLU,
+  QGELU,
+  QGEGLU,
+  SRELU,
+  SREGLU,
+};
+
 void nvte_gelu(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream);

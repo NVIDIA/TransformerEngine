@@ -27,7 +27,7 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
-from transformer_engine_jax import NVTE_Activation_Enum
+from transformer_engine_jax import NVTE_Activation_Type
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
@@ -126,16 +126,16 @@ def _check_valid_batch_dims(bdims):
 
 
 ActivationEnum = {
-    ('gelu',): NVTE_Activation_Enum.GELU,
-    ('gelu', 'linear'): NVTE_Activation_Enum.GEGLU,
-    ('silu',): NVTE_Activation_Enum.SILU,
-    ('silu', 'linear'): NVTE_Activation_Enum.SWIGLU,
-    ('relu',): NVTE_Activation_Enum.RELU,
-    ('relu', 'linear'): NVTE_Activation_Enum.REGLU,
-    ('quick_gelu',): NVTE_Activation_Enum.QGELU,
-    ('quick_gelu', 'linear'): NVTE_Activation_Enum.QGEGLU,
-    ('squared_relu',): NVTE_Activation_Enum.SRELU,
-    ('squared_relu', 'linear'): NVTE_Activation_Enum.SREGLU,
+    ('gelu',): NVTE_Activation_Type.GELU,
+    ('gelu', 'linear'): NVTE_Activation_Type.GEGLU,
+    ('silu',): NVTE_Activation_Type.SILU,
+    ('silu', 'linear'): NVTE_Activation_Type.SWIGLU,
+    ('relu',): NVTE_Activation_Type.RELU,
+    ('relu', 'linear'): NVTE_Activation_Type.REGLU,
+    ('quick_gelu',): NVTE_Activation_Type.QGELU,
+    ('quick_gelu', 'linear'): NVTE_Activation_Type.QGEGLU,
+    ('squared_relu',): NVTE_Activation_Type.SRELU,
+    ('squared_relu', 'linear'): NVTE_Activation_Type.SREGLU,
 }
 
 
