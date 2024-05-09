@@ -1610,58 +1610,68 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 }
 
 
+// Kernel used to update KV chache when attention layout is "thd".
 extern "C"
-__global__ void attn_copy(__nv_bfloat16* A, int* seq_len, __nv_bfloat16* B, int max_seq_len, int b, int s) {
+__global__ void attention_copy_kernel(
+        __nv_bfloat16* cache_tensor, 
+        int* seq_len, 
+        int* incoming_seq_len, 
+        __nv_bfloat16* hidden_tensor, 
+        int max_incoming_seq_len, 
+        int max_seq_len, 
+        int b, 
+        int s
+    ) {
     for(int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-        int per_block = s / blockDim.x;
-        int remainder = s % blockDim.x;
-        int copy_block_offset_begin = per_block * threadIdx.x + min(threadIdx.x, remainder);
-
+        int to_copy = s * incoming_seq_len[batch_idx];
         int offset = seq_len[batch_idx];
 
-        __nv_bfloat16* begin_A_copy = A + max_seq_len * s * batch_idx + s * offset; 
-        __nv_bfloat16* begin_B_copy = B + s * batch_idx;
+        __nv_bfloat16* begin_cache_copy = cache_tensor + max_seq_len * s * batch_idx + s * offset; 
+        __nv_bfloat16* begin_hidden_copy = hidden_tensor + s * batch_idx * max_incoming_seq_len;
 
-        int limit = copy_block_offset_begin + per_block + (threadIdx.x < remainder ? 1 : 0);
-        
-        for(int i = copy_block_offset_begin; i < limit; i++) {
-            *(begin_A_copy + i) = *(begin_B_copy + i);
+        for(int i = threadIdx.x; i < to_copy; i += blockDim.x) {
+            *(begin_cache_copy + i) = *(begin_hidden_copy + i);
         }
     } 
 }
 
+// Kernel used in positional encoding application.
 extern "C"
-__global__ void gv(float* src, int* seq_len, float* dst,  int d, int b) {
+__global__ void get_values_kernel(
+        float* src, 
+        int* seq_len, 
+        int* incoming_seq_len, 
+        float* dst, 
+        int max_incoming_seq_len, 
+        int b, 
+        int d
+    ) 
+    {
     // src [s, 1, 1, d]
     // dst [b]
     for(int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-        int per_block = d / blockDim.x;
-        int remainder = d % blockDim.x;
-        int copy_block_offset_begin = per_block * threadIdx.x + min(threadIdx.x, remainder);
-
+        int to_copy = d * incoming_seq_len[batch_idx];
         int offset = seq_len[batch_idx];
 
         float* begin_src_copy = src + d * offset; 
-        float* begin_dst_copy = dst + d * batch_idx;
+        float* begin_dst_copy = dst + d * max_incoming_seq_len * batch_idx;
 
-        int limit = copy_block_offset_begin + per_block + (threadIdx.x < remainder ? 1 : 0);
-        
-        for(int i = copy_block_offset_begin; i < limit; i++) {
+        for(int i = threadIdx.x; i < to_copy; i += blockDim.x) {
             *(begin_dst_copy + i) = *(begin_src_copy + i);
         }
     } 
 }
 
-
-
-void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B, int max_seq_len, int b, int s) {
-    attn_copy<<<16, 32, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<__nv_bfloat16*>(A.data_ptr<torch::BFloat16>()),
+void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len, torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s) {
+    attention_copy_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<__nv_bfloat16*>(A.data_ptr<torch::BFloat16>()),
                           seq_len.data_ptr<int>(),
-                          reinterpret_cast<__nv_bfloat16*>(B.data_ptr<torch::BFloat16>()), max_seq_len, b, s);
+                          incoming_seq_len.data_ptr<int>(),
+                          reinterpret_cast<__nv_bfloat16*>(B.data_ptr<torch::BFloat16>()), max_incoming_seq_len, max_seq_len, b, s);
 }
 
-void get_values(torch::Tensor A, torch::Tensor seq_len, torch::Tensor B,  int d, int b) {
-    gv<<<16, 32, 0, at::cuda::getCurrentCUDAStream()>>>(A.data_ptr<float>(),
+void get_values(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len, torch::Tensor B,  int max_incoming_seq_len, int b, int d) {
+    get_values_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(A.data_ptr<float>(),
                           seq_len.data_ptr<int>(),
-                          B.data_ptr<float>(),  d, b);
+                          incoming_seq_len.data_ptr<int>(),
+                          B.data_ptr<float>(), max_incoming_seq_len, b, d);
 }
