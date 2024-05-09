@@ -3226,6 +3226,8 @@ class DotProductAttention(torch.nn.Module):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
+        self.hidden_size_per_attention_head = kv_channels
+
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
@@ -4091,7 +4093,6 @@ class MultiheadAttention(torch.nn.Module):
         self.tp_size = tp_size
         self.sequence_parallel = (tp_size > 1) and sequence_parallel
 
-
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
@@ -4100,10 +4101,11 @@ class MultiheadAttention(torch.nn.Module):
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
         assert (self.num_gqa_groups % tp_size == 0
                 ), "The number of GQA groups must be divisible by tensor parallel size!"
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+
         self.hidden_size_per_attention_head = kv_channels
         self.hidden_size_q = self.hidden_size_per_attention_head * num_attention_heads
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
-        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
