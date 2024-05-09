@@ -73,7 +73,7 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 option(UB_MPI_BOOTSTRAP "Bootstrap userbuffers with MPI." OFF)
 message(STATUS "Userbuffers MPI bootstrap: ${UB_MPI_BOOTSTRAP}")
 if (UB_MPI_BOOTSTRAP)
-     find_package(MPI REQUIRED)
+     find_package(MPI REQUIRED COMPONENTS CXX)
      list(APPEND transformer_engine_LIBS MPI::MPI_CXX)
      target_compile_definitions(transformer_engine PRIVATE UB_MPI_BOOTSTRAP)
 endif()
