@@ -194,3 +194,19 @@ def restart_jupyter_notebook():
         import warnings
         warnings.simplefilter("ignore")
         torch.set_warn_always(False)
+
+def generate_sample_text(model):
+    tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
+    inputs = tokenizer(["Some random initial str ", "Another string ... "] * 32, return_tensors="pt", padding=True)
+
+    inputs['input_ids'] = inputs['input_ids'].cuda()
+    inputs['attention_mask'] = inputs['attention_mask'].cuda()
+
+    outputs = model.generate(**inputs, max_new_tokens=100)
+    generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    for text in generated_texts:
+        print(text)
+        print("=" * 100)
+
+def benchmark_generation(model):
+    pass
