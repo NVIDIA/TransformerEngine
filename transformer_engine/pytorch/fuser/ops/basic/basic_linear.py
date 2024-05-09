@@ -335,13 +335,19 @@ class BasicLinear(BasicOperation):
                 f"Supported dtypes are float32, float16, bfloat16 (got {dtype})"
             )
 
+        # Required grads
+        requires_dgrad = input.requires_grad
+        requires_wgrad = weight.requires_grad
+        requires_backward = requires_dgrad or requires_wgrad
+
         # Check if FP8 is enabled
         with_fp8_compute = (
             FP8GlobalStateManager.is_fp8_enabled()
             and input_fp8_meta is not None
             and weight_fp8_meta is not None
-            and grad_output_fp8_meta is not None ### TODO Tweak
         )
+        if with_fp8_compute and requires_backward:
+            with_fp8_compute = grad_output_fp8_meta is not None
         if not with_fp8_compute:
             input_fp8_meta = None
             weight_fp8_meta = None
@@ -354,35 +360,11 @@ class BasicLinear(BasicOperation):
             and output_fp8_meta is not None
         )
 
-        # Check weight tensor
-        ### TODO: Weight caching without FP8 params
+        # Tensor dims
+        input_dims = input.size()
         weight_dims = weight.size()
-        if len(weight_dims) != 2:
-            raise ValueError(
-                f"Weight tensor is not 2D (shape={tuple(weight.size())})"
-            )
-        w = convert_tensor(
-            weight,
-            device=device,
-            dtype=dtype,
-            memory_format=torch.contiguous_format,
-        )
-        if with_fp8_compute and not is_float8_tensor(w):
-            fp8_dtype = get_fp8_te_dtype(
-                weight_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            w = Float8Tensor.to_float8(
-                w,
-                fp8_meta=weight_fp8_meta,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-            )
-        elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.from_float8()
 
         # Check input tensor
-        input_dims = input.size()
         if len(input_dims) == 0 or weight_dims[1] != input_dims[-1]:
             raise ValueError(
                 f"Input tensor (shape={tuple(input.size())}) "
@@ -400,7 +382,7 @@ class BasicLinear(BasicOperation):
                 input_fp8_meta["recipe"],
                 fprop_tensor=True,
             )
-            with_cast_transpose = weight.requires_grad
+            with_cast_transpose = requires_wgrad
             if tensor_parallel_mode == "column" and sequence_parallel:
                 with_cast_transpose = False
             if with_cast_transpose:
@@ -428,6 +410,32 @@ class BasicLinear(BasicOperation):
                 tensor_parallel_group,
                 async_op=True,
             )
+
+        # Check weight tensor
+        ### TODO: Weight caching without FP8 params
+        if len(weight_dims) != 2:
+            raise ValueError(
+                f"Weight tensor is not 2D (shape={tuple(weight.size())})"
+            )
+        w = convert_tensor(
+            weight,
+            device=device,
+            dtype=dtype,
+            memory_format=torch.contiguous_format,
+        )
+        if with_fp8_compute and not is_float8_tensor(w):
+            fp8_dtype = get_fp8_te_dtype(
+                weight_fp8_meta["recipe"],
+                fprop_tensor=True,
+            )
+            w = Float8Tensor.to_float8(
+                w,
+                fp8_meta=weight_fp8_meta,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+            )
+        elif not with_fp8_compute and is_float8_tensor(w):
+            w = w.from_float8()
 
         # Construct output tensor
         y = None
@@ -503,7 +511,7 @@ class BasicLinear(BasicOperation):
 
         # Check buffer for wgrad fusion
         grad_weight = None
-        if weight.requires_grad and accumulate_into_main_grad:
+        if requires_wgrad and accumulate_into_main_grad:
             if not hasattr(weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
@@ -532,8 +540,8 @@ class BasicLinear(BasicOperation):
         ctx.with_fp8_compute = with_fp8_compute
         ctx.input_dims = input_dims
         ctx.weight_dims = weight_dims
-        ctx.requires_dgrad = input.requires_grad
-        ctx.requires_wgrad = weight.requires_grad
+        ctx.requires_dgrad = requires_dgrad
+        ctx.requires_wgrad = requires_wgrad
 
         # Reshape output tensor
         output_dims = list(input_dims)

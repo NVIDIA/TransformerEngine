@@ -100,47 +100,62 @@ class ForwardLinearBiasActivation(FusedOperation):
         else:
             raise NotImplementedError("Activations are not yet supported")  ### TODO Implement
 
+        # Tensor dims
+        input_dims = input.size()
+        weight_dims = linear_op.weight.size()
+
         # Check if FP8 is enabled
         with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
+        input_fp8_meta = None
+        weight_fp8_meta = None
+        output_fp8_meta = None
+        grad_output_fp8_meta = None
+        grad_input_fp8_meta = None
+        if with_fp8_compute:
+            input_fp8_meta = linear_op.get_fp8_meta("input")
+            weight_fp8_meta = linear_op.get_fp8_meta("param")
+            output_fp8_meta = None
+            grad_output_fp8_meta = linear_op.get_fp8_meta("grad_output")
+            prev_op = basic_op_prev_ops[0]
+            if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
+                grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
 
         # Check input tensor
-        input_dims = input.size()
-        if len(input_dims) == 0 or linear_op.weight.size(1) != input_dims[-1]:
+        if len(input_dims) == 0 or weight_dims[1] != input_dims[-1]:
             raise ValueError(
                 f"Input tensor (shape={tuple(input.size())}) "
                 f"and weight tensor (shape={tuple(linear_op.weight.size())}) "
                 "are not compatible"
             )
-        local_x = reshape(
+        x_local = reshape(
             input,
             (-1, input_dims[-1]),
             device=linear_op.device,
             dtype=linear_op.dtype,
         )
-        if with_fp8_compute and not is_float8_tensor(local_x):
-            fp8_meta = linear_op.get_fp8_meta("input")
-            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+        if with_fp8_compute and not is_float8_tensor(x_local):
+            fp8_dtype = get_fp8_te_dtype(input_fp8_meta["recipe"], fprop_tensor=True)
             with_cast_transpose = linear_op.weight.requires_grad
             if linear_op.tensor_parallel_mode == "column" and linear_op.sequence_parallel:
                 with_cast_transpose = False
             if with_cast_transpose:
-                local_x = fp8_cast_transpose(
-                    local_x,
-                    fp8_meta=fp8_meta,
+                x_local = fp8_cast_transpose(
+                    x_local,
+                    fp8_meta=input_fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
             else:
-                local_x = Float8Tensor.to_float8(
-                    local_x,
-                    fp8_meta=fp8_meta,
+                x_local = Float8Tensor.to_float8(
+                    x_local,
+                    fp8_meta=input_fp8_meta,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
                 )
-        elif not with_fp8_compute and is_float8_tensor(local_x):
-            local_x = local_x.from_float8()
-        x = local_x
+        elif not with_fp8_compute and is_float8_tensor(x_local):
+            x_local = x_local.from_float8()
+        x = x_local
         x_async = None
         if (
             linear_op.tensor_parallel_mode == "column"
@@ -154,18 +169,18 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Check weight tensor
         ### TODO: Weight caching without FP8 params
+        weight = linear_op.weight
         w = convert_tensor(
-            linear_op.weight,
+            weight,
             device=linear_op.device,
             dtype=linear_op.dtype,
             memory_format=torch.contiguous_format,
         )
         if with_fp8_compute and not is_float8_tensor(w):
-            fp8_meta = linear_op.get_fp8_meta("param")
-            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            fp8_dtype = get_fp8_te_dtype(weight_fp8_meta["recipe"], fprop_tensor=True)
             w = Float8Tensor.to_float8(
                 w,
-                fp8_meta=fp8_meta,
+                fp8_meta=weight_fp8_meta,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
             )
@@ -184,7 +199,7 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Perform GEMM
         y = torch.empty(
-            (x.size(0), w.size(0)),
+            (x.size(0), weight_dims[0]),
             dtype=linear_op.dtype,
             device=linear_op.device,
         )
@@ -217,13 +232,39 @@ class ForwardLinearBiasActivation(FusedOperation):
                 use_bias=(bias_op is not None),
             )
 
+        # Check buffer for wgrad fusion
+        grad_weight = None
+        if weight.requires_grad and linear_op._accumulate_into_main_grad:
+            if not hasattr(weight, "main_grad"):
+                raise RuntimeError(
+                    "BasicLinear op is configured with "
+                    "accumulate_into_main_grad=True, "
+                    "but weight parameter does not have main_grad attribute"
+                )
+            grad_weight = weight.main_grad.detach()
+        else:
+            accumulate_into_main_grad = False
+
         # Save state for backward pass
         linear_op_ctx.save_for_backward(
-            local_x,
+            x_local,
+            weight.detach(),
+            grad_weight,
         )
+        linear_op_ctx.device = linear_op.device
+        linear_op_ctx.dtype = linear_op.dtype
+        linear_op_ctx.tensor_parallel_mode = linear_op.tensor_parallel_mode
+        linear_op_ctx.tensor_parallel_group = linear_op.tensor_parallel_group
+        linear_op_ctx.sequence_parallel = linear_op.sequence_parallel
+        linear_op_ctx.weight_fp8_meta = weight_fp8_meta
+        linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
+        linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        linear_op_ctx.accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         linear_op_ctx.with_fp8_compute = with_fp8_compute
         linear_op_ctx.input_dims = input_dims
+        linear_op_ctx.weight_dims = weight_dims
         linear_op_ctx.requires_dgrad = input.requires_grad
+        linear_op_ctx.requires_wgrad = weight.requires_grad
 
         # Reshape output tensor
         output_dims = list(input_dims)
