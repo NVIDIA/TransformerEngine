@@ -3266,41 +3266,44 @@ class DotProductAttention(torch.nn.Module):
                 """
                     inference_params.seq_len - lengths of processed sequences
                 """
-                bs = query_layer.shape[0] 
+                batch_size = query_layer.shape[0] 
 
+                
                 tex.attention_copy(
                     inference_key_memory, 
                     inference_params.seq_len, 
                     inference_params.incoming_seq_len,
                     key_layer, 
-                    inference_params.max_incoming_seqence_length,
+                    inference_params.max_incoming_seq_len,
                     inference_params.max_sequence_length,  
-                    bs,
+                    batch_size,
                     self.channels)
                 tex.attention_copy(
                     inference_value_memory, 
                     inference_params.seq_len, 
                     inference_params.incoming_seq_len,
                     value_layer, 
-                    inference_params.max_incoming_seqence_length,
+                    inference_params.max_incoming_seq_len,
                     inference_params.max_sequence_length,  
-                    bs,
+                    batch_size,
                     self.channels)
+                
                     
-                max_seqlen_q = inference_params.max_incoming_seqence_length
+                max_seqlen_q = inference_params.max_incoming_seq_len
                 max_seqlen_kv = inference_params.max_sequence_length
-                cu_seqlens_q = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
-                cu_seqlens_kv = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_q = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_k = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_v = self.alloc(bs + 1, dtype=torch.int32, device="cuda")
+                cu_seqlens_q = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
+                cu_seqlens_kv = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_q = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_k = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
+                seq_offsets_v = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
 
-                cu_seqlens_q.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda"))
-                cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + 1, dim=0))
+                cu_seqlens_q[1:].copy_(torch.cumsum(inference_params.incoming_seq_len, dim=0))
+                cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + inference_params.incoming_seq_len, dim=0))
 
-                seq_offsets_q.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q)
-                seq_offsets_k.copy_(torch.arange(0, bs + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
+                seq_offsets_q.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q)
+                seq_offsets_k.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
                 seq_offsets_v.copy_(seq_offsets_k)
+
                 
                 query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
                 key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
@@ -3601,7 +3604,6 @@ class DotProductAttention(torch.nn.Module):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     is_first_microbatch=is_first_microbatch)
-
             out =  self.fused_attention(
                 query_layer,
                 key_layer,
@@ -4173,12 +4175,20 @@ class MultiheadAttention(torch.nn.Module):
             if self.layer_number not in inference_params.key_value_memory_dict:
                 inf_max_seq_len = inference_params.max_sequence_length
                 inf_max_batch_size = inference_params.max_batch_size
-                inference_key_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
-                inference_value_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
+                if self.qkv_format == "thd":
+                    inference_key_memory = self._allocate_memory(
+                        inf_max_batch_size, inf_max_seq_len, hidden_states.dtype
+                    )
+                    inference_value_memory = self._allocate_memory(
+                        inf_max_batch_size, inf_max_seq_len, hidden_states.dtype
+                    )
+                else:
+                    inference_key_memory = self._allocate_memory(
+                        inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
+                    )
+                    inference_value_memory = self._allocate_memory(
+                        inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
+                    )
                 inference_params.key_value_memory_dict[self.layer_number] = (
                     inference_key_memory,
                     inference_value_memory,
@@ -4333,30 +4343,37 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
             
             if self.qkv_format == "thd" and inference_params is not None:
-                b, d = query_layer.shape[0], query_layer.shape[-1]
+                key_layer = key_layer.contiguous()
+                query_layer = query_layer.contiguous()
+                batch_size, hidden_dim = query_layer.shape[0], query_layer.shape[-1]
 
-                q_pos_emb = self.alloc((b, 1, 1, d), torch.float32, "cuda")
-                k_pos_emb = self.alloc((b, 1, 1, d), torch.float32, "cuda")
+                q_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
+                k_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
                 q_freq, k_freq = rotary_pos_emb
-
+                
                 tex.get_values(
-                    q_freq, 
-                    inference_params.seq_len + 1, 
-                    inference_params.incoming_seq_len, 
-                    q_pos_emb, 
-                    d, 
-                    b
+                    q_freq, # [max_pos_emb, s, 1, d]
+                    inference_params.seq_len, # [b]
+                    inference_params.incoming_seq_len, # [b] 
+                    q_pos_emb, # [b, 1, 1, d]
+                    inference_params.max_incoming_seq_len,
+                    batch_size, 
+                    hidden_dim
                 )
                 tex.get_values(
                     k_freq, 
-                    inference_params.seq_len + 1, 
+                    inference_params.seq_len, 
                     inference_params.incoming_seq_len, 
                     k_pos_emb, 
-                    d, 
-                    b
+                    inference_params.max_incoming_seq_len,
+                    batch_size, 
+                    hidden_dim
                 )
-                query_layer.copy_(apply_rotary_pos_emb(query_layer, q_pos_emb, "bshd", fused=True))
-                key_layer.copy_(apply_rotary_pos_emb(key_layer, k_pos_emb, "bshd", fused=True))
+
+                for i in range(batch_size):
+                    key_layer[i,].copy_(apply_rotary_pos_emb(key_layer[i,:].unsqueeze(0), k_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
+                    query_layer[i,:].copy_(apply_rotary_pos_emb(query_layer[i,:].unsqueeze(0), q_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
+
             else:
                 q_pos_emb, k_pos_emb = rotary_pos_emb
 

@@ -228,11 +228,10 @@ class TEGemmaForCausalLM:
                 inference_params=inference_params
             )[0]
 
-
         hidden_states = self.model.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         logits = logits.float()
-        logits = logits[torch.arange(logits.size(0)), inference_params.seq_len - 1, :]
+        logits = logits[torch.arange(logits.size(0)), inference_params.incoming_seq_len - 1, :]
         next_tokens = torch.argmax(logits, dim=1)
 
         # Sequences, which are finished should contain padding - taken from huggingface transformers.
@@ -240,11 +239,13 @@ class TEGemmaForCausalLM:
         output_tokens.append(next_tokens)
 
         unfinished_sequences = unfinished_sequences & ~(next_tokens == eos_token_id)
+
+
         hidden_states = self.model.embed_tokens(next_tokens).unsqueeze(1)
 
         for k, v in inference_params.key_value_memory_dict.items():
-            key_layer = v[0].permute((1, 0, 2, 3)).contiguous().cuda()
-            value_layer = v[1].permute((1, 0, 2, 3)).contiguous().cuda()
+            key_layer = v[0].contiguous().cuda()
+            value_layer = v[1].contiguous().cuda()
             inference_params.key_value_memory_dict[k] = (key_layer, value_layer)
         
         return hidden_states, output_tokens
@@ -271,7 +272,9 @@ class TEGemmaForCausalLM:
 
         # lengths is a tensor of shape [s] representing lengths of sequences.
         lengths = torch.sum(input_ids.ne(generation_config.pad_token_id), dim=-1).squeeze()
-        inference_params.seq_len = lengths.to(torch.int32).clone().cuda()
+        inference_params.seq_len = torch.zeros_like(lengths).to(torch.int32).clone().cuda()
+        inference_params.incoming_seq_len = lengths.to(torch.int32).clone().cuda()
+        inference_params.max_incoming_seq_len = input_ids.shape[1]
         
         TEGemmaForCausalLM._padding_to_beginning(input_ids, lengths)
         
@@ -283,6 +286,12 @@ class TEGemmaForCausalLM:
             generation_config.eos_token_id,
             unfinished_sequences
         )
+
+        
+
+        inference_params.seq_len.copy_(inference_params.incoming_seq_len)
+        inference_params.incoming_seq_len.copy_(torch.ones_like(inference_params.incoming_seq_len))
+        inference_params.max_incoming_seq_len = 1
 
 
         generator = GemmaGenerator(
@@ -315,6 +324,7 @@ class TEGemmaForCausalLM:
         for i in range(max_new_tokens):
             next_tokens = graphed_generator(*args) if use_cuda_graphs else generator(*args)
             output_tokens.append(next_tokens.clone())
+
 
         result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
         return result
