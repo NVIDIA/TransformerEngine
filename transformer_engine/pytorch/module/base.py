@@ -244,6 +244,16 @@ def initialize_ub(
             )
 
 
+def destroy_ub():
+    """Destroy all initialized userbuffers communicators."""
+    global _ub_communicators
+    if _ub_communicators is None:
+        return
+    for ub in _ub_communicators.values():
+        del ub
+    _ub_communicators = None
+
+
 def get_ub(name: str):
     """Get userbuffer communicator corresponding to give key."""
     global _ub_communicators

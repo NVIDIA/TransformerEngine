@@ -83,19 +83,24 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     // Allocate and register extra userbuffers
     void *ubuf_ptr;
     size_t ubuf_bytes = sample.numel() * sample.element_size();
-    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, true);
+    bool alloc = true;
+    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
+      alloc = false;
+      NVTE_CHECK_CUDA(cudaMalloc(&ubuf_ptr, ubuf_bytes));
+    }
+    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
     _ubuf = torch::from_blob(ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
-
-    // Set the number of SMs for GEMM with margin
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
-    _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
     if (_atomic_gemm) {
       auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
       _counters = torch::zeros({num_splits * 2}, counter_options);
       _counters.index_put_({Slice(None, num_splits)}, 1);
+    }
+  }
+
+  ~UbufCommOverlap() {
+    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
+      cudaFree(_ubuf.data_ptr());
     }
   }
 
@@ -300,7 +305,12 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       ubuf_bytes = static_cast<size_t>(ubuf_chunk_bytes * _num_ubuf_chunks);
 
     void *ubuf_ptr;
-    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, true);
+    bool alloc = true;
+    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
+      alloc = false;
+      NVTE_CHECK_CUDA(cudaMalloc(&ubuf_ptr, ubuf_bytes));
+    }
+    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
     _ubuf = torch::from_blob(
       ubuf_ptr, {sample.size(0) / tp_size * _num_ubuf_chunks, sample.size(1)}, sample.options());
 
@@ -329,6 +339,12 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
         _self_chunk_id = 0;
         _counters.index_put_({_self_chunk_id}, 0);
       }
+    }
+  }
+
+  ~UbufP2PCommOverlap() {
+    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
+      cudaFree(_ubuf.data_ptr());
     }
   }
 
