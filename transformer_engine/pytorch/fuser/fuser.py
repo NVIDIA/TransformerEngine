@@ -165,7 +165,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             )
             for idx, basic_op_dparams in zip(basic_op_idxs, fused_op_dparams):
                 grad_params[idx] = basic_op_dparams
-                clear_tensor_data(*basic_op_ctxs[idx].saved_tensors)
+                basic_op_ctxs[idx].saved_tensors = None
 
         # Flatten list of parameter gradients
         grad_params_flat = []
