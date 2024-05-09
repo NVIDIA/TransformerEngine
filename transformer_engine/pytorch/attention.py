@@ -3206,7 +3206,7 @@ class DotProductAttention(torch.nn.Module):
         attention_type: str = "self",
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = None
+        cp_stream: torch.cuda.Stream = None,
     ) -> None:
         super().__init__()
 
