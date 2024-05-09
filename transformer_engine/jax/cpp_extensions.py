@@ -4311,20 +4311,20 @@ class DBiasCastTransposePrimitive(BasePrimitive):
     def infer_sharding_from_operands(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh,
                                      arg_infos, result_infos):
         del out_dtype, result_infos
-        x_spec = get_padded_spec(arg_infos[1])
+        x_spec = get_padded_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
 
     @staticmethod
     def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh, arg_infos,
                   result_infos):
         del result_infos
-        x_spec = get_padded_spec(arg_infos[1])
+        x_spec = get_padded_spec(arg_infos[0])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
@@ -4332,7 +4332,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
 
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, dbias_shaprding,
                          amax_sharding)
