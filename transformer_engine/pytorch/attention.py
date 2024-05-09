@@ -3121,7 +3121,7 @@ class DotProductAttention(torch.nn.Module):
     ----------
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    channels_per_head : int
+    kv_channels : int
                 number of key-query-value channels per attention head.
     num_gqa_groups : Optional[int] = None
                     number of GQA groups in the transformer layer.
@@ -3192,7 +3192,7 @@ class DotProductAttention(torch.nn.Module):
     def __init__(
         self,
         num_attention_heads: int,
-        channels_per_head: int,
+        kv_channels: int,
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
@@ -3206,8 +3206,7 @@ class DotProductAttention(torch.nn.Module):
         attention_type: str = "self",
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = None,
-        kv_channels: int = None # deprecated
+        cp_stream: torch.cuda.Stream = None
     ) -> None:
         super().__init__()
 
@@ -3243,7 +3242,7 @@ class DotProductAttention(torch.nn.Module):
             set_all_rng_states(self.rng_states_tracker.get_states())
             attention_dropout_ctx = self.rng_states_tracker.fork
 
-        norm_factor = math.sqrt(channels_per_head)
+        norm_factor = math.sqrt(kv_channels)
 
         self.device_compute_capability = get_device_compute_capability()
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))) \
@@ -3375,11 +3374,11 @@ class DotProductAttention(torch.nn.Module):
         .. note::
 
             Input tensor :attr:`query_layer` must be of shape (:attr:`sequence_length`, :attr:`batch_size`,
-            :attr:`num_attention_heads`, :attr:`channels_per_head`) and the tensors :attr:`key_layer` and :attr:`value_layer`
+            :attr:`num_attention_heads`, :attr:`kv_channels`) and the tensors :attr:`key_layer` and :attr:`value_layer`
             must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
-            :attr:`num_gqa_groups`, :attr:`channels_per_head`). Output of shape
+            :attr:`num_gqa_groups`, :attr:`kv_channels`). Output of shape
             (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
-            * :attr:`channels_per_head`) is returned.
+            * :attr:`kv_channels`) is returned.
 
         .. note::
 
@@ -3900,7 +3899,7 @@ class MultiheadAttention(torch.nn.Module):
                  size of each input sample.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    channels_per_head: int, default = `None`
+    kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     attention_dropout: float, default = 0.1
@@ -4024,7 +4023,7 @@ class MultiheadAttention(torch.nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        channels_per_head: Optional[int] = None,
+        kv_channels: Optional[int] = None,
         attention_dropout: float = 0.1,
         layernorm_epsilon: float = 1e-5,
         init_method: Optional[Callable] = None,
@@ -4055,8 +4054,7 @@ class MultiheadAttention(torch.nn.Module):
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
-        qkv_format: str = "sbhd",
-        kv_channels: int = None # deprecated
+        qkv_format: str = "sbhd"
     ) -> None:
         super().__init__()
 
@@ -4074,7 +4072,7 @@ class MultiheadAttention(torch.nn.Module):
         self.num_attention_heads = num_attention_heads
         self.return_bias = return_bias
 
-        channels_per_head = channels_per_head if channels_per_head else (hidden_size // num_attention_heads)
+        kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
 
         if init_method is None:
             init_method = get_default_init_method()
@@ -4102,7 +4100,7 @@ class MultiheadAttention(torch.nn.Module):
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
         assert (self.num_gqa_groups % tp_size == 0
                 ), "The number of GQA groups must be divisible by tensor parallel size!"
-        self.hidden_size_per_attention_head = channels_per_head
+        self.hidden_size_per_attention_head = kv_channels
         self.hidden_size_q = self.hidden_size_per_attention_head * num_attention_heads
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
