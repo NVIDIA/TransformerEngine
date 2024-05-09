@@ -26,9 +26,10 @@ def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]
     Activation Unit
     """
     if len(activation_type) > 1:
-        assert x.shape[-2] == 2  # Linear + GeLU
+        assert x.shape[-2] == 2    # Linear + GeLU
     output = _activation_lu(x, activation_type)
     return output
+
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]):
@@ -37,9 +38,11 @@ def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable
 
     return _output
 
+
 def _activation_lu_fwd_rule(x, activation_type):
     fwd_output = act_lu(x, activation_type)
     return fwd_output, (x,)
+
 
 def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
@@ -49,25 +52,26 @@ def _activation_lu_bwd_rule(activation_type, ctx, g):
     dx = jnp.reshape(dx, x.shape)
     return (dx,)
 
+
 _activation_lu.defvjp(_activation_lu_fwd_rule, _activation_lu_bwd_rule)
 
 
 def fused_layernorm_fp8_mlp(x: jnp.ndarray,
-                           gamma: jnp.ndarray,
-                           beta: jnp.ndarray,
-                           kernels: List[jnp.ndarray],
-                           biases: List[jnp.ndarray],
-                           fp8_gemm_pkg: FP8MetaPackage,
-                           layernorm_type: str,
-                           zero_centered_gamma: bool = False,
-                           epsilon: float = 1e-6,
-                           layernorm_input_axes: Tuple[str, ...] = None,
-                           dot_1_input_axes: Tuple[str, ...] = None,
-                           dot_2_input_axes: Tuple[str, ...] = None,
-                           ffn1_ckpt_name: str = 'ffn1',
-                           ffn2_ckpt_name: str = 'ffn2',
-                           activation_type: Sequence[Union[str, Callable]] = ('gelu',),
-                           use_bias: bool = True) -> jnp.ndarray:
+                            gamma: jnp.ndarray,
+                            beta: jnp.ndarray,
+                            kernels: List[jnp.ndarray],
+                            biases: List[jnp.ndarray],
+                            fp8_gemm_pkg: FP8MetaPackage,
+                            layernorm_type: str,
+                            zero_centered_gamma: bool = False,
+                            epsilon: float = 1e-6,
+                            layernorm_input_axes: Tuple[str, ...] = None,
+                            dot_1_input_axes: Tuple[str, ...] = None,
+                            dot_2_input_axes: Tuple[str, ...] = None,
+                            ffn1_ckpt_name: str = 'ffn1',
+                            ffn2_ckpt_name: str = 'ffn2',
+                            activation_type: Sequence[Union[str, Callable]] = ('gelu',),
+                            use_bias: bool = True) -> jnp.ndarray:
     """
     Layernorm + GEMM1 + bias + activation + GEMM2 + bias
     """
@@ -94,31 +98,28 @@ def fused_layernorm_fp8_mlp(x: jnp.ndarray,
             "if layernorm_type is 'rmsnorm'"
 
     output = _fused_layernorm_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max,
-                                     amax, scale, scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
-                                     zero_centered_gamma, epsilon, layernorm_input_axes,
-                                     dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
-                                     ffn2_ckpt_name, activation_type, use_bias)
+                                      amax, scale, scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
+                                      zero_centered_gamma, epsilon, layernorm_input_axes,
+                                      dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
+                                      ffn2_ckpt_name, activation_type, use_bias)
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22))
 def _fused_layernorm_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
-                            kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, bias_1: jnp.ndarray,
-                            bias_2: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
-                            scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype,
-                            bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
-                            epsilon: float, layernorm_input_axes: Tuple[str, ...],
-                            dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
-                            ffn1_ckpt_name: str, ffn2_ckpt_name: str,
-                            activation_type: Sequence[Union[str, Callable]],
-                            use_bias: bool):
-    output, _ = _fused_layernorm_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, bias_1,
-                                                  bias_2, fp8_max, amax, scale, scale_inv,
-                                                  fwd_dtype, bwd_dtype, layernorm_type,
-                                                  zero_centered_gamma, epsilon,
-                                                  layernorm_input_axes, dot_1_input_axes,
-                                                  dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name,
-                                                  activation_type, use_bias)
+                             kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, bias_1: jnp.ndarray,
+                             bias_2: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
+                             scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype,
+                             bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
+                             epsilon: float, layernorm_input_axes: Tuple[str, ...],
+                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
+                             ffn1_ckpt_name: str, ffn2_ckpt_name: str,
+                             activation_type: Sequence[Union[str, Callable]], use_bias: bool):
+    output, _ = _fused_layernorm_fp8_mlp_fwd_rule(
+        x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max, amax, scale, scale_inv,
+        fwd_dtype, bwd_dtype, layernorm_type, zero_centered_gamma, epsilon, layernorm_input_axes,
+        dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name, activation_type,
+        use_bias)
     return output
 
 
@@ -159,6 +160,11 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[0]
     assert kernel_1.shape[-1] == kernel_2.shape[0]
+
+    maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
+    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
+    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
 
     amax = FP8Helper.update_amax_history(amax)
 
@@ -211,8 +217,11 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
                                 (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
     if use_bias:
-        bias_1_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1.shape
-        dot_1_output += jnp.reshape(bias_1, bias_1_shape)
+        bias_1_shape = bias_1.shape
+        bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
+        dot_1_output += jnp.reshape(bias_1, bias_1_new_shape)
+    else:
+        bias_1_shape = None
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
@@ -227,8 +236,8 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     act_lu_fp8(dot_1_output, activation_lu_out_amax, activation_lu_out_scale,
                activation_lu_out_scale_inv, fwd_dtype, activation_type)
 
-    casted_activation_lu_out = with_sharding_constraint_by_logical_axes(casted_activation_lu_out,
-                                                                        dot_2_input_axes)
+    casted_activation_lu_out = with_sharding_constraint_by_logical_axes(
+        casted_activation_lu_out, dot_2_input_axes)
 
     kernel_2_scale = scale[gemm2_kernel_idx]
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
@@ -238,20 +247,23 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     # (batch..., hidden_in) x (hidden_out, hidden_in)
     dot_2_output = fp8_dot_impl(casted_activation_lu_out, casted_kernel_2,
-                                activation_lu_out_scale_inv,
-                                kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)),
+                                activation_lu_out_scale_inv, kernel_2_scale_inv, x.dtype,
+                                (x_contracting_dims, (0,)),
                                 get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     if use_bias:
-        bias_2_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2.shape
-        dot_2_output += jnp.reshape(bias_2, bias_2_shape)
+        bias_2_shape = bias_2.shape
+        bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
+        dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
+    else:
+        bias_2_shape = None
 
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax,
-           x_contracting_dims, xt_batch_dims, bias_1.shape, bias_2.shape)
+           x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape, maybe_fp32_to_fm32)
 
     return dot_2_output, ctx
 
@@ -274,9 +286,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, \
     casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
     updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
-    x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape= ctx
-
-    is_gated = len(activation_type) > 1
+    x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape, maybe_fp32_to_fm32 = ctx
 
     gemm2_x_idx, gemm2_kernel_idx, gemm2_grad_idx = FP8Helper.get_fp8_meta_indices(1)
 
@@ -299,7 +309,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                        grad_scale_inv, bwd_dtype,
                        static_axis_boundary=-1,
                        transpose_axis_boundary=-1)
-        dbias_2 = jnp.empty(bias_2_shape, grad.dtype)
+        dbias_2 = None
 
     casted_activation_lu_out_t = transpose(casted_activation_lu_out,
                                            static_axis_boundary=-1,
@@ -325,7 +335,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     dactivation_lu_scale = scale[gemm1_grad_idx]
     dactivation_lu_scale_inv = scale_inv[gemm1_grad_idx]
 
-    if is_gated:
+    if len(activation_type) > 1:    # if gated
         if use_bias:
             dactivation_lu = dact_lu(dgrad_2, dot_1_output, activation_type)
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
@@ -349,7 +359,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 bwd_dtype,
                 static_axis_boundary=-1,
                 activation_type=activation_type)
-            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
+            dbias_1 = None
     else:
         if use_bias:
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax=\
@@ -375,7 +385,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 bwd_dtype,
                 static_axis_boundary=-1,
                 transpose_axis_boundary=-2)
-            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
+            dbias_1 = None
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
@@ -383,16 +393,14 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
     xt_batch_dims_2 = tuple(i + 1 for i in xt_batch_dims)
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dactivation_lu_t, gemm1_x_scale_inv,
-                           dactivation_lu_scale_inv, grad.dtype,
-                           (xt_batch_dims, xt_batch_dims_2),
+                           dactivation_lu_scale_inv, grad.dtype, (xt_batch_dims, xt_batch_dims_2),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     x_contracting_dims = ((min(x_contracting_dims),) + tuple(
             i + 1 for i in x_contracting_dims), (1,2))
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
-    dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1,
-                           dactivation_lu_scale_inv, kernel_1_scale_inv,
-                           grad.dtype, x_contracting_dims,
+    dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1, dactivation_lu_scale_inv,
+                           kernel_1_scale_inv, grad.dtype, x_contracting_dims,
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, layernorm_input_axes)
@@ -418,10 +426,11 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     amax = amax.at[gemm2_kernel_idx, 0].set(updated_kernel_2_amax)
     amax = amax.at[gemm2_grad_idx, 0].set(updated_grad_amax[0])
 
-    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
+    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
+
     return dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, \
            fp8_max, amax, scale, scale_inv
 
 
 _fused_layernorm_fp8_mlp.defvjp(_fused_layernorm_fp8_mlp_fwd_rule,
-                                        _fused_layernorm_fp8_mlp_bwd_rule)
+                                _fused_layernorm_fp8_mlp_bwd_rule)

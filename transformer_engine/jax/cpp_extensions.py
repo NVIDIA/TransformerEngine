@@ -1084,7 +1084,7 @@ class SoftmaxPrimitive(BasePrimitive):
     """
     Softmax Primitive
     """
-    max_k_seqlen_supported = 4096
+    max_k_seqlen_supported = 16384
     name = "te_softmax_internal_placeholder"
 
     @staticmethod
@@ -1339,8 +1339,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
            ):
@@ -1498,8 +1497,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
            ):
@@ -1710,11 +1708,10 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
+                and 16 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
                 and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
                 and attn_batches % 4 == 0    # batch * heads must be divisor of 4
-           ):
+                and k_seqlen == q_seqlen):
             if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
                 batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
                 return attn_batches % batch_per_block == 0
@@ -2668,11 +2665,15 @@ class ActLuPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[0])
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        impl = ActLuPrimitive.impl
-        return mesh, impl, out_sharding, arg_shardings
+
+        def sharded_impl(x):
+            return ActLuPrimitive.impl(x, act_enum=act_enum)
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
 
 
 register_primitive(ActLuPrimitive)
+
 
 def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]) -> jnp.ndarray:
     """
@@ -2793,8 +2794,11 @@ class DActLuPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
-        impl = DActLuPrimitive.impl
-        return mesh, impl, out_shardings, arg_shardings
+
+        def sharded_impl(dz, x):
+            return DActLuPrimitive.impl(dz, x, act_enum=act_enum)
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
 
 
 register_primitive(DActLuPrimitive)
@@ -4187,10 +4191,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        if dz_aval.shape[-2] == 1 or dz_aval.shape[-2] == 2:
-            gi_hidden_size = reduce(operator.mul, dz_aval.shape[-2:])
-        else:
-            gi_hidden_size = dz_aval.shape[-1]
+        gi_hidden_size = reduce(operator.mul, dz_aval.shape[transpose_axis_boundary:])
         t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
@@ -4233,13 +4234,9 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         ir_dz_type = ir.RankedTensorType(dz.type)
         ir_dz_shape = ir_dz_type.shape
-        if ir_dz_shape[-2] == 1 or dz_aval.shape[-2] == 2:
-            batch_szie = reduce(operator.mul, ir_dz_shape[:-2])
-            ir_hidden_szie = reduce(operator.mul, ir_dz_shape[-2:])
-        else:
-            batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
-            ir_hidden_szie = ir_dz_shape[-1]
-        contracted_dz_shape = (batch_szie, ir_hidden_szie)
+        batch_size = reduce(operator.mul, ir_dz_shape[:transpose_axis_boundary])
+        ir_hidden_size = reduce(operator.mul, ir_dz_shape[transpose_axis_boundary:])
+        contracted_dz_shape = (batch_size, ir_hidden_size)
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
         ir_amax_dtype = ir_amax_type.element_type
@@ -4248,7 +4245,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         ir_scale_inv_shape = ir_amax_shape
         transposed_dz_shape = _multidim_transpose(ir_dz_shape, static_axis_boundary,
                                                  transpose_axis_boundary)
-        dbias_shape = (*ir_dz_shape[:static_axis_boundary + 1], ir_hidden_szie)
+        dbias_shape = (*ir_dz_shape[:static_axis_boundary + 1], ir_hidden_size)
 
         wkspace_aval = ctx.avals_out[-1]
 
@@ -4321,20 +4318,20 @@ class DBiasCastTransposePrimitive(BasePrimitive):
     def infer_sharding_from_operands(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh,
                                      arg_infos, result_infos):
         del out_dtype, result_infos
-        x_spec = get_padded_spec(arg_infos[1])
+        x_spec = get_padded_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         return (out_sharding, tranposed_out_sharding, dbias_shaprding, amax_sharding)
 
     @staticmethod
     def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh, arg_infos,
                   result_infos):
         del result_infos
-        x_spec = get_padded_spec(arg_infos[1])
+        x_spec = get_padded_spec(arg_infos[0])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
@@ -4342,7 +4339,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         dbias_shaprding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:static_axis_boundary + 1], x_spec[-1]))
 
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, dbias_shaprding,
                          amax_sharding)
@@ -4560,7 +4557,7 @@ def dgated_act_lu_cast_transpose(
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose d_gated_act_lu fusion wrapper
-    Return FP8(dgayed_act_lu(inputs))
+    Return FP8(dgated_act_lu(inputs))
     """
     act_type_id = ActivationEnum[activation_type]
     return DgatedActLuCastTransposePrimitive.outer_primitive.bind(
