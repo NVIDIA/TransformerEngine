@@ -237,7 +237,6 @@ class TransformerLayer(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
-        kv_channels: Optional[int] = None, # deprecated
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
