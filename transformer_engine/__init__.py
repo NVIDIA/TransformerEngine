@@ -20,10 +20,21 @@ def _lazy_import(name: str) -> ModuleType:
     loader.exec_module(module)
     return module
 
-# Lazily import frameworks
-pytorch: ModuleType = _lazy_import("transformer_engine.pytorch")
-jax: ModuleType = _lazy_import("transformer_engine.jax")
-paddle: ModuleType = _lazy_import("transformer_engine.paddle")
+# Import framework submodules
+# Note: Load module lazily if import fails. This way a useful import
+# error will be thrown if the user attempts to access the module.
+try:
+    from . import pytorch
+except ImportError:
+    pytorch = _lazy_import("transformer_engine.pytorch")
+try:
+    from . import jax
+except ImportError:
+    jax = _lazy_import("transformer_engine.jax")
+try:
+    from . import paddle
+except ImportError:
+    paddle = _lazy_import("transformer_engine.paddle")
 
 __all__ = [
     "__version__",
