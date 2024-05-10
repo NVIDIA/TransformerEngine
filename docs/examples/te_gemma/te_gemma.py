@@ -150,7 +150,6 @@ class TEGemmaForCausalLM:
         config.qkv_format = qkv_format
         with fp8_model_init(fp8_init):
             vanilla_model = cls(config)
-        is_local = os.path.isdir(pretrained_model_name_or_path)
         subfolder = ""
         variant = None
         if os.path.isfile(
@@ -162,7 +161,7 @@ class TEGemmaForCausalLM:
                 )
                 is_sharded = True
 
-        resolved_archive_file, sharded_metadata = get_checkpoint_shard_files(
+        resolved_archive_file, _ = get_checkpoint_shard_files(
                 pretrained_model_name_or_path,
                 archive_file,
         )
@@ -172,17 +171,16 @@ class TEGemmaForCausalLM:
             assert not isinstance(resolved_archive_file, list)
             resolved_archive_file = [resolved_archive_file]
 
+        total_dict = {}
         for shard_file in resolved_archive_file:
             state_dict = load_state_dict(shard_file)
-            replace_params(state_dict, vanilla_model.state_dict(), config, fp8_init=config.fuse_qkv_params)
-            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            total_dict = total_dict | state_dict
+        replace_params(total_dict, vanilla_model.state_dict(), config, qkv_fused_and_interleaved=config.fuse_qkv_params)
+        _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="") # Copy parameters like embedding.
 
-            # Force mem release. Taken from huggingface code
-            del state_dict
-            gc.collect()
-
-
-
+        # Force mem release. Taken from huggingface code
+        del total_dict
+        gc.collect()
         return vanilla_model
     
     @staticmethod
@@ -326,21 +324,29 @@ class TEGemmaForCausalLM:
         result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
         return result
 
-
-def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
-    # collect all layer prefixes to update
+def _get_all_layer_prefixes_to_update(hf_state_dict):
+    """
+        There are many parameters in hf_state_dict, whose name start with model.layers.[number].
+        This function extracts all strings like "model.layers.[number]." that are starting strings of keys in hf_state_dict.
+    """
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
         layer_prefix_pat = 'model.layers.\d+.'
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
+    return all_layer_prefixes
+
+def replace_params(hf_state_dict, te_state_dict, config, qkv_fused_and_interleaved=False):
+    """
+    Replaces params from TE TransformerLayer state_dict with corresponding parameters 
+    from HuggingFace GemmaModel state_dict.
+    """
+    all_layer_prefixes : List[str] = _get_all_layer_prefixes_to_update(hf_state_dict)
+    
     for layer_prefix in all_layer_prefixes:
         def copy_from_ht_to_te(te_name, hf_name, start=None, end=None):
-            # When loading weights into models with less number of layers, skip the
-            # copy if the corresponding layer doesn't exist in HF model
-            if layer_prefix + hf_name in hf_state_dict:
-                te_state_dict[layer_prefix + te_name].data[start:end].copy_(hf_state_dict[layer_prefix + hf_name])
+            te_state_dict[layer_prefix + te_name].data[start:end].copy_(hf_state_dict[layer_prefix + hf_name])
 
         copy_from_ht_to_te('self_attention.layernorm_qkv.layer_norm_weight', 'input_layernorm.weight')
         copy_from_ht_to_te('self_attention.proj.weight', 'self_attn.o_proj.weight')
@@ -349,16 +355,22 @@ def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
         copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.gate_proj.weight', end=config.intermediate_size)
         copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.up_proj.weight', start=config.intermediate_size)
 
-        if fp8_init:
-            dst = te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.weight']
-            def copy_interleave(hf_name, x):
-                if layer_prefix + hf_name in hf_state_dict:
-                    q =  hf_state_dict[layer_prefix + hf_name] 
-                    for head_nr in range(config.num_attention_heads):
-                        dst_offset = head_nr * config.head_dim * 3
-                        # copy query
-                        dst[( dst_offset + x * config.head_dim):(dst_offset + (x + 1) * config.head_dim), :] = \
-                            q[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
+        if qkv_fused_and_interleaved:
+            """
+                When qkv_fused_and_interleaved=True, key, query and value layers are on one tensor
+                in TE TransformerLayer. Moreover they are interleaved within each head. 
+                Let q_i, k_i and v_i be query, key and value layers for i-th head respectively.
+                Then TE stores weight tensor in the form:
+                [q1 k1 v1 q2 k2 v2 ...]
+                This is done to maximally optimize performance time.
+            """
+            te_qkv_layer = te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.weight']
+            def copy_interleave(hf_name, idx):
+                src = hf_state_dict[layer_prefix + hf_name] 
+                for head_nr in range(config.num_attention_heads):
+                    dst_offset = head_nr * config.head_dim * 3
+                    te_qkv_layer[(dst_offset + idx * config.head_dim):(dst_offset + (idx + 1) * config.head_dim), :] = \
+                        src[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
             copy_interleave('self_attn.q_proj.weight', 0)
             copy_interleave('self_attn.k_proj.weight', 1)
             copy_interleave('self_attn.v_proj.weight', 2)
