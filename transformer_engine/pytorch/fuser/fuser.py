@@ -149,19 +149,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 break
 
             # Backward op
-            prev_ops = [
-                basic_ops[idx-1] if idx > 0 else None
-                for idx in basic_op_idxs
-            ]
-            next_ops = [
-                basic_ops[idx+1] if (idx < len(basic_op_idxs) - 1) else None
-                for idx in basic_op_idxs
-            ]
             dx, fused_op_dparams = op.fuser_backward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
-                prev_ops,
-                next_ops,
             )
             for idx, basic_op_dparams in zip(basic_op_idxs, fused_op_dparams):
                 grad_params[idx] = basic_op_dparams

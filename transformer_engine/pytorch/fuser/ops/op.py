@@ -113,8 +113,6 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
         """Backward pass
 
@@ -323,8 +321,6 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         """Backward pass
 
@@ -365,15 +361,8 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
-        grad_input, grad_params = self.op_backward(
-            basic_op_ctxs[0],
-            grad_output,
-            basic_op_prev_ops[0],
-            basic_op_next_ops[0],
-        )
+        grad_input, grad_params = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [grad_params]
 
     def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:

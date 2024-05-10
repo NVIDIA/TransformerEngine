@@ -232,39 +232,15 @@ class ForwardLinearBiasActivation(FusedOperation):
                 use_bias=(bias_op is not None),
             )
 
-        # Check buffer for wgrad fusion
-        grad_weight = None
-        if weight.requires_grad and linear_op._accumulate_into_main_grad:
-            if not hasattr(weight, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = weight.main_grad.detach()
-        else:
-            accumulate_into_main_grad = False
-
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(
-            x_local,
-            weight.detach(),
-            grad_weight,
-        )
-        linear_op_ctx.device = linear_op.device
-        linear_op_ctx.dtype = linear_op.dtype
-        linear_op_ctx.tensor_parallel_mode = linear_op.tensor_parallel_mode
-        linear_op_ctx.tensor_parallel_group = linear_op.tensor_parallel_group
-        linear_op_ctx.sequence_parallel = linear_op.sequence_parallel
+        linear_op_ctx.save_for_backward(x_local)
+        linear_op_ctx.with_fp8_compute = with_fp8_compute
         linear_op_ctx.weight_fp8_meta = weight_fp8_meta
         linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
         linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
-        linear_op_ctx.accumulate_into_main_grad = linear_op._accumulate_into_main_grad
-        linear_op_ctx.with_fp8_compute = with_fp8_compute
-        linear_op_ctx.input_dims = input_dims
-        linear_op_ctx.weight_dims = weight_dims
-        linear_op_ctx.requires_dgrad = input.requires_grad
-        linear_op_ctx.requires_wgrad = weight.requires_grad
+        linear_op_ctx.input_dims = input.size()
+        linear_op_ctx.input_requires_grad = input.requires_grad
+        linear_op_ctx.weight_requires_grad = weight.requires_grad
 
         # Reshape output tensor
         output_dims = list(input_dims)
