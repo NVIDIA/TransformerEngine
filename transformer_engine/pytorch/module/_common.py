@@ -154,7 +154,7 @@ class _NoopCatFunc(torch.autograd.Function):
         device = tensors[0].device
         strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
-        data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * 
+        data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
         for tensor in tensors[1:]:
             if True:
                 return torch.cat(tensors, dim=dim)
