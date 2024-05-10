@@ -21,6 +21,9 @@ def get_te_dirs():
     result = result.stdout.replace("\n", ":").split(":")
     yield result[result.index("Location") + 1].strip()
 
+def get_dll_paths(suffix):
+    return map(lambda x: os.path.join(x, suffix), get_te_dirs()
+
 def get_shared_library_ext()
     system = platform.system()
     if system == "Linux":
@@ -36,10 +39,10 @@ def get_shared_library_ext()
 def _load_ctypes(lib_name="libtransformer_engine.", optional=False):
     """Load shared library with Transformer Engine C extensions"""
     lib_name = lib_name + get_shared_library_ext()
-    for dll_dir in get_te_dirs():
-        dll_path = os.path.join(dll_dir, lib_name)
-        if not optional or os.path.exists(dll_path):
-            return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    for dll_path in filter(os.path.exists, get_dll_paths(lib_name)):
+        return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    if not optional:
+        raise RuntimeError(f"Unable to find library {lib_name}")
     return None
 
 
