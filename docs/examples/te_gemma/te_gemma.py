@@ -19,9 +19,8 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.common.recipe import Format, DelayedScaling
 
 import transformers
-from transformers.models.gemma.modeling_gemma import GemmaModel, GemmaForCausalLM, GemmaRMSNorm, GemmaConfig
+from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConfig
 from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
-from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
 
 @contextmanager
@@ -266,7 +265,7 @@ class TEGemmaForCausalLM:
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
 
         # inference_params object is a cache, where keys and values of previous tokens are stored
-        inference_params = te.pytorch.InferenceParams(
+        inference_params = InferenceParams(
             max_batch_size=batch_size, 
             max_sequence_length=input_ids.shape[1] + max_new_tokens
         )
@@ -324,7 +323,6 @@ class TEGemmaForCausalLM:
             next_tokens = graphed_generator(*args) if use_cuda_graphs else generator(*args)
             output_tokens.append(next_tokens.clone())
 
-
         result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
         return result
 
@@ -337,67 +335,36 @@ def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
-
-    GATE_PROJ_SIZE=24576
-
-
     for layer_prefix in all_layer_prefixes:
-        # When loading weights into models with less number of layers, skip the
-        # copy if the corresponding layer doesn't exist in HF model
-        if layer_prefix + 'input_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].copy_(hf_state_dict[layer_prefix + 'input_layernorm.weight'])
+        def copy_from_ht_to_te(te_name, hf_name, start=None, end=None):
+            # When loading weights into models with less number of layers, skip the
+            # copy if the corresponding layer doesn't exist in HF model
+            if layer_prefix + hf_name in hf_state_dict:
+                te_state_dict[layer_prefix + te_name].data[start:end].copy_(hf_state_dict[layer_prefix + hf_name])
+
+        copy_from_ht_to_te('self_attention.layernorm_qkv.layer_norm_weight', 'input_layernorm.weight')
+        copy_from_ht_to_te('self_attention.proj.weight', 'self_attn.o_proj.weight')
+        copy_from_ht_to_te('layernorm_mlp.layer_norm_weight', 'post_attention_layernorm.weight')
+        copy_from_ht_to_te('layernorm_mlp.fc2_weight', 'mlp.down_proj.weight')
+        copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.gate_proj.weight', end=config.intermediate_size)
+        copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.up_proj.weight', start=config.intermediate_size)
+
         if fp8_init:
             dst = te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.weight']
-
-            if layer_prefix + 'self_attn.q_proj.weight' in hf_state_dict:
-                q =  hf_state_dict[layer_prefix + 'self_attn.q_proj.weight'] 
-                for head_nr in range(config.num_attention_heads):
-                    dst_offset = head_nr * config.head_dim * 3
-                    # copy query
-                    dst[dst_offset:(dst_offset + config.head_dim), :] = \
-                        q[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
-
-            if layer_prefix + 'self_attn.k_proj.weight' in hf_state_dict:
-                k = hf_state_dict[layer_prefix + 'self_attn.k_proj.weight']
-                for head_nr in range(config.num_attention_heads):
-                    dst_offset = head_nr * config.head_dim * 3
-                    # copy query
-                    dst[( dst_offset + config.head_dim):(dst_offset + 2 * config.head_dim), :] = \
-                        k[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
-            
-            if layer_prefix + 'self_attn.v_proj.weight' in hf_state_dict:
-                v = hf_state_dict[layer_prefix + 'self_attn.v_proj.weight']
-                for head_nr in range(config.num_attention_heads):
-                    dst_offset = head_nr * config.head_dim * 3
-                    dst[(dst_offset + 2 * config.head_dim):(dst_offset + 3 * config.head_dim), :] = \
-                        v[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
+            def copy_interleave(hf_name, x):
+                if layer_prefix + hf_name in hf_state_dict:
+                    q =  hf_state_dict[layer_prefix + hf_name] 
+                    for head_nr in range(config.num_attention_heads):
+                        dst_offset = head_nr * config.head_dim * 3
+                        # copy query
+                        dst[( dst_offset + x * config.head_dim):(dst_offset + (x + 1) * config.head_dim), :] = \
+                            q[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
+            copy_interleave('self_attn.q_proj.weight', 0)
+            copy_interleave('self_attn.k_proj.weight', 1)
+            copy_interleave('self_attn.v_proj.weight', 2)
         else:
-        
-            if layer_prefix + 'self_attn.q_proj.weight' in hf_state_dict:
-                te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.query_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.q_proj.weight'])
-
-            if layer_prefix + 'self_attn.k_proj.weight' in hf_state_dict:
-                te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.key_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.k_proj.weight'])
-                
-
-            if layer_prefix + 'self_attn.v_proj.weight' in hf_state_dict:
-                te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.value_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.v_proj.weight'])
-
-        if layer_prefix + 'self_attn.o_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.proj.weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.o_proj.weight'])
-
-        if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].copy_(hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'])
-        
-        if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE].copy_(hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'])
-
-        if layer_prefix + 'mlp.up_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[GATE_PROJ_SIZE:].copy_(hf_state_dict[layer_prefix + 'mlp.up_proj.weight'])
-
-        if layer_prefix + 'mlp.down_proj.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.fc2_weight'].copy_(hf_state_dict[layer_prefix + 'mlp.down_proj.weight'].data[:])
-
-
+            copy_from_ht_to_te('self_attention.layernorm_qkv.query_weight', 'self_attn.q_proj.weight')
+            copy_from_ht_to_te('self_attention.layernorm_qkv.key_weight', 'self_attn.k_proj.weight')
+            copy_from_ht_to_te('self_attention.layernorm_qkv.value_weight', 'self_attn.v_proj.weight')
 
     return all_layer_prefixes
