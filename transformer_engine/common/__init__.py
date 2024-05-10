@@ -8,15 +8,18 @@ import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
 
 
-def get_te_path():
-    """Find Transformer Engine install path using pip"""
+def get_te_dirs():
+    """Find Transformer Engine install by looking up two dirs or query path using pip"""
+
+    yield str(Path(__file__).parents[1])
 
     command = [sys.executable, "-m", "pip", "show", "transformer_engine"]
     result = subprocess.run(command, capture_output=True, check=True, text=True)
     result = result.stdout.replace("\n", ":").split(":")
-    return result[result.index("Location") + 1].strip()
+    yield result[result.index("Location") + 1].strip()
 
 def get_shared_library_ext()
     system = platform.system()
@@ -33,11 +36,10 @@ def get_shared_library_ext()
 def _load_ctypes(lib_name="libtransformer_engine.", optional=False):
     """Load shared library with Transformer Engine C extensions"""
     lib_name = lib_name + get_shared_library_ext()
-    dll_path = get_te_path()
-    dll_path = os.path.join(dll_path, lib_name)
-
-    if not optional or os.path.exists(dll_path):
-        return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    for dll_dir in get_te_dirs():
+        dll_path = os.path.join(dll_dir, lib_name)
+        if not optional or os.path.exists(dll_path):
+            return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
     return None
 
 
