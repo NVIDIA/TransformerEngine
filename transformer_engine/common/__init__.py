@@ -18,46 +18,28 @@ def get_te_path():
     result = result.stdout.replace("\n", ":").split(":")
     return result[result.index("Location") + 1].strip()
 
+def get_shared_library_ext()
+    system = platform.system()
+    if system == "Linux":
+        extension = "so"
+    elif system == "Darwin":
+        extension = "dylib"
+    elif system == "Windows":
+        extension = "dll"
+    else:
+        raise RuntimeError(f"Unsupported operating system ({system})")
+    return extension
 
-def _load_library():
+def _load_ctypes(lib_name="libtransformer_engine.", optional=False):
     """Load shared library with Transformer Engine C extensions"""
-
-    system = platform.system()
-    if system == "Linux":
-        extension = "so"
-    elif system == "Darwin":
-        extension = "dylib"
-    elif system == "Windows":
-        extension = "dll"
-    else:
-        raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libtransformer_engine." + extension
+    lib_name = lib_name + get_shared_library_ext()
     dll_path = get_te_path()
     dll_path = os.path.join(dll_path, lib_name)
 
-    return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
-
-
-def _load_userbuffers():
-    """Load shared library with userbuffers"""
-
-    system = platform.system()
-    if system == "Linux":
-        extension = "so"
-    elif system == "Darwin":
-        extension = "dylib"
-    elif system == "Windows":
-        extension = "dll"
-    else:
-        raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libtransformer_engine_userbuffers." + extension
-    dll_path = get_te_path()
-    dll_path = os.path.join(dll_path, lib_name)
-
-    if os.path.exists(dll_path):
+    if not optional or os.path.exists(dll_path):
         return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
     return None
 
 
-_TE_LIB_CTYPES = _load_library()
-_UB_LIB_CTYPES = _load_userbuffers()
+_TE_LIB_CTYPES = _load_ctypes(lib_name="libtransformer_engine.")
+_UB_LIB_CTYPES = _load_ctypes(lib_name="libtransformer_engine_userbuffers.", optional=True)
