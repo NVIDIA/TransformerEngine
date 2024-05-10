@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 import pytest
-from typing import Callable, Sequence, Union
+from typing import Callable, List, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -73,16 +73,18 @@ class TestDistributedLayernormMLP:
     def layernorm_fp8_mlp_prim_func(self, x: jnp.ndarray, ln_scale: jnp.ndarray,
                           kernel_1: jnp.ndarray, kernel_2: jnp.ndarray,
                           bias_1: jnp.ndarray, bias_2: jnp.ndarray,
-                          fp8_max: jnp.ndarray, fp8_metas_amax: jnp.ndarray,
-                          fp8_metas_scale: jnp.ndarray, fp8_metas_scale_inv: jnp.ndarray,
+                          amax_list_1: List[jnp.ndarray],
+                          amax_list_2: List[jnp.ndarray],
+                          scale_list_1: List[jnp.ndarray],
+                          scale_list_2: List[jnp.ndarray],
                           layernorm_type: str = "rmsnorm",
                           activation_type: Sequence[Union[str, Callable]] = ('gelu',),
                           use_bias: bool = True,
                           multi_gpus: bool = False,
                           ) -> jnp.ndarray:
 
-        fp8_meta_pkg = FP8MetaPackage(2, fp8_max, fp8_metas_amax, fp8_metas_scale,
-                                      fp8_metas_scale_inv)
+        fp8_meta_pkg1 = FP8MetaPackage(amax_list_1[0], scale_list_1[0], amax_list_1[1], scale_list_1[1], amax_list_1[2], scale_list_1[2])
+        fp8_meta_pkg2 = FP8MetaPackage(amax_list_2[0], scale_list_2[0], amax_list_2[1], scale_list_2[1], amax_list_2[2], scale_list_2[2])
 
         if multi_gpus:
             layernorm_input_axes = LAYERNORM_INPUT_AXES
@@ -97,7 +99,7 @@ class TestDistributedLayernormMLP:
         return jnp.mean(
             fused_layernorm_fp8_mlp(x, ln_scale, None,
                                     [kernel_1, kernel_2], [bias_1, bias_2],
-                                    fp8_meta_pkg,
+                                    [fp8_meta_pkg1, fp8_meta_pkg2],
                                     layernorm_type,
                                     layernorm_input_axes=layernorm_input_axes,
                                     dot_1_input_axes=dot_1_input_axes,
@@ -119,15 +121,22 @@ class TestDistributedLayernormMLP:
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = 'rmsnorm'
 
-        fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM * 2)
-        fp8_metas_amax = jnp.zeros((FP8Helper.NUM_META_PER_GEMM * 2,
-                                    FP8Helper.AMAX_HISTORY_LEN), jnp.float32)
-        fp8_metas_scale = jnp.ones((FP8Helper.NUM_META_PER_GEMM * 2, 1), jnp.float32)
-        fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM * 2, 1), jnp.float32)
+        fp8_amax_list_1 = [jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
+                           jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
+                           jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32)]
+        fp8_amax_list_2 = [jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
+                           jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
+                           jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32)]
+        fp8_scale_list_1 = [jnp.ones((1,), jnp.float32),
+                           jnp.ones((1,), jnp.float32),
+                           jnp.ones((1,), jnp.float32)]
+        fp8_scale_list_2 = [jnp.ones((1,), jnp.float32),
+                           jnp.ones((1,), jnp.float32),
+                           jnp.ones((1,), jnp.float32)]
 
         inputs = [x, gamma, k1, k2, b1, b2] = \
             self.generate_inputs(input_shape, activation_type, use_bias, dtype)
-        inputs = [*inputs, fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv]
+        inputs = [*inputs, fp8_amax_list_1, fp8_amax_list_2, fp8_scale_list_1, fp8_scale_list_2]
         static_inputs = [layernorm_type,
                          activation_type,
                          use_bias]

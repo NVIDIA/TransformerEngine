@@ -48,9 +48,11 @@ def _canonicalize_tuple(x):
 
 
 def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_gamma):
-    if original_init is None:
-        if not zero_centered_gamma:
-            return nn.initializers.ones
+    if original_init is not None:
+        return original_init
+
+    if not zero_centered_gamma:
+        return nn.initializers.ones
     return nn.initializers.zeros
 
 
@@ -313,47 +315,36 @@ class TransformerEngineBase(nn.Module):
     """
 
     @staticmethod
-    def get_fp8_metas(num_of_gemm: int) -> List[jnp.ndarray]:
+    def generate_fp8_meta_set(postfix: str) -> FP8MetaPackage:
         """
-        Get the FP8 metas
+        Generate a set of FP8 meta for a GEMM.
         """
-        num_of_meta = num_of_gemm * FP8Helper.NUM_META_PER_GEMM
-        axes = ('fp8_meta_axis', 'fp8_meta_history')
 
-        fp8_max = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,
-                                                     FP8Helper.FP8_MAX_NAME,
-                                                     FP8Helper.generate_fp8_max_array,
-                                                     num_of_meta,
-                                                     axes=axes)
-        fp8_metas_amax = nn_partitioning.variable_with_axes(
-            FP8Helper.FP8_COLLECTION_NAME,
-            FP8Helper.FP8_AMAX_NAME,
-            jnp.zeros, (num_of_meta, FP8Helper.AMAX_HISTORY_LEN),
-            jnp.float32,
-            axes=axes)
-        fp8_metas_scale = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,
-                                                             FP8Helper.FP8_SCALE_NAME,
-                                                             jnp.ones, (num_of_meta, 1),
-                                                             jnp.float32,
-                                                             axes=axes)
-        fp8_metas_scale_inv = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,
-                                                                 FP8Helper.FP8_SCALE_INV_NAME,
-                                                                 jnp.ones, (num_of_meta, 1),
-                                                                 jnp.float32,
-                                                                 axes=axes)
+        input_name_post_fix = f"_i_{postfix}"
+        weight_name_post_fix = f"_w_{postfix}"
+        grad_name_post_fix = f"_g_{postfix}"
 
-        return fp8_max.value, fp8_metas_amax.value, fp8_metas_scale.value, fp8_metas_scale_inv.value
+        def generate_a_set(target_postfix):
+            amax = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,
+                                                      f"{FP8Helper.FP8_AMAX_NAME}{target_postfix}",
+                                                      jnp.zeros, (FP8Helper.AMAX_HISTORY_LEN,),
+                                                      jnp.float32,
+                                                      axes=(None,))
 
-    @staticmethod
-    def get_fp8_meta_package(num_of_gemm: int) -> FP8MetaPackage:
-        """
-        Get the FP8 metas
-        """
-        fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
-            TransformerEngineBase.get_fp8_metas(num_of_gemm)
+            scale = nn_partitioning.variable_with_axes(
+                FP8Helper.FP8_COLLECTION_NAME,
+                f"{FP8Helper.FP8_SCALE_NAME}{target_postfix}",
+                jnp.ones, (1,),
+                jnp.float32,
+                axes=(None,))
 
-        return FP8MetaPackage(num_of_gemm, fp8_max, fp8_metas_amax, fp8_metas_scale,
-                              fp8_metas_scale_inv)
+            return amax.value, scale.value
+
+        i_amax, i_scale = generate_a_set(input_name_post_fix)
+        w_amax, w_scale = generate_a_set(weight_name_post_fix)
+        g_amax, g_scale = generate_a_set(grad_name_post_fix)
+
+        return FP8MetaPackage(i_amax, i_scale, w_amax, w_scale, g_amax, g_scale)
 
 
 class DenseGeneral(TransformerEngineBase):
@@ -464,14 +455,13 @@ class DenseGeneral(TransformerEngineBase):
             bias = None
 
         contract_ind = tuple(range(0, len(axis)))
-        fp8_gemm_pkg = None
+        fp8_meta_pkg = None
         if FP8Helper.is_fp8_enabled():
-            fp8_gemm_pkg = \
-                    TransformerEngineBase.get_fp8_meta_package(1)
+            fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
 
         y = type_safe_dot_general(inputs,
                                   kernel,
-                                  fp8_meta_pkg=fp8_gemm_pkg,
+                                  fp8_meta_pkg=fp8_meta_pkg,
                                   contracting_dims=(axis, contract_ind))
 
         if self.enable_low_rank_adaptation:
@@ -699,17 +689,16 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        fp8_meta_package = None
+        fp8_meta_pkg = None
         if FP8Helper.is_fp8_enabled():
-            fp8_meta_package = \
-                    TransformerEngineBase.get_fp8_meta_package(1)
+            fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
 
         if fuse_layernorm:
             z = layernorm_fp8_dot(y,
                                   kernel,
                                   scale,
                                   ln_bias,
-                                  fp8_meta_package,
+                                  fp8_meta_pkg,
                                   self.layernorm_type,
                                   zero_centered_gamma=self.zero_centered_gamma,
                                   epsilon=self.epsilon,
@@ -719,7 +708,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
             z = type_safe_dot_general(y,
                                       kernel,
-                                      fp8_meta_pkg=fp8_meta_package,
+                                      fp8_meta_pkg=fp8_meta_pkg,
                                       contracting_dims=(axis, contract_ind))
 
         if self.enable_low_rank_adaptation:
@@ -1001,11 +990,11 @@ class LayerNormMLP(TransformerEngineBase):
                 kernels.append(self.kernel_init(init_key, *init_args))
             return jnp.stack(kernels, axis=stack_axis, dtype=jnp.float32)
 
-        num_of_gemm = 2
-        fp8_meta_package = None
+        wi_fp8_meta_pkg = None
+        wo_fp8_meta_pkg = None
         if FP8Helper.is_fp8_enabled():
-            fp8_meta_package = \
-                    TransformerEngineBase.get_fp8_meta_package(num_of_gemm)
+            wi_fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
+            wo_fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("1")
 
         num_activations = len(normalized_acts)
         axis = _canonicalize_tuple(self.axis)
@@ -1063,7 +1052,7 @@ class LayerNormMLP(TransformerEngineBase):
             out = fused_layernorm_fp8_mlp(y,
                                          scale,
                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
-                                         fp8_meta_package,
+                                         [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
                                          self.layernorm_type,
                                          zero_centered_gamma=self.zero_centered_gamma,
                                          epsilon=self.epsilon,
@@ -1074,16 +1063,15 @@ class LayerNormMLP(TransformerEngineBase):
                                          ffn2_ckpt_name=ffn2_ckpt_name,
                                          activation_type = normalized_acts,
                                          use_bias = self.use_bias)
+
         else:    # not use_fused_ln_geglu_mlp
             # DenseGeneral 1
-            gemm1_fp8_meta_package = None if fp8_meta_package is None \
-                                     else fp8_meta_package.get_package_by_gemm_idx(0)
             if fuse_layernorm:
                 x = layernorm_fp8_dot(y,
                                       kernel_1,
                                       scale,
                                       ln_bias,
-                                      gemm1_fp8_meta_package,
+                                      wi_fp8_meta_pkg,
                                       self.layernorm_type,
                                       zero_centered_gamma=self.zero_centered_gamma,
                                       epsilon=self.epsilon,
@@ -1093,7 +1081,7 @@ class LayerNormMLP(TransformerEngineBase):
                 y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
                 x = type_safe_dot_general(y,
                                           kernel_1,
-                                          fp8_meta_pkg=gemm1_fp8_meta_package,
+                                          fp8_meta_pkg=wi_fp8_meta_pkg,
                                           contracting_dims=(axis, contract_ind))
 
             if self.enable_low_rank_adaptation:
@@ -1130,10 +1118,10 @@ class LayerNormMLP(TransformerEngineBase):
             bias_1 = None
             if self.use_bias:
                 bias_1 = nn_partitioning.param_with_axes('wi_bias',
-                                                       self.bias_init,
-                                                       intermediate_dim,
-                                                       jnp.float32,
-                                                       axes=self.bias_axes_1)
+                                                         self.bias_init,
+                                                         intermediate_dim,
+                                                         jnp.float32,
+                                                         axes=self.bias_axes_1)
                 bias_1 = bias_1.astype(self.dtype)
                 bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
                 x += jnp.reshape(bias_1, bias_1_shape)
@@ -1159,12 +1147,9 @@ class LayerNormMLP(TransformerEngineBase):
             z = with_sharding_constraint_by_logical_axes(z, self.dot_2_input_axes)
 
             # DenseGeneral 2
-            gemm2_fp8_meta_package = None if fp8_meta_package is None \
-                                     else fp8_meta_package.get_package_by_gemm_idx(1)
-
             out = type_safe_dot_general(z,
                                         kernel_2,
-                                        fp8_meta_pkg=gemm2_fp8_meta_package,
+                                        fp8_meta_pkg=wo_fp8_meta_pkg,
                                         contracting_dims=(axis, contract_ind))
 
             if self.enable_low_rank_adaptation:
@@ -1192,9 +1177,9 @@ class LayerNormMLP(TransformerEngineBase):
             bias_2 = None
             if self.use_bias:
                 bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                       self.bias_init, (hidden_size,),
-                                                       jnp.float32,
-                                                       axes=self.bias_axes_2)
+                                                         self.bias_init, (hidden_size,),
+                                                         jnp.float32,
+                                                         axes=self.bias_axes_2)
                 bias_2 = bias_2.astype(self.dtype)
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 

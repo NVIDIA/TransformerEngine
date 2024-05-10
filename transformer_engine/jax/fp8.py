@@ -6,7 +6,8 @@ Helper module for fp8 meta management
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, Optional, Tuple, Union
+from functools import partial
+from typing import Dict, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -85,72 +86,67 @@ class FP8MetaPackage:
     A container that contains all required meta data for FP8
     """
 
+    NUM_OF_META: int = 3
+    INPUT_IDX: int = 0
+    WEIGHT_IDX: int = 1
+    GRAD_IDX: int = 2
+
     def __init__(
         self,
-        num_of_gemm: int,
-        fp8_max: jnp.ndarray,
-        amax: jnp.ndarray,
-        scale: jnp.ndarray,
-        scale_inv: jnp.ndarray,
+        i_amax: jnp.ndarray,
+        i_scale: jnp.ndarray,
+        w_amax: jnp.ndarray,
+        w_scale: jnp.ndarray,
+        g_amax: jnp.ndarray,
+        g_scale: jnp.ndarray,
     ) -> None:
-        total_num_of_meta = num_of_gemm * FP8Helper.NUM_META_PER_GEMM
-        self._num_of_gemm = num_of_gemm
-        assert fp8_max.shape[0] == total_num_of_meta
-        self._fp8_max = fp8_max
-        assert amax.shape[0] == total_num_of_meta
-        self._amax = amax
-        assert scale.shape[0] == total_num_of_meta
-        self._scale = scale
-        assert scale_inv.shape[0] == total_num_of_meta
-        self._scale_inv = scale_inv
+
+        self._amax_list = [None] * FP8MetaPackage.NUM_OF_META
+        self._scale_list = [None] * FP8MetaPackage.NUM_OF_META
+
+        self._amax_list[FP8MetaPackage.INPUT_IDX] = i_amax
+        self._scale_list[FP8MetaPackage.INPUT_IDX] = i_scale
+        self._amax_list[FP8MetaPackage.WEIGHT_IDX] = w_amax
+        self._scale_list[FP8MetaPackage.WEIGHT_IDX] = w_scale
+        self._amax_list[FP8MetaPackage.GRAD_IDX] = g_amax
+        self._scale_list[FP8MetaPackage.GRAD_IDX] = g_scale
 
     @property
-    def num_of_gemm(self) -> int:
+    def amax_list(self) -> List[jnp.ndarray]:
         """
-        num_of_gemm of this package
+        Get the amax list of this package.
         """
-        return self._num_of_gemm
+        return self._amax_list
 
     @property
-    def fp8_max(self) -> jnp.ndarray:
+    def scale_list(self) -> List[jnp.ndarray]:
         """
-        fp8_max of this package
+        Get the scale list of this package.
         """
-        return self._fp8_max
+        return self._scale_list
 
-    @property
-    def amax(self) -> jnp.ndarray:
+    @staticmethod
+    def update_amax_list(amax_list: List[jnp.ndarray]) -> jnp.ndarray:
         """
-        amax of this package
+        Update the amax history list
         """
-        return self._amax
+        updated_amax_list = [FP8Helper.update_amax_history(amax) for amax in amax_list]
+        return updated_amax_list
 
-    @property
-    def scale(self) -> jnp.ndarray:
+    @staticmethod
+    def update_fp8_scale(
+            amax_list: List[jnp.ndarray], scale_list: List[jnp.ndarray],
+            fp8_dtype_list: List[DType]) -> Tuple[List[jnp.ndarray], List[jnp.ndarray]]:
         """
-        scale of this package
+        Get update scale and scale_inv list
         """
-        return self._scale
-
-    @property
-    def scale_inv(self) -> jnp.ndarray:
-        """
-        scale_inv of this package
-        """
-        return self._scale_inv
-
-    def get_package_by_gemm_idx(self, gemm_idx):
-        """
-        Get a sub package by gemm_idx
-        """
-        assert self.num_of_gemm > gemm_idx
-
-        meta_start_idx = gemm_idx * FP8Helper.NUM_META_PER_GEMM
-        meta_end_idx = (gemm_idx + 1) * FP8Helper.NUM_META_PER_GEMM
-        return FP8MetaPackage(1, self.fp8_max[meta_start_idx:meta_end_idx],
-                              self.amax[meta_start_idx:meta_end_idx],
-                              self.scale[meta_start_idx:meta_end_idx],
-                              self.scale_inv[meta_start_idx:meta_end_idx])
+        update_scale_list = []
+        update_scale_inv_list = []
+        for amax, scale, fp8_dtype in zip(amax_list, scale_list, fp8_dtype_list):
+            upadted_scale, updated_scale_inv = FP8Helper.update_fp8_scale(amax, scale, fp8_dtype)
+            update_scale_list.append(upadted_scale)
+            update_scale_inv_list.append(updated_scale_inv)
+        return update_scale_list, update_scale_inv_list
 
 
 class AmaxComputeAlgo(Enum):
@@ -159,7 +155,7 @@ class AmaxComputeAlgo(Enum):
     MOST_RECENT = "most_recent"
 
 
-NVTE_FP8_COLLECTION_NAME = "fp8_meta_collection"
+NVTE_FP8_COLLECTION_NAME = "fp8_metas"
 
 
 class FP8Helper:
@@ -173,15 +169,9 @@ class FP8Helper:
     BWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[1]
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
-    NUM_META_PER_GEMM: int = 3
-    INPUT_META_IDX_PER_GEMM: int = 0
-    KERNEL_META_IDX_PER_GEMM: int = 1
-    GRAD_META_IDX_PER_GEMM: int = 2
     FP8_COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
-    FP8_AMAX_NAME: str = "fp8_meta_amax"
-    FP8_SCALE_NAME: str = "fp8_meta_scale"
-    FP8_SCALE_INV_NAME: str = "fp8_meta_scale_inv"
-    FP8_MAX_NAME: str = "fp8_max"
+    FP8_AMAX_NAME: str = "amax"
+    FP8_SCALE_NAME: str = "scale"
     FP8_2X_ACC_FPROP: bool = False
     FP8_2X_ACC_DGRAD: bool = True
     FP8_2X_ACC_WGRAD: bool = True
@@ -242,84 +232,13 @@ class FP8Helper:
         return new_coll
 
     @staticmethod
-    def update_fp8_metas(state: Collection) -> Collection:
-        """
-        Update the FP8 metas
-        """
-        assert isinstance(state, (dict, FrozenDict))
-        if FP8Helper.FP8_COLLECTION_NAME in state:
-            frozen_state = FrozenDict(state) if not isinstance(state, FrozenDict) else state
-            others, fp8_metas = frozen_state.pop(FP8Helper.FP8_COLLECTION_NAME)
-            fp8_metas = FP8Helper._update_fp8_metas_impl(fp8_metas)
-            new_state = FrozenDict({**others, FP8Helper.FP8_COLLECTION_NAME: fp8_metas})
-
-            if not isinstance(state, FrozenDict):
-                new_state = new_state.unfreeze()
-            return new_state
-        return state
-
-    @staticmethod
-    def generate_fp8_max_array(num_of_meta):
-        """
-        Generate the FP8 max array
-        """
-        num_of_gemm = num_of_meta // FP8Helper.NUM_META_PER_GEMM
-        fp8_max_fwd = jnp.finfo(FP8Helper.FWD_DTYPE).max
-        fp8_max_bwd = jnp.finfo(FP8Helper.BWD_DTYPE).max
-        fp8_max_per_gemm = []
-        for i in range(FP8Helper.NUM_META_PER_GEMM):
-            val = fp8_max_bwd if i == FP8Helper.GRAD_META_IDX_PER_GEMM \
-                else fp8_max_fwd
-            fp8_max_per_gemm.append([val])
-        fp8_max_per_gemm = jnp.asarray(fp8_max_per_gemm, dtype=jnp.float32)
-        return jnp.vstack([fp8_max_per_gemm] * num_of_gemm)
-
-    @staticmethod
-    def get_fp8_meta_indices(gemm_idx: int) -> Tuple[int, int, int]:
-        """
-        Obtain the index about FP8 metas by the given GEMM index.
-        """
-        input_idx = FP8Helper.NUM_META_PER_GEMM * gemm_idx + FP8Helper.INPUT_META_IDX_PER_GEMM
-        kernel_idx = FP8Helper.NUM_META_PER_GEMM * gemm_idx + FP8Helper.KERNEL_META_IDX_PER_GEMM
-        grad_idx = FP8Helper.NUM_META_PER_GEMM * gemm_idx + FP8Helper.GRAD_META_IDX_PER_GEMM
-        return input_idx, kernel_idx, grad_idx
-
-    @staticmethod
-    @jax.jit
-    def _update_fp8_metas_impl(fp8_metas: Collection) -> Collection:
-        fp8_meta_arrays, treedef = jax.tree_util.tree_flatten(fp8_metas)
-        num_of_meta_with_max = FP8Helper.NUM_META_PER_GEMM + 1
-        num_of_gemm = len(fp8_meta_arrays) // num_of_meta_with_max
-        for i in range(num_of_gemm):
-            # flattern array is ordered in alphabetical order of collection names
-            fp8_max_idx = i * num_of_meta_with_max
-            fp8_amax_idx = fp8_max_idx + 1
-            fp8_scale_idx = fp8_amax_idx + 1
-            fp8_scale_inv_idx = fp8_scale_idx + 1
-
-            fp8_max = fp8_meta_arrays[fp8_max_idx]
-            if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
-                amax = jnp.max(fp8_meta_arrays[fp8_amax_idx], axis=-1, keepdims=True)
-            else:
-                amax = fp8_meta_arrays[fp8_amax_idx][..., 0:1]
-            scale = fp8_meta_arrays[fp8_scale_idx]
-
-            sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
-            sf = jnp.where(amax > 0.0, sf, scale)
-            sf = jnp.where(jnp.isfinite(amax), sf, scale)
-            fp8_meta_arrays[fp8_scale_idx] = sf
-            fp8_meta_arrays[fp8_scale_inv_idx] = 1 / sf
-
-        return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
-
-    @staticmethod
     def generate_fp8_meta_dtype_converter_pair(*args):
         """
         Generate a pair of conversion fun in-between fm32 and fp32.
         """
 
         def identical_fun(*metas):
-            return metas
+            return list(metas)
 
         def fm32_to_fp32_fun(*metas):
             for meta in metas:
@@ -354,20 +273,21 @@ class FP8Helper:
         Update the amax history
         """
         updated_amax = jnp.roll(amax, -1, -1)
-        updated_amax = updated_amax.at[..., 0].set(0)
+        updated_amax = updated_amax.at[0].set(0)
         return updated_amax
 
     @staticmethod
-    @jax.jit
-    def update_fp8_scale(fp8_max: jnp.ndarray, amax: jnp.ndarray,
-                         scale: jnp.ndarray) -> jnp.ndarray:
+    @partial(jax.jit, static_argnums=(2,))
+    def update_fp8_scale(amax: jnp.ndarray, scale: jnp.ndarray, fp8_dtype: DType) -> jnp.ndarray:
         """
         Calculate fp8 scale and scale_inv based on given amax.
         """
+        fp8_max = jnp.astype(jnp.finfo(fp8_dtype).max, jnp.float32)
+
         if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
             amax = jnp.max(amax, axis=-1, keepdims=True)
         else:
-            amax = amax[..., 0:1]
+            amax = amax[0:1]
 
         sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
         sf = jnp.where(amax > 0.0, sf, scale)
@@ -473,32 +393,6 @@ def update_collections(new: Collection, original: Collection) -> FrozenDict:
         The updated collection.
     """
     return FP8Helper.update_collections(new, original)
-
-
-def update_fp8_metas(state: Collection) -> Collection:
-    r"""
-    Calculate new fp8 scales and its inverse via the followed formula
-
-    .. code-block:: python
-
-        sf = (fp8_max / amax) / (2 ^ margin)
-        sf = sf if amax > 0.0, else original_scale
-        updated_scale = sf if isfinite(amax), else original_scale)
-        updated_scale_inv = 1/updated_scale
-
-    Collection = [dict, flax.core.frozen_dict.FrozenDict]
-
-    Parameters
-    ----------
-    state: Collection
-        A collection that includes FP8 metas.
-
-    Returns
-    -------
-    outputs : Collection
-        The collection with updated FP8 metas.
-    """
-    return FP8Helper.update_fp8_metas(state)
 
 
 def get_delayed_scaling():
