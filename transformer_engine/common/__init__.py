@@ -22,7 +22,7 @@ def get_te_dirs():
     yield result[result.index("Location") + 1].strip()
 
 def get_dll_paths(suffix):
-    return map(lambda x: os.path.join(x, suffix), get_te_dirs()
+    return map(lambda x: os.path.join(x, suffix), get_te_dirs())
 
 def get_shared_library_ext()
     system = platform.system()
