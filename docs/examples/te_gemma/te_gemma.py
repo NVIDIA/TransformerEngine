@@ -62,7 +62,8 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             attn_input_format=config.qkv_format,
             num_gqa_groups=config.num_key_value_heads,
             attention_hidden_size=4096,
-            layer_number=(layer_idx+1)
+            layer_number=(layer_idx+1),
+            zero_centered_gamma=True
         )
         te_rope = RotaryPositionEmbedding(256)
         self.te_rope_emb = te_rope(max_seq_len=config.max_position_embeddings).cuda()
@@ -287,8 +288,6 @@ class TEGemmaForCausalLM:
             unfinished_sequences
         )
 
-        
-
         inference_params.seq_len.copy_(inference_params.incoming_seq_len)
         inference_params.incoming_seq_len.copy_(torch.ones_like(inference_params.incoming_seq_len))
         inference_params.max_incoming_seq_len = 1
@@ -346,8 +345,7 @@ def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
         # When loading weights into models with less number of layers, skip the
         # copy if the corresponding layer doesn't exist in HF model
         if layer_prefix + 'input_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].copy_(1 + hf_state_dict[layer_prefix + 'input_layernorm.weight'])
-        
+            te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.layer_norm_weight'].copy_(hf_state_dict[layer_prefix + 'input_layernorm.weight'])
         if fp8_init:
             dst = te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.weight']
 
@@ -380,7 +378,7 @@ def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
 
             if layer_prefix + 'self_attn.k_proj.weight' in hf_state_dict:
                 te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.key_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.k_proj.weight'])
-
+                
 
             if layer_prefix + 'self_attn.v_proj.weight' in hf_state_dict:
                 te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.value_weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.v_proj.weight'])
@@ -389,7 +387,7 @@ def replace_params(hf_state_dict, te_state_dict, config, fp8_init=False):
             te_state_dict[layer_prefix + 'self_attention.proj.weight'].copy_(hf_state_dict[layer_prefix + 'self_attn.o_proj.weight'])
 
         if layer_prefix + 'post_attention_layernorm.weight' in hf_state_dict:
-            te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].copy_(1 + hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'])
+            te_state_dict[layer_prefix + 'layernorm_mlp.layer_norm_weight'].copy_(hf_state_dict[layer_prefix + 'post_attention_layernorm.weight'])
         
         if layer_prefix + 'mlp.gate_proj.weight' in hf_state_dict:
             te_state_dict[layer_prefix + 'layernorm_mlp.fc1_weight'].data[:GATE_PROJ_SIZE].copy_(hf_state_dict[layer_prefix + 'mlp.gate_proj.weight'])
