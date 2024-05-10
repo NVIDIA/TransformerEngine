@@ -305,6 +305,7 @@ class BasicLinear(BasicOperation):
         input: torch.Tensor,
         weight: torch.Tensor,
         *,
+        bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         tensor_parallel_mode: Optional[str] = None,
@@ -314,10 +315,53 @@ class BasicLinear(BasicOperation):
         input_fp8_meta: Optional[dict[str,Any]] = None,
         weight_fp8_meta: Optional[dict[str,Any]] = None,
         output_fp8_meta: Optional[dict[str,Any]] = None,
-        grad_output_fp8_meta: Optional[dict[str,Any]] = None,
-        grad_input_fp8_meta: Optional[dict[str,Any]] = None,
-        accumulate_into_main_grad: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Functional API for forward pass
+
+        Parameters
+        ----------
+        input: torch.Tensor
+            Input tensor
+        weight: torch.Tensor
+            Weight tensor
+        bias: torch.Tensor, optional
+            Bias tensor
+        device: torch.device, default = default CUDA device
+            Tensor device
+        dtype: torch.dtype, default = default dtype
+            Tensor datatype
+        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+            Mode for tensor parallelism
+        tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+            Process group for tensor parallelism
+        sequence_parallel: bool, default = `False`
+            Whether to apply sequence parallelism together with tensor
+            parallelism, i.e. distributing input or output tensors
+            along outer dimension (sequence or batch dim) when not
+            distributing along inner dimension (embedding dim)
+        with_fp8_compute: bool, default = `False`
+            Whether to perform compute in FP8
+        input_fp8_meta: dict, optional
+            FP8 metadata for casting input tensor to FP8. Required for
+            FP8 compute if input is not already in FP8.
+        weight_fp8_meta: dict, optional
+            FP8 metadata for casting weight tensor to FP8. Required for
+            FP8 compute if weight is not already in FP8.
+        output_fp8_meta: dict, optional
+            FP8 metadata for casting output tensor to FP8
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor
+        torch.Tensor
+            Input tensor used in GEMM, possibly cast and reshaped from
+            provided input tensor
+        torch.Tensor
+            Weight tensor used in GEMM, possibly cast and reshaped from
+            provided weight tensor
+
+        """
 
         # Check device
         if device is None:
@@ -429,6 +473,16 @@ class BasicLinear(BasicOperation):
         elif not with_fp8_compute and is_float8_tensor(w):
             w = w.from_float8()
 
+        # Check bias tensor
+        b = None
+        if bias is not None:
+            b = convert_tensor(
+                bias,
+                device=device,
+                dtype=dtype,
+                memory_format=torch.contiguous_format,
+            )
+
         # Construct output tensor
         y = None
         if with_fp8_output:
@@ -459,7 +513,11 @@ class BasicLinear(BasicOperation):
         # Perform GEMM
         x_async = _wait_async(x_async)
         if with_fp8_compute:
-            kwargs = dict(out=y)
+            kwargs = dict(
+                out=y,
+                bias=b,
+                use_bias=(b is not None),
+            )
             if with_fp8_output:
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                     forward=y._fp8_meta_forward,
@@ -492,6 +550,8 @@ class BasicLinear(BasicOperation):
                 y.dtype,
                 get_workspace(),
                 out=y,
+                bias=b,
+                use_bias=(b is not None),
             )
 
         # Reduce tensor-parallel output if needed
@@ -527,12 +587,72 @@ class BasicLinear(BasicOperation):
         with_fp8_compute: bool = False,
         input_fp8_meta: Optional[dict[str,Any]] = None,
         weight_fp8_meta: Optional[dict[str,Any]] = None,
-        output_fp8_meta: Optional[dict[str,Any]] = None,
         grad_output_fp8_meta: Optional[dict[str,Any]] = None,
         grad_input_fp8_meta: Optional[dict[str,Any]] = None,
         accumulate_into_grad_weight: bool = False,
         grad_weight: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Functional API for backward pass
+
+        Parameters
+        ----------
+        grad_output: torch.Tensor
+            Loss gradient w.r.t. output tensor
+        input: torch.Tensor, optional
+            Input tensor. Required to compute loss gradient w.r.t.
+            weight.
+        weight: torch.Tensor, optional
+            Weight tensor. Required to compute loss gradient w.r.t.
+            input.
+        input_dims: iterable of int
+            Input tensor dimensions
+        weight_dims: iterable of int
+            Weight tensor dimensions
+        input_requires_grad: bool
+            Whether to compute loss gradient w.r.t. input tensor
+        weight_requires_grad: bool
+            Whether to compute loss gradient w.r.t. weight tensor
+        device: torch.device, default = default CUDA device
+            Tensor device
+        dtype: torch.dtype, default = default dtype
+            Tensor datatype
+        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+            Mode for tensor parallelism
+        tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+            Process group for tensor parallelism
+        sequence_parallel: bool, default = `False`
+            Whether to apply sequence parallelism together with tensor
+            parallelism, i.e. distributing input or output tensors
+            along outer dimension (sequence or batch dim) when not
+            distributing along inner dimension (embedding dim)
+        with_fp8_compute: bool, default = `False`
+            Whether to perform compute in FP8
+        input_fp8_meta: dict, optional
+            FP8 metadata for casting input tensor to FP8. Required for
+            FP8 compute if input is not already in FP8.
+        weight_fp8_meta: dict, optional
+            FP8 metadata for casting weight tensor to FP8. Required for
+            FP8 compute if weight is not already in FP8.
+        grad_output_fp8_meta: dict, optional
+            FP8 metadata for casting loss gradient w.r.t. output
+            tensor to FP8. Required if output grad is not already in
+            FP8.
+        grad_output_fp8_meta: dict, optional
+            FP8 metadata for casting loss gradient w.r.t. input
+            tensor to FP8
+        accumulate_into_grad_weight: bool, default = `False`
+            Accumulate into weight grad instead of overwriting
+        grad_weight: torch.Tensor, optional
+            Loss gradient w.r.t. weight tensor
+
+        Returns
+        -------
+        torch.Tensor
+            Loss gradient w.r.t. input tensor
+        torch.Tensor
+            Loss gradient w.r.t. weight tensor
+
+        """
 
         # Check device
         if device is None:
@@ -631,7 +751,11 @@ class BasicLinear(BasicOperation):
         # Check input tensor
         x = None
         x_async = None
-        if input_requires_grad:
+        if weight_requires_grad:
+            if input is None:
+                raise ValueError(
+                    "Input tensor is required to compute weight grad"
+                )
             x_local = reshape(
                 input,
                 (-1, input_dims[-1]),
@@ -666,6 +790,10 @@ class BasicLinear(BasicOperation):
         if input_requires_grad:
 
             # Check weight tensor
+            if weight is None:
+                raise ValueError(
+                    "Weight tensor is required to compute input grad"
+                )
             w = convert_tensor(
                 weight,
                 device=device,
@@ -768,17 +896,16 @@ class BasicLinear(BasicOperation):
                     )
 
         # Perform wgrad GEMM
-        dw = None
-        if weight_requires_grad:
-            if accumulate_into_grad_weight:
-                if grad_weight is None:
+        if not weight_requires_grad:
+            grad_weight = None
+        else:
+            if grad_weight is None:
+                if accumulate_into_grad_weight:
                     raise ValueError(
                         "Attempted to accumulate into grad weight buffer"
                         "without providing grad weight"
                     )
-                dw = grad_weight
-            else:
-                dw = torch.empty(
+                grad_weight = torch.empty(
                     weight_dims,
                     dtype=dtype,
                     device=device,
@@ -796,10 +923,10 @@ class BasicLinear(BasicOperation):
                     dy._scale_inv,
                     0,
                     dy._fp8_dtype,
-                    dw.dtype,
+                    grad_weight.dtype,
                     get_workspace(),
                     accumulate=accumulate_into_grad_weight,
-                    out=dw,
+                    out=grad_weight,
                 )
             else:
                 gemm(
@@ -809,10 +936,8 @@ class BasicLinear(BasicOperation):
                     get_workspace(),
                     accumulate=accumulate_into_grad_weight,
                     layout="NT",
-                    out=dw,
+                    out=grad_weight,
             )
-            if accumulate_into_grad_weight:
-                dw = None
 
         # Clean up and return grads
         _wait_async(dy_async)
@@ -821,7 +946,7 @@ class BasicLinear(BasicOperation):
         grad_input = None
         if dx is not None:
             grad_input = reshape(dx, input_dims)
-        return grad_input, dw
+        return grad_input, grad_weight
 
     def op_forward(
         self,
@@ -860,8 +985,6 @@ class BasicLinear(BasicOperation):
             input_fp8_meta=input_fp8_meta,
             weight_fp8_meta=weight_fp8_meta,
             output_fp8_meta=output_fp8_meta,
-            grad_output_fp8_meta=grad_output_fp8_meta,
-            grad_input_fp8_meta=grad_input_fp8_meta,
         )
 
         # Save state for backward pass
@@ -921,4 +1044,6 @@ class BasicLinear(BasicOperation):
             grad_weight=grad_weight,
         )
 
+        if accumulate_into_main_grad:
+            grad_weight = None
         return grad_input, [grad_weight]
