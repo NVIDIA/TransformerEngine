@@ -10,6 +10,7 @@ from .module import Linear
 from .module import LayerNormMLP
 from .module import LayerNorm
 from .module import RMSNorm
+from .module import FP8AllToAll
 from .attention import DotProductAttention
 from .attention import InferenceParams
 from .attention import MultiheadAttention
