@@ -69,11 +69,9 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
 
     def forward(self,
                 hidden_states,
-                *args,
                 attention_mask,
                 inference_params=None,
-                self_attn_mask_type='causal',
-                **kwargs):
+                self_attn_mask_type='causal'):
         """
         Custom forward to make sure we only pass relevant arguments to the
         forward pass of the `TransformerLayer`. Also, make sure the output
@@ -87,6 +85,32 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             self_attn_mask_type=self_attn_mask_type
             ),)
 
+class StaticGemma(torch.nn.Module):
+    def __init__(self, model, inference_params, dtype, mask, lm_head):
+        super().__init__()
+        self.model = model
+        self.inference_params = inference_params
+        self.normalizer = torch.tensor(self.model.config.hidden_size**0.5, dtype=dtype)
+        self.mask = mask
+        self.lm_head = lm_head
+    
+    def forward(self, hidden_states):
+
+        hidden_states.data[:] = hidden_states.data[:] * self.normalizer
+        for decoder_layer in self.model.layers:
+            hidden_states.copy_(decoder_layer(
+                hidden_states,
+                attention_mask=None,
+                self_attn_mask_type=self.mask,
+                inference_params=self.inference_params
+            )[0])
+
+        hidden_states.copy_(self.model.norm(hidden_states))
+        logits = self.lm_head(hidden_states)
+        logits = logits.float()
+        return logits
+
+
 class GemmaGenerator(torch.nn.Module):
     def __init__(self, model, lm_head, inference_params, dtype, generation_config):
         super().__init__()
@@ -95,25 +119,14 @@ class GemmaGenerator(torch.nn.Module):
         self.normalizer = torch.tensor(self.model.config.hidden_size**0.5, dtype=dtype) 
         self.generation_config = generation_config
         self.lm_head = lm_head
+        self.gemma_layers = StaticGemma(model, inference_params, dtype, 'padding', lm_head)
 
     def forward(self, hidden_states, unfinished_sequences):
-        hidden_states.data[:] = hidden_states.data[:] * self.normalizer
-
-        for decoder_layer in self.model.layers:
-            hidden_states.copy_(decoder_layer(
-                        hidden_states,
-                        inference_params=self.inference_params,
-                        self_attn_mask_type='padding',
-                        attention_mask=None
-                    )[0])
+        logits = self.gemma_layers(hidden_states)
+        logits = logits[:, -1, :]
+        next_tokens = torch.argmax(logits, dim=1)
 
         self.inference_params.seq_len.copy_(self.inference_params.seq_len + 1)
-
-        hidden_states.copy_(self.model.norm(hidden_states))
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
-        logits = logits[:, -1, :]
-        next_tokens = torch.argmax(logits, dim=-1)
 
         # Sequences, which are finished should contain padding - taken from huggingface transformers.
         next_tokens = next_tokens * unfinished_sequences + self.generation_config.pad_token_id * (1 - unfinished_sequences)
@@ -134,7 +147,6 @@ class TEGemmaForCausalLM:
 
     def __new__(cls, config: GemmaConfig):
         with replace_decoder(te_decoder_cls=TEGemmaDecoderLayer):
-            # trzeba wstawis layer number do tego czegos w jakis sposob
             gemma_for_causal_lm = GemmaForCausalLM(config)
 
         gemma_for_causal_lm.generate = TEGemmaForCausalLM.generate.__get__(gemma_for_causal_lm, GemmaForCausalLM)
@@ -145,7 +157,8 @@ class TEGemmaForCausalLM:
     def from_pretrained_local(cls, pretrained_model_name_or_path, *args, config, fp8_init=False, qkv_format="bshd", **kwargs):
         """
         Custom method adapted from `from_pretrained` method in HuggingFace
-        Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
+        Transformers repo: 
+        https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
         config.qkv_format = qkv_format
         with fp8_model_init(fp8_init):
@@ -184,7 +197,7 @@ class TEGemmaForCausalLM:
         return vanilla_model
     
     @staticmethod
-    def _padding_to_beginning(inputs, lengths):
+    def _padding_to_end(inputs, lengths):
         """
         Gets the tensor with sequence padded from the beginning and
         return tensor padded from its end.
@@ -206,47 +219,24 @@ class TEGemmaForCausalLM:
     
     def _generate_context_phase(
             self,
+            gemma_layers,
             input_ids,
             inference_params,
             pad_token_id,
             eos_token_id,
             unfinished_sequences
     ):
-
         hidden_states = self.model.embed_tokens(input_ids)
-        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
-        
-        output_tokens = []
-        hidden_states = hidden_states * normalizer
-        for decoder_layer in self.model.layers:
-            hidden_states = decoder_layer(
-                hidden_states,
-                attention_mask=None,
-                self_attn_mask_type="padding_causal",
-                inference_params=inference_params
-            )[0]
-
-        hidden_states = self.model.norm(hidden_states)
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
+        logits = gemma_layers(hidden_states)
         logits = logits[torch.arange(logits.size(0)), inference_params.incoming_seq_len - 1, :]
         next_tokens = torch.argmax(logits, dim=1)
 
         # Sequences, which are finished should contain padding - taken from huggingface transformers.
         next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-        output_tokens.append(next_tokens)
 
         unfinished_sequences = unfinished_sequences & ~(next_tokens == eos_token_id)
-
-
         hidden_states = self.model.embed_tokens(next_tokens).unsqueeze(1)
-
-        for k, v in inference_params.key_value_memory_dict.items():
-            key_layer = v[0].contiguous().cuda()
-            value_layer = v[1].contiguous().cuda()
-            inference_params.key_value_memory_dict[k] = (key_layer, value_layer)
-        
-        return hidden_states, output_tokens
+        return hidden_states, [next_tokens]
 
     
     @torch.no_grad()
@@ -254,18 +244,18 @@ class TEGemmaForCausalLM:
         self,
         input_ids: Optional[torch.Tensor] = None,
         generation_config: Optional[GenerationConfig] = None,
-        max_new_tokens = 0,
-        use_cuda_graphs = False,
+        max_new_tokens: int = 0,
+        use_cuda_graphs: bool = False,
         **kwargs,
     ): 
-        batch_size, _ = input_ids.shape
+        batch_size, max_input_sequence_len = input_ids.shape
         generation_config, _ = self._prepare_generation_config(generation_config, **kwargs)
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
 
-        # inference_params object is a cache, where keys and values of previous tokens are stored
+        # InferenceParams is a cache, where keys and values of previous tokens are stored.
         inference_params = InferenceParams(
             max_batch_size=batch_size, 
-            max_sequence_length=input_ids.shape[1] + max_new_tokens
+            max_sequence_length=max_input_sequence_len + max_new_tokens
         )
 
         # lengths is a tensor of shape [s] representing lengths of sequences.
@@ -274,10 +264,13 @@ class TEGemmaForCausalLM:
         inference_params.incoming_seq_len = lengths.to(torch.int32).clone().cuda()
         inference_params.max_incoming_seq_len = input_ids.shape[1]
         
-        TEGemmaForCausalLM._padding_to_beginning(input_ids, lengths)
+        TEGemmaForCausalLM._padding_to_end(input_ids, lengths)
+
+        context_phase_layers = StaticGemma(self.model, inference_params, torch.float32, 'padding_causal', self.lm_head)
         
         hidden_states, output_tokens = TEGemmaForCausalLM._generate_context_phase(
             self,
+            context_phase_layers,
             input_ids,
             inference_params,
             generation_config.pad_token_id,
@@ -288,7 +281,6 @@ class TEGemmaForCausalLM:
         inference_params.seq_len.copy_(inference_params.incoming_seq_len)
         inference_params.incoming_seq_len.copy_(torch.ones_like(inference_params.incoming_seq_len))
         inference_params.max_incoming_seq_len = 1
-
 
         generator = GemmaGenerator(
             lm_head=self.lm_head,
