@@ -4291,7 +4291,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         _check_valid_batch_dims(batch_dims)
         assert DBiasCastTransposePrimitive.outer_primitive is not None
         dz, amax, scale, scale_inv = batched_args
-        dz_bdim, _, amax_bdim, _, _ = batch_dims
+        dz_bdim, amax_bdim, _, _ = batch_dims
 
         # Minus batch dim.
         transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, dz.ndim - 1)
