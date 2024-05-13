@@ -49,17 +49,14 @@ class TestFP8Helper(unittest.TestCase):
     def test_update_fp8_metas(self):
         FP8Helper.initialize(margin=3.0, amax_history_len=3)
 
-        seed = 0
-        key1, key2 = jax.random.split(jax.random.PRNGKey(seed))
-        num_of_gemm = 10
-        num_of_meta = FP8Helper.NUM_META_PER_GEMM * num_of_gemm
+        rng_key = jax.random.PRNGKey(0)
 
-        def select_amax(amaxes):
+        def select_amax(amax):
             if FP8Helper.AMAX_COMPUTE_ALGO == AmaxComputeAlgo.MAX:
-                return jnp.max(amaxes, axis=-1, keepdims=True)
-            return amaxes[:, 0:1]
+                return jnp.max(amax, axis=-1, keepdims=True)
+            return amax[0:1]
 
-        def get_fp8_scale(fp8_max, amax, scale):
+        def get_fp8_scale(amax, scale, fp8_max):
             fp8_max = np.array(fp8_max)
             amax = np.array(amax)
             scale = np.array(scale)
@@ -69,65 +66,24 @@ class TestFP8Helper(unittest.TestCase):
             sf = jnp.where(jnp.isfinite(amax), sf, scale)
             return sf
 
-        amax_meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
-        scale_meta_shape = (num_of_meta, 1)
-        fp8_max_array = FP8Helper.generate_fp8_max_array(num_of_meta)
-        fp8_amax_array1 = jax.random.uniform(key1, shape=amax_meta_shape)
-        fp8_scale_array1 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array1),
-                                         jnp.ones(scale_meta_shape))
-        fp8_scale_inv_array1 = 1 / fp8_scale_array1
-        fp8_amax_array2 = jax.random.uniform(key2, shape=amax_meta_shape)
-        fp8_scale_array2 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array2),
-                                         jnp.ones(scale_meta_shape))
-        fp8_scale_inv_array2 = 1 / fp8_scale_array2
+        amax_meta_shape = (FP8Helper.AMAX_HISTORY_LEN,)
+        scale_meta_shape = (1,)
 
-        state = flax.core.frozen_dict.FrozenDict({
-            FP8Helper.FP8_COLLECTION_NAME: {
-                "test_update_fp8_metas1": {
-                    FP8Helper.FP8_MAX_NAME: fp8_max_array,
-                    FP8Helper.FP8_AMAX_NAME: fp8_amax_array1,
-                    FP8Helper.FP8_SCALE_NAME: jnp.ones(scale_meta_shape),
-                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(scale_meta_shape)
-                },
-                "test_update_fp8_metas2": {
-                    FP8Helper.FP8_MAX_NAME: fp8_max_array,
-                    FP8Helper.FP8_AMAX_NAME: fp8_amax_array2,
-                    FP8Helper.FP8_SCALE_NAME: jnp.ones(scale_meta_shape),
-                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(scale_meta_shape)
-                }
-            }
-        })
+        for _ in range(5):
+            for fp8_dtype in [jnp.float8_e4m3fn, jnp.float8_e4m3fn]:
+                fp8_max = jnp.astype(jnp.finfo(fp8_dtype).max, jnp.float32)
 
-        updated_state = FP8Helper.update_fp8_metas(state)
+                curr_key, rng_key = jax.random.split(rng_key)
+                amax = jax.random.uniform(curr_key, shape=amax_meta_shape)
+                scale = jnp.ones(scale_meta_shape)
+                ref_scale = get_fp8_scale(select_amax(amax), scale, fp8_max)
+                ref_scale_inv = 1 / ref_scale
 
-        state_array, _ = jax.tree_util.tree_flatten(updated_state)
-        meta_per_gemm = FP8Helper.NUM_META_PER_GEMM + 1
-        scale_shift = 2
-        scale_inv_shift = 3
-        assert_allclose(state_array[0 * meta_per_gemm + scale_shift], fp8_scale_array1)
-        assert_allclose(state_array[0 * meta_per_gemm + scale_inv_shift], fp8_scale_inv_array1)
-        assert_allclose(state_array[1 * meta_per_gemm + scale_shift], fp8_scale_array2)
-        assert_allclose(state_array[1 * meta_per_gemm + scale_inv_shift], fp8_scale_inv_array2)
+                target_scale, target_scale_inv = FP8Helper.update_fp8_scale(amax, scale, fp8_dtype)
+                assert_allclose(ref_scale, target_scale)
+                assert_allclose(ref_scale_inv, target_scale_inv)
 
         FP8Helper.finalize()
-
-    @unittest.skipIf(not is_fp8_supported, reason=reason)
-    def test_generate_fp8_max_array(self):
-        num_of_meta = FP8Helper.NUM_META_PER_GEMM * 2
-
-        def get_ref(format_for_test):
-            refer_list = []
-            for i in range(num_of_meta):
-                val = format_for_test.value.max_bwd \
-                    if i % FP8Helper.NUM_META_PER_GEMM == FP8Helper.GRAD_META_IDX_PER_GEMM \
-                    else format_for_test.value.max_fwd
-                refer_list.append([val])
-            return jnp.asarray(refer_list)
-
-        for fp8_format in FP8Format:
-            FP8Helper.initialize(fp8_format=fp8_format)
-            assert_allclose(get_ref(fp8_format), FP8Helper.generate_fp8_max_array(num_of_meta))
-            FP8Helper.finalize()
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_update_collections(self):
