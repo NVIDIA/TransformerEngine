@@ -305,7 +305,7 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
                          epsilon=self.epsilon)
 
 
-class TransformerEngineBase(nn.Module):
+class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-methods
     """
     Base class of transformer engine
     """
