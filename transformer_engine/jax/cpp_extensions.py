@@ -27,7 +27,7 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
-from transformer_engine_jax import NVTE_Activation_Enum
+from transformer_engine_jax import NVTE_Activation_Type
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
@@ -126,10 +126,16 @@ def _check_valid_batch_dims(bdims):
 
 
 ActivationEnum = {
-    ('gelu',): NVTE_Activation_Enum.GELU,
-    ('gelu', 'linear'): NVTE_Activation_Enum.GEGLU,
-    ('silu',): NVTE_Activation_Enum.SILU,
-    ('silu', 'linear'): NVTE_Activation_Enum.SWIGLU
+    ('gelu',): NVTE_Activation_Type.GELU,
+    ('gelu', 'linear'): NVTE_Activation_Type.GEGLU,
+    ('silu',): NVTE_Activation_Type.SILU,
+    ('silu', 'linear'): NVTE_Activation_Type.SWIGLU,
+    ('relu',): NVTE_Activation_Type.RELU,
+    ('relu', 'linear'): NVTE_Activation_Type.REGLU,
+    ('quick_gelu',): NVTE_Activation_Type.QGELU,
+    ('quick_gelu', 'linear'): NVTE_Activation_Type.QGEGLU,
+    ('squared_relu',): NVTE_Activation_Type.SRELU,
+    ('squared_relu', 'linear'): NVTE_Activation_Type.SREGLU,
 }
 
 
@@ -2655,7 +2661,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         act_lu partitioning
         """
-        del result_infos
+        del result_infos, act_enum
         x_spec = get_padded_spec(arg_infos[0])
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
@@ -2721,6 +2727,7 @@ class DActLuPrimitive(BasePrimitive):
         ir_in_shape = ir_in_type.shape
         gi_type = ir.RankedTensorType(x.type)
         gi_shape = gi_type.shape
+#        assert ir_in_shape == gi_shape
         for axis in range(len(ir_in_shape) - 1):
             assert ir_in_shape[axis] == gi_shape[axis]
 
@@ -2783,7 +2790,7 @@ class DActLuPrimitive(BasePrimitive):
         """
         dact_lu partition
         """
-        del result_infos
+        del result_infos, act_enum
         dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
