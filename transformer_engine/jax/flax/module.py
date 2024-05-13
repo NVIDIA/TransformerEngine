@@ -6,7 +6,6 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
 import operator
-import warnings
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 
 import jax.numpy as jnp
@@ -272,7 +271,6 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
     bias_axes: Tuple[str, ...] = ('embed',)
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
-    sharding_type = None
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
@@ -294,8 +292,6 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
         outputs : jax.numpy.ndarray
             Output tensors.
         """
-        warnings.warn("sharding_type of LayerNorm would be removed in the near feature",
-                      DeprecationWarning)
 
         features = x.shape[-1]
         scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
@@ -403,7 +399,6 @@ class DenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
-    sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -425,8 +420,6 @@ class DenseGeneral(TransformerEngineBase):
         outputs : jax.numpy.ndarray
             Output tensors.
         """
-        warnings.warn("sharding_type of DenseGeneral would be removed in the near feature",
-                      DeprecationWarning)
 
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
@@ -609,7 +602,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     layernorm_input_axes: Tuple[str, ...] = None
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
-    sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -636,8 +628,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
-        warnings.warn("sharding_type of LayerNormDenseGeneral would be removed in the near feature",
-                      DeprecationWarning)
 
         ln_output = None
 
@@ -895,7 +885,6 @@ class LayerNormMLP(TransformerEngineBase):
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
     dot_2_input_axes: Tuple[str, ...] = None
-    major_sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -924,8 +913,6 @@ class LayerNormMLP(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
-        warnings.warn("major_sharding_type of LayerNormMLP would be removed in the near feature",
-                      DeprecationWarning)
 
         ln_output = None
 
