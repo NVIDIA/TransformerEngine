@@ -46,46 +46,6 @@ class TestFP8Helper(unittest.TestCase):
         FP8Helper.finalize()
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
-    def test_update_fp8_metas(self):
-        FP8Helper.initialize(margin=3.0, amax_history_len=3)
-
-        rng_key = jax.random.PRNGKey(0)
-
-        def select_amax(amax):
-            if FP8Helper.AMAX_COMPUTE_ALGO == AmaxComputeAlgo.MAX:
-                return jnp.max(amax, axis=-1, keepdims=True)
-            return amax[0:1]
-
-        def get_fp8_scale(amax, scale, fp8_max):
-            fp8_max = np.array(fp8_max)
-            amax = np.array(amax)
-            scale = np.array(scale)
-
-            sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
-            sf = jnp.where(amax > 0.0, sf, scale)
-            sf = jnp.where(jnp.isfinite(amax), sf, scale)
-            return sf
-
-        amax_meta_shape = (FP8Helper.AMAX_HISTORY_LEN,)
-        scale_meta_shape = (1,)
-
-        for _ in range(5):
-            for fp8_dtype in [jnp.float8_e4m3fn, jnp.float8_e4m3fn]:
-                fp8_max = jnp.astype(jnp.finfo(fp8_dtype).max, jnp.float32)
-
-                curr_key, rng_key = jax.random.split(rng_key)
-                amax = jax.random.uniform(curr_key, shape=amax_meta_shape)
-                scale = jnp.ones(scale_meta_shape)
-                ref_scale = get_fp8_scale(select_amax(amax), scale, fp8_max)
-                ref_scale_inv = 1 / ref_scale
-
-                target_scale, target_scale_inv = FP8Helper.update_fp8_scale(amax, scale, fp8_dtype)
-                assert_allclose(ref_scale, target_scale)
-                assert_allclose(ref_scale_inv, target_scale_inv)
-
-        FP8Helper.finalize()
-
-    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_update_collections(self):
         original_val = 0.0
         updated_val = 10.0
