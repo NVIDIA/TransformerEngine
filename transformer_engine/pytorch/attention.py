@@ -408,7 +408,7 @@ class PackTensors(torch.autograd.Function):
         *tensors: Tuple[torch.Tensor, ...]
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
-        ctx.indices = indices
+        ctx.save_for_backward(indices)
         ctx.dim0 = tensors[0].shape[0]
         if len(tensors) == 1:
             return pack_tensor(indices, *tensors)
@@ -418,11 +418,12 @@ class PackTensors(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
+        (indices,) = ctx.saved_tensors
         if len(grad_outputs) == 1:
-            return None, unpack_tensor(ctx.indices, ctx.dim0, *grad_outputs)
+            return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
         if len(grad_outputs) == 2:
-            return None, *unpack_2_tensors(ctx.indices, ctx.dim0, *grad_outputs)
-        return None, *unpack_3_tensors(ctx.indices, ctx.dim0, *grad_outputs)
+            return None, *unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
+        return None, *unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
 
 
 class UnpackTensor(torch.autograd.Function):
@@ -436,12 +437,13 @@ class UnpackTensor(torch.autograd.Function):
         dim0: int,
         tensor: torch.Tensor,
     ) -> torch.Tensor:
-        ctx.indices = indices
+        ctx.save_for_backward(indices)
         return unpack_tensor(indices, dim0, tensor)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return None, None, pack_tensor(ctx.indices, grad_output)
+        (indices,) = ctx.saved_tensors
+        return None, None, pack_tensor(indices, grad_output)
 
 
 def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
@@ -868,8 +870,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         else:
             out = out.view(-1, *out.shape[-2:])
 
-        ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
-        ctx.rng_states = rng_states
+        ctx.save_for_backward(q, kv, out, softmax_lse,
+            cu_seqlens_q, cu_seqlens_k, rng_states, attn_biases)
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
@@ -880,14 +882,14 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.qkv_format = qkv_format
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
-        ctx.attn_biases = attn_biases
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+        (q, kv, out, softmax_lse,
+            cu_seqlens_q, cu_seqlens_k, rng_states, attn_biases) = ctx.saved_tensors
 
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
@@ -897,12 +899,12 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
-        if ctx.attn_biases[0] is not None:
+        if attn_biases[0] is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)]
             attn_dbias = torch.zeros(
                 *ctx.attn_bias_shape,
-                dtype=ctx.attn_biases[0].dtype,
-                device=ctx.attn_biases[0].device
+                dtype=attn_biases[0].dtype,
+                device=attn_biases[0].device
             )
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_dbias_ = attn_dbias.view(
@@ -985,9 +987,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
-                        aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
+                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
-                            aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                            aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             cu_seqlens_q, cu_seqlens_k,
@@ -1017,7 +1019,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             ctx.dropout_p, ctx.softmax_scale, True,
-                            rng_state=ctx.rng_states[cp_size-i-1],
+                            rng_state=rng_states[cp_size-i-1],
                             **fa_optional_backward_kwargs
                         )
                 elif i >= (cp_size-rank-1):
@@ -1038,9 +1040,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
-                        aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
+                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
-                            aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                            aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                             cu_seqlens_q, cu_seqlens_k//2,
@@ -1074,7 +1076,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k//2,
                             ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                             ctx.dropout_p, ctx.softmax_scale, False,
-                            rng_state=ctx.rng_states[cp_size-i-1],
+                            rng_state=rng_states[cp_size-i-1],
                             **fa_optional_backward_kwargs
                         )
                 else:
@@ -1095,9 +1097,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             out_ = out[1].contiguous()
                             dout_ = dout[1].contiguous()
-                        aux_ctx_tensors = [softmax_lse_, ctx.rng_states[cp_size-i-1]]
+                        aux_ctx_tensors = [softmax_lse_, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
-                            aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                            aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             cu_seqlens_q//2, cu_seqlens_k,
@@ -1135,14 +1137,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             ctx.dropout_p, ctx.softmax_scale, False,
-                            rng_state=ctx.rng_states[cp_size-i-1],
+                            rng_state=rng_states[cp_size-i-1],
                             **fa_optional_backward_kwargs
                         )
             else:
                 if ctx.use_fused_attention:
-                    aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
+                    aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                     if attn_dbias is not None:
-                        aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                        aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                     dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         cu_seqlens_q, cu_seqlens_k,
@@ -2300,9 +2302,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         qkvo_tensors = (qkv, out_save) if not ctx.fp8 else (None, None)
-        ctx.save_for_backward(*qkvo_tensors, cu_seqlens, *fp8_tensors)
+        ctx.save_for_backward(*qkvo_tensors, cu_seqlens, *fp8_tensors, *aux_ctx_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen = max_seqlen
         ctx.qkv_dtype = qkv_dtype
         ctx.attn_scale = attn_scale
@@ -2326,12 +2327,12 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             d_out = d_out._data
 
         d_out = d_out.contiguous()
-        (qkv, out, cu_seqlens,
-            qkv_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
-        if not ctx.aux_ctx_tensors[0].is_contiguous():
-            ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
+        (qkv, out, cu_seqlens, qkv_fp8, out_fp8,
+            fwd_scales, fwd_scale_invs, *aux_ctx_tensors) = ctx.saved_tensors
+        if not aux_ctx_tensors[0].is_contiguous():
+            aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
-            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            softmax_lse, rng_state = aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x)
@@ -2363,7 +2364,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     dqkv_fp8, *rest = fused_attn_bwd_qkvpacked(
                         ctx.max_seqlen, cu_seqlens,
                         qkv_fp8, out_fp8, d_out_fp8,
-                        fp8_dtype_forward, fp8_dtype_backward, ctx.aux_ctx_tensors,
+                        fp8_dtype_forward, fp8_dtype_backward, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         fwd_scale_invs[META_QKV], # d_scale_qkv,
                         fwd_scale_invs[META_S], # d_scale_s,
@@ -2398,7 +2399,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
                         ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
-                        ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                        ctx.qkv_dtype, ctx.qkv_dtype, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         None, None, None, None, None, None, None, None, None, None,
                         ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
@@ -2501,9 +2502,9 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         qkvo_tensors = (q, kv, out_save) if not ctx.fp8 else (None, None, None)
-        ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
+        ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv,
+            *fp8_tensors, *aux_ctx_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
         ctx.qkv_dtype = qkv_dtype
@@ -2528,12 +2529,12 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             d_out = d_out._data
 
         d_out = d_out.contiguous()
-        (q, kv, out, cu_seqlens_q, cu_seqlens_kv,
-            q_fp8, kv_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
-        if not ctx.aux_ctx_tensors[0].is_contiguous():
-            ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
+        (q, kv, out, cu_seqlens_q, cu_seqlens_kv, q_fp8, kv_fp8, out_fp8,
+            fwd_scales, fwd_scale_invs, *aux_ctx_tensors) = ctx.saved_tensors
+        if not aux_ctx_tensors[0].is_contiguous():
+            aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
-            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            softmax_lse, rng_state = aux_ctx_tensors
             dq = torch.empty_like(q)
             dkv = torch.empty_like(kv)
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
@@ -2567,7 +2568,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     dq_fp8, dkv_fp8, *rest = fused_attn_bwd_kvpacked(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q_fp8, kv_fp8, out_fp8, d_out_fp8,
-                        fp8_dtype_forward, fp8_dtype_backward, ctx.aux_ctx_tensors,
+                        fp8_dtype_forward, fp8_dtype_backward, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         fwd_scale_invs[META_QKV], # d_scale_qkv,
                         fwd_scale_invs[META_S], # d_scale_s,
@@ -2614,7 +2615,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, kv, out, d_out,
-                        ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                        ctx.qkv_dtype, ctx.qkv_dtype, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         None, None, None, None, None, None, None, None, None, None,
                         ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
@@ -2773,9 +2774,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
-        ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv, *fp8_tensors)
+        ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv,
+            *fp8_tensors, *aux_ctx_tensors)
         ctx.fp8_meta = fp8_meta
-        ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
         ctx.qkv_dtype = qkv_dtype
@@ -2800,12 +2801,12 @@ class FusedAttnFunc(torch.autograd.Function):
             d_out = d_out._data
 
         d_out = d_out.contiguous()
-        (q, k, v, out, cu_seqlens_q, cu_seqlens_kv,
-            q_fp8, k_fp8, v_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
-        if not ctx.aux_ctx_tensors[0].is_contiguous():
-            ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
+        (q, k, v, out, cu_seqlens_q, cu_seqlens_kv, q_fp8, k_fp8, v_fp8, out_fp8,
+            fwd_scales, fwd_scale_invs, *aux_ctx_tensors) = ctx.saved_tensors
+        if not aux_ctx_tensors[0].is_contiguous():
+            aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
-            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            softmax_lse, rng_state = aux_ctx_tensors
             dq = torch.empty_like(q)
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
@@ -2840,7 +2841,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
-                        fp8_dtype_forward, fp8_dtype_backward, ctx.aux_ctx_tensors,
+                        fp8_dtype_forward, fp8_dtype_backward, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         fwd_scale_invs[META_QKV], # d_scale_qkv,
                         fwd_scale_invs[META_S], # d_scale_s,
@@ -2923,7 +2924,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q, k, v, out, d_out,
-                        ctx.qkv_dtype, ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                        ctx.qkv_dtype, ctx.qkv_dtype, aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         None, None, None, None, None, None, None, None, None, None,
                         ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
