@@ -19,7 +19,9 @@ from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quanti
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
-from transformer_engine.jax.mlp import activation_lu, activation_lu_fp8, fused_layernorm_fp8_mlp
+from transformer_engine.jax.mlp import activation_lu, fused_layernorm_fp8_mlp
+from transformer_engine.jax.cpp_extensions import act_lu_fp8, dact_lu_dbias_cast_transpose
+from transformer_engine.jax.cpp_extensions import dgated_act_lu_cast_transpose
 
 
 GEMM_CASES = [
@@ -34,10 +36,16 @@ LN_CASES = [(512, 1024)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = is_fp8_available()
 
+
+
 def _convert_to_activation_function(fn_or_string):
     """Convert a string to an activation function."""
     if fn_or_string == 'linear':
         return lambda x: x
+    if fn_or_string == 'quick_gelu':
+        return lambda x: nn.gelu(x, approximate=True)
+    if fn_or_string == 'squared_relu':
+        return lambda x: functools.reduce(operator.mul, [nn.relu(x), nn.relu(x)])
     if isinstance(fn_or_string, str):
         return getattr(nn, fn_or_string)
     if callable(fn_or_string):
@@ -171,14 +179,20 @@ class TestFP8Dot:
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('m,n,k', [(128, 256, 512),
+    @pytest.mark.parametrize('m,n,k', [(256, 128, 512),
                                        (16384, 1024, 2816),
                                        (16384, 2816, 1024),
                                        (16384, 1024, 1024)])
     @pytest.mark.parametrize('activation_type', [('gelu', ),
                                                  ('gelu', 'linear'),
                                                  ('silu', ),
-                                                 ('silu', 'linear')])
+                                                 ('silu', 'linear'),
+                                                 ('relu',),
+                                                 ('relu', 'linear'),
+                                                 ('quick_gelu',),
+                                                 ('quick_gelu', 'linear'),
+                                                 ('squared_relu',),
+                                                 ('squared_relu', 'linear')])
     @pytest.mark.parametrize('use_bias', [True, False])
     def test_grad_fused_layernorm_fp8_mlp(self, m, n, k,
             activation_type: Sequence[Union[str, Callable]], use_bias: bool):
@@ -187,8 +201,8 @@ class TestFP8Dot:
         subkeys = jax.random.split(key, 6)
 
         a = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
-        k1 = jax.random.normal(subkeys[1], (k, len(activation_type), n), jnp.bfloat16)
-        k2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16)
+        k1 = jax.random.normal(subkeys[1], (k, len(activation_type), n), jnp.bfloat16) / jnp.sqrt(k)
+        k2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16) / jnp.sqrt(n)
         s = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
         if use_bias:
             b1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
@@ -345,7 +359,13 @@ class TestActivationLu:
     @pytest.mark.parametrize('activation_type', [('gelu',),
                                                  ('gelu', 'linear'),
                                                  ('silu',),
-                                                 ('silu', 'linear')])
+                                                 ('silu', 'linear'),
+                                                 ('relu',),
+                                                 ('relu', 'linear'),
+                                                 ('quick_gelu',),
+                                                 ('quick_gelu', 'linear'),
+                                                 ('squared_relu',),
+                                                 ('squared_relu', 'linear') ])
     def test_activation_lu(self, random_inputs, activation_type):
         x = random_inputs
         x = jnp.repeat(x, len(activation_type), axis=1)
@@ -363,37 +383,74 @@ class TestActivationLu:
 
 class TestActivationLuFP8(TestActivationLu):
 
-    def primitive_func(self, inputs, dx_trans_no_use, dbias_no_use, amax, scale, scale_inv):
-        return jnp.mean(
-            activation_lu_fp8(inputs,
-                              amax, scale, scale_inv,
-                              jnp.float8_e4m3fn, jnp.float8_e5m2,
-                              activation_type = self.activation_type))
+    def prim_func(self, x):
+        amax = self.amax
+        scale = self.scale
+        scale_inv = self.scale_inv
+        activation_type = self.activation_type
+
+        @jax.custom_vjp
+        def _prim_func(x, _x_t, _dbias, _amax):
+            output = _prim_func_fwd(x, _x_t, _dbias, _amax)
+            return output
+
+        def _prim_func_fwd(x, _x_t, _dbias, _amax):
+            activation_lu_out, _ = act_lu_fp8(x, amax, scale, scale_inv,
+                                              FP8Helper.FWD_DTYPE, activation_type)
+            activation_lu_out = dequantize(activation_lu_out, x.dtype, scale_inv)
+            ctx = (x)
+            return activation_lu_out, ctx
+
+        def _prim_func_bwd(ctx, g):
+            x = ctx
+            if len(self.activation_type) > 1: #gated, no bias
+                dactivation_lu, dactivation_lu_trans, amax_out = \
+                dgated_act_lu_cast_transpose(g, x, amax, scale, scale_inv,
+                                             FP8Helper.BWD_DTYPE, -1, activation_type)
+                dbias = jnp.empty(x.shape[-1], x.dtype)
+            else: #not gated, with bias
+                dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
+                dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, FP8Helper.BWD_DTYPE,
+                                             -1, -2, self.activation_type)
+            dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
+            dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)
+            ctx = (dactivation_lu, dactivation_lu_trans, dbias, amax_out)
+            return ctx
+
+        _prim_func.defvjp(_prim_func_fwd, _prim_func_bwd)
+
+        dx_trans_no_use = jnp.empty([x.shape[i] for i in self.transpose_indices], dtype=x.dtype)
+        dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
+        amax_no_use = jnp.zeros(1, jnp.float32)
+        value_n_grad_primitive_func = value_and_grad(lambda a, b, c, d:
+            jnp.mean(_prim_func(a, b, c, d)), (0, 1, 2, 3))
+        return value_n_grad_primitive_func(x, dx_trans_no_use, dbias_no_use, amax_no_use)
+
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('shape', [(32, 1, 64), (64, 1, 256)])
     @pytest.mark.parametrize('activation_type', [('gelu',),
                                                  ('gelu', 'linear'),
                                                  ('silu',),
-                                                 ('silu', 'linear')])
+                                                 ('silu', 'linear'),
+                                                 ('relu',),
+                                                 ('relu', 'linear'),
+                                                 ('quick_gelu',),
+                                                 ('quick_gelu', 'linear'),
+                                                 ('squared_relu',),
+                                                 ('squared_relu', 'linear') ])
     def test_activation_lu(self, random_inputs, activation_type):
         self.amax = jnp.zeros(1, jnp.float32)
         self.scale = jnp.ones(1, jnp.float32)
         self.scale_inv = jnp.ones(1, jnp.float32)
         self.activation_type = activation_type
+        self.transpose_indices = (1, 2, 0)
 
         x = random_inputs
         x = jnp.repeat(x, len(activation_type), axis=1)
 
-        value_n_grad_primitive_func = jit( value_and_grad(self.primitive_func, (0, 1, 2, 3, 4, 5,)))
 
-        transpose_indices = (1, 2, 0) if len(activation_type) > 1 else (2, 0, 1)
-        dx_trans_no_use = jnp.zeros([x.shape[i] for i in transpose_indices], dtype=x.dtype)
-        dbias_no_use = jnp.zeros(x.shape[-1], dtype=x.dtype)
-
-        prim_out, (prim_grad, prim_grad_trans, dbias, amax, _, _) = \
-            value_n_grad_primitive_func(x, dx_trans_no_use, dbias_no_use,
-                                    self.amax, self.scale, self.scale_inv)
+        prim_out, (prim_grad, prim_grad_trans, dbias, amax) = self.prim_func(x)
         ref_out, (ref_grad,) = self.ref_func(x, activation_type)
 
         assert_allclose(prim_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
@@ -402,7 +459,7 @@ class TestActivationLuFP8(TestActivationLu):
             assert_allclose(dbias, jnp.sum(ref_grad, axis=(i for i in range(x.ndim - 1))))
         assert_allclose(prim_grad, ref_grad, dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(prim_grad_trans,
-                        jnp.transpose(ref_grad, transpose_indices),
+                        jnp.transpose(ref_grad, self.transpose_indices),
                         dtype=FP8Helper.BWD_DTYPE)
 
 
