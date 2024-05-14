@@ -661,3 +661,45 @@ size_t get_cudnn_version();
 bool userbuf_comm_available();
 
 void placeholder();
+
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel
+ **************************************************************************************************/
+
+at::Tensor thd_read_half_tensor(const at::Tensor &tensor,
+                                const at::Tensor &cu_seqlens,
+                                int half_idx
+);
+
+void thd_second_half_lse_correction(at::Tensor lse,
+                                    const at::Tensor &lse_per_step,
+                                    const at::Tensor &cu_seqlens,
+                                    int total_tokens
+);
+
+at::Tensor thd_read_second_half_lse(const at::Tensor &lse,
+                                    const at::Tensor &cu_seqlens,
+                                    int total_tokens
+);
+
+void thd_out_correction(at::Tensor out,
+                        const at::Tensor &out_per_step,
+                        const at::Tensor &lse,
+                        const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens,
+                        bool only_second_half
+);
+
+void thd_grad_correction(at::Tensor grad,
+                         const at::Tensor &grad_per_step,
+                         const at::Tensor &cu_seqlens,
+                         const std::string &first_half,
+                         const std::string &second_half
+);
+
+at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens,
+                                       int total_tokens,
+                                       int world_size,
+                                       int rank
+);

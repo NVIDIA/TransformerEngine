@@ -18,12 +18,15 @@
 
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/activation.h>
 #include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
 
 constexpr int kMaxNumDim = 8;
+
+size_t get_activation_len(NVTE_Activation_Type activation_enum);
 
 struct Shape {
     int num_dim;
