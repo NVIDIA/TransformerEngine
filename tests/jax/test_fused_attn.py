@@ -90,24 +90,34 @@ def is_causal_mask(mask: AttnMaskType):
 
 def make_decoder_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
     """
-    Create padded causal mask
+    Create inverse padded causal mask where `True` means allowing the corresponding
+    position to participate in attention and `False` means masking out that position.
     """
     q_idxs = jnp.broadcast_to(jnp.arange(q_tokens.shape[-1], dtype=jnp.int32), q_tokens.shape)
     kv_idxs = jnp.broadcast_to(jnp.arange(kv_tokens.shape[-1], dtype=jnp.int32), kv_tokens.shape)
     inv_causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
     inv_padding_mask = make_attention_mask(q_tokens > 0, kv_tokens > 0)
-    return jnp.logical_not(combine_masks(inv_causal_mask, inv_padding_mask))
+    return combine_masks(inv_causal_mask, inv_padding_mask)
 
+def make_mask(q_token: ArrayLike, kv_token: ArrayLike, attn_mask_type: AttnMaskType) -> Array:
+    """
+    Create attention mask based on mask type. A `True` value in the mask means
+    masking out the corresponding position and a `False` value means allowing
+    that position to participate in attention.
+    """
+    if is_causal_mask(attn_mask_type):
+        inv_mask = make_decoder_mask(q_token, kv_token)
+    else:
+        inv_mask = make_attention_mask(q_token > 0, kv_token > 0)
+    mask = jnp.logical_not(inv_mask)
+    return mask
 
 def jax_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
     """
     JAX native dot product attention implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if is_causal_mask(attn_mask_type):
-        mask = make_decoder_mask(q_token, kv_token)
-    else:
-        mask = jnp.logical_not(make_attention_mask(q_token > 0, kv_token > 0))
+    mask = make_mask(q_token, kv_token, attn_mask_type)
 
     output = general_dot_product_attention(query,
                                            key,
@@ -127,10 +137,7 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
     TE customcall dot product attention implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if is_causal_mask(attn_mask_type):
-        mask = make_decoder_mask(q_token, kv_token)
-    else:
-        mask = jnp.logical_not(make_attention_mask(q_token > 0, kv_token > 0))
+    mask = make_mask(q_token, kv_token, attn_mask_type)
 
     qkv_layout = kwargs.pop('qkv_layout')
     match qkv_layout:
