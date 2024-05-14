@@ -36,3 +36,16 @@ def test_gqa(
     x = torch.randn((batch_size, 1, hidden_size)).cuda()
     model(x)
 
+    # Check shapes of weights.
+    assert model.self_attention.layernorm_qkv.key_weight.shape[0] == kv_channels * num_gqa_groups
+    assert model.self_attention.layernorm_qkv.key_weight.shape[1] == hidden_size
+
+    assert model.self_attention.layernorm_qkv.query_weight.shape[0] == kv_channels * num_attn_head
+    assert model.self_attention.layernorm_qkv.query_weight.shape[1] == hidden_size
+    
+    assert model.self_attention.layernorm_qkv.value_weight.shape[0] == kv_channels * num_gqa_groups
+    assert model.self_attention.layernorm_qkv.value_weight.shape[1] == hidden_size
+    
+    assert model.self_attention.proj.weight.shape[0] == hidden_size
+    assert model.self_attention.proj.weight.shape[1] == kv_channels * num_attn_head
+
