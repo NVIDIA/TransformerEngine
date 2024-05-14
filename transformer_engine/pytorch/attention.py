@@ -148,6 +148,15 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_key_memory,
                 new_inference_value_memory,
             )
+    
+    def set_before_new_input(self, new_input, pad_token_id=None, offsets_change):
+        assert offsets_change in ["all_zero", "+1", None]
+
+        lengths = torch.sum(new_input.ne(pad_token_id), dim=-1).squeeze()
+        self.seq_len = torch.zeros_like(lengths).to(torch.int32).clone().cuda()
+        self.incoming_seq_len = lengths.to(torch.int32).clone().cuda()
+        self.max_incoming_seq_len = new_input.shape[1]
+
 
 @torch.no_grad()
 def get_alibi(
@@ -2321,7 +2330,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 seq_offsets_q, seq_offsets_k, seq_offsets_v,
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
-                use_FAv2_bwd, fp8, fp8_meta, tp_size, tp_group):
+                use_FAv2_bwd, fp8, fp8_meta):
         
         if fp8:
             if _NVTE_DEBUG:
@@ -3196,6 +3205,7 @@ class DotProductAttention(torch.nn.Module):
         q_size = query_layer.shape[1]
         key_layer = key_layer.contiguous()
         value_layer = value_layer.contiguous()
+
         
 
         
@@ -3268,7 +3278,6 @@ class DotProductAttention(torch.nn.Module):
                 """
                 batch_size = query_layer.shape[0] 
 
-                
                 tex.attention_copy(
                     inference_key_memory, 
                     inference_params.seq_len, 
@@ -3287,7 +3296,6 @@ class DotProductAttention(torch.nn.Module):
                     inference_params.max_sequence_length,  
                     batch_size,
                     self.channels)
-                
                     
                 max_seqlen_q = inference_params.max_incoming_seq_len
                 max_seqlen_kv = inference_params.max_sequence_length
@@ -3304,7 +3312,6 @@ class DotProductAttention(torch.nn.Module):
                 seq_offsets_k.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
                 seq_offsets_v.copy_(seq_offsets_k)
 
-                
                 query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
                 key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
                 value_layer = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16)
@@ -4369,6 +4376,7 @@ class MultiheadAttention(torch.nn.Module):
                     batch_size, 
                     hidden_dim
                 )
+
 
                 for i in range(batch_size):
                     key_layer[i,].copy_(apply_rotary_pos_emb(key_layer[i,:].unsqueeze(0), k_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
