@@ -944,9 +944,15 @@ class LayerNormMLP(TransformerEngineBase):
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         gated_act_pool = [('gelu', 'linear'),
-                          ('silu', 'linear')]
+                          ('silu', 'linear'),
+                          ('relu', 'linear'),
+                          ('quick_gelu', 'linear'),
+                          ('squared_relu', 'linear')]
         act_pool = [('gelu',),
-                    ('silu',)]
+                    ('silu',),
+                    ('relu',),
+                    ('quick_gelu',),
+                    ('squared_relu',)]
         normalize_acts = []
         for act in self.activations:
             if not isinstance(act, str):
@@ -955,7 +961,6 @@ class LayerNormMLP(TransformerEngineBase):
         normalize_acts = tuple(reversed(normalize_acts)
                                if normalize_acts[0] == 'linear' else normalize_acts)
 
-        is_gated = normalize_acts in gated_act_pool
         is_act_implemented = normalize_acts in (gated_act_pool + act_pool)
 
         use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented and\
@@ -1052,8 +1057,8 @@ class LayerNormMLP(TransformerEngineBase):
                                                          axes=self.bias_axes_2)
                 bias_2 = bias_2.astype(self.dtype)
             else:
-                bias_1 = jnp.empty(0, self.dtype)
-                bias_2 = jnp.empty(0, self.dtype)
+                bias_1 = None
+                bias_2 = None
 
             out = fused_layernorm_fp8_mlp(y,
                                          scale,
@@ -1134,7 +1139,6 @@ class LayerNormMLP(TransformerEngineBase):
                 x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
-
             activations = []
             if is_act_implemented:
                 z = activation_lu(x, normalize_acts)
@@ -1144,8 +1148,8 @@ class LayerNormMLP(TransformerEngineBase):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
-            if not is_gated:
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+                if num_activations == 1:
+                    z = jnp.reshape(z, (*z.shape[:-2], -1))
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
                            broadcast_dims=self.intermediate_hidden_dropout_dims,
