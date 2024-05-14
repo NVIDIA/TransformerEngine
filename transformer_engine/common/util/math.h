@@ -53,13 +53,13 @@ __device__ inline OType dqgelu(const IType val, const Empty& e) {
 }
 
 template <typename OType, typename IType>
-__device__ inline OType swish(const IType val, const Empty& e) {
+__device__ inline OType silu(const IType val, const Empty& e) {
     const float cval = val;
     return cval * sigmoid<float, float>(cval, e);
 }
 
 template <typename OType, typename IType>
-__device__ inline OType dswish(const IType val, const Empty& e) {
+__device__ inline OType dsilu(const IType val, const Empty& e) {
     const float cval = val;
     return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
 }
@@ -74,6 +74,15 @@ __device__ inline OType drelu(IType value, const Empty &) {
     return value > 0.f ? 1.f : 0.f;
 }
 
+template <typename OType, typename IType>
+__device__ inline OType srelu(IType value, const Empty &) {
+    return value > 0 ? value * value : 0.f;
+}
+
+template <typename OType, typename IType>
+__device__ inline OType dsrelu(IType value, const Empty &) {
+    return fmaxf(2.f * value, 0.f);
+}
 
 }  // namespace transformer_engine
 
