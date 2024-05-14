@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "ipcsocket.h"
 #include "userbuffers.h"
 #include <assert.h>
 #include <chrono>
@@ -17,16 +16,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 
-#ifndef UB_MPI_BOOTSTRAP
-static char EXT_COMM_WORLD[] = "world";
-static char EXT_COMM_INTRA[] = "intra";
-static char EXT_COMM_INTER[] = "inter";
-#else
+#ifdef UB_MPI_BOOTSTRAP
 #include <mpi.h>
 static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
 static MPI_Comm EXT_COMM_INTRA;
 static MPI_Comm EXT_COMM_INTER;
+#else
+static char EXT_COMM_WORLD[] = "world";
+static char EXT_COMM_INTRA[] = "intra";
+static char EXT_COMM_INTER[] = "inter";
 #endif
 
 #define MULTICAST_GB_TOTAL 512
@@ -92,14 +92,17 @@ int pipe_rank(communicator *comm, int step) {
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
   *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
-  (*comm)->_free = ext_free;
+  (*comm)->_bcast_int = ext_bcast_int;
   (*comm)->_barrier = ext_barrier;
+  (*comm)->_free = ext_free;
   (*comm)->nranks = numranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
@@ -226,33 +229,18 @@ int create_communicator_grouped2(communicator **comm,
     (*comm)->mc_maxsize = mc_maxsize;
 
     int fd;
-    volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
-    uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
-    ncclResult_t ret = ncclSuccess;
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
-    (*comm)->_barrier((*comm)->comm_world);
-
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
-      CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
-                                           CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
-      for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-        (*comm)->_barrier((*comm)->comm_intra);
-        NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
-      }
-    } else {
-      for (int i = 0; i < (*comm)->ar2_nvrank; i++)
-        (*comm)->_barrier((*comm)->comm_intra);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
-      for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
-        (*comm)->_barrier((*comm)->comm_intra);
-      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+      CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(&fd), (*comm)->mc_handle,
+                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
     }
-  error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+    (*comm)->_bcast_int(static_cast<void *>(&fd), 0, (*comm)->comm_intra);
+    if ((*comm)->ar2_nvrank > 0) {
+      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(&fd),
+                                            CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+    }
     close(fd);
+
     CUCHECK(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
 
     CUdeviceptr mc_va;
@@ -328,20 +316,26 @@ int create_communicator_grouped2(communicator **comm,
 int create_communicator_grouped(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_free, ext_barrier,
-                                      pipegpus, pipenodes, 1, 1);
+  return create_communicator_grouped2(
+    comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+    ext_alloc_copy_allgather, ext_bcast_int, ext_barrier, ext_free,
+    pipegpus, pipenodes, 1, 1);
 }
 
 int create_communicator(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_free, ext_barrier,
-                                      1, 1, 1, 1);
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free) {
+  return create_communicator_grouped2(
+    comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+    ext_alloc_copy_allgather, ext_bcast_int, ext_barrier, ext_free,
+    1, 1, 1, 1);
 }
 
 int create_communicator_grouped2_mpi(communicator **comm,
@@ -395,7 +389,7 @@ int create_communicator_grouped2_mpi(communicator **comm,
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm,
     myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    &ub_alloc_copy_allgather, &ub_free, &ub_barrier,
+    &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free,
     pipegpus, pipenodes, tensorgpus, tensornodes);
 #else
   NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
@@ -407,7 +401,7 @@ int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipen
   return create_communicator_grouped2_mpi(comm, pipegpus, pipenodes, 1, 1);
 }
 
-int create_communicator_mpi(communicator **comm, int pipegpus, int pipenodes) {
+int create_communicator_mpi(communicator **comm) {
   return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
 }
 
@@ -468,34 +462,23 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
     CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
 
-    int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
-    CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
+    int myfd;
+    int *peerfd;
+    CUCHECK(cuMemExportToShareableHandle(&myfd, comm->uchandles[hndl][myrank],
                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
-
-    volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
-    uint64_t opId = 0xdeadcafebeef;
-    ncclResult_t ret = ncclSuccess;
-
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
-    for (int p = 1; p < nranks; p++) {
-      comm->_barrier(comm->comm_intra);
-      NCCLCHECKGOTO(
-          ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
-          error);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
-                    error);
-    }
-  error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
-
+    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&peerfd), reinterpret_cast<void *>(&myfd),
+                                sizeof(int), comm->comm_intra);
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
         CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
                                                reinterpret_cast<void *>(peerfd[p]),
                                                CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
-      close(peerfd[p]);
     }
+    close(myfd);
+    for (int p = 0; p < nranks; p++)
+      close(peerfd[p]);
+    comm->_free(reinterpret_cast<void *>(peerfd));
+
     CUdeviceptr ptr;
     CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
@@ -559,7 +542,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     CUDACHECK(cudaDeviceSynchronize());
-    comm->_free(tmp, sizeof(cudaIpcMemHandle_t) * comm->nvsize);
+    comm->_free(tmp);
   }
   comm->mem_size[hndl] = aligned_size;
 

@@ -556,20 +556,15 @@ def setup_pytorch_extension() -> setuptools.Extension:
     import pybind11
     include_dirs.append(pybind11.get_include())
     if lib_extension() == "dll":
-        cxx_flags += ["/EHsc", "/bigobj"]
+        cxx_flags += [ "/EHsc", "/bigobj" ]
     else:
-        cxx_flags += ["-fvisibility=hidden"]
+        cxx_flags += [ "-fvisibility=hidden" ]
 
-    # Link to core Transformer Engine library
-    linker_kwargs = {}
+    # Link core TE library
+    linker_kwargs = { 'libraries' : [ 'transformer_engine' ] }
     if lib_extension() == 'dll':
-        # Windows does not support -Wl,-rpath so we need to specify core TE library as a relative
-        # path to the DLL file.
-        linker_kwargs['libraries'] = [ str(Path('./libtransformer_engine.dll')) ]
-    else:
-        linker_kwargs['libraries'] = [ "transformer_engine" ]
-        linker_kwargs['library_dirs'] = [ '.' ]
-        linker_kwargs['extra_link_args'] = [ '-Wl,-rpath,.' ]
+        # Windows needs the library file name
+        linker_kwargs['libraries'] = [ './libtransformer_engine.dll' ]
 
     # Construct PyTorch CUDA extension
     from torch.utils.cpp_extension import CUDAExtension
@@ -623,12 +618,13 @@ def setup_jax_extension() -> setuptools.Extension:
         # Windows does not support -Wl,-rpath so we need to specify shared libraries with full path
         # in order to dynamically load them at runtime without errors.
         cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
-        libraries = [ cuda_lib_dir / f'lib{lib}.dll' for lib in libraries ]
+        libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
 
         # Core TE library has to be relative to the module install path to deploy correctly.
         libraries += [ Path('./libtransformer_engine.dll') ]
         linker_kwargs['libraries'] = [ str(path) for path in libraries ]
     else:
+        # Set link and runtime paths for CUDA libraries
         cuda_lib_dir = CUDA_HOME / 'lib64'
         if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
             cuda_lib_dir = CUDA_HOME / 'lib'
@@ -636,11 +632,14 @@ def setup_jax_extension() -> setuptools.Extension:
         linker_kwargs['library_dirs'] = [
             str(cuda_lib_dir),
             str(CUDNN_LINK),
-            '.'  # for core TE library
         ]
-        linker_kwargs['extra_link_args'] = [
-            f"-Wl,-rpath,{path}" for path in linker_kwargs['library_dirs']
-        ]
+        if lib_extension() == 'dylib':
+            # Mac does not support `runtime_library_dirs` option so we do it manually
+            linker_kwargs['extra_link_args'] = [
+                f"-Wl,-rpath,{path}" for path in linker_kwargs['library_dirs']
+            ]
+        else:
+            linker_kwargs['runtime_library_dirs'] = linker_kwargs['library_dirs']
 
     # Add PyBind11 to the extension
     from pybind11.setup_helpers import Pybind11Extension

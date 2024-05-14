@@ -52,10 +52,8 @@ size_t nvte_tensor_ndim(const NVTETensor tensor) {
 
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor*>(tensor);
-  size_t idx = (dim < 0) ? t.data.shape.size() + dim
-                         : dim;
-  NVTE_CHECK(idx >= 0 && idx < t.data.shape.size(), "Invalid dimension index!");
-  return t.data.shape[idx];
+  NVTE_CHECK(dim >= 0 && dim < t.data.shape.size(), "Invalid dimension index: ", dim);
+  return t.data.shape[dim];
 }
 
 size_t nvte_tensor_numel(const NVTETensor tensor) {

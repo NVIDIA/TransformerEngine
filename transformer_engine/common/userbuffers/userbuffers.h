@@ -7,11 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
-#ifndef UB_MPI_BOOTSTRAP
-typedef char* ExtComm;
-#else
+#ifdef UB_MPI_BOOTSTRAP
 #include <stdexcept>
 #include <mpi.h>
+#ifdef UB_BCAST_OVER_IPC_SOCKET
+#include "ipcsocket.h"
+#endif
 
 #define UB_MPI_CHECK(expr)                                                                       \
   do {                                                                                           \
@@ -39,13 +40,50 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
                           *globaldata, localbytes, MPI_BYTE, comm));
 }
 
-void ub_free(void *ptr, size_t bytes) {
-  free(ptr);
+void ub_bcast_int(void *databuf, int src, ExtComm comm) {
+#ifdef UB_BCAST_OVER_IPC_SOCKET
+  int ar2_nvrank, ar2_nvsize;
+  UB_MPI_CHECK(MPI_Comm_rank(comm, &ar2_nvrank));
+  UB_MPI_CHECK(MPI_Comm_size(comm, &ar2_nvsize));
+
+  int *fd = static_cast<int *>(databuf);
+  volatile uint32_t abortFlag = 0;
+  struct ncclIpcSocket ipcSock = {0};
+  uint64_t opId = 0xdeadcafeb000;
+  ncclResult_t ret = ncclSuccess;
+  NCCLCHECK(ncclIpcSocketInit(&ipcSock, ar2_nvrank, (uint64_t)opId, &abortFlag));
+  UB_MPI_CHECK(MPI_Barrier(comm));
+
+  if (ar2_nvrank == src) {
+    for (int p = 0; p < ar2_nvsize; p++) {
+      if (p != ar2_nvrank) {
+        UB_MPI_CHECK(MPI_Barrier(comm));
+        NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, *fd, p, (uint64_t)opId), ret, error);
+      }
+    }
+  } else {
+    for (int i = 0; i < ar2_nvrank; i++)
+      UB_MPI_CHECK(MPI_Barrier(comm));
+    NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, fd), ret, error);
+    for (int i = 0; i < ar2_nvsize - ar2_nvrank - 1; i++)
+      UB_MPI_CHECK(MPI_Barrier(comm));
+  }
+error:
+  NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+#else
+  UB_MPI_CHECK(MPI_Bcast(databuf, 1, MPI_INT, src, comm));
+#endif
 }
 
 void ub_barrier(ExtComm comm) {
   UB_MPI_CHECK(MPI_Barrier(comm));
 }
+
+void ub_free(void *ptr) {
+  free(ptr);
+}
+#else
+typedef char* ExtComm;
 #endif
 
 #include <cuda.h>
@@ -174,8 +212,9 @@ struct communicator {
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
   std::function<void(void**, void*, size_t, ExtComm)> _alloc_copy_allgather;
-  std::function<void(void*, size_t)> _free;
+  std::function<void(void*, int, ExtComm)> _bcast_int;
   std::function<void(ExtComm)> _barrier;
+  std::function<void(void*)> _free;
 
   ExtComm comm_world,
           comm_inter,       // reduction group communicator (subset of the nodes) along GPU rail
@@ -198,19 +237,25 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
 
 int create_communicator_grouped(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes);
 
 int create_communicator(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t)> ext_free, std::function<void(ExtComm)> ext_barrier);
+  std::function<void(void*, int, ExtComm)> ext_bcast_int,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free);
 
 int create_communicator_grouped2_mpi(communicator **comm,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes);

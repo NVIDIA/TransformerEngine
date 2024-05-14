@@ -332,7 +332,7 @@ class TensorWrapper {
    *
    *  \return Size of this TensorWrapper in given dimension.
    */
-  size_t size(const size_t dim) const noexcept {
+  size_t size(const size_t dim) const {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_size(tensor_, dim);
   }

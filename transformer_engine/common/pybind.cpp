@@ -92,23 +92,6 @@ PYBIND11_MODULE(transformer_engine_pybind, m) {
     .value("ATOMIC_GEMM_RS", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS)
     .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P)
     .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P);
-
-  py::class_<ub::CommGemmOverlapBase>(m, "CommGemmOverlapBase", py::module_local())
-    .def(py::init<int, int, int, int, int, int, int, int, int, int, bool, bool>())
-    .def("register_gpu_buffer",
-      static_cast<void (ub::CommGemmOverlapBase::*)(py::capsule*, bool)>(
-        &ub::CommGemmOverlapBase::register_gpu_buffer))
-    .def("set_collective_callbacks", &ub::CommGemmOverlapBase::set_collective_callbacks)
-    .def("is_atomic_gemm", &ub::CommGemmOverlapBase::is_atomic_gemm)
-    .def("is_p2p_overlap", &ub::CommGemmOverlapBase::is_p2p_overlap);
-
-  py::class_<ub::CommGemmOverlap,
-             ub::CommGemmOverlapBase>(m, "CommGemmOverlap", py::module_local())
-    .def(py::init<int, int, int, int, int, int, int, int, int, int, bool, bool>());
-
-  py::class_<ub::CommGemmOverlapP2P,
-             ub::CommGemmOverlapBase>(m, "CommGemmOverlapP2P", py::module_local())
-    .def(py::init<int, int, int, int, int, int, int, int, int, int, bool, bool, bool, bool>());
 }  // PYBIND11_MODULE
 
 }  // namespace transformer_engine

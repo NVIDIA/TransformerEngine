@@ -107,9 +107,9 @@ target_include_directories(transformer_engine PRIVATE
 
 # Compiler options
 set(USERBUFFERS_CUDA_SUPPRESS
-    -Xcudafe --diag_suppress=39      # possible division by zero
+    # -Xcudafe --diag_suppress=39      # possible division by zero
     -Xcudafe --diag_suppress=177     # variable declared but never referenced
-    -Xcudafe --diag_suppress=179     # right operand of "%" is zero
+    # -Xcudafe --diag_suppress=179     # right operand of "%" is zero
     -Xcudafe --diag_suppress=550     # variable set but never used
     -Xcudafe --diag_suppress=949     # nonstandard default argument on declaration
     -Xcudafe --diag_suppress=1143    # arithmetic on pointer to void or function type

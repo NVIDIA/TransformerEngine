@@ -50,11 +50,10 @@ namespace transformer_engine {
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
-class FP8TensorMeta {
- public:
-    at::Tensor scale;
-    at::Tensor scale_inv;
-    at::Tensor amax_history;
+struct FP8TensorMeta : torch::CustomClassHolder {
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax_history;
 };
 
 // Used as named indices on the `scale`, `scale_inv`,

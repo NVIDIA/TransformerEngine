@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <map>
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -28,20 +29,64 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
-#define CHECK_CUDA(call)                                                                           \
-  do {                                                                                             \
-    cudaError_t status_ = call;                                                                    \
-    if (status_ != cudaSuccess) {                                                                  \
-      fprintf(stderr, "CUDA Error at line %d: %s\n", __LINE__, cudaGetErrorString(status_));       \
-      exit(1);                                                                                     \
-    }                                                                                              \
-  } while (0)
-
 using namespace torch::indexing;
 
 namespace transformer_engine {
 
 namespace userbuffers {
+
+static struct TorchCallbacks : torch::CustomClassHolder {
+  bool initialized{false};
+  std::unordered_map<void *, at::Tensor> gathered_tensors;
+  std::function<at::Tensor(at::Tensor&, const std::string &)> allgather;
+  std::function<void(at::Tensor &, int, const std::string &)> bcast_int;
+  std::function<void(const std::string &)> barrier;
+  std::function<void(at::Tensor &)> free;
+} torch_callbacks;
+
+void set_collective_callbacks(
+  std::function<at::Tensor(at::Tensor&, const std::string &)> allgather,
+  std::function<void(at::Tensor &, int, const std::string &)> bcast_int,
+  std::function<void(const std::string &)> barrier,
+  std::function<void(at::Tensor &)> free
+) {
+  torch_callbacks.allgather = allgather;
+  torch_callbacks.bcast_int = bcast_int;
+  torch_callbacks.barrier = barrier;
+  torch_callbacks.free = free;
+  torch_callbacks.initialized = true;
+}
+
+void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, char *group) {
+  assert(torch_callbacks.initialized);
+  auto localtensor = torch::from_blob(
+    localdata, {static_cast<int64_t>(localbytes / sizeof(uint8_t))},
+    at::device(torch::kCPU).dtype(torch::kUInt8));
+  auto globaltensor = torch_callbacks.allgather(localtensor, group);
+  *globaldata = globaltensor.data_ptr();
+  torch_callbacks.gathered_tensors[*globaldata] = globaltensor;
+}
+
+void ub_bcast_int(void *data, int src, char *group) {
+  assert(torch_callbacks.initialized);
+  auto datatensor = torch::from_blob(data, {1}, at::device(torch::kCPU).dtype(torch::kUInt8));
+  torch_callbacks.bcast_int(datatensor, src, group);
+}
+
+void ub_barrier(char *group) {
+  assert(torch_callbacks.initialized);
+  torch_callbacks.barrier(group);
+}
+
+void ub_free(void *ptr) {
+  assert(torch_callbacks.initialized);
+  auto i = torch_callbacks.gathered_tensors.find(ptr);
+  if (i == torch_callbacks.gathered_tensors.end())
+    return;
+  auto tensor = std::move(i->second);
+  torch_callbacks.gathered_tensors.erase(i);
+  torch_callbacks.free(tensor);
+}
 
 DType torch_dtype_to_te(torch::Dtype torch_type) {
   switch (torch_type) {
@@ -58,14 +103,32 @@ DType torch_dtype_to_te(torch::Dtype torch_type) {
   }
 }
 
-TensorWrapper torch_tensor_to_te(
-  torch::Tensor inp, void *amax = nullptr, void *scale = nullptr, void *scale_inv = nullptr
-) {
-  return TensorWrapper(inp.data_ptr(), {inp.sizes().begin(), inp.sizes().end()},
-                       torch_dtype_to_te(inp.scalar_type()),
-                       reinterpret_cast<float *>(amax),
-                       reinterpret_cast<float *>(scale),
-                       reinterpret_cast<float *>(scale_inv));
+TensorWrapper torch_tensor_to_te(torch::Tensor inp,
+                                 torch::Tensor amax = torch::Tensor(),
+                                 torch::Tensor scale = torch::Tensor(),
+                                 torch::Tensor scale_inv = torch::Tensor(),
+                                 int64_t fp8_idx = -1) {
+  float *amax_ptr = nullptr;
+  if (amax.numel())
+    amax_ptr = reinterpret_cast<float *>(amax.data_ptr());
+
+  float *scale_ptr = nullptr;
+  if(scale.numel())
+    scale_ptr = reinterpret_cast<float *>(scale.data_ptr());
+
+  float *scale_inv_ptr = nullptr;
+  if(scale_inv.numel()) {
+    if (fp8_idx >= 0)
+      scale_inv = scale_inv[fp8_idx];
+    scale_inv_ptr = reinterpret_cast<float *>(scale_inv[fp8_idx].data_ptr());
+  }
+
+  std::vector<size_t> inp_shape;
+  for (int64_t i=0; i<inp.ndimension(); i++)
+    inp_shape.push_back(static_cast<size_t>(inp.size(i)));
+
+  return TensorWrapper(inp.data_ptr(), inp_shape, torch_dtype_to_te(inp.scalar_type()),
+                       amax_ptr, scale_ptr, scale_inv_ptr);
 }
 
 struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
@@ -79,7 +142,8 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
     bool set_sm_margin, bool atomic_gemm)
   : CommGemmOverlap(world_rank, world_size, tp_rank, tp_size, 0, 1, num_splits, num_max_streams,
-                 comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+                    comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm,
+                    &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free) {
     // Allocate and register extra userbuffers
     void *ubuf_ptr;
     size_t ubuf_bytes = sample.numel() * sample.element_size();
@@ -88,11 +152,11 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
       alloc = false;
       NVTE_CHECK_CUDA(cudaMalloc(&ubuf_ptr, ubuf_bytes));
     }
-    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
+    this->register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
     _ubuf = torch::from_blob(ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     if (_atomic_gemm) {
-      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+      auto counter_options = at::device(torch::kCUDA).dtype(torch::kInt32);
       _counters = torch::zeros({num_splits * 2}, counter_options);
       _counters.index_put_({Slice(None, num_splits)}, 1);
     }
@@ -116,33 +180,28 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                at::Tensor D_amax, at::Tensor bias, transformer_engine::DType bias_type,
                at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize,
                bool accumulate, bool use_split_accumulator, int comm_type, at::Tensor rs_output) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, empty, empty, _ubuf_scale_inv);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
     if (comm_type_ == NVTE_Comm_Overlap_Type::ALL_GATHER) {
       CommGemmOverlap::bulk_gemm_overlap_ag(
-      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_,
-      grad, accumulate, use_split_accumulator);
+        (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+        &D_, &pre_gelu_out_, &ubuf_, &workspace_,
+        grad, accumulate, use_split_accumulator);
     } else {
       TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
       CommGemmOverlap::bulk_gemm_overlap_rs(
-      (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
-      grad, accumulate, use_split_accumulator);
+        (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
+        &D_, &pre_gelu_out_, &ubuf_, &rs_out_, &workspace_,
+        grad, accumulate, use_split_accumulator);
     }
 
     // Get the current userbuf offset
@@ -174,26 +233,21 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                               at::Tensor rs_output) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, empty, empty, _ubuf_scale_inv);
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
     TensorWrapper counters_ = torch_tensor_to_te(_counters);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlap::atomic_gemm_overlap_rs(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_, &counters_,
+      &D_, &pre_gelu_out_, &ubuf_, &rs_out_, &counters_, &workspace_,
       grad, accumulate, use_split_accumulator);
     return;
   }  // split_overlap_rs
@@ -210,25 +264,20 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, empty, empty, _ubuf_scale_inv);
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlap::split_gemm_overlap_rs(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
+      &D_, &pre_gelu_out_, &ubuf_, &rs_out_, &workspace_,
       grad, accumulate, use_split_accumulator, gemm_overlap);
 
     return;
@@ -260,6 +309,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                       cudaMemcpyDeviceToDevice, _stream_comm));
   }
 
+  /*
+  ** Helper function to export _ubuf output
+  */
   torch::Tensor& get_ubuf_output(int comm_type) {
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
@@ -276,6 +328,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     return output_tensor;
   }
 
+  /*
+  ** Helper function to set the inverse Fp8 scale for the _ubuf tensor
+  */
   void set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
     _ubuf_scale_inv = scale_inv;
     _ubuf_scale_inv_initialized = true;
@@ -297,12 +352,13 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
     bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter)
   : CommGemmOverlapP2P(world_rank, world_size, tp_rank, tp_size, 0, 1,
-                    num_splits, num_max_streams, comm_cga_size, num_comm_sm,
-                    set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter) {
+                      num_splits, num_max_streams, comm_cga_size, num_comm_sm,
+                      set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter,
+                      &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free) {
     size_t ubuf_bytes = sample.numel() * sample.element_size();
     size_t ubuf_chunk_bytes = ubuf_bytes / tp_size;
     if (is_reduce_scatter)
-      ubuf_bytes = static_cast<size_t>(ubuf_chunk_bytes * _num_ubuf_chunks);
+      ubuf_bytes = static_cast<int>(ubuf_bytes / tp_size * (tp_size * 2 - 1));
 
     void *ubuf_ptr;
     bool alloc = true;
@@ -310,7 +366,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       alloc = false;
       NVTE_CHECK_CUDA(cudaMalloc(&ubuf_ptr, ubuf_bytes));
     }
-    register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
+    this->register_gpu_buffer(&ubuf_ptr, ubuf_bytes, alloc);
     _ubuf = torch::from_blob(
       ubuf_ptr, {sample.size(0) / tp_size * _num_ubuf_chunks, sample.size(1)}, sample.options());
 
@@ -325,15 +381,15 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
 
     _self_chunk_id = _tp_id;
     if (_atomic_gemm) {
-      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+      auto counter_options = at::device(torch::kCUDA).dtype(torch::kInt32);
       _counters = torch::zeros({tp_size * 2}, counter_options);
       _counters.index_put_({Slice(None, tp_size)}, 1);
 
       if (!is_reduce_scatter) {
         const char *env_p = std::getenv("NVTE_AG_P2P_MULTI_ATOMIC");
         if (world_rank == 0 && env_p != nullptr) {
-          if (env_p[0] == '1') {
-            printf("!!userbuffers_sendrecv_multi_atomic_shuffle\n");
+          if (env_p[0] == '1' && world_rank == 0) {
+            printf("!!! [UB][PyTorch] userbuffers_sendrecv_multi_atomic_shuffle\n");
           }
         }
         _self_chunk_id = 0;
@@ -360,12 +416,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
       size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
     // Create an GEMM output buffer with N+1 chunks in a contiguous memory
     int m = (transa) ? A.size(0) : A.size(1);
     int n = _ubuf.size(0);
@@ -373,13 +423,16 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     torch::Tensor D_buffer = torch::empty({n_chunk * (_tp_size + 1), m}, D.options());
     D = torch::from_blob(D_buffer.data_ptr(), {D.size(0), D.size(1)}, D.options());
 
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    std::vector<TensorWrapper*> ubufs_(_num_ubuf_chunks);
+    for (int i=0; i < _num_ubuf_chunks; i++)
+      *(ubufs_[i]) = torch_tensor_to_te(_ubufs[i], empty, empty, _ubuf_scale_inv);
     TensorWrapper counters_ = torch_tensor_to_te(_counters);
     TensorWrapper B_copy_ = torch_tensor_to_te(B_copy);
     TensorWrapper D_buffer_ = torch_tensor_to_te(D_buffer);
@@ -387,7 +440,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlapP2P::atomic_gemm_overlap_ag(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &counters_, &B_copy_, &D_buffer_,
+      &D_, &pre_gelu_out_, ubufs_, &counters_, &B_copy_, &D_buffer_, &workspace_,
       grad, accumulate, use_split_accumulator);
 
     // Return the last N rows of D_buffer
@@ -409,25 +462,22 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
                                  bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    std::vector<TensorWrapper*> ubufs_(_num_ubuf_chunks);
+    for (int i=0; i < _num_ubuf_chunks; i++)
+      *(ubufs_[i]) = torch_tensor_to_te(_ubufs[i], empty, empty, _ubuf_scale_inv);
     TensorWrapper B_copy_ = torch_tensor_to_te(B_copy);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlapP2P::split_gemm_overlap_ag(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &B_copy_,
+      &D_, &pre_gelu_out_, ubufs_, &B_copy_, &workspace_,
       grad, accumulate, use_split_accumulator);
 
     return D;
@@ -445,26 +495,23 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    std::vector<TensorWrapper*> ubufs_(_num_ubuf_chunks);
+    for (int i=0; i < _num_ubuf_chunks; i++)
+      *(ubufs_[i]) = torch_tensor_to_te(_ubufs[i], empty, empty, _ubuf_scale_inv);
     TensorWrapper counters_ = torch_tensor_to_te(_counters);
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlapP2P::atomic_gemm_overlap_rs(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &counters_, &rs_out_,
+      &D_, &pre_gelu_out_, ubufs_, &counters_, &rs_out_, &workspace_,
       grad, accumulate, use_split_accumulator);
   }
 
@@ -480,30 +527,28 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-    if (A_scale_inverse.numel())
-      A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-    if (B_scale_inverse.numel())
-      B_scale_inverse = B_scale_inverse[B_fp8_tensor];
-
-    TensorWrapper A_ = torch_tensor_to_te(A, nullptr, nullptr, A_scale_inverse.data_ptr());
-    TensorWrapper B_ = torch_tensor_to_te(B, nullptr, nullptr, B_scale_inverse.data_ptr());
+    auto empty = torch::Tensor();
+    TensorWrapper A_ = torch_tensor_to_te(A, empty, empty, A_scale_inverse, A_fp8_tensor);
+    TensorWrapper B_ = torch_tensor_to_te(B, empty, empty, B_scale_inverse, B_fp8_tensor);
     TensorWrapper bias_ = torch_tensor_to_te(bias);
-    TensorWrapper D_ = torch_tensor_to_te(D, D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+    TensorWrapper D_ = torch_tensor_to_te(D, D_amax, D_scale, empty);
     TensorWrapper pre_gelu_out_ = torch_tensor_to_te(pre_gelu_out);
     TensorWrapper workspace_ = torch_tensor_to_te(workspace);
-    TensorWrapper ubuf_ = torch_tensor_to_te(_ubuf, nullptr, _ubuf_scale_inv.data_ptr());
+    std::vector<TensorWrapper*> ubufs_(_num_ubuf_chunks);
+    for (int i=0; i < _num_ubuf_chunks; i++)
+      *(ubufs_[i]) = torch_tensor_to_te(_ubufs[i], empty, empty, _ubuf_scale_inv);
     TensorWrapper rs_out_ = torch_tensor_to_te(rs_output);
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlapP2P::split_gemm_overlap_rs(
       (cudaStream_t)stream_main, &A_, transa, &B_, transb, &bias_,
-      &D_, &pre_gelu_out_, &workspace_, &ubuf_, &rs_out_,
+      &D_, &pre_gelu_out_, ubufs_, &rs_out_, &workspace_,
       grad, accumulate, use_split_accumulator);
   }
 
+
   /*
-  ** Copy input to _ubufs[0]
+  ** Helper function to copy input to _ubuf or _ubufs chunks
   */
   void copy_input_to_ubuf(torch::Tensor input, bool chunk) {
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
@@ -512,19 +557,22 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       if (input.numel() != _ubufs[0].numel() || input.element_size() != _ubufs[0].element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
       }
-      CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].data_ptr(), input.data_ptr(),
-                                 input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
-                                 (cudaStream_t)stream_main));
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].data_ptr(), input.data_ptr(),
+                                     input.numel() * input.element_size(),
+                                     cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
     } else {
       if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
       }
-      CHECK_CUDA(cudaMemcpyAsync(_ubuf.data_ptr(), input.data_ptr(),
-                                 input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
-                                 (cudaStream_t)stream_main));
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubuf.data_ptr(), input.data_ptr(),
+                                      input.numel() * input.element_size(),
+                                      cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
     }
   }
 
+  /*
+  ** Helper function to export _ubuf output
+  */
   torch::Tensor get_ubuf_output(int comm_type) {
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     NVTE_Comm_Overlap_Type comm_type_ = static_cast<NVTE_Comm_Overlap_Type>(comm_type);
@@ -539,6 +587,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
   }
 
+  /*
+  ** Helper function to set the inverse Fp8 scale for the _ubuf tensor
+  */
   void set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
     _ubuf_scale_inv = scale_inv;
     _ubuf_scale_inv_initialized = true;

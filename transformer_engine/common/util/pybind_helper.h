@@ -6,14 +6,13 @@
 
 #include <pybind11/pybind11.h>
 
-#define NVTE_ADD_PYBIND11_BINDINGS(ext_mod)                                                      \
-    auto te_common = pybind11::module_::import("transformer_engine_pybind");                     \
-    ext_mod.attr("DType") = te_common.attr("DType");                                             \
-    ext_mod.attr("NVTE_Activation_Type") = te_common.attr("NVTE_Activation_Type");               \
-    ext_mod.attr("NVTE_Bias_Type") = te_common.attr("NVTE_Bias_Type");                           \
-    ext_mod.attr("NVTE_Mask_Type") = te_common.attr("NVTE_Mask_Type");                           \
-    ext_mod.attr("NVTE_QKV_Layout") = te_common.attr("NVTE_QKV_Layout");                         \
-    ext_mod.attr("NVTE_Fused_Attn_Backend") = te_common.attr("NVTE_Fused_Attn_Backend");         \
-    ext_mod.attr("NVTE_Comm_Overlap_Type") = te_common.attr("NVTE_Comm_Overlap_Type");           \
-    ext_mod.attr("NVTE_Comm_Overlap_Algo") = te_common.attr("NVTE_Comm_Overlap_Algo");           \
-    ext_mod.attr("CommGemmOverlapBase") = te_common.attr("CommGemmOverlapBase");
+#define NVTE_ADD_PYBIND11_BINDINGS(m)                                                       \
+    auto nvte = pybind11::module_::import("transformer_engine_pybind");                     \
+    m.attr("DType") = nvte.attr("DType");                                                   \
+    m.attr("NVTE_Activation_Type") = nvte.attr("NVTE_Activation_Type");                     \
+    m.attr("NVTE_Bias_Type") = nvte.attr("NVTE_Bias_Type");                                 \
+    m.attr("NVTE_Mask_Type") = nvte.attr("NVTE_Mask_Type");                                 \
+    m.attr("NVTE_QKV_Layout") = nvte.attr("NVTE_QKV_Layout");                               \
+    m.attr("NVTE_Fused_Attn_Backend") = nvte.attr("NVTE_Fused_Attn_Backend");               \
+    m.attr("NVTE_Comm_Overlap_Type") = nvte.attr("NVTE_Comm_Overlap_Type");                 \
+    m.attr("NVTE_Comm_Overlap_Algo") = nvte.attr("NVTE_Comm_Overlap_Algo");

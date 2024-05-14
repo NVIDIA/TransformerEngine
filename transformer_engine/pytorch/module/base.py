@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 
-import transformer_engine_extensions as tex
+import transformer_engine_extensions as tex  #pylint: disable=import-error
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
@@ -105,16 +105,6 @@ def initialize_ub(
                 return method
         raise KeyError(f"Given layer name {name} does not exist.")
 
-    def allgather_callback(send_capsule, recv_capsule, group):
-        send = torch.utils.dlpack.from_dlpack(send_capsule)
-        recv = torch.utils.dlpack.from_dlpack(recv_capsule)
-        pg = None if group == "world" else tp_group
-        torch.distributed.all_gather_into_tensor(recv, send, group=pg)
-
-    def barrier_callback(group):
-        pg = None if group == "world" else tp_group
-        torch.distributed.barrier(group=pg)
-
     def add_ub(
         name: str,
         method: str,
@@ -179,7 +169,7 @@ def initialize_ub(
                     set_sm_margin,          # Set SM margin
                     atomic_gemm,            # use a single GEMM with atomic-counters
                     aggregate,              # Aggregate 2X GEMM chunks
-                    is_reduce_scatter       # overlap with reduce scatter
+                    is_reduce_scatter,      # overlap with reduce scatter
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -193,10 +183,8 @@ def initialize_ub(
                     cga_size,               # CGA cluster size
                     num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
-                    atomic_gemm             # use a single GEMM with atomic-counters
+                    atomic_gemm,            # use a single GEMM with atomic-counters
                 )
-        ub_obj.allgather = allgather_callback
-        ub_obj.barrier = barrier_callback
         _ub_communicators[name] = ub_obj
 
     if ub_cfgs is not None:
@@ -206,6 +194,34 @@ def initialize_ub(
                 assert wgrad_name not in ub_cfgs
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_reduce_scatter_overlap.append(name)
+
+
+    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str):
+        pg = None if group == "world" else tp_group
+        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
+        global_data = torch.zeros(global_size, dtype=local_data.dtype, device='cuda')
+        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
+        return global_data.cpu()
+
+    def bcast_int_callback(data: torch.Tensor, src: int, group: str):
+        pg = None if group == "world" else tp_group
+        data = data.cuda()
+        torch.distributed.broadcast(data, src, group=pg)
+        data = data.cpu()
+
+    def barrier_callback(group: str):
+        pg = None if group == "world" else tp_group
+        torch.distributed.barrier(group=pg)
+
+    def free_callback(data: torch.Tensor):
+        del data
+
+    tex.set_collective_callbacks(
+        alloc_copy_allgather_callback,
+        bcast_int_callback,
+        barrier_callback,
+        free_callback
+    )
 
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
