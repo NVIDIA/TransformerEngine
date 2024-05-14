@@ -19,6 +19,8 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
+find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+
 # Check for cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
     "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
@@ -28,9 +30,8 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
             "Try running 'git submodule update --init --recursive' "
             "within the Transformer Engine source.")
 endif()
-
 include(${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
-find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR})
