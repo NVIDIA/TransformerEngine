@@ -336,11 +336,13 @@ class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-meth
 
             return amax.value, scale.value
 
-        i_amax, i_scale = generate_a_set(input_name_post_fix)
-        w_amax, w_scale = generate_a_set(weight_name_post_fix)
-        g_amax, g_scale = generate_a_set(grad_name_post_fix)
+        input_amax, input_scale = generate_a_set(input_name_post_fix)
+        weight_amax, weight_scale = generate_a_set(weight_name_post_fix)
+        grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
 
-        return FP8MetaPackage(i_amax, i_scale, w_amax, w_scale, g_amax, g_scale)
+        return FP8MetaPackage(input_amax, input_scale,
+                              weight_amax, weight_scale,
+                              grad_amax,  grad_scale)
 
 
 class DenseGeneral(TransformerEngineBase):
@@ -919,17 +921,21 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        gated_act_pool = [('gelu', 'linear'),
-                          ('silu', 'linear'),
-                          ('relu', 'linear'),
-                          ('quick_gelu', 'linear'),
-                          ('squared_relu', 'linear')]
-        act_pool = [('gelu',),
-                    ('silu',),
-                    ('relu',),
-                    ('quick_gelu',),
-                    ('squared_relu',)]
-        normalized_acts = []
+        gated_act_pool = [
+            ('gelu', 'linear'),
+            ('silu', 'linear'),
+            ('relu', 'linear'),
+            ('quick_gelu', 'linear'),
+            ('squared_relu', 'linear')
+        ]
+        act_pool = [
+            ('gelu',),
+            ('silu',),
+            ('relu',),
+            ('quick_gelu',),
+            ('squared_relu',)
+        ]
+        normalize_acts = []
         for act in self.activations:
             if not isinstance(act, str):
                 return False

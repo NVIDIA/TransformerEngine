@@ -93,23 +93,23 @@ class FP8MetaPackage:
 
     def __init__(
         self,
-        i_amax: jnp.ndarray,
-        i_scale: jnp.ndarray,
-        w_amax: jnp.ndarray,
-        w_scale: jnp.ndarray,
-        g_amax: jnp.ndarray,
-        g_scale: jnp.ndarray,
+        input_amax: jnp.ndarray,
+        input_scale: jnp.ndarray,
+        weight_amax: jnp.ndarray,
+        weight_scale: jnp.ndarray,
+        grad_amax: jnp.ndarray,
+        grad_scale: jnp.ndarray,
     ) -> None:
 
         self._amax_list = [None] * FP8MetaPackage.NUM_OF_META
         self._scale_list = [None] * FP8MetaPackage.NUM_OF_META
 
-        self._amax_list[FP8MetaPackage.INPUT_IDX] = i_amax
-        self._scale_list[FP8MetaPackage.INPUT_IDX] = i_scale
-        self._amax_list[FP8MetaPackage.WEIGHT_IDX] = w_amax
-        self._scale_list[FP8MetaPackage.WEIGHT_IDX] = w_scale
-        self._amax_list[FP8MetaPackage.GRAD_IDX] = g_amax
-        self._scale_list[FP8MetaPackage.GRAD_IDX] = g_scale
+        self._amax_list[FP8MetaPackage.INPUT_IDX] = input_amax
+        self._scale_list[FP8MetaPackage.INPUT_IDX] = input_scale
+        self._amax_list[FP8MetaPackage.WEIGHT_IDX] = weight_amax
+        self._scale_list[FP8MetaPackage.WEIGHT_IDX] = weight_scale
+        self._amax_list[FP8MetaPackage.GRAD_IDX] = grad_amax
+        self._scale_list[FP8MetaPackage.GRAD_IDX] = grad_scale
 
     @property
     def amax_list(self) -> List[jnp.ndarray]:
