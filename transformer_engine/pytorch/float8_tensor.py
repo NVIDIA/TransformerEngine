@@ -46,7 +46,7 @@ class _FromFloat8Func(torch.autograd.Function):
     """Cast from FP8 to other dtype"""
     @staticmethod
     def forward(
-        ctx,
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
@@ -63,7 +63,10 @@ class _FromFloat8Func(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad):
+    def backward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
         # Assume that we want gradients in full precision
         return grad, None
 
@@ -97,7 +100,7 @@ class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
     @staticmethod
     def forward(
-        ctx,
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: torch.Tensor,
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
@@ -106,7 +109,7 @@ class _ToFloat8Func(torch.autograd.Function):
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
-    ):
+    ) -> Float8Tensor:
 
         # Manually compute scale-inverse if needed
         if scale is not None and scale_inv is None:
@@ -189,7 +192,10 @@ class _ToFloat8Func(torch.autograd.Function):
         )
 
     @staticmethod
-    def backward(ctx, grad):
+    def backward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
         # Assume that we want gradients in full precision
         return grad, None, None, None, None, None, None, None
 

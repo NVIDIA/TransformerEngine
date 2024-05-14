@@ -11,6 +11,7 @@ from typing import Dict, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
+from flax.linen import fp8_ops
 
 from transformer_engine_jax import DType
 from transformer_engine_jax import get_cublasLt_version
@@ -65,6 +66,15 @@ def _format2dtypes(format_: Format):
     if format_ == Format.HYBRID:
         return jnp.float8_e4m3fn, jnp.float8_e5m2
     return jnp.bfloat16, jnp.bfloat16
+
+
+# fm32 is a custom dtype to specify the "add" rules as max operation.
+# This is typically used in Pipeline Parallelism + "MiconBatching > 1",
+# which is implemented via nn.scan. Without this custom dtype, nn.scan
+# would sum gradients from all micro-batches, and this is not the expected
+# behavior for FP8 meta. Instead, the summation of FP8 meta gradients should
+# be "MAX".
+FlaxFloatMeta32 = fp8_ops.fm32
 
 
 class FP8MetaPackage:
@@ -302,6 +312,42 @@ class FP8Helper:
             fp8_meta_arrays[fp8_scale_inv_idx] = 1 / sf
 
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
+
+    @staticmethod
+    def generate_fp8_meta_dtype_converter_pair(*args):
+        """
+        Generate a pair of conversion fun in-between fm32 and fp32.
+        """
+
+        def identical_fun(*metas):
+            return metas
+
+        def fm32_to_fp32_fun(*metas):
+            for meta in metas:
+                assert meta.dtype == FlaxFloatMeta32
+            return [jax.lax.convert_element_type(meta, jnp.float32) for meta in metas]
+
+        def fp32_to_fm32_fun(*metas):
+            for meta in metas:
+                assert meta.dtype == jnp.float32
+            return [jax.lax.convert_element_type(meta, FlaxFloatMeta32) for meta in metas]
+
+        # Make functions to be a vaild JAX type
+        partial_identical_fun = jax.tree_util.Partial(identical_fun)
+        partial_fm32_to_fp32_fun = jax.tree_util.Partial(fm32_to_fp32_fun)
+        partial_fp32_to_fm32_fun = jax.tree_util.Partial(fp32_to_fm32_fun)
+
+        if len(args) < 1:
+            return partial_identical_fun, partial_identical_fun
+
+        original_dtype = args[0].dtype
+        for arg in args:
+            assert arg.dtype == original_dtype
+
+        if original_dtype == FlaxFloatMeta32:
+            return partial_fm32_to_fp32_fun, partial_fp32_to_fm32_fun
+
+        return partial_identical_fun, partial_identical_fun
 
     @staticmethod
     def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
