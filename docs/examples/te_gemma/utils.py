@@ -6,6 +6,8 @@ import time
 import sys
 import IPython
 
+from te_gemma_loading_weights import from_pretrained_local
+
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -19,7 +21,7 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
-        #self.model_name = "" # <== Add model weight location here
+        self.model_name = "" # <== Add model weight location here
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
@@ -87,13 +89,15 @@ def init_baseline_model(hyperparams):
 
     return model
 
-def init_te_gemma_model(hyperparams, fp8_model_init=False, qkv_format="thd"):
+def init_te_gemma_model(hyperparams, fp8_model_init=False, qkv_format="thd", cuda_graphs=False):
     # Init the model
-    from te_gemma import TEGemmaForCausalLM
+    from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
+    cls = TEGemmaForCausalLMCudaGraphs if cuda_graphs else TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
     config.fuse_qkv_params = hyperparams.fuse_qkv_params
-    model = TEGemmaForCausalLM.from_pretrained_local(
+    model = from_pretrained_local(
+        cls,
             hyperparams.model_name,
             config=config,
             torch_dtype=torch.bfloat16,

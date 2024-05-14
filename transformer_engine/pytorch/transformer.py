@@ -618,6 +618,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states = cast_if_needed(
                 hidden_states, torch.get_autocast_gpu_dtype()
             )
+        
 
         # Self attention.
         self_attention_outputs = self.self_attention(

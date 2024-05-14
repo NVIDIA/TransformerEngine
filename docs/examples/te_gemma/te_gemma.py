@@ -4,7 +4,7 @@
 
 from contextlib import contextmanager
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Optional
 
 from transformers.generation import *
 from transformers.generation.utils import *

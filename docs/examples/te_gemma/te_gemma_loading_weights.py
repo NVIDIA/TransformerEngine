@@ -1,9 +1,8 @@
 import os
 import re
 import gc
-from contextlib import contextmanager
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import List
 
 from transformers.generation import *
 from transformers.generation.utils import *
@@ -13,8 +12,14 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
 from transformers.utils.hub import get_checkpoint_shard_files
 
+"""
+    This file contains logic of mapping the HuggingFace GemmaModel parameters 
+    with TransformerEngine TransformerLayer. When we have initialized Transformer models
+    both with HF and with TE, we can copy parameters from the first to the second.
+"""
 
-def from_pretrained_local(cls, pretrained_model_name_or_path, *args, config, fp8_init=False, qkv_format="bshd", **kwargs):
+
+def from_pretrained_local(cls, pretrained_model_name_or_path, config, fp8_init=False, qkv_format="bshd"):
     """
     Custom method adapted from `from_pretrained` method in HuggingFace
     Transformers repo: 
