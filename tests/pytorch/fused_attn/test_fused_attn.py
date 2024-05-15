@@ -329,6 +329,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
                 fused_attn_fwd.min().item(), fused_attn_fwd.max().item()))  
             print("flash_attn_fwd min {:.8f} max {:.8f}".format(
                 flash_attn_fwd.min().item(), flash_attn_fwd.max().item()))  
+            torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
+            torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             print("fused_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
@@ -554,6 +556,8 @@ def _run_dot_product_attention(
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
+        #os.environ["NVTE_FUSED_ATTN"] = "1"
+        #os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
@@ -579,10 +583,27 @@ def _run_dot_product_attention(
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
-    #print('seqlens_q',seqlens_q)
-    #print('seqlens_kv',seqlens_kv)
-    #print('cu_seqlens_q',cu_seqlens_q)
-    #print('cu_seqlens_kv',cu_seqlens_kv)
+    print('seqlens_q',seqlens_q)
+    print('seqlens_kv',seqlens_kv)
+    print('cu_seqlens_q',cu_seqlens_q)
+    print('cu_seqlens_kv',cu_seqlens_kv)
+
+    seqlens_q_after_pad = seqlens_q.clone()
+    seqlens_kv_after_pad = seqlens_kv.clone()
+    cu_seqlens_q_after_pad = cu_seqlens_q.clone()
+    cu_seqlens_kv_after_pad = cu_seqlens_kv.clone()
+    pad_between_seqs = True
+    pad_len = 0
+    if pad_between_seqs:
+        pad_len = 3
+        seqlens_q_after_pad = seqlens_q + pad_len
+        seqlens_kv_after_pad = seqlens_kv + pad_len
+        cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
+        cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
+    print('seqlens_q_after_pad',seqlens_q_after_pad)
+    print('seqlens_kv_after_pad',seqlens_kv_after_pad)
+    print('cu_seqlens_q_after_pad',cu_seqlens_q_after_pad)
+    print('cu_seqlens_kv_after_pad',cu_seqlens_kv_after_pad)
 
     # Create attention mask if padding
     attention_mask = None
@@ -630,13 +651,14 @@ def _run_dot_product_attention(
         'h'  : config.num_heads,
         'hg' : config.num_gqa_groups,
         'd'  : config.head_dim,
-        't'  : cu_seqlens_q[-1],
-        'tg' : cu_seqlens_kv[-1],
+        't'  : cu_seqlens_q_after_pad[-1],
+        'tg' : cu_seqlens_kv_after_pad[-1],
         '3'  : 3,
         '2'  : 2,
         '1'  : 1,
         }
     inp = []
+    inp_orig = []
     for i,layout in enumerate(qkv_layout.split('_')):
         layout = '_'.join(layout)
         if i == 0:
@@ -645,8 +667,23 @@ def _run_dot_product_attention(
             layout = layout.replace('s', 'skv')
             layout = layout.replace('h', 'hg')
             layout = layout.replace('t', 'tg')
+        #print('--------- layout ',layout,cu_seqlens_q)
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        tensor_orig = tensor
+        if pad_between_seqs:
+            tensor_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            if layout == 't_h_d':
+                for i in range(1, config.batch_size+1):
+                    tensor[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+                    #print('============ thd ',i,tensor_orig.shape, tensor_orig.is_contiguous())
+                    #print('============ thd ',i,tensor_orig.shape, cu_seqlens_q_after_pad[i-1],seqlens_q[i-1])
+            if layout == 'tg_hg_d':
+                for i in range(1, config.batch_size+1):
+                    tensor[cu_seqlens_kv[i-1]:cu_seqlens_kv_after_pad[i-1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+                    #print('============ tghd ',i,tensor_orig.shape)
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split('_')):
@@ -655,31 +692,36 @@ def _run_dot_product_attention(
                 split_dim = dim
                 break
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
+        tensors_orig = torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
         for j in range(tensor_count):
             if split_dim != 0:
                 inp.append(tensors[j].squeeze(split_dim))
+                inp_orig.append(tensors_orig[j].squeeze(split_dim))
             else:
                 inp.append(tensors[j])
+                inp_orig.append(tensors_orig[j])
     for i in range(3):
         inp[i].requires_grad = True
+        inp_orig[i].requires_grad = True
+        #print('------------ inp_orig[i]',inp_orig[i].shape)
 
     # Create ragged offsets for q/k/v
     seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
     qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
     if qkv_format == 'thd':
-        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q
+        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
         if qkv_group == 'hd_hd_hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
         if qkv_group in ['3hd', 'h3d']:
-            seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-            seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
+            seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
         if qkv_group in ['hd_2hd', 'hd_h2d']:
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
     print('seq_offsets_q',seq_offsets_q)
     print('seq_offsets_k',seq_offsets_k)
     print('seq_offsets_v',seq_offsets_v)
@@ -691,6 +733,13 @@ def _run_dot_product_attention(
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split('_')]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
+    out_grad_orig = out_grad
+    if pad_between_seqs:
+        out_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        if qkv_format_kv == 't_h_d':
+            for i in range(1, config.batch_size+1):
+                out_grad[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
+                out_grad_orig = torch.cat([out_grad_orig, out_grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
 
     # Create bias
     if config.attn_bias_type in ['no_bias', 'alibi']:
@@ -729,10 +778,23 @@ def _run_dot_product_attention(
     )
 
     # Run a forward and backward pass
-    out = block(inp[0], inp[1], inp[2],
+    if backend == "FlashAttention":
+        q = inp_orig[0]
+        k = inp_orig[1]
+        v = inp_orig[2]
+        d_out = out_grad_orig
+    if backend == "FusedAttention":
+        q = inp[0]
+        k = inp[1]
+        v = inp[2]
+        d_out = out_grad
+    print('ccccccccu ',cu_seqlens_q)
+    out = block(q, k, v,
             window_size=window_size,
             attention_mask=attention_mask,
             qkv_format=qkv_format,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             seq_offsets_q=seq_offsets_q,
@@ -745,9 +807,24 @@ def _run_dot_product_attention(
             core_attention_bias=bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
-    out.backward(out_grad)
+    out.backward(d_out)
+    print('---- out',out.shape)
 
-    return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    #return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    if backend == "FlashAttention":
+        return out, (q.grad, k.grad, v.grad)
+    if backend == "FusedAttention":
+        out_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        q_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        k_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        v_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        for i in range(1, config.batch_size+1):
+            out_orig = torch.cat([out_orig, out[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+            q_grad_orig = torch.cat([q_grad_orig, q.grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+            k_grad_orig = torch.cat([k_grad_orig, k.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+            v_grad_orig = torch.cat([v_grad_orig, v.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+        return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+        
 
 
 model_configs_te_layer = {
