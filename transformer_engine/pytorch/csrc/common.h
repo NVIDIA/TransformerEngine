@@ -150,19 +150,25 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               void* scale_inv_ptr
 );
 
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
                                                               const transformer_engine::DType type
 );
 
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
+                                                              const transformer_engine::DType dtype,
+                                                              at::Tensor amax = at::Tensor(),
+                                                              const at::Tensor scale = at::Tensor(),
+                                                              at::Tensor scale_inv = at::Tensor(),
+                                                              int64_t fp8_idx = -1
+);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
-                                                              at::Tensor amax,
-                                                              const at::Tensor scale,
-                                                              at::Tensor scale_inv);
+                                                              at::Tensor amax = at::Tensor(),
+                                                              const at::Tensor scale = at::Tensor(),
+                                                              at::Tensor scale_inv = at::Tensor(),
+                                                              int64_t fp8_idx = -1
+);
 
 
 size_t product(const std::vector<size_t> &shape);

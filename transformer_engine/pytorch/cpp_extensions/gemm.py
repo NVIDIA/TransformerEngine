@@ -167,7 +167,6 @@ def gemm(
     extra_output_tensor: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
-
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"

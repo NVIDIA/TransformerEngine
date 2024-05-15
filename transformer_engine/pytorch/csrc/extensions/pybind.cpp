@@ -150,34 +150,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("set_collective_callbacks", &te_ub::set_collective_callbacks);
 
   py::class_<te_ub::UbufCommOverlap>(m, "UbufCommOverlap", py::module_local())
-    .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int,
-                  bool, bool>())
-    // overlap algorithms
+    .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, bool, bool>())
     .def("bulk_overlap", &te_ub::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &te_ub::UbufCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_rs", &te_ub::UbufCommOverlap::atomic_gemm_overlap_rs)
-    // I/O utils
     .def("copy_input_to_ubuf", &te_ub::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &te_ub::UbufCommOverlap::get_ubuf_output)
     .def("set_ubuf_scale_inv", &te_ub::UbufCommOverlap::set_ubuf_scale_inv)
-    // overlap properties
     .def("is_fp8_ubuf", &te_ub::UbufCommOverlap::is_fp8_ubuf)
     .def("is_atomic_gemm", &te_ub::UbufCommOverlap::is_atomic_gemm)
     .def("is_p2p_overlap", &te_ub::UbufCommOverlap::is_p2p_overlap);
 
   py::class_<te_ub::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap", py::module_local())
-    .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int,
-                  bool, bool, bool, bool>())
-    // overlap algorithms
+    .def(py::init<torch::Tensor &, int, int, int, int, int, int, bool, bool, bool, bool>())
     .def("split_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_ag)
     .def("split_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_ag_p2p", &te_ub::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
     .def("atomic_gemm_overlap_rs_p2p", &te_ub::UbufP2PCommOverlap::atomic_gemm_overlap_rs)
-    // I/O utils
     .def("copy_input_to_ubuf", &te_ub::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &te_ub::UbufP2PCommOverlap::get_ubuf_output)
     .def("set_ubuf_scale_inv", &te_ub::UbufP2PCommOverlap::set_ubuf_scale_inv)
-    // overlap properties
     .def("is_fp8_ubuf", &te_ub::UbufP2PCommOverlap::is_fp8_ubuf)
     .def("is_atomic_gemm", &te_ub::UbufP2PCommOverlap::is_atomic_gemm)
     .def("is_p2p_overlap", &te_ub::UbufP2PCommOverlap::is_p2p_overlap);

@@ -164,8 +164,6 @@ def initialize_ub(
                     local_size,             # Size of the TP group
                     num_splits,
                     tex.NVTE_MAX_USERBUFFER_STREAMS,
-                    cga_size,               # CGA cluster size
-                    num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
                     atomic_gemm,            # use a single GEMM with atomic-counters
                     aggregate,              # Aggregate 2X GEMM chunks

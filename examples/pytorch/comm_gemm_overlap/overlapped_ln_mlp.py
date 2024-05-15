@@ -1,8 +1,14 @@
+#!/usr/bin/python3
+
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import os
+import sys
+import faulthandler
+import pdb
+import traceback
 import argparse
 from functools import partial
 
@@ -31,10 +37,15 @@ def dist_print(rank, msg, end='\n', all_ranks=False):
         print(f"[RANK-{rank}] {msg}", end=end)
 
 def train(nprocs, config, rank):
+    # Debug log
+    if config.debug:
+        dbg_log = open(f'faulthandler_{rank}.log', 'w+')  #pylint: disable=consider-using-with
+        faulthandler.enable(dbg_log)
+
     # Initialize torch.distributed global process group and get TP group
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl",
-                            init_method=None if config.use_torchrun else "file:///tmp/rdzv",
+                            init_method=None if config.with_torchrun else "file:///tmp/rdzv",
                             rank=rank,
                             world_size=nprocs)
     tp_group = dist.new_group(backend="nccl")
@@ -114,10 +125,16 @@ def train(nprocs, config, rank):
     te.destroy_ub()
     dist.destroy_process_group(tp_group)
 
+    if config.debug:
+        dbg_log.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test a te.LayerNormMLP module with "
                                                  "GEMM+comm overlap via Userbuffers.")
+    parser.add_argument("-np", "--nprocs", type=int, default=torch.cuda.device_count(),
+                        help="Number of processes/GPUs to run with. " + \
+                             "This option is ignored when launching with torchrun.")
     parser.add_argument('-i', "--num-iters", type=int, default=5,
                         help="Number of dummy 'training' iterations.")
     parser.add_argument('-b', "--batch-size", type=int, default=2,
@@ -136,18 +153,27 @@ if __name__ == "__main__":
                         help="Enables the te.fp8_autocast() context.")
     parser.add_argument("--no-comm-overlap", action="store_true", default=False,
                         help="Disable the comm+GEMM overlap.")
-    parser.add_argument("--use-torchrun", action="store_true", default=False,
-                        help="Disable `torch.multiprocessing.spawn` for launching with `torchrun`.")
     parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
                         help="Data type for input tensor and Transformer Engine module parameters.")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
     args = parser.parse_args()
 
-    if args.use_torchrun:
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        world_size = int(os.getenv("WORLD_SIZE", "1"))
-        train(world_size, args, local_rank)
-    else:
-        ngpus = torch.cuda.device_count()
-        worker = partial(train, ngpus, args)
-        mp.spawn(worker, nprocs=ngpus)
+    try:
+        if "TORCHELASTIC_RUN_ID" in os.environ.keys():
+            setattr(args, 'with_torchrun', True)
+            local_rank = int(os.environ["LOCAL_RANK"])
+            world_size = int(os.environ["WORLD_SIZE"])
+            train(world_size, args, local_rank)
+        else:
+            setattr(args, 'with_torchrun', False)
+            worker = partial(train, args.nprocs, args)
+            mp.spawn(worker, nprocs=args.nprocs)
+
+    except Exception as e:  #pylint: disable=broad-exception-caught
+        if args.debug:
+            extype, value, tb = sys.exc_info()
+            traceback.print_exc()
+            pdb.post_mortem(tb)
+        else:
+            raise e

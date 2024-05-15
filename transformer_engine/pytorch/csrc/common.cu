@@ -24,25 +24,12 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   return transformer_engine::TensorWrapper(data_ptr, shape, type);
 }
 
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr,
     const std::vector<size_t>& shape,
     const transformer_engine::DType type) {
   return transformer_engine::TensorWrapper(data_ptr, shape, type);
 }
-
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor) {
-    transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
-    std::vector<size_t> shape;
-
-    for (auto s : tensor.sizes()) {
-        shape.push_back(s);
-    }
-    return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
-}
-
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr,
@@ -57,27 +44,40 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
                                            reinterpret_cast<float*>(scale_inv_ptr));
 }
 
+transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
+                                                              const transformer_engine::DType dtype,
+                                                              at::Tensor amax,
+                                                              const at::Tensor scale,
+                                                              at::Tensor scale_inv,
+                                                              int64_t fp8_idx) {
+    if (tensor.numel() == 0)
+        return transformer_engine::TensorWrapper(nullptr, std::vector<size_t>{0}, dtype);
+
+    if (amax.numel())
+        NVTE_CHECK(amax.scalar_type() == at::kFloat);
+    if (scale.numel())
+        NVTE_CHECK(scale.scalar_type() == at::kFloat);
+    if (scale_inv.numel()) {
+        NVTE_CHECK(scale_inv.scalar_type() == at::kFloat);
+        if (fp8_idx >= 0) scale_inv = scale_inv[fp8_idx];
+    }
+
+    std::vector<size_t> shape;
+    for (auto s : tensor.sizes())
+        shape.push_back(s);
+
+    return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype,
+                                       getDataPtr(amax), getDataPtr(scale), getDataPtr(scale_inv));
+}
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
                                                               at::Tensor amax,
                                                               const at::Tensor scale,
-                                                              at::Tensor scale_inv) {
+                                                              at::Tensor scale_inv,
+                                                              int64_t fp8_idx) {
     transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
-    std::vector<size_t> shape;
-
-    for (auto s : tensor.sizes()) {
-        shape.push_back(s);
-    }
-    NVTE_CHECK(amax.scalar_type() == at::kFloat);
-    NVTE_CHECK(scale.scalar_type() == at::kFloat);
-    NVTE_CHECK(scale_inv.scalar_type() == at::kFloat);
-
-    return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype,
-                                       amax.data_ptr(),
-                                       scale.data_ptr(),
-                                       scale_inv.data_ptr());
+    return makeTransformerEngineTensor(tensor, dtype, amax, scale, scale_inv, fp8_idx);
 }
-
 
 size_t product(const std::vector<size_t> &shape) {
     size_t ret = 1;

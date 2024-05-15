@@ -2631,7 +2631,7 @@ void reduce_bf16_out(
   void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream
 ) {
   size_t num_threads = MAX_THREADS / 4;
-  size_t num_blocks = (input_size +num_threads - 1) / num_threads;
+  size_t num_blocks = (input_size + num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
   reduce_bf16_cuda<in_type><<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
