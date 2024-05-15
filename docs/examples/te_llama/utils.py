@@ -7,7 +7,7 @@ import sys
 import IPython
 
 import torch
-from torch.optim import AdamW
+from torch.optim import SGD
 from torch.utils.data import DataLoader
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup, AutoConfig
@@ -117,7 +117,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate)
+    optimizer = SGD(params = model.parameters(), lr=hyperparams.learning_rate)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,

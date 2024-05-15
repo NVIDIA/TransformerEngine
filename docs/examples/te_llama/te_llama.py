@@ -100,13 +100,13 @@ class TELlamaForCausalLM:
         subfolder = ""
         variant = None
         if os.path.isfile(
-                    os.path.join(pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_INDEX_NAME, variant))
+                os.path.join(pretrained_model_name_or_path, subfolder, _add_variant("model.safetensors.index.json", variant))
             ):
-                # Load from a sharded PyTorch checkpoint
-                archive_file = os.path.join(
-                    pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_INDEX_NAME, variant)
-                )
-                is_sharded = True
+            # Load from a sharded PyTorch checkpoint
+            archive_file = os.path.join(
+                pretrained_model_name_or_path, subfolder, _add_variant("model.safetensors.index.json", variant)
+            )
+            is_sharded = True
         else:
             raise AssertionError("Only sharded PyTorch ckpt format supported at the moment")
 
