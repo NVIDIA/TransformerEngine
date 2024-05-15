@@ -119,14 +119,15 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     def __init__(self, max_batch_size, max_sequence_length, qkv_format="bshd"):
         self.max_sequence_length = max_sequence_length
         self.max_batch_size = max_batch_size
-        self.sequence_len_offset = 0
-        self.batch_size_offset = 0
         self.key_value_memory_dict = {}
+        self.qkv_format = qkv_format
         
-
         if qkv_format == "thd":
             self.seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
             self.incoming_seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
+        else:
+            self.sequence_len_offset = 0
+            self.batch_size_offset = 0
 
     def swap_key_value_dict(self, batch_indices):
         """
@@ -153,8 +154,28 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
     
-    def set_before_new_input(self, new_input, offsets_change=None, pad_token_id=None):
-        assert offsets_change in ["all_zero", None]
+    
+    def thd_setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
+        """
+            After every context/generation phase, the parameters representing
+            for example sequence lengths and incmoing sequence lengths,
+            need to be updated. This function does exactly that.
+
+
+            Parameters
+            ----------
+            new_input: torch.Tensor
+                Tensor with token_ids (not embeddings!) on which we want to do next forward pass.
+            reset: int
+                If reset=True, all previous sequence lengths will be set to 0. 
+                It is supposed to be used after last generation phase to 
+                allow inference_params to be reused.
+            pad_token_id: int
+                Value of padding token - used to compute sequence_lengths. If pad_token_id=None, 
+                we assume that all new_input sequence lengths
+                are equal to the corresponding dimension of new_input.
+        """
+        assert self.qkv_format == "thd"
 
         self.seq_len.copy_(self.seq_len + self.incoming_seq_len)
         if pad_token_id is not None:
@@ -163,8 +184,79 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             self.incoming_seq_len.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
         self.max_incoming_seq_len = new_input.shape[1]
 
-        if offsets_change == "all_zero":
+        if reset:
             self.seq_len.copy_(torch.zeros_like(self.seq_len))
+    
+    def save_new_key_and_value_layer(self, layer_number, key_layer, value_layer):
+        """
+            Saves key_layer and value_layer in the cache.
+        """
+        (inference_key_memory, inference_value_memory,
+            ) = self.key_value_memory_dict[layer_number]
+        if self.qkv_format == "thd":
+            batch_size = key_layer.shape[0]
+            channels = inference_key_memory.shape[2] * inference_key_memory.shape[3] # h * d
+            tex.attention_copy(
+                inference_key_memory, 
+                self.seq_len, 
+                self.incoming_seq_len,
+                key_layer, 
+                self.max_incoming_seq_len,
+                self.max_sequence_length,  
+                batch_size,
+                channels)
+            
+            tex.attention_copy(
+                inference_value_memory, 
+                self.seq_len, 
+                self.incoming_seq_len,
+                value_layer, 
+                self.max_incoming_seq_len,
+                self.max_sequence_length,  
+                batch_size,
+                channels)
+        else:
+            assert self.qkv_format in ["bshd", "sbhd"], "Attention format not supported by the inference."
+            batch_start = self.batch_size_offset
+            batch_end = batch_start + key_layer.size(1)
+            assert batch_end <= inference_key_memory.size(1)
+
+            sequence_start = self.sequence_len_offset
+            sequence_end = sequence_start + key_layer.size(0)
+            assert sequence_end <= inference_key_memory.size(0)
+
+            # Copy keys and values into KV-cache
+            inference_key_memory[
+                sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
+            inference_value_memory[
+                sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
+            key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
+            value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+            return key_layer, value_layer
+    
+    def pick_freqs(self, freq, pos_emb_buffer):
+        """
+            Parameters
+            ----------
+            freq: torch.Tensor [max_pos_emb, 1, 1, d]
+                Tensor with frequencies used in rotarty positional encoding application.
+            pos_emb_buffer: torch.Tensor [b, max_incoming_seq_len, 1, d]
+                Buffer for positional embedding frequencies for each sequence in batch.
+                
+            If self.incoming_seq_len contains numbers [s1, s2, ...], then
+            pos_emb_buffer[0, :] = freq[s1:(s1 + max_incoming_seq_len), 1, 1, d].
+        """
+        batch_size, _, _ , hidden_dim = pos_emb_buffer.shape
+        tex.get_values(
+            freq,
+            self.seq_len,
+            self.incoming_seq_len, 
+            pos_emb_buffer,
+            self.max_incoming_seq_len,
+            batch_size, 
+            hidden_dim
+        )
+                
 
 
 @torch.no_grad()
@@ -3215,9 +3307,6 @@ class DotProductAttention(torch.nn.Module):
         key_layer = key_layer.contiguous()
         value_layer = value_layer.contiguous()
 
-        
-
-        
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'DotProductAttention only supports CUDA tensors.'
@@ -3266,46 +3355,15 @@ class DotProductAttention(torch.nn.Module):
             ) = inference_params.key_value_memory_dict[self.layer_number]
 
             if qkv_format in ["bshd", "sbhd"]:
-                batch_start = inference_params.batch_size_offset
-                batch_end = batch_start + key_layer.size(1)
-                assert batch_end <= inference_key_memory.size(1)
-
-                sequence_start = inference_params.sequence_len_offset
-                sequence_end = sequence_start + key_layer.size(0)
-                assert sequence_end <= inference_key_memory.size(0)
-
-                # Copy keys and values into KV-cache
-                inference_key_memory[
-                    sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
-                inference_value_memory[
-                    sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
-                key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-                value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+                key_layer, value_layer = inference_params.save_new_key_and_value_layer(self.layer_number, key_layer, value_layer)
             elif qkv_format == "thd":
+
+                inference_params.save_new_key_and_value_layer(self.layer_number, key_layer, value_layer)
+
                 """
-                    inference_params.seq_len - lengths of processed sequences
+                    We compute parameters needed by the THD attention with offsets.
                 """
                 batch_size = query_layer.shape[0] 
-
-                tex.attention_copy(
-                    inference_key_memory, 
-                    inference_params.seq_len, 
-                    inference_params.incoming_seq_len,
-                    key_layer, 
-                    inference_params.max_incoming_seq_len,
-                    inference_params.max_sequence_length,  
-                    batch_size,
-                    self.channels)
-                tex.attention_copy(
-                    inference_value_memory, 
-                    inference_params.seq_len, 
-                    inference_params.incoming_seq_len,
-                    value_layer, 
-                    inference_params.max_incoming_seq_len,
-                    inference_params.max_sequence_length,  
-                    batch_size,
-                    self.channels)
-                    
                 max_seqlen_q = inference_params.max_incoming_seq_len
                 max_seqlen_kv = inference_params.max_sequence_length
                 cu_seqlens_q = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
@@ -3321,6 +3379,7 @@ class DotProductAttention(torch.nn.Module):
                 seq_offsets_k.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
                 seq_offsets_v.copy_(seq_offsets_k)
 
+                # qkv layers are reshaped to the format [t, h, d]
                 query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
                 key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
                 value_layer = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16)
@@ -4359,36 +4418,27 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
             
             if self.qkv_format == "thd" and inference_params is not None:
-                key_layer = key_layer.contiguous() # verify if needed
-                query_layer = query_layer.contiguous() # verify if needed
+                # For thd attention incoming tokens can be on different positions,
+                # so we need to copy different positional encoding freqency
+                # for every sequence in a batch.
+                #
+                # For example if sequence lengths in context phase are: 2 and 5 (batch size=2),
+                # in first generation phase key_layer have shape [2, 1, d]. 
+                # key_layer[0, :] corresponds  to the token with position 3 = 2 + 1,
+                # and key_layer [1, :] corresponds  to the token with position 6 = 5 + 1.
+                key_layer = key_layer.contiguous()
+                query_layer = query_layer.contiguous()
                 batch_size, hidden_dim = query_layer.shape[0], query_layer.shape[-1]
 
                 q_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
                 k_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
                 q_freq, k_freq = rotary_pos_emb
 
-                # inference_params.pick_freqs(q_freq, q_pos_emb)
-                # inference_params.pick_freqs(k_freq, k_pos_emb)
+                # inference_params object is aware of the positions of incoming tokens.
+                inference_params.pick_freqs(q_freq, q_pos_emb) 
+                inference_params.pick_freqs(k_freq, k_pos_emb)
                 
-                tex.get_values(
-                    q_freq, # [max_pos_emb, s, 1, d]
-                    inference_params.seq_len, # [b]
-                    inference_params.incoming_seq_len, # [b] 
-                    q_pos_emb, # [b, 1, 1, d]
-                    inference_params.max_incoming_seq_len,
-                    batch_size, 
-                    hidden_dim
-                )
-                tex.get_values(
-                    k_freq, 
-                    inference_params.seq_len, 
-                    inference_params.incoming_seq_len, 
-                    k_pos_emb, 
-                    inference_params.max_incoming_seq_len,
-                    batch_size, 
-                    hidden_dim
-                )
-                
+                # We need to apply different positional encoding for each element of the batch.
                 for i in range(batch_size):
                     key_layer[i,].copy_(apply_rotary_pos_emb(key_layer[i,:].unsqueeze(0), k_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
                     query_layer[i,:].copy_(apply_rotary_pos_emb(query_layer[i,:].unsqueeze(0), q_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
