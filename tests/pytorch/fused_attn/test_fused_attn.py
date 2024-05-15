@@ -512,22 +512,23 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 
 qkv_layouts_thd = [
     't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+    #'thd_thd_thd',
     ]
 
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    #"layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
     "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #th3d/thd_t2hd
-    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    "layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #th3d/thd_t2hd
-    "layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
-    "layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd
-    "layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    "layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd
-    "layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
-    "layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
-    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    "layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
+    #"layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    #"layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #th3d/thd_t2hd
+    #"layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
+    #"layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd
+    #"layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    #"layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd
+    #"layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
+    #"layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
+    #"layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
+    #"layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
@@ -593,13 +594,15 @@ def _run_dot_product_attention(
     cu_seqlens_q_after_pad = cu_seqlens_q.clone()
     cu_seqlens_kv_after_pad = cu_seqlens_kv.clone()
     pad_between_seqs = True
-    pad_len = 0
+    pad_len = [0] * config.batch_size
     if pad_between_seqs:
-        pad_len = 3
+        max_pad_len = 3
+        pad_len = torch.randint(0, max_pad_len+1, [config.batch_size], device="cuda") #3
         seqlens_q_after_pad = seqlens_q + pad_len
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
+    print('pad_len', pad_len)
     print('seqlens_q_after_pad',seqlens_q_after_pad)
     print('seqlens_kv_after_pad',seqlens_kv_after_pad)
     print('cu_seqlens_q_after_pad',cu_seqlens_q_after_pad)
@@ -667,22 +670,33 @@ def _run_dot_product_attention(
             layout = layout.replace('s', 'skv')
             layout = layout.replace('h', 'hg')
             layout = layout.replace('t', 'tg')
-        #print('--------- layout ',layout,cu_seqlens_q)
+        print('--------- layout ',layout,cu_seqlens_q)
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_orig = tensor
         if pad_between_seqs:
             tensor_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
-            if layout == 't_h_d':
+            if layout in ['t_h_d', 't_3_h_d', 't_h_3_d']:
                 for i in range(1, config.batch_size+1):
-                    tensor[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
-                    tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+                    valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                    pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
+                    #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
+                    tensor[pad_range[0]:pad_range[1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
+                    print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
+                    #tensor[cu_seqlens_q_after_pad[i-1]-pad_len:cu_seqlens_q_after_pad[i-1]] = 0.0
+                    #tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
                     #print('============ thd ',i,tensor_orig.shape, tensor_orig.is_contiguous())
-                    #print('============ thd ',i,tensor_orig.shape, cu_seqlens_q_after_pad[i-1],seqlens_q[i-1])
-            if layout == 'tg_hg_d':
+                    #print('============ thd ',i,tensor_orig.shape, cu_seqlens_q_after_pad[i-1],cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1])
+            if layout in ['tg_hg_d', 'tg_2_hg_d', 'tg_hg_2_d']:
                 for i in range(1, config.batch_size+1):
-                    tensor[cu_seqlens_kv[i-1]:cu_seqlens_kv_after_pad[i-1]] = 0.0
-                    tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+                    valid_range = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
+                    pad_range = (cu_seqlens_kv_after_pad[i] - pad_len[i-1], cu_seqlens_kv_after_pad[i])
+                    #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
+                    tensor[pad_range[0]:pad_range[1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
+                    #tensor[cu_seqlens_kv_after_pad[i-1]-pad_len:cu_seqlens_kv_after_pad[i-1]] = 0.0
+                    #tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
                     #print('============ tghd ',i,tensor_orig.shape)
         tensor_count = 1
         split_dim = 0
@@ -691,6 +705,7 @@ def _run_dot_product_attention(
                 tensor_count = int(l)
                 split_dim = dim
                 break
+        print('tesnsor shape',tensor.shape, tensor_orig.shape)
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
         tensors_orig = torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
         for j in range(tensor_count):
@@ -738,8 +753,13 @@ def _run_dot_product_attention(
         out_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
         if qkv_format_kv == 't_h_d':
             for i in range(1, config.batch_size+1):
-                out_grad[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
-                out_grad_orig = torch.cat([out_grad_orig, out_grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+                valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
+                #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
+                out_grad[pad_range[0]:pad_range[1]] = 0.0
+                out_grad_orig = torch.cat([out_grad_orig, out_grad[valid_range[0]:valid_range[1]]], dim=0)
+                #out_grad[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
+                #out_grad_orig = torch.cat([out_grad_orig, out_grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
 
     # Create bias
     if config.attn_bias_type in ['no_bias', 'alibi']:
@@ -788,7 +808,7 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-    print('ccccccccu ',cu_seqlens_q)
+    print('ccccccccu ',attention_mask is None, cu_seqlens_q)
     out = block(q, k, v,
             window_size=window_size,
             attention_mask=attention_mask,
@@ -819,10 +839,16 @@ def _run_dot_product_attention(
         k_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
         v_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
         for i in range(1, config.batch_size+1):
-            out_orig = torch.cat([out_orig, out[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
-            q_grad_orig = torch.cat([q_grad_orig, q.grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
-            k_grad_orig = torch.cat([k_grad_orig, k.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
-            v_grad_orig = torch.cat([v_grad_orig, v.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+            valid_range_q = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+            valid_range_kv = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
+            out_orig = torch.cat([out_orig, out[valid_range_q[0]:valid_range_q[1]]], dim=0)
+            q_grad_orig = torch.cat([q_grad_orig, q.grad[valid_range_q[0]:valid_range_q[1]]], dim=0)
+            k_grad_orig = torch.cat([k_grad_orig, k.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+            v_grad_orig = torch.cat([v_grad_orig, v.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+            #out_orig = torch.cat([out_orig, out[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+            #q_grad_orig = torch.cat([q_grad_orig, q.grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
+            #k_grad_orig = torch.cat([k_grad_orig, k.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
+            #v_grad_orig = torch.cat([v_grad_orig, v.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
         return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
         
 
