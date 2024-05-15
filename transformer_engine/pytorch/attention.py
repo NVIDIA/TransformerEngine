@@ -116,13 +116,17 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                          maximum sequence length during inference.
     """
 
-    def __init__(self, max_batch_size, max_sequence_length):
+    def __init__(self, max_batch_size, max_sequence_length, qkv_format="bshd"):
         self.max_sequence_length = max_sequence_length
         self.max_batch_size = max_batch_size
         self.sequence_len_offset = 0
         self.batch_size_offset = 0
         self.key_value_memory_dict = {}
-        self.seq_len=torch.tensor((1000))
+        
+
+        if qkv_format == "thd":
+            self.seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
+            self.incoming_seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
 
     def swap_key_value_dict(self, batch_indices):
         """
@@ -149,13 +153,18 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
     
-    def set_before_new_input(self, new_input, pad_token_id=None, offsets_change):
-        assert offsets_change in ["all_zero", "+1", None]
+    def set_before_new_input(self, new_input, offsets_change=None, pad_token_id=None):
+        assert offsets_change in ["all_zero", None]
 
-        lengths = torch.sum(new_input.ne(pad_token_id), dim=-1).squeeze()
-        self.seq_len = torch.zeros_like(lengths).to(torch.int32).clone().cuda()
-        self.incoming_seq_len = lengths.to(torch.int32).clone().cuda()
+        self.seq_len.copy_(self.seq_len + self.incoming_seq_len)
+        if pad_token_id is not None:
+            self.incoming_seq_len.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
+        else:
+            self.incoming_seq_len.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
         self.max_incoming_seq_len = new_input.shape[1]
+
+        if offsets_change == "all_zero":
+            self.seq_len.copy_(torch.zeros_like(self.seq_len))
 
 
 @torch.no_grad()
@@ -4350,13 +4359,16 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
             
             if self.qkv_format == "thd" and inference_params is not None:
-                key_layer = key_layer.contiguous()
-                query_layer = query_layer.contiguous()
+                key_layer = key_layer.contiguous() # verify if needed
+                query_layer = query_layer.contiguous() # verify if needed
                 batch_size, hidden_dim = query_layer.shape[0], query_layer.shape[-1]
 
                 q_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
                 k_pos_emb = self.alloc((batch_size, inference_params.max_incoming_seq_len, 1, hidden_dim), torch.float32, "cuda")
                 q_freq, k_freq = rotary_pos_emb
+
+                # inference_params.pick_freqs(q_freq, q_pos_emb)
+                # inference_params.pick_freqs(k_freq, k_pos_emb)
                 
                 tex.get_values(
                     q_freq, # [max_pos_emb, s, 1, d]
@@ -4376,8 +4388,7 @@ class MultiheadAttention(torch.nn.Module):
                     batch_size, 
                     hidden_dim
                 )
-
-
+                
                 for i in range(batch_size):
                     key_layer[i,].copy_(apply_rotary_pos_emb(key_layer[i,:].unsqueeze(0), k_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
                     query_layer[i,:].copy_(apply_rotary_pos_emb(query_layer[i,:].unsqueeze(0), q_pos_emb[i,:].unsqueeze(1), "bshd", fused=True)[0,:])
