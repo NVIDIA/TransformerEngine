@@ -656,11 +656,9 @@ class TransformerLayer(torch.nn.Module):
 
         # Cross attention.
         if self.layer_type == "decoder":
-            window_size = check_set_window_size("padding", None)
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
-                window_size=window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
