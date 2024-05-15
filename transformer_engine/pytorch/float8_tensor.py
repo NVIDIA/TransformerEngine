@@ -636,6 +636,20 @@ class Float8Tensor(torch.Tensor):
         tensor: torch.Tensor,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> None:
+        """Cast from tensor and populate transpose cache
+
+        Only supported for 2D tensors.
+
+        Parameters
+        ----------
+        tensor: torch.Tensor
+                Tensor to copy from. Must have same dimensions as
+                destination tensor.
+        noop_flag: torch.Tensor, optional
+                   float32 flag indicating whether to avoid updating
+                   destination tensor.
+
+        """
 
         # Make sure tensor is in expected format
         data = self._data
@@ -649,7 +663,7 @@ class Float8Tensor(torch.Tensor):
             if dtype not in (torch.float32, torch.float16, torch.bfloat16):
                 dtype = torch.float32
             tensor = tensor.to(
-                device=self_device.device,
+                device=self.device,
                 dtype=dtype,
                 memory_format=torch.contiguous_format,
             )

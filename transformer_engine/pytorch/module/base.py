@@ -8,7 +8,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Generator, Union, Optional, Tuple, List
+from typing import Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -515,7 +515,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def prepare_forward(
         self,
         inp: torch.Tensor,
-        is_first_microbatch: Union[bool, None],
+        is_first_microbatch: Union[bool, None],  # pylint: disable=unused-argument
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
     ) -> Generator[torch.Tensor, None, None]:

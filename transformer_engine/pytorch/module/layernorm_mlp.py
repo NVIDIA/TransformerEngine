@@ -5,7 +5,7 @@
 """LayerNormMLP API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from torch.nn.parameter import Parameter
@@ -748,7 +748,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 elif ctx.ub_overlap_rs_dgrad:
                     dim_size = list(dgelu.size())
                     dim_size[0] = dim_size[0] // tp_world_size
-                    dim_size[1] = fc1_weight_t_fp8.size(0)
+                    dim_size[1] = fc1_weight_fp8.size(1)
                     rs_out = torch.empty(dim_size, dtype=ctx.activation_dtype, device=dgelu.device)
                     if ub_obj_dgrad.is_p2p_overlap():
                         if ub_obj_dgrad.is_atomic_gemm():

@@ -5,7 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from torch.nn import init

@@ -4,7 +4,7 @@
 
 """Linear API"""
 import os
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -954,7 +954,7 @@ class Linear(TransformerEngineBaseModule):
                             noop_flag=skip_fp8_weight_update,
                         )
                 else:
-                    # FP8 cast or cast-transpose to workspace buffer
+                    # FP8 cast to workspace buffer
                     update_workspace = (
                         is_first_microbatch is None
                         or is_first_microbatch
