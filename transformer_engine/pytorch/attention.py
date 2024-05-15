@@ -2412,11 +2412,11 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, dqkv, None, None, None,
+            return (None, None, None, None, None, None, None, dqkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, dqkv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, dqkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -2635,11 +2635,11 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, None, dq, dkv, None, None, None,
+            return (None, None, None, None, None, None, None, None, None, dq, dkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -2951,11 +2951,11 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, None, dq, dk, dv, None, None, None,
+            return (None, None, None, None, None, None, None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, dq, dk, dv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
