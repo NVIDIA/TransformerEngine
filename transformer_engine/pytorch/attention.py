@@ -871,7 +871,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             out = out.view(-1, *out.shape[-2:])
 
         ctx.save_for_backward(q, kv, out, softmax_lse,
-            cu_seqlens_q, cu_seqlens_k, rng_states, attn_biases)
+            cu_seqlens_q, cu_seqlens_k, rng_states, *attn_biases)
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
@@ -889,7 +889,7 @@ class AttnFuncWithCP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout):
         (q, kv, out, softmax_lse,
-            cu_seqlens_q, cu_seqlens_k, rng_states, attn_biases) = ctx.saved_tensors
+            cu_seqlens_q, cu_seqlens_k, rng_states, *attn_biases) = ctx.saved_tensors
 
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
