@@ -1,6 +1,7 @@
 import os
 import re
 import gc
+import torch
 
 from typing import List
 
@@ -9,7 +10,7 @@ from transformers.generation.utils import *
 
 from transformer_engine.pytorch.fp8 import fp8_model_init
 
-from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
+from transformers.modeling_utils import load_state_dict, _load_state_dict_into_model
 from transformers.utils.hub import get_checkpoint_shard_files
 
 """
@@ -18,29 +19,14 @@ from transformers.utils.hub import get_checkpoint_shard_files
     both with HF and with TE, we can copy parameters from the first to the second.
 """
 
-
-def from_pretrained_local(cls, pretrained_model_name_or_path, config, fp8_init=False, qkv_format="bshd"):
-    """
-    Custom method adapted from `from_pretrained` method in HuggingFace
-    Transformers repo: 
-    https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
-    """
-    config.qkv_format = qkv_format
-    with fp8_model_init(fp8_init):
-        vanilla_model = cls(config)
-    variant = None
-    if os.path.isfile(
-                os.path.join(pretrained_model_name_or_path, _add_variant("model.safetensors.index.json", variant))
-        ):
-        # Load from a sharded PyTorch checkpoint
-        archive_file = os.path.join(
-            pretrained_model_name_or_path, _add_variant("model.safetensors.index.json", variant)
-        )
-
-    resolved_archive_file, _ = get_checkpoint_shard_files(
-            pretrained_model_name_or_path,
-            archive_file,
+def _load_fp8_weights(vanilla_model, hyperparams):
+    vanilla_model.load_state_dict(
+        torch.load(hyperparams.fp8_model_weights_filename)
     )
+
+def _load_standard_weights(vanilla_model, config):
+    archive_file = os.path.join(config.model_name, "model.safetensors.index.json")
+    resolved_archive_file, _ = get_checkpoint_shard_files(config.model_name, archive_file)
     total_dict = {}
     for shard_file in resolved_archive_file:
         state_dict = load_state_dict(shard_file)
@@ -51,6 +37,23 @@ def from_pretrained_local(cls, pretrained_model_name_or_path, config, fp8_init=F
     # Force mem release. Taken from huggingface code
     del total_dict
     gc.collect()
+
+
+def load_te_model(cls, config):
+    """
+    Custom method adapted from `from_pretrained` method in HuggingFace
+    Transformers repo: 
+    https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
+    """
+    with fp8_model_init(config.fp8_model_init):
+        # there we need only to create model
+        vanilla_model = cls(config)
+    if config.fp8_model_init:
+        if config.fp8_model_weights_filename is not None:
+            _load_fp8_weights(vanilla_model, config)
+    else:
+        _load_standard_weights(vanilla_model, config)
+    
     return vanilla_model
 
 def _get_all_layer_prefixes_to_update(hf_state_dict):
