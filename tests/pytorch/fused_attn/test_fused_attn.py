@@ -243,7 +243,9 @@ def get_swa(seq_q, seq_kv, w=None):
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
-def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa):
+@pytest.mark.parametrize("pad_between_seqs", [False])
+def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
+    workspace_opt, qkv_layout, swa, pad_between_seqs):
     """Test DotProductAttention module"""
 
     # Get configs
@@ -283,7 +285,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
             attn_mask_type = config.attn_mask_type
             config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, config, "UnfusedDotProductAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+            dtype, config, "UnfusedDotProductAttention",
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
         )
         if swa:
             config.attn_mask_type = attn_mask_type
@@ -292,22 +295,26 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     if fused_attn_supported:
         if len(fused_attn_backend) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
             )
         if len(fused_attn_backend) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
             )
 
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype, config, "FlashAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+            dtype, config, "FlashAttention",
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -325,18 +332,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     if fused_attn_supported and flash_attn_supported:
         if _NVTE_DEBUG:
             print("[test_dot_product_attention]: fused attn vs flash attn")
-            print("fused_attn_fwd min {:.8f} max {:.8f}".format(
-                fused_attn_fwd.min().item(), fused_attn_fwd.max().item()))  
-            print("flash_attn_fwd min {:.8f} max {:.8f}".format(
-                flash_attn_fwd.min().item(), flash_attn_fwd.max().item()))  
-            torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
-            torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
-            print("fused_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
-                fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item()))  
-            print("flash_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
-                flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item()))  
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backend) == 2:
         if _NVTE_DEBUG:
@@ -352,7 +349,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 
 model_configs_mask = {
@@ -378,7 +375,7 @@ model_configs_mask = {
 @pytest.mark.parametrize("model", model_configs_mask.keys())
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_bias = {
@@ -416,7 +413,7 @@ model_configs_bias = {
 @pytest.mark.parametrize("model", model_configs_bias.keys())
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_bias_shapes = {
@@ -443,7 +440,8 @@ model_configs_bias_shapes = {
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
 def test_dpa_bias_shapes(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types and shapes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
 
 model_configs_swa = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
@@ -460,7 +458,8 @@ model_configs_swa = {
 @pytest.mark.parametrize("model", model_configs_swa.keys())
 def test_dpa_sliding_window(dtype, model_configs, model):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+
 
 model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
@@ -477,14 +476,12 @@ model_configs_alibi_slopes = {
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
 def test_dpa_alibi_slopes(dtype, model_configs, model):
     """Test DotProductAttention module with ALiBi slopes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-    # will add tests for thd layouts later when the support is available in fused attention
-    #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
     ]
 
 
@@ -508,28 +505,26 @@ model_configs_layout = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
-qkv_layouts_thd = [
-    't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
-    #'thd_thd_thd',
-    ]
 
+qkv_layouts_thd = ['t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd']
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    #"layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
-    "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"), #th3d/thd_t2hd
-    #"layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    #"layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"), #th3d/thd_t2hd
-    #"layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"), #th3d/t3hd/thd_t2hd
-    #"layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    #"layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #th3d/t3hd/thd_t2hd
-    #"layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"), #all 5 pass
-    #"layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"), #all 5 pass
-    #"layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"), #all 5 skipped
+    "layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"),
+    "layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"),
+    "layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"),
+    "layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"),
+    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"),
 }
+
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
@@ -538,7 +533,13 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
+    pad_between_seqs = False
+    test_dot_product_attention(dtype, model_configs, model, False, True,
+        qkv_layout, False, pad_between_seqs)
+    pad_between_seqs = True
+    test_dot_product_attention(dtype, model_configs, model, False, True,
+        qkv_layout, False, pad_between_seqs)
+
 
 def _run_dot_product_attention(
         dtype: torch.dtype,
@@ -548,6 +549,7 @@ def _run_dot_product_attention(
         qkv_layout: str,
         workspace_opt: bool,
         swa: bool,
+        pad_between_seqs: bool,
         ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
 
@@ -557,8 +559,6 @@ def _run_dot_product_attention(
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
-        #os.environ["NVTE_FUSED_ATTN"] = "1"
-        #os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
@@ -584,16 +584,11 @@ def _run_dot_product_attention(
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
-    print('seqlens_q',seqlens_q)
-    print('seqlens_kv',seqlens_kv)
-    print('cu_seqlens_q',cu_seqlens_q)
-    print('cu_seqlens_kv',cu_seqlens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
     cu_seqlens_q_after_pad = cu_seqlens_q.clone()
     cu_seqlens_kv_after_pad = cu_seqlens_kv.clone()
-    pad_between_seqs = True
     pad_len = [0] * config.batch_size
     if pad_between_seqs:
         max_pad_len = 3
@@ -602,11 +597,6 @@ def _run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
-    print('pad_len', pad_len)
-    print('seqlens_q_after_pad',seqlens_q_after_pad)
-    print('seqlens_kv_after_pad',seqlens_kv_after_pad)
-    print('cu_seqlens_q_after_pad',cu_seqlens_q_after_pad)
-    print('cu_seqlens_kv_after_pad',cu_seqlens_kv_after_pad)
 
     # Create attention mask if padding
     attention_mask = None
@@ -670,34 +660,23 @@ def _run_dot_product_attention(
             layout = layout.replace('s', 'skv')
             layout = layout.replace('h', 'hg')
             layout = layout.replace('t', 'tg')
-        print('--------- layout ',layout,cu_seqlens_q)
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_orig = tensor
-        if pad_between_seqs:
+        if qkv_format == 'thd' and pad_between_seqs:
             tensor_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
             if layout in ['t_h_d', 't_3_h_d', 't_h_3_d']:
                 for i in range(1, config.batch_size+1):
                     valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
                     pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
-                    #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
                     tensor[pad_range[0]:pad_range[1]] = 0.0
                     tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
-                    print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
-                    #tensor[cu_seqlens_q_after_pad[i-1]-pad_len:cu_seqlens_q_after_pad[i-1]] = 0.0
-                    #tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
-                    #print('============ thd ',i,tensor_orig.shape, tensor_orig.is_contiguous())
-                    #print('============ thd ',i,tensor_orig.shape, cu_seqlens_q_after_pad[i-1],cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1])
             if layout in ['tg_hg_d', 'tg_2_hg_d', 'tg_hg_2_d']:
                 for i in range(1, config.batch_size+1):
                     valid_range = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
                     pad_range = (cu_seqlens_kv_after_pad[i] - pad_len[i-1], cu_seqlens_kv_after_pad[i])
-                    #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
                     tensor[pad_range[0]:pad_range[1]] = 0.0
                     tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
-                    #tensor[cu_seqlens_kv_after_pad[i-1]-pad_len:cu_seqlens_kv_after_pad[i-1]] = 0.0
-                    #tensor_orig = torch.cat([tensor_orig, tensor[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
-                    #print('============ tghd ',i,tensor_orig.shape)
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split('_')):
@@ -705,7 +684,6 @@ def _run_dot_product_attention(
                 tensor_count = int(l)
                 split_dim = dim
                 break
-        print('tesnsor shape',tensor.shape, tensor_orig.shape)
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
         tensors_orig = torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
         for j in range(tensor_count):
@@ -718,7 +696,6 @@ def _run_dot_product_attention(
     for i in range(3):
         inp[i].requires_grad = True
         inp_orig[i].requires_grad = True
-        #print('------------ inp_orig[i]',inp_orig[i].shape)
 
     # Create ragged offsets for q/k/v
     seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
@@ -737,10 +714,6 @@ def _run_dot_product_attention(
             seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
             seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
             seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
-    print('seq_offsets_q',seq_offsets_q)
-    print('seq_offsets_k',seq_offsets_k)
-    print('seq_offsets_v',seq_offsets_v)
-    print('seq_offsets_o',seq_offsets_o)
 
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
@@ -749,17 +722,14 @@ def _run_dot_product_attention(
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
     out_grad_orig = out_grad
-    if pad_between_seqs:
+    if qkv_format == 'thd' and pad_between_seqs:
         out_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
         if qkv_format_kv == 't_h_d':
             for i in range(1, config.batch_size+1):
                 valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
                 pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
-                #print('============ thd ',i,tensor_orig.shape, valid_range, pad_range)
                 out_grad[pad_range[0]:pad_range[1]] = 0.0
                 out_grad_orig = torch.cat([out_grad_orig, out_grad[valid_range[0]:valid_range[1]]], dim=0)
-                #out_grad[cu_seqlens_q[i-1]:cu_seqlens_q_after_pad[i-1]] = 0.0
-                #out_grad_orig = torch.cat([out_grad_orig, out_grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
 
     # Create bias
     if config.attn_bias_type in ['no_bias', 'alibi']:
@@ -798,7 +768,7 @@ def _run_dot_product_attention(
     )
 
     # Run a forward and backward pass
-    if backend == "FlashAttention":
+    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         q = inp_orig[0]
         k = inp_orig[1]
         v = inp_orig[2]
@@ -808,7 +778,6 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-    print('ccccccccu ',attention_mask is None, cu_seqlens_q)
     out = block(q, k, v,
             window_size=window_size,
             attention_mask=attention_mask,
@@ -828,29 +797,24 @@ def _run_dot_product_attention(
             alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
     out.backward(d_out)
-    print('---- out',out.shape)
 
-    #return out, (inp[0].grad, inp[1].grad, inp[2].grad)
-    if backend == "FlashAttention":
+    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         return out, (q.grad, k.grad, v.grad)
     if backend == "FusedAttention":
-        out_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
-        q_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
-        k_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
-        v_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
-        for i in range(1, config.batch_size+1):
-            valid_range_q = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
-            valid_range_kv = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
-            out_orig = torch.cat([out_orig, out[valid_range_q[0]:valid_range_q[1]]], dim=0)
-            q_grad_orig = torch.cat([q_grad_orig, q.grad[valid_range_q[0]:valid_range_q[1]]], dim=0)
-            k_grad_orig = torch.cat([k_grad_orig, k.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
-            v_grad_orig = torch.cat([v_grad_orig, v.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
-            #out_orig = torch.cat([out_orig, out[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
-            #q_grad_orig = torch.cat([q_grad_orig, q.grad[cu_seqlens_q_after_pad[i-1]:cu_seqlens_q_after_pad[i-1]+seqlens_q[i-1]]],dim=0)
-            #k_grad_orig = torch.cat([k_grad_orig, k.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
-            #v_grad_orig = torch.cat([v_grad_orig, v.grad[cu_seqlens_kv_after_pad[i-1]:cu_seqlens_kv_after_pad[i-1]+seqlens_kv[i-1]]],dim=0)
-        return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
-        
+        if qkv_format == 'thd' and pad_between_seqs:
+            out_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            q_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            k_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            v_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            for i in range(1, config.batch_size+1):
+                valid_range_q = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                valid_range_kv = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
+                out_orig = torch.cat([out_orig, out[valid_range_q[0]:valid_range_q[1]]], dim=0)
+                q_grad_orig = torch.cat([q_grad_orig, q.grad[valid_range_q[0]:valid_range_q[1]]], dim=0)
+                k_grad_orig = torch.cat([k_grad_orig, k.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+                v_grad_orig = torch.cat([v_grad_orig, v.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+            return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+        return out, (q.grad, k.grad, v.grad)
 
 
 model_configs_te_layer = {
