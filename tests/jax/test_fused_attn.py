@@ -302,6 +302,8 @@ class FusedAttnRunner:
         """
 
         self._setup_inputs()
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape != BiasShape.BIAS_1HSS:
+            pytest.skip("Bias gradient calculation is only supported for 1HSS bias shape.")
 
         def grad_func(func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient
