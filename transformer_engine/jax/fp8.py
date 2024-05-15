@@ -268,6 +268,7 @@ class FP8Helper:
         return partial_identical_fun, partial_identical_fun
 
     @staticmethod
+    @jax.jit
     def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
         """
         Update the amax history
