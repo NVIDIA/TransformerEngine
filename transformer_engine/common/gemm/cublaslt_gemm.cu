@@ -39,7 +39,7 @@ uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
   uint32_t alignment = 256;
   for (; ; alignment /= 2) {
-    if (!(address % alignment)) {
+    if (address % alignment == 0) {
       return alignment;
     }
   }
@@ -271,22 +271,22 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
-  const auto A_aligned = _getAlignment(reinterpret_cast<uintptr_t>(A));
-  const auto B_aligned = _getAlignment(reinterpret_cast<uintptr_t>(B));
-  const auto C_aligned = _getAlignment(reinterpret_cast<uintptr_t>(C));
-  const auto D_aligned = _getAlignment(reinterpret_cast<uintptr_t>(D));
+  const auto A_alignment = _getAlignment(reinterpret_cast<uintptr_t>(A));
+  const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(B));
+  const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
+  const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
     preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,
-    &A_aligned, sizeof(A_aligned)));
+    &A_alignment, sizeof(A_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
     preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,
-    &B_aligned, sizeof(B_aligned)));
+    &B_alignment, sizeof(B_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
     preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,
-    &C_aligned, sizeof(C_aligned)));
+    &C_alignment, sizeof(C_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
     preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES,
-    &D_aligned, sizeof(D_aligned)));
+    &D_alignment, sizeof(D_alignment)));
 
   const auto status = cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
                                                      Ddesc, preference, 1, &heuristicResult,
