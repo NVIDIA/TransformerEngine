@@ -25,8 +25,8 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
                 const Tensor *input_QKV, const Tensor *input_Bias,
                 Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
                 const Tensor *cu_seqlens, const Tensor *seq_offsets_q,
-                const Tensor *seq_offsets_k, const Tensor *seq_offsets_v, const Tensor *seq_offsets_o,
-                const Tensor *rng_state, Tensor *workspace,
+                const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
+                const Tensor *seq_offsets_o, const Tensor *rng_state, Tensor *workspace,
                 cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
@@ -38,8 +38,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
                 const Tensor *input_Bias, Tensor *output_S,
                 Tensor *output_dQKV, Tensor *output_dBias,
                 const Tensor *cu_seqlens, const Tensor *seq_offsets_q,
-                const Tensor *seq_offsets_k, const Tensor *seq_offsets_v, const Tensor *seq_offsets_o,
-                const Tensor *rng_state, Tensor *workspace,
+                const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
+                const Tensor *seq_offsets_o, const Tensor *rng_state, Tensor *workspace,
                 cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_arbitrary_seqlen_fwd_kvpacked(

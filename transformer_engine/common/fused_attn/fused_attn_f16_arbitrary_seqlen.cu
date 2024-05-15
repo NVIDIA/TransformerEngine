@@ -715,12 +715,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             variant_pack[offset_v] = devPtrSeqOffsetsV;
             variant_pack[offset_o] = devPtrSeqOffsetsO;
         }
-//std::cout << " ============== print offset o ========= " << std::endl;
-//int32_t cpu_offset_o[2];
-//cudaMemcpy(cpu_offset_o, devPtrSeqOffsetsO, 2*sizeof(int32_t), cudaMemcpyDeviceToHost);
-//cudaDeviceSynchronize();
-//std::cout << cpu_offset_o[0] << " ---- " << cpu_offset_o[1] << std::endl;
-
 
         if (is_dropout) {
             variant_pack[dropout_seed] = devPtrDropoutSeed;

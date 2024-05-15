@@ -2539,7 +2539,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             d_out = d_out._data
 
         d_out = d_out.contiguous()
-        (q, kv, out, cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
+        (q, kv, out, cu_seqlens_q, cu_seqlens_kv,
+            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             q_fp8, kv_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2818,7 +2819,8 @@ class FusedAttnFunc(torch.autograd.Function):
             d_out = d_out._data
 
         d_out = d_out.contiguous()
-        (q, k, v, out, cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
+        (q, k, v, out, cu_seqlens_q, cu_seqlens_kv,
+            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             q_fp8, k_fp8, v_fp8, out_fp8, fwd_scales, fwd_scale_invs) = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2951,11 +2953,13 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, None, None, dq, dk, dv, None, None, None,
+            return (None, None, None, None, None, None,
+                    None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, None, dq, dk, dv, None, rest[0], None,
+        return (None, None, None, None, None, None,
+                None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
