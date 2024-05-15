@@ -427,7 +427,7 @@ class _Linear(torch.autograd.Function):
                         out_index, meta_tensor, output_te_dtype, output_dtype = (
                             None, None, None, ctx.activation_dtype)
                     dgrad, _ = fp8_gemm(
-                        weight_fp8.transpose_2d(cache=True),
+                        weight_fp8.transpose_2d(),
                         weight_fp8._scale_inv,
                         0,
                         weight_fp8._fp8_dtype,
@@ -930,13 +930,9 @@ class Linear(TransformerEngineBaseModule):
             else:
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
-            # Cast weights to FP8 if needed
+            # Initialize FP8 weights if needed
             weight_fp8 = None
-            if self.fp8 and not isinstance(weight_tensor, Float8Tensor):
-                update_workspace = (
-                    is_first_microbatch is None
-                    or is_first_microbatch
-                )
+            if self.fp8:
                 with_transpose = torch.is_grad_enabled()
                 if (
                     not with_transpose
@@ -944,15 +940,34 @@ class Linear(TransformerEngineBaseModule):
                     and not in_fp8_activation_recompute_phase()
                 ):
                     with_transpose = True
-                weight_fp8 = self.get_fp8_workspace(
-                    tensor=weight_tensor,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    with_transpose=with_transpose,
-                )
+                if isinstance(weight_tensor, Float8Tensor):
+                    # Fill transpose cache in FP8 tensor if needed
+                    update_transpose_cache = with_transpose
+                    if update_transpose_cache:
+                        update_transpose_cache = (
+                            is_first_microbatch
+                            or skip_fp8_weight_update is not None
+                        )
+                    if update_transpose_cache:
+                        weight_tensor.transpose_2d(
+                            fill_cache=True,
+                            noop_flag=skip_fp8_weight_update,
+                        )
+                else:
+                    # FP8 cast or cast-transpose to workspace buffer
+                    update_workspace = (
+                        is_first_microbatch is None
+                        or is_first_microbatch
+                    )
+                    weight_fp8 = self.get_fp8_workspace(
+                        tensor=weight_tensor,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        cache_name=(None if is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        with_transpose=with_transpose,
+                    )
 
             from ..cpu_offload import CPUOffloadEnabled
 

@@ -613,7 +613,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # FC2 DGRAD; Unconditional
                 fc2_dgrad, _ = tex.fp8_gemm(
-                    fc2_weight_fp8.transpose_2d(cache=True),
+                    fc2_weight_fp8.transpose_2d(),
                     fc2_weight_fp8._scale_inv,
                     0,
                     fc2_weight_fp8._fp8_dtype,
@@ -766,7 +766,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj = None
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
-                    fc1_weight_fp8.transpose_2d(cache=True),
+                    fc1_weight_fp8.transpose_2d(),
                     fc1_weight_fp8._scale_inv,
                     0,
                     fc1_weight_fp8._fp8_dtype,
@@ -1443,7 +1443,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     and not in_fp8_activation_recompute_phase()
                 ):
                     with_transpose = True
-                if not isinstance(fc1_weight, Float8Tensor):
+                update_transpose_cache = with_transpose
+                if update_transpose_cache:
+                    update_transpose_cache = (
+                        is_first_microbatch
+                        or skip_fp8_weight_update is not None
+                    )
+                if isinstance(fc1_weight, Float8Tensor):
+                    if update_transpose_cache:
+                        fc1_weight.transpose_2d(
+                            fill_cache=True,
+                            noop_flag=skip_fp8_weight_update,
+                        )
+                else:
                     cache_name = None
                     if is_first_microbatch is not None:
                         cache_name = "fc1_weight"
@@ -1456,7 +1468,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         skip_update_flag=skip_fp8_weight_update,
                         with_transpose=with_transpose,
                     )
-                if not isinstance(fc2_weight, Float8Tensor):
+                if isinstance(fc2_weight, Float8Tensor):
+                    if update_transpose_cache:
+                        fc2_weight.transpose_2d(
+                            fill_cache=True,
+                            noop_flag=skip_fp8_weight_update,
+                        )
+                else:
                     cache_name = None
                     if is_first_microbatch is not None:
                         cache_name = "fc2_weight"

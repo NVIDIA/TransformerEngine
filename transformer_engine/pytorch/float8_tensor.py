@@ -566,7 +566,8 @@ class Float8Tensor(torch.Tensor):
     def transpose_2d(
         self,
         *,
-        cache: bool = False,
+        force_compute: bool = False,
+        fill_cache: bool = False,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -574,40 +575,60 @@ class Float8Tensor(torch.Tensor):
 
         Parameters
         ----------
-        cache: bool, default = `False`
-               Whether or not to cache the transpose.
-        noop_flag: Optional[torch.Tensor], default = `None`
-                   Only used if argument `cache` is `True`, ignored otherwise.
-                   A single element fp32 tensor with a value of 1.0 or 0.0
-                   which is treated as a boolean. `1.0` forces recompute
-                   and `0.0` executes a noop using the same kernel.
+        force_compute: bool, default = `False`
+                       Force computation of transpose. Otherwise use
+                       cached values, if possible.
+        fill_cache: bool, default = `False`
+                    Cache output tensor for future function calls.
+        noop_flag: torch.Tensor, optional
+                   float32 flag indicating whether to avoid updating
+                   cached values, if possible.
+
         """
         assert self.dim() == 2, f"{self.dim()}-D transpose not supported."
 
-        # Case: no caching.
-        if not cache:
-            return tex.fp8_transpose(self._data, self._fp8_dtype)
+        # Need to compute transpose if cache is invalid
+        need_compute = force_compute
+        if self._transpose is None:
+            need_compute = True
+        elif self._transpose_invalid:
+            need_compute = True
 
-        # Case: reuse cache without calling a kernel.
-        if not self._transpose_invalid and noop_flag is None:
-            assert self._transpose is not None, "Tranpose cache is empty."
+        # Need to apply transpose kernel if noop flag is applied
+        if noop_flag is not None:
+            need_compute = True
+
+        # Return cached transpose if possible
+        if not need_compute:
             return self._transpose
 
-        # Allocate transpose if needed.
-        data_2d = self._data.reshape(-1, self._data.shape[-1])
-        if self._transpose is None:
-            shape = (data_2d.shape[1], data_2d.shape[0])
-            self._transpose = torch.empty(shape, dtype=torch.uint8, device=self._data.device)
-
-        # Case: recompute transpose and store cache.
-        if noop_flag is None:
-            tex.fp8_transpose_noalloc(data_2d, self._transpose, self._fp8_dtype)
+        # Allocate output if needed
+        data = self._data.contiguous().reshape(-1, self.size(-1))
+        out = self._transpose
+        if out is None:
+            out = torch.empty(
+                (data.size(1), data.size(0)),
+                dtype=torch.uint8,
+                device=data.device,
+            )
+            noop_flag = None
         else:
-            # Case: cuda graph capture.
-            tex.fp8_transpose_noalloc_noop(data_2d, self._transpose, noop_flag, self._fp8_dtype)
+            self._transpose_invalid = False
 
-        self._transpose_invalid = False
-        return self._transpose
+        # Apply transpose kernel
+        fp8_dtype = self._fp8_dtype
+        if noop_flag is None:
+            tex.fp8_transpose_noalloc(data, out, fp8_dtype)
+        else:
+            noop_flag = noop_flag.to(dtype=torch.float32, device=data.device)
+            tex.fp8_transpose_noalloc_noop(data, out, noop_flag, fp8_dtype)
+
+        # Fill cache if needed
+        if fill_cache:
+            self._transpose = out
+            self._transpose_invalid = False
+
+        return out
 
     @torch.no_grad()
     def cast_transpose_(
