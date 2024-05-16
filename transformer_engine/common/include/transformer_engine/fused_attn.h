@@ -176,7 +176,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
  *                                          e.g. M, ZInv, rng_state.
- *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     seq_offsets_q            Cumulative sequence offsets for Q, [batch_size + 1].
  *  \param[in]     seq_offsets_k            Cumulative sequence offsets for K, [batch_size + 1].
  *  \param[in]     seq_offsets_v            Cumulative sequence offsets for V, [batch_size + 1].
@@ -231,7 +231,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *                                          e.g. M, ZInv, rng_state.
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     seq_offsets_q            Cumulative sequence offsets for Q, [batch_size + 1].
  *  \param[in]     seq_offsets_k            Cumulative sequence offsets for K, [batch_size + 1].
  *  \param[in]     seq_offsets_v            Cumulative sequence offsets for V, [batch_size + 1].
@@ -289,8 +289,8 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
  *                                          e.g. M, ZInv, rng_state.
- *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     seq_offsets_q            Cumulative sequence offsets for Q, [batch_size + 1].
  *  \param[in]     seq_offsets_k            Cumulative sequence offsets for K, [batch_size + 1].
  *  \param[in]     seq_offsets_v            Cumulative sequence offsets for V, [batch_size + 1].
@@ -350,8 +350,8 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dQ                       The gradient of the Q tensor.
  *  \param[out]    dKV                      The gradient of the KV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     seq_offsets_q            Cumulative sequence offsets for Q, [batch_size + 1].
  *  \param[in]     seq_offsets_k            Cumulative sequence offsets for K, [batch_size + 1].
  *  \param[in]     seq_offsets_v            Cumulative sequence offsets for V, [batch_size + 1].
