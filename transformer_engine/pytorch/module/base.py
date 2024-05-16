@@ -840,6 +840,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     noop_flag=skip_update_flag,
                 )
             else:
-                out.copy_(tensor)
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                    forward=out._fp8_meta_forward,
+                )
+                fp8_meta = out._fp8_meta[fp8_meta_key]
+                fp8_meta_index = out._fp8_meta_index
+                cast_to_fp8(
+                    tensor,
+                    fp8_meta,
+                    fp8_meta_index,
+                    out._fp8_dtype,
+                    out=out._data,
+                )
+                out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
 
         return out
