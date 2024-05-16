@@ -499,6 +499,8 @@ model_configs_layout = {
     "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
     "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding",         "no_bias"),
     "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
+    "layout_2_0": ModelConfig(2, 16, 16, 256,    1, 2048, 0.0,        "no_mask",         "no_bias"),
+    "layout_2_1": ModelConfig(2, 24, 24, 256, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
 }
 
 
