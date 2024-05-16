@@ -231,8 +231,8 @@ def print_sample_of_generated_texts(model):
         print(text)
         print("=" * 100)
 
-def benchmark_generation(model, tokenizer, context_length, max_new_tokens):
-    inputs = tokenizer(["a" * context_length] * context_length, return_tensors="pt", padding=True)
+def benchmark_generation(model, tokenizer, batch_size, context_length, max_new_tokens):
+    inputs = tokenizer(["a" * context_length] * batch_size, return_tensors="pt", padding=True)
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
