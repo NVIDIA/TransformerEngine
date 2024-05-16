@@ -78,12 +78,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
   m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
+  m.def("srelu", &srelu, "Squared ReLU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
+  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");

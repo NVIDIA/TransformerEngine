@@ -317,3 +317,56 @@ at::Tensor dqgelu(at::Tensor grad,
 
   return output;
 }
+
+at::Tensor srelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = static_cast<size_t>(input.numel()) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype,
+                                               amax.data_ptr(), scale.data_ptr(),
+                                               scale_inv.data_ptr());
+
+  nvte_srelu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor dsrelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = input.numel() / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_dsrelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
