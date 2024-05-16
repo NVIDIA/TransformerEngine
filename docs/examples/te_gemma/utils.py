@@ -26,6 +26,8 @@ class HyperParameters:
         self.mixed_precision = "bf16"
         self.model_name = None 
 
+        self.fp8 = False
+
         # Weights in fp8
         self.fp8_model_weights_filename = None
         self.fp8_model_init = False
