@@ -214,6 +214,8 @@ model_configs_base = {
     "base_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 1
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
+    "base_3_0": ModelConfig(8, 16, 16, 128,    1, 2048, 0.0, "no_mask", "no_bias"), # inference
+    "base_3_1": ModelConfig(8, 16, 16, 256,    1, 2048, 0.0, "no_mask", "no_bias"), # inference
 }
 
 
@@ -279,6 +281,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
     if (qkv_format == 'thd' and 'padding' not in config.attn_mask_type):
         pytest.skip("THD layout requires padding/padding_causal mask type.")
 
+    # d=256 is supported by cuDNN 9.0+ for inference but not training
+    is_training = (config.head_dim <= 128)
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         if swa:
@@ -286,7 +290,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
             config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
             dtype, config, "UnfusedDotProductAttention",
-            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
         )
         if swa:
             config.attn_mask_type = attn_mask_type
@@ -296,25 +300,25 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
         if len(fused_attn_backend) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype, config, "FusedAttention",
-                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
         if len(fused_attn_backend) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype, config, "FusedAttention",
-                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype, config, "FusedAttention",
-                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
 
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
             dtype, config, "FlashAttention",
-            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs,
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -550,6 +554,7 @@ def _run_dot_product_attention(
         workspace_opt: bool,
         swa: bool,
         pad_between_seqs: bool,
+        is_training: bool,
         ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
 
@@ -796,10 +801,14 @@ def _run_dot_product_attention(
             core_attention_bias=bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
-    out.backward(d_out)
+    if is_training:
+        out.backward(d_out)
 
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
-        return out, (q.grad, k.grad, v.grad)
+        if is_training:
+            return out, (q.grad, k.grad, v.grad)
+        else:
+            return out, (None, None, None)
     if backend == "FusedAttention":
         if qkv_format == 'thd' and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
@@ -813,8 +822,15 @@ def _run_dot_product_attention(
                 q_grad_orig = torch.cat([q_grad_orig, q.grad[valid_range_q[0]:valid_range_q[1]]], dim=0)
                 k_grad_orig = torch.cat([k_grad_orig, k.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
                 v_grad_orig = torch.cat([v_grad_orig, v.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
-            return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
-        return out, (q.grad, k.grad, v.grad)
+            if is_training:
+                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+            else:
+                return out_orig, (None, None, None)
+        else:
+            if is_training:
+                return out, (q.grad, k.grad, v.grad)
+            else:
+                return out, (None, None, None)
 
 
 model_configs_te_layer = {
