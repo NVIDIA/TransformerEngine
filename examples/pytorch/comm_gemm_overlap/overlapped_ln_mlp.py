@@ -61,6 +61,7 @@ def train(nprocs, config, rank):
         'set_sm_margin' : False,
     }
     rs_cfg = {  # Reduce-scatter overlap for fc1_dgrad and fc2_fprop
+        'method': 'ring_exchange',
         'num_splits' : 4,
         'num_sm' : 1,
         'set_sm_margin' : True,
@@ -80,8 +81,34 @@ def train(nprocs, config, rank):
             },
         )
 
-    # Initialize TE model
-    ln_mlp = te.LayerNormMLP(
+    # Initialize TE models
+    # common_kwargs = {
+    #     'bias': True,
+    #     'device': 'cuda',
+    #     'params_dtype': config.dtype,
+    #     'sequence_parallel': True,
+    #     'tp_group': tp_group,
+    #     'tp_size': tp_size,
+    # }
+    # fc1 = te.Linear(
+    #     hidden_size, config.mlp_expansion_factor * hidden_size,
+    #     parallel_mode='column',
+    #     ub_overlap_ag=True,
+    #     ub_overlap_rs=True,
+    #     ub_name='fc1',
+    #     **common_kwargs
+    # )
+    # fc2 = te.Linear(
+    #     config.mlp_expansion_factor * hidden_size, hidden_size,
+    #     parallel_mode='row',
+    #     ub_overlap_ag=True,
+    #     ub_overlap_rs=True,
+    #     ub_name='fc2',
+    #     **common_kwargs
+    # )
+    # model = torch.nn.Sequential(fc1, fc2)
+
+    model = te.LayerNormMLP(
         hidden_size, config.mlp_expansion_factor * hidden_size,
         params_dtype = config.dtype,
         device = 'cuda',
@@ -89,6 +116,7 @@ def train(nprocs, config, rank):
         tp_size = tp_size,
         set_parallel_mode = True,
         sequence_parallel = True,
+        seq_length = config.seq_length,
         micro_batch_size = config.batch_size,
         ub_overlap_rs_dgrad = not config.no_comm_overlap,
         ub_overlap_rs = not config.no_comm_overlap,
@@ -96,7 +124,7 @@ def train(nprocs, config, rank):
     )
 
     # Initialize optimizer with model parameters
-    optim = torch.optim.Adam(ln_mlp.parameters(), lr=0.0001)
+    optim = torch.optim.Adam(model.parameters(), lr=0.0001)
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
@@ -105,15 +133,16 @@ def train(nprocs, config, rank):
 
     # Start dummy "training" iterations
     for i in range(config.num_iters):
-        dist_print(rank, f"Iter {i}", all_ranks=config.verbose)
+        dist_print(rank, f"Iter {i+1}", all_ranks=config.verbose)
 
         dist_print(rank, "|-- Generate random input batch", all_ranks=config.verbose)
-        x = torch.rand((config.seq_length * config.batch_size // tp_size, hidden_size),
-                       dtype=config.dtype, device='cuda')
+        x = torch.rand((config.seq_length // tp_size, config.batch_size, hidden_size),
+                       dtype=config.dtype, device='cuda', requires_grad=True)
 
         dist_print(rank, "|-- Forward pass", all_ranks=config.verbose)
         with te.fp8_autocast(enabled=config.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
-            y = ln_mlp(x)
+            y = model(x)
+            dist_print(rank, "|-- Compute loss", all_ranks=config.verbose)
             loss = y.flatten().sum()
 
         dist_print(rank, "|-- Backward pass", all_ranks=config.verbose)
@@ -122,7 +151,6 @@ def train(nprocs, config, rank):
         dist_print(rank, "|-- Optimizer step", all_ranks=config.verbose)
         optim.step()
 
-    te.destroy_ub()
     dist.destroy_process_group(tp_group)
 
     if config.debug:

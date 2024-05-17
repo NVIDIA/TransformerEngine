@@ -407,7 +407,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
                     torch.max(-amin, amax).float()
 
-            ub_algo = tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None
             fc1_outputs = tex.gemm(
                 fc1_weight,
                 ln_out_total,
@@ -416,7 +415,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc1_bias,
                 use_bias=(not bias_gelu_nvfusion) and use_fc1_bias,
                 gelu=not bias_gelu_nvfusion and (activation == 'gelu'),
-                ub_algo=ub_algo,
+                ub_algo=tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag \
+                                                                          else None,
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
@@ -1043,7 +1043,8 @@ class _LayerNormMLP(torch.autograd.Function):
                         use_bias=not ctx.bias_gelu_nvfusion,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        ub_algo=tex.NVTE_Comm_Overlap_Algo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                        ub_algo=tex.NVTE_Comm_Overlap_Algo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad \
+                                                                           else None,
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
                     clear_tensor_data(ln_out_total, dgelu)
@@ -1407,7 +1408,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=2)
 
-        self.reset_parameters(defer_init=(device == 'meta'))
+        self.reset_parameters(defer_init=device == 'meta')
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

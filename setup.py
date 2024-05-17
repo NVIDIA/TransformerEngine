@@ -296,6 +296,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Common requirements
     setup_reqs: List[str] = []
     install_reqs: List[str] = [
+        "pybind11",
         "pydantic",
         "importlib-metadata>=1.0; python_version<'3.8'",
     ]
@@ -561,10 +562,13 @@ def setup_pytorch_extension() -> setuptools.Extension:
         cxx_flags += [ "-fvisibility=hidden" ]
 
     # Link core TE library
-    linker_kwargs = { 'libraries' : [ 'transformer_engine' ] }
+    lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
     if lib_extension() == 'dll':
-        # Windows needs the library file name
-        linker_kwargs['libraries'] = [ './libtransformer_engine.dll' ]
+        # Windows can load from the same folder as the extension library but needs full DLL name.
+        lib_kwargs['libraries'] = [ './libtransformer_engine.dll' ]
+    else:
+        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
+        lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
 
     # Construct PyTorch CUDA extension
     from torch.utils.cpp_extension import CUDAExtension
@@ -576,7 +580,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
-        **linker_kwargs,
+        **lib_kwargs,
     )
 
 
@@ -613,33 +617,32 @@ def setup_jax_extension() -> setuptools.Extension:
         'cublasLt',
         'cudnn',
     ]
-    linker_kwargs = {}
+    lib_kwargs = {}
     if lib_extension() == 'dll':
-        # Windows does not support -Wl,-rpath so we need to specify shared libraries with full path
-        # in order to dynamically load them at runtime without errors.
+        # Windows needs explicit file paths for each library.
         cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
         libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
 
-        # Core TE library has to be relative to the module install path to deploy correctly.
-        libraries += [ Path('./libtransformer_engine.dll') ]
-        linker_kwargs['libraries'] = [ str(path) for path in libraries ]
+        # Core TE library is in the same folder as the extension library so it doesn't
+        # need an absolute path, just the full file name.
+        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
     else:
-        # Set link and runtime paths for CUDA libraries
+        # Set link and runtime paths for CUDA libraries.
         cuda_lib_dir = CUDA_HOME / 'lib64'
         if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
             cuda_lib_dir = CUDA_HOME / 'lib'
-        linker_kwargs['libraries'] = libraries + [ 'transformer_engine' ]
-        linker_kwargs['library_dirs'] = [
+        lib_kwargs['libraries'] = libraries
+        lib_kwargs['library_dirs'] = [
             str(cuda_lib_dir),
             str(CUDNN_LINK),
         ]
-        if lib_extension() == 'dylib':
-            # Mac does not support `runtime_library_dirs` option so we do it manually
-            linker_kwargs['extra_link_args'] = [
-                f"-Wl,-rpath,{path}" for path in linker_kwargs['library_dirs']
-            ]
-        else:
-            linker_kwargs['runtime_library_dirs'] = linker_kwargs['library_dirs']
+        lib_kwargs['extra_link_args'] = [
+            f"-Wl,-rpath,{path}" for path in lib_kwargs['library_dirs']
+        ]
+        # Add core TE library with RPATH same as the extension library's $ORIGIN dir.
+        lib_kwargs['libraries'] += [ 'transformer_engine' ]
+        lib_kwargs['library_dirs'] += [ '.' ]
+        lib_kwargs['extra_link_args'] += [ '-Wl,-rpath,$ORIGIN' ]
 
     # Add PyBind11 to the extension
     from pybind11.setup_helpers import Pybind11Extension
@@ -662,7 +665,7 @@ def setup_jax_extension() -> setuptools.Extension:
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
         },
-        **linker_kwargs,
+        **lib_kwargs,
     )
 
 

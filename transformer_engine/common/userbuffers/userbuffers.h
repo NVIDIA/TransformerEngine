@@ -383,12 +383,6 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream);
 
 // void unregister_user_buffer(int handler);
 
-void destroy_communicator(communicator *comm);
-
-template <typename in_type>
-void reduce_bf16_out(void *input, void *output, int num_inputs,
-                     int input_size, cudaStream_t stream);
-
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,
                             int input_size, cudaStream_t stream);

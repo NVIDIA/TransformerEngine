@@ -2610,38 +2610,6 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
 }
 
-template <typename in_type>
-__global__ void __launch_bounds__(MAX_THREADS / 4)
-reduce_bf16_cuda(
-  void *inputs, void *output, const int num_inputs, const int input_size
-) {
-  const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-  in_type *inputs_ = reinterpret_cast<in_type *>(inputs);
-  float accum_buf = static_cast<float>(inputs_[tid]);
-  #pragma unroll
-  for (int i = 1; i < num_inputs; i++) {
-    accum_buf += static_cast<float>(inputs_[tid + input_size * i]);
-  }
-  half *output_ = reinterpret_cast<half *>(output);
-  output_[tid] = static_cast<half>(accum_buf);
-}
-
-template <typename in_type>
-void reduce_bf16_out(
-  void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream
-) {
-  size_t num_threads = MAX_THREADS / 4;
-  size_t num_blocks = (input_size + num_threads - 1) / num_threads;
-  dim3 block(num_threads);
-  dim3 grid(num_blocks);
-  reduce_bf16_cuda<in_type><<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
-}
-
-template void reduce_bf16_out<half>(
-  void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream);
-template void reduce_bf16_out<float>(
-  void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream);
-
 template <typename fp8type>
 __global__ void __launch_bounds__(MAX_THREADS / 4)
 reduce_fp8_in_bf16_out_cuda(void *inputs, void *output, const float *scale,

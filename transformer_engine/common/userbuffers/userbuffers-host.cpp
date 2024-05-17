@@ -405,23 +405,6 @@ int create_communicator_mpi(communicator **comm) {
   return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
 }
 
-void destroy_communicator(communicator *comm) {
-  for (int i=0; i < NVTE_MAX_REGIONS; i++) {
-    if (comm->mem_dealloc[i]) {
-      cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[i]), comm->mem_size[i]);
-      cuMemRelease(comm->uchandles[i][comm->nvrank]);
-      free(comm->uchandles[i]);
-    }
-    free(comm->peer_ptr[i]);
-  }
-  cudaFree(comm->flags);
-  cudaFree(comm->recv_id);
-  cudaFree(comm->send_id);
-  cudaFree(comm->gpu_ptrs);
-  free(comm->fifo);
-  free(comm);
-}
-
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
   if (comm->free_region > NVTE_MAX_REGIONS)
     return -1;

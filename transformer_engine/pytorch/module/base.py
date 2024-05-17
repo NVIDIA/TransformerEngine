@@ -162,7 +162,6 @@ def initialize_ub(
                     world_size,             # Global number of processes
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
-                    num_splits,
                     tex.NVTE_MAX_USERBUFFER_STREAMS,
                     set_sm_margin,          # Set SM margin
                     atomic_gemm,            # use a single GEMM with atomic-counters
@@ -256,16 +255,6 @@ def initialize_ub(
                 num_splits=4 if method == "pipeline" else 0,
                 fp8_buf=name in layers_all_gather_overlap,
             )
-
-
-def destroy_ub():
-    """Destroy all initialized userbuffers communicators."""
-    global _ub_communicators
-    if _ub_communicators is None:
-        return
-    for ub in _ub_communicators.values():
-        del ub
-    _ub_communicators = None
 
 
 def get_ub(name: str):
