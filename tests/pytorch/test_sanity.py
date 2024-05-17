@@ -946,6 +946,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     torch.cuda.synchronize()
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 def test_sanity_fp8_gemm_with_unalignment(N, datatype):
