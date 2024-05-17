@@ -149,9 +149,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                         || (bias_type == NVTE_Bias_Type::NVTE_ALIBI
                             && attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK
                             && attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK
-                            && sm_arch_ == 90)
+                            && sm_arch_ >= 90)
                         || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS
-                            && sm_arch_ == 90))))
+                            && sm_arch_ >= 90))))
             && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
                 || ((cudnn_runtime_version >= 8906)
                     && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK
@@ -163,7 +163,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                     || attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 && bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
-                || (cudnn_runtime_version >= 90000 && qkv_format == NVTE_QKV_Format::NVTE_THD)
+                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && qkv_format == NVTE_QKV_Format::NVTE_THD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }
