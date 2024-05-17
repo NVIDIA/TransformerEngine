@@ -218,6 +218,28 @@ void te_atomic_gemm(at::Tensor A,
                     at::Tensor counter
 );
 
+void te_grouped_gemm(std::vector<at::Tensor> A,
+                     std::vector<at::Tensor> A_scale_inverse,
+                     transformer_engine::DType A_type,
+                     bool transa,
+                     std::vector<at::Tensor> B,
+                     std::vector<at::Tensor> B_scale_inverse,
+                     transformer_engine::DType B_type,
+                     bool transb,
+                     std::vector<at::Tensor> D,
+                     std::vector<at::Tensor> D_scale,
+                     transformer_engine::DType D_type,
+                     std::vector<at::Tensor> D_amax,
+                     std::vector<at::Tensor> bias,
+                     transformer_engine::DType bias_type,
+                     std::vector<at::Tensor> pre_gelu_out,
+                     bool grad,
+                     std::vector<at::Tensor> workspace,
+                     size_t workspaceSize,
+                     bool accumulate,
+                     bool use_split_accumulator
+);
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/

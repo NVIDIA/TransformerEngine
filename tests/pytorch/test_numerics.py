@@ -24,7 +24,8 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-
+from transformer_engine.pytorch.cpp_extensions import grouped_gemm
+from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -1575,3 +1576,53 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])
+
+
+def _torch_grouped_gemm(A, B, layout):
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    return [
+        torch.mm(
+            b.t() if transb else b,
+            a.t() if transa else a,
+        ) for a, b in zip(A, B)
+    ]
+
+
+@pytest.mark.parametrize("shape", [(1, 127, 128, 512),
+                                   (8, 15, 128, 512),
+                                   (8, 1027, 128, 512),
+                                   (16, 10027, 128, 512),])
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+def test_grouped_gemm(shape, dtype, layout):
+    z, m, k, n = shape
+
+    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    assert m_splits.sum() == m and len(m_splits) == z
+    m_splits = m_splits.tolist()
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]      # weight
+        B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)   # input
+        out = torch.split(torch.empty(m, n, dtype=dtype, device="cuda"), m_splits) # output
+        grad = False
+        accumulate = False
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]      # weight
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)   # grad_output
+        out = torch.split(torch.empty(m, k, dtype=dtype, device="cuda"), m_splits) # dgrad
+        grad = True
+        accumulate = False
+    else:  # layout == "NT"
+        A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits) # input
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits) # grad_output
+        out = [torch.zeros(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+        accumulate = True
+
+    grouped_gemm(A, B, out, dtype, get_multi_stream_cublas_workspace(), grad, accumulate, layout)
+    out_ref = _torch_grouped_gemm(A, B, layout)
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref)

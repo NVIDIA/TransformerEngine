@@ -3,14 +3,14 @@
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 import torch
 import transformer_engine_extensions as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
 
-__all__ = ['gemm', 'fp8_gemm']
+__all__ = ['gemm', 'fp8_gemm', 'grouped_gemm']
 
 
 def fp8_gemm(
@@ -259,3 +259,69 @@ def gemm(
     _ = fn(*args)
 
     return out, grad_bias, gelu_input
+
+
+def grouped_gemm(
+    A: List[torch.Tensor],
+    B: List[torch.Tensor],
+    out: List[torch.Tensor],
+    dtype: torch.dtype,
+    workspaces: List[torch.Tensor],
+    grad: bool = False,
+    accumulate: bool = False,
+    layout: str = "TN",
+    bias: Optional[List[torch.Tensor]] = None,
+    use_bias: bool = False,
+) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Non FP8 Grouped GEMM."""
+
+    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    num_groups = len(A)
+    empty_tensor = [torch.Tensor()] * num_groups
+
+    if grad and use_bias:
+        grad_bias = [
+            torch.empty(B[i].shape[1], dtype=out[0].dtype, device="cuda")
+            for i in range(num_groups)
+        ]
+    else:
+        grad_bias = empty_tensor
+
+    bias = bias if use_bias else empty_tensor
+
+    assert (
+        A[0].dtype == dtype and B[0].dtype == dtype
+    ), f"Expected dtype={dtype}, but found A.dtype={A[0].dtype} and B.dtype={B[0].dtype}"
+    input_dtype = TE_DType[dtype]
+    output_dtype = TE_DType[out[0].dtype]
+    if use_bias:
+        bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
+    else:
+        bias_dtype = output_dtype
+
+    tex.te_grouped_gemm(
+        A,
+        empty_tensor,
+        input_dtype,
+        transa,
+        B,
+        empty_tensor,
+        input_dtype,
+        transb,
+        out,
+        empty_tensor,  # out_scale
+        output_dtype,
+        empty_tensor,  # out_amax
+        grad_bias if grad else bias,
+        bias_dtype,
+        empty_tensor,  # gelu_input
+        grad,
+        workspaces,
+        workspaces[0].shape[0],
+        accumulate,
+        False,  # use_split_accumulator
+    )
+
+    return out, grad_bias

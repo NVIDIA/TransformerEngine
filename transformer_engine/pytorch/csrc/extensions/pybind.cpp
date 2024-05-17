@@ -56,6 +56,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
+  m.def("te_grouped_gemm", &te_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
                   "Fused Attention FP8/BF16/FP16 FWD with packed QKV");
   m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
