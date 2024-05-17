@@ -163,7 +163,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                     || attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 && bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
-                || (qkv_format == NVTE_QKV_Format::NVTE_THD)
+                || (cudnn_runtime_version >= 90000 && qkv_format == NVTE_QKV_Format::NVTE_THD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }
