@@ -14,7 +14,7 @@ from pathlib import Path
 def get_te_dirs():
     """Find Transformer Engine install by looking up two dirs or query path using pip"""
 
-    yield str(Path(__file__).parents[1])
+    yield str(Path(__file__).parents[2])
 
     command = [sys.executable, "-m", "pip", "show", "transformer_engine"]
     result = subprocess.run(command, capture_output=True, check=True, text=True)
@@ -24,7 +24,7 @@ def get_te_dirs():
 def get_dll_paths(suffix):
     return map(lambda x: os.path.join(x, suffix), get_te_dirs())
 
-def get_shared_library_ext()
+def get_shared_library_ext():
     system = platform.system()
     if system == "Linux":
         extension = "so"
