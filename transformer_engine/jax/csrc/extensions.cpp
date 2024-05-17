@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 
 #include "common/include/transformer_engine/fused_attn.h"
+#include "common/include/transformer_engine/activation.h"
 #include "common/include/transformer_engine/transformer_engine.h"
 #include "jax/csrc/modules.h"
 #include "jax/csrc/utils.h"
@@ -101,11 +102,17 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
         .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
 
-    pybind11::enum_<NVTE_Activation_Enum>(m, "NVTE_Activation_Enum", pybind11::module_local())
-        .value("GELU", NVTE_Activation_Enum::GELU)
-        .value("GEGLU", NVTE_Activation_Enum::GEGLU)
-        .value("SILU", NVTE_Activation_Enum::SILU)
-        .value("SWIGLU", NVTE_Activation_Enum::SWIGLU);
+    pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
+        .value("GELU", NVTE_Activation_Type::GELU)
+        .value("GEGLU", NVTE_Activation_Type::GEGLU)
+        .value("SILU", NVTE_Activation_Type::SILU)
+        .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
+        .value("RELU", NVTE_Activation_Type::RELU)
+        .value("REGLU", NVTE_Activation_Type::REGLU)
+        .value("QGELU", NVTE_Activation_Type::QGELU)
+        .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
+        .value("SRELU", NVTE_Activation_Type::SRELU)
+        .value("SREGLU", NVTE_Activation_Type::SREGLU);
 
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)

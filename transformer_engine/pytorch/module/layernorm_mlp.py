@@ -64,7 +64,8 @@ def _act_func(activation: str):
             'geglu': (tex.geglu, tex.dgeglu),
             'reglu': (tex.reglu, tex.dreglu),
             'swiglu': (tex.swiglu, tex.dswiglu),
-            'qgelu': (tex.qgelu, tex.dqgelu)
+            'qgelu': (tex.qgelu, tex.dqgelu),
+            'srelu': (tex.srelu, tex.dsrelu),
     }
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
@@ -1194,7 +1195,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu'.
+          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu', 'srelu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.

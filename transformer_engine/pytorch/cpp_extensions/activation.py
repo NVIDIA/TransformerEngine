@@ -8,7 +8,7 @@ import torch
 import transformer_engine_extensions as tex
 
 
-__all__ = ['gelu', 'relu', 'reglu', 'geglu', 'swiglu', 'qgelu']
+__all__ = ['gelu', 'relu', 'reglu', 'geglu', 'swiglu', 'qgelu', 'srelu']
 
 
 def gelu(
@@ -159,6 +159,31 @@ def qgelu(
         amax_history = empty_tensor
         scale_inv = empty_tensor
     return torch.ops.tex_ts.qgelu_ts(
+        inp,
+        scale,
+        amax_history,
+        scale_inv,
+        fp8_tensor,
+        otype,
+    )
+
+def srelu(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+) -> torch.Tensor:
+    """ReLU with FP8 output"""
+    empty_tensor = torch.Tensor()
+    if fp8_meta_tensor is not None:
+        scale = fp8_meta_tensor.scale
+        amax_history = fp8_meta_tensor.amax_history
+        scale_inv = fp8_meta_tensor.scale_inv
+    else:
+        scale = empty_tensor
+        amax_history = empty_tensor
+        scale_inv = empty_tensor
+    return torch.ops.tex_ts.srelu_ts(
         inp,
         scale,
         amax_history,
