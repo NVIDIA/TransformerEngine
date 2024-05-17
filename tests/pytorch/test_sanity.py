@@ -950,8 +950,8 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 def test_sanity_fp8_gemm_with_unalignment(N, datatype):
-    offset = 4
-    scratchpad = torch.randn(N*N + 2*offset, device="cuda", dtype=datatype)
+    offset = 16
+    scratchpad = torch.randn(N*N + offset, device="cuda", dtype=datatype)
 
     fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
     fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
@@ -969,8 +969,8 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
             meta_weight,
             fp8_tensor_inp,
             inp_type)
-    inp_fp8 = torch.reshape(scratchpad_fp8[offset:-offset], (N, N))
-    weight_fp8 = torch.reshape(scratchpad_fp8[offset*2:], (N, N))
+    inp_fp8 = torch.reshape(scratchpad_fp8[:-offset], (N, N))
+    weight_fp8 = torch.reshape(scratchpad_fp8[offset:], (N, N))
     _, _ = fp8_gemm(
             weight_fp8,
             meta_weight.scale_inv,
