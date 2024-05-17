@@ -142,7 +142,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && ((head_dim <= 128 && head_dim % 8 == 0)
                 // TODO (cyang): add is_training to nvte_get_fused_attn_backend
                 // d=256 only supported for forward
-                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && head_dim <= 256 && head_dim % 8 == 0))
+                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000
+                    && head_dim <= 256 && head_dim % 8 == 0))
             && ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || ((cudnn_runtime_version >= 8906)
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
@@ -163,7 +164,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                     || attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 && bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
-                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && qkv_format == NVTE_QKV_Format::NVTE_THD)
+                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000
+                    && qkv_format == NVTE_QKV_Format::NVTE_THD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }

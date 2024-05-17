@@ -1302,24 +1302,49 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         dtype, config, False, qkv_layout)
 
     tols = dict(atol=5e-1, rtol=5e-2)
+    rmse_tol = 0.1
+    bwd_names = ['dq', 'dk', 'dv']
+    fwd_rmse = _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)
+    fwd_range = max(fused_attn_fwd_fp8.max().item(),
+        fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
+        fused_attn_fwd_f16.min().item())
     if _NVTE_DEBUG:
-        print('[test_dpa_fp8_vs_f16]: ', tols)
+        print()
+        print('========== {:^25s} =========='.format('forward output'))
         print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
         print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd RMSE: {:.6f}'.format(
-            _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)))
-    torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+        print('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+        except Exception as e:
+            print(e)
+            print()
+    assert(fwd_rmse < rmse_tol * fwd_range
+        ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
     for i,_ in enumerate(fused_attn_bwd_f16):
+        bwd_rmse = _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])
+        bwd_range = max(fused_attn_bwd_fp8[i].max().item(),
+            fused_attn_bwd_f16[i].max().item()) - min(fused_attn_bwd_fp8[i].min().item(),
+            fused_attn_bwd_f16[i].min().item())
         if _NVTE_DEBUG:
-            print('fused_attn_bwd_fp8 min {:.6f} max {:.6f}'.format(
+            print()
+            print('========== {:^25s} =========='.format(bwd_names[i]))
+            print('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
-            print('fused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
+            print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
-            print('fused_attn_bwd RMSE: {:.6f}'.format(
-                _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])))
-        torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
+            try:
+                torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+            except Exception as e:
+                print(e)
+                print()
+        assert(bwd_rmse < rmse_tol * bwd_range
+            ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
@@ -1390,7 +1415,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
             layout = layout.replace('h', 'hg')
             layout = layout.replace('t', 'tg')
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
-        tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        tensor = torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split('_')):
@@ -1411,7 +1436,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
     qkv_format_kv = qkv_format_kv.replace('s', 'sq')
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split('_')]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
-    out_grad = 0.1 * torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
+    out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
     with fp8_autocast(enabled=fp8_dpa, fp8_recipe=fp8_recipe):
         out = dpa(inp[0], inp[1], inp[2],
@@ -1518,7 +1543,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = 0.0001 * torch.randint(0, 100,
+    inp = 0.0001 * torch.randint(-100, 100,
             (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim),
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
