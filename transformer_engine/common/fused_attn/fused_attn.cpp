@@ -135,14 +135,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     if (((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
                 || (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90)))
-            && (max_seqlen_q % 64 == 0 || max_seqlen_q == 1)
-            && (max_seqlen_kv % 64 == 0)
+            && ((cudnn_runtime_version < 90000 && max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0)
+                || (cudnn_runtime_version >= 90000))
             && ((cudnn_runtime_version < 8907 && num_attn_heads == num_gqa_groups)
                 || (cudnn_runtime_version >= 8907))
-            && ((cudnn_runtime_version < 90000 && head_dim <= 128 && head_dim % 8 == 0)
+            && ((head_dim <= 128 && head_dim % 8 == 0)
                 // TODO (cyang): add is_training to nvte_get_fused_attn_backend
                 // d=256 only supported for forward
-                || (cudnn_runtime_version >= 90000 && head_dim <= 256 && head_dim % 8 == 0))
+                || (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && head_dim <= 256 && head_dim % 8 == 0))
             && ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || ((cudnn_runtime_version >= 8906)
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
