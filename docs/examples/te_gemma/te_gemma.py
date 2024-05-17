@@ -51,7 +51,11 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
         self.te_rope_emb = RotaryPositionEmbedding(256)(max_seq_len=config.max_position_embeddings).cuda()
 
     def forward(self, *args, **kwargs): # We need to pass positional encoding.
-        return super().forward(*args, rotary_pos_emb=self.te_rope_emb, **kwargs)
+        # this args cannot be passed to TransformerLayer
+        keys_to_remove = ["position_ids", "past_key_value", "output_attentions", "use_cache", "cache_position"]
+        for key in keys_to_remove:
+            kwargs.pop(key, None)
+        return (super().forward(*args, rotary_pos_emb=self.te_rope_emb, **kwargs),) # We need to return tuple to be compatible with HF.
 
 class StaticGemmaModel(torch.nn.Module):
     """
@@ -82,7 +86,7 @@ class StaticGemmaModel(torch.nn.Module):
                 attention_mask=None,
                 self_attn_mask_type=self.mask,
                 inference_params=self.inference_params
-            ) # static copy - for CUDA graphs
+            )[0] # static copy - for CUDA graphs
 
         hidden_states.copy_(self.model.norm(hidden_states)) # static copy - for CUDA graphs
         logits = self.lm_head(hidden_states)
@@ -148,7 +152,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     """
 
     def __init__(self, config: GemmaConfig):
-        assert config.qkv_format == "thd", "Generation using other qkv_layouts than thd is not provided in this tutorial"
         with replace_decoder(te_decoder_cls=TEGemmaDecoderLayer):
             super().__init__(config)
         self.hidden_size = config.hidden_size
@@ -158,6 +161,10 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             dtype=torch.float32,
         )
         self._model_context_phase = StaticGemmaModel(self.model, torch.float32, 'padding_causal', self.lm_head)
+
+        if self.config.fp8:
+            self.fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
+
     
     @staticmethod
     def _padding_to_end(inputs, lengths):
@@ -179,6 +186,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             new_input_ids[i,:lengths[i]] = inputs[i, (max_seq_len-lengths[i]):max_seq_len]
             new_input_ids[i,lengths[i]:] = inputs[i, 0:(max_seq_len-lengths[i])]
         inputs.copy_(new_input_ids)
+    
+    def _next_64_multiply(self, x):
+        return ((x + 63) // 64) * 64
     
     # This function is overriden in TeGEmmaForCausalLMCudaGraphs.
     def _create_hidden_states_buffer(self, input_ids : torch.Tensor):
@@ -215,6 +225,8 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         #self._model_context_phase = self.record_graph(self._model_context_phase, hidden_states)
         hidden_states.data[:] = self.model.embed_tokens(input_ids)
         logits = self._model_context_phase(hidden_states)
+        #import pdb 
+        #pdb.set_trace()
 
         # We choose logits coresponding with last token in each sequence,
         # which have various lengths - they are stored in (inference_params.incoming_seq_len - 1) Tensor.
@@ -237,37 +249,41 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         max_new_tokens: int = 0,
         *args, **kwargs
     ): 
-        batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(input_ids)
-        lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze() # [s]
-        input_ids = F.pad(input_ids, (max_input_sequence_len - input_ids.shape[1], 0), "constant", 0)
+        
+        assert self.config.qkv_format == "thd", "Generation using other qkv_layouts than thd is not provided in this tutorial"
+        with te.pytorch.fp8_autocast(enabled=self.config.fp8, fp8_recipe=self.fp8_recipe if self.config.fp8 else None), \
+            autocast(dtype=torch.bfloat16, cache_enabled=False):
+            batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(input_ids)
+            lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze() # [s]
+            input_ids = F.pad(input_ids, (max_input_sequence_len - input_ids.shape[1], 0), "constant", 0)
 
-        # InferenceParams is a cache, where keys and values of previous tokens are stored.
-        # Moreover it stores length of both already generated and input sequences.
-        inference_params = self._create_inference_params(
-            max_batch_size=batch_size, 
-            max_sequence_length=max_input_sequence_len + max_new_tokens
-        )
+            # InferenceParams is a cache, where keys and values of previous tokens are stored.
+            # Moreover it stores length of both already generated and input sequences.
+            inference_params = self._create_inference_params(
+                max_batch_size=batch_size, 
+                max_sequence_length=self._next_64_multiply(max_input_sequence_len + max_new_tokens)
+            )
 
-        self._model_context_phase.set_inference_params(inference_params)
-        self._model_generation_phase.set_inference_params(inference_params)
+            self._model_context_phase.set_inference_params(inference_params)
+            self._model_generation_phase.set_inference_params(inference_params)
 
-        # Context phase
-        TEGemmaForCausalLM._padding_to_end(input_ids, lengths)
-        hidden_states, next_tokens = TEGemmaForCausalLM._generate_context_phase(
-            self,
-            input_ids,
-            inference_params
-        )
+            # Context phase
+            TEGemmaForCausalLM._padding_to_end(input_ids, lengths)
+            hidden_states, next_tokens = TEGemmaForCausalLM._generate_context_phase(
+                self,
+                input_ids,
+                inference_params
+            )
 
-        # Generation phase.
-        inference_params.thd_setup_before_new_input(next_tokens.unsqueeze(1))
-        output_tokens = [next_tokens]
-        for _ in range(max_new_tokens):
-            next_tokens = self._model_generation_phase(hidden_states)
-            output_tokens.append(next_tokens.clone())
+            # Generation phase.
+            inference_params.thd_setup_before_new_input(next_tokens.unsqueeze(1))
+            output_tokens = [next_tokens]
+            for i in range(max_new_tokens):
+                next_tokens = self._model_generation_phase(hidden_states)
+                output_tokens.append(next_tokens.clone())
 
-        result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
-        return result
+            result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
+            return result
 
 class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
     """
@@ -294,13 +310,14 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         # with their recorded version. After invocation of each of them,
         # captured graph will be replayed with minimal usage of CPU,
         # what will lead to huge speedup.
+
         input_shape = (config.cuda_graphs_static_batch_size, config.cuda_graphs_static_max_context_len)
-        self.inference_params.thd_setup_before_new_input(torch.ones(input_shape), pad_token_id=0, reset=True)
+        self.inference_params.thd_setup_before_new_input(torch.ones(input_shape), reset=True)
         self._model_context_phase = self.record_graph(self._model_context_phase, self.hidden_states_buffer) # CUDA Graphs recording
 
         input_shape = torch.ones((config.cuda_graphs_static_batch_size, 1))
         self.inference_params.thd_setup_before_new_input(input_shape, reset=True)        
-        self._model_generation_phase = self.record_graph(self._model_generation_phase, self.generation_buffer) # CUDA Graphs recording
+        #self._model_generation_phase = self.record_graph(self._model_generation_phase, self.generation_buffer) # CUDA Graphs recording
 
     """
         Functions _create_hidden_states_buffer and _create_inference_params from base class are overriden
@@ -326,7 +343,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             graphed_function = te.pytorch.make_graphed_callables(
                 function, 
                 (input_tensor,), 
-                fp8_enabled=True, 
+                fp8_enabled=self.config.fp8, 
                 fp8_recipe=fp8_recipe, 
                 allow_unused_input=True,
                 num_warmup_iters=3
