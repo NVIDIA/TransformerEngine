@@ -130,7 +130,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=False)
+    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
