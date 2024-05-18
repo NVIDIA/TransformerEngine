@@ -21,8 +21,13 @@ from transformers.utils.hub import get_checkpoint_shard_files
 
 def _load_fp8_weights(vanilla_model, hyperparams):
     vanilla_model.load_state_dict(
-        torch.load(hyperparams.fp8_model_weights_filename)
+        torch.load(hyperparams.fp8_model_weights_filename), strict=False 
+        # strict = false, because some parameters have 
+        # multiple pointers to the same weight
+        # vanilla_model._model_context_phase.model
+        # and vanilla_model._model_generation_phase.model
     )
+
 
 def _load_standard_weights(vanilla_model, config):
     archive_file = os.path.join(config.model_name, "model.safetensors.index.json")
@@ -31,6 +36,7 @@ def _load_standard_weights(vanilla_model, config):
     for shard_file in resolved_archive_file:
         state_dict = load_state_dict(shard_file)
         total_dict = total_dict | state_dict
+
     replace_params(total_dict, vanilla_model.state_dict(), config, qkv_fused_and_interleaved=config.fuse_qkv_params)
     _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="") # Copy parameters like embedding.
 
@@ -45,10 +51,13 @@ def load_te_model(cls, config):
     Transformers repo: 
     https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
     """
+    config.use_cache = False # To make TransformerLayer compatible with GemmaModel
     with fp8_model_init(config.fp8_model_init):
         # there we need only to create model
-        vanilla_model = cls(config)
-    if config.fp8_model_init:
+        vanilla_model = cls(config).to(torch.bfloat16).cuda()
+    
+    # and now we copy the weights into it
+    if config.fp8_model_weights_filename is not None:
         if config.fp8_model_weights_filename is not None:
             _load_fp8_weights(vanilla_model, config)
     else:
