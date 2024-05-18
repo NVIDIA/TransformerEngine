@@ -153,7 +153,6 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
-                total_loss += loss.detach().float()
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
@@ -200,21 +199,25 @@ def restart_jupyter_notebook():
         warnings.simplefilter("ignore")
         torch.set_warn_always(False)
 
-
+@torch.no_grad()
 def run_forward_pass(model, hyperparams, num_iters):
     """
         It runs num_iters forward passes with sample data.
     """
+    accelerator = Accelerator(
+        log_with="wandb",
+        gradient_accumulation_steps=hyperparams.gradient_accumulation_steps,
+        mixed_precision="no"
+    )
+    train_dataloader = get_dataloaders(accelerator, hyperparams)
+
     model.train()
     train_dataloader = enumerate(train_dataloader)
 
     for _ in range(num_iters):
         _, batch = next(train_dataloader)
         batch["input_ids"] = batch["input_ids"].cuda()
-        model.generate(
-            **batch,
-            max_new_tokens=10
-        )
+        model(batch["input_ids"])
 
 """
     Benchmarking and example generation functions.
@@ -223,6 +226,13 @@ def run_forward_pass(model, hyperparams, num_iters):
 def print_sample_of_generated_texts(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     inputs = tokenizer(["Another string ... ", "I "] * 32, return_tensors="pt", padding=True)
+
+
+    max_length = inputs['input_ids'].size(1)
+    new_length = ((max_length + 63) // 64) * 64
+    inputs['input_ids'] = torch.nn.functional.pad(inputs['input_ids'], (new_length - max_length, 0), value=tokenizer.pad_token_id)
+    inputs['attention_mask'] = torch.nn.functional.pad(inputs['attention_mask'], (new_length - max_length, 0), value=0)
+
 
     inputs['input_ids'] = inputs['input_ids'].cuda()
     inputs['attention_mask'] = inputs['attention_mask'].cuda()
