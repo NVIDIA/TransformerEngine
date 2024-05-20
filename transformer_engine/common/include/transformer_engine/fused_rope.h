@@ -17,6 +17,7 @@ extern "C" {
  *
  *  \param[in]     input           Input tensor for fused rope.
  *  \param[in]     freqs           The freqs tensor.
+ *  \param[in]     begins          The beginning offsets.
  *  \param[out]    output          Output tensor.
  *  \param[in]     s               Length of the s dimension of input.
  *  \param[in]     b               Length of the b dimension of input.
@@ -34,7 +35,8 @@ extern "C" {
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs,
-                             NVTETensor output, const int s, const int b,
+                             const NVTETensor begins, NVTETensor output, 
+                             const int s, const int b,
                              const int h, const int d, const int d2,
                              const int stride_s, const int stride_b,
                              const int stride_h, const int stride_d,
@@ -46,6 +48,7 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs,
  *
  *  \param[in]     output_grads    Incoming gradient tensor for backward.
  *  \param[in]     freqs           The freqs tensor.
+ *  \param[in]     begins          The beginning offsets.
  *  \param[out]    input_grads     Input gradient tensor to calculate.
  *  \param[in]     s               Length of the s dimension of output_grads.
  *  \param[in]     b               Length of the b dimension of output_grads.
@@ -62,8 +65,8 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs,
  *  \param[in]     o_stride_d      Stride of the d dimension of input_grads.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_rope_backward(const NVTETensor output_grads,
-                              const NVTETensor freqs, NVTETensor input_grads,
+void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor freqs, 
+                              const NVTETensor begins, NVTETensor input_grads,
                               const int s, const int b, const int h,
                               const int d, const int d2, const int stride_s,
                               const int stride_b, const int stride_h,
