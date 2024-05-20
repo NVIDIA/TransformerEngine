@@ -14,6 +14,7 @@ import subprocess
 from subprocess import CalledProcessError
 import sys
 import sysconfig
+import platform
 from typing import List, Optional, Tuple, Union
 
 import setuptools
@@ -115,7 +116,7 @@ def found_pybind11() -> bool:
     try:
         subprocess.run(
             [
-                "cmake",
+                str(cmake_bin()),
                 "--find-package",
                 "-DMODE=EXIST",
                 "-DNAME=pybind11",
@@ -132,13 +133,24 @@ def found_pybind11() -> bool:
         return True
     return False
 
-def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple
+@lru_cache(maxsize=1)
+def lib_extension():
+    """Get the library file extension for the operating system"""
+    system = platform.system()
+    if system == "Linux":
+        lib_ext = "so"
+    elif system == "Darwin":
+        lib_ext = "dylib"
+    elif system == "Windows":
+        lib_ext = "dll"
+    else:
+        raise RuntimeError(f"Unsupported operating system ({system})")
+    return lib_ext
 
-    Throws FileNotFoundError if NVCC is not found.
+def cuda_path() -> Tuple[str, str]:
+    """CUDA root path and NVCC binary path as a tuple.
 
-    """
-
+    Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
     nvcc_bin: Optional[Path] = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
@@ -149,6 +161,7 @@ def cuda_version() -> Tuple[int, ...]:
         # Check if nvcc is in path
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
+            cuda_home = Path(nvcc_bin.strip("/bin/nvcc"))
             nvcc_bin = Path(nvcc_bin)
     if nvcc_bin is None:
         # Last-ditch guess in /usr/local/cuda
@@ -157,9 +170,15 @@ def cuda_version() -> Tuple[int, ...]:
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
+    return cuda_home, nvcc_bin
+
+CUDA_HOME, NVCC_BIN = cuda_path()
+
+def cuda_version() -> Tuple[int, ...]:
+    """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
     output = subprocess.run(
-        [nvcc_bin, "-V"],
+        [NVCC_BIN, "-V"],
         capture_output=True,
         check=True,
         universal_newlines=True,
@@ -167,6 +186,53 @@ def cuda_version() -> Tuple[int, ...]:
     match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
+
+def cudnn_path() -> Tuple[str, str]:
+    """cuDNN include and library paths.
+
+    Throws FileNotFoundError if libcudnn.so is not found."""
+    assert os.path.exists(root_path / "3rdparty" / "cudnn-frontend"), (
+        "Could not find cuDNN frontend API. Try running 'git submodule update --init --recursive' "
+        "within the Transformer Engine source.")
+    try:
+        shutil.copy2(root_path / "3rdparty" / "cudnn-frontend" / "cmake" / "cuDNN.cmake",
+                     root_path / "FindCUDNN.cmake")
+        find_cudnn = subprocess.run(
+            [
+                str(cmake_bin()),
+                "--find-package",
+                f"-DCMAKE_MODULE_PATH={str(root_path)}",
+                "-DCMAKE_FIND_DEBUG_MODE=ON",
+                "-DMODE=EXIST",
+                "-DCOMPILER_ID=CXX",
+                "-DLANGUAGE=CXX",
+                "-DNAME=CUDNN",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        os.remove(root_path / "FindCUDNN.cmake")
+    except subprocess.CalledProcessError as e:
+        raise FileNotFoundError("Could not find a cuDNN installation.") from e
+
+    cudnn_include = None
+    cudnn_link = None
+    lib_ext = lib_extension()
+    path_divider = '\\' if lib_ext == "dll" else '/'
+    for line in find_cudnn.stderr.splitlines():
+        if "cudnn.h" in line:
+            cudnn_include = line.lstrip(' ').rstrip(path_divider + 'cudnn.h')
+        elif "libcudnn." + lib_ext in line:
+            cudnn_link = line.lstrip(' ').rstrip(path_divider + 'libcudnn.so')
+        if cudnn_include is not None and cudnn_link is not None:
+            break
+    if cudnn_include is None or cudnn_link is None:
+        raise FileNotFoundError("Could not find a cuDNN installation.")
+
+    return Path(cudnn_include), Path(cudnn_link)
+
+CUDNN_INCLUDE, CUDNN_LINK = cudnn_path()
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -263,14 +329,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "cmake>=3.18")
     if not found_ninja():
         add_unique(setup_reqs, "ninja")
+    if not found_pybind11():
+        add_unique(setup_reqs, "pybind11")
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
         add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.5.8,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
-        if not found_pybind11():
-            add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "paddle" in frameworks():
@@ -416,6 +482,7 @@ class CMakeBuildExtension(BuildExtension):
             from paddle.utils.cpp_extension.extension_utils import custom_write_stub
             custom_write_stub(lib_name, stub_path)
 
+GLIBCXX_USECXX11_ABI = False
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -424,10 +491,21 @@ def setup_common_extension() -> CMakeExtension:
 
     """
     cmake_flags = []
-    if "jax" in frameworks():
-        cmake_flags.append("-DENABLE_JAX=ON")
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
+        # FindPythonInterp and FindPythonLibs are deprecated in newer CMake versions,
+        # but PyBind11 still tries to use them unless we set PYBIND11_FINDPYTHON=ON.
+        cmake_flags.append("-DPYBIND11_FINDPYTHON=ON")
+
+    # If we need to build TE/PyTorch extensions later, we need to compile core TE library with
+    # the same C++ ABI version as PyTorch.
+    if "pytorch" in frameworks():
+        import torch
+        if "-D_GLIBCXX_USE_CXX11_ABI=1" in torch._C._show_config():  # pylint: disable=unsupported-membership-test
+            global GLIBCXX_USECXX11_ABI
+            GLIBCXX_USECXX11_ABI = True
+            cmake_flags += [ "-DUSE_CXX11_ABI=ON" ]
+
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / "transformer_engine",
@@ -446,12 +524,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-        # We need to compile system.cpp because the pytorch extension uses
-        # transformer_engine::getenv. This is a workaround to avoid direct
-        # linking with libtransformer_engine.so, as the pre-built PyTorch
-        # wheel from conda or PyPI was not built with CXX11_ABI, and will
-        # cause undefined symbol issues.
-        root_path / "transformer_engine" / "common" / "util" / "system.cpp",
     ] + \
     _all_files_in_dir(extensions_dir)
 
@@ -493,6 +565,25 @@ def setup_pytorch_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
+    # Link core TE library
+    lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
+    if lib_extension() == 'dll':
+        # Windows can load from the same folder as the extension library but needs full DLL name.
+        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+    else:
+        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
+
+    # Add missing PyBind flags
+    import pybind11
+    include_dirs.append(pybind11.get_include())
+    if lib_extension() == "dll":
+        cxx_flags += [ "/EHsc", "/bigobj" ]
+    else:
+        cxx_flags += [ "-fvisibility=hidden" ]
+
     # userbuffers support
     if with_userbuffers():
         if os.getenv("MPI_HOME"):
@@ -500,6 +591,10 @@ def setup_pytorch_extension() -> setuptools.Extension:
             include_dirs.append(mpi_home / "include")
         cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
         nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
+        if lib_extension() == 'dll':
+            lib_kwargs['libraries'].append('transformer_engine_userbuffers.dll')
+        else:
+            lib_kwargs['libraries'].append('transformer_engine_userbuffers')
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -509,13 +604,104 @@ def setup_pytorch_extension() -> setuptools.Extension:
         name="transformer_engine_extensions",
         sources=sources,
         include_dirs=include_dirs,
-        # libraries=["transformer_engine"], ### TODO (tmoon) Debug linker errors
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        **lib_kwargs
     )
 
+def setup_jax_extension() -> setuptools.Extension:
+    """Setup PyBind11 extension for JAX support"""
+    # Source files
+    src_dir = root_path / "transformer_engine" / "jax" / "csrc"
+    sources = [
+        src_dir / "extensions.cpp",
+        src_dir / "modules.cpp",
+        src_dir / "utils.cu",
+    ]
+
+    # Header files
+    include_dirs = [
+        CUDA_HOME / "include",
+        CUDNN_INCLUDE,
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "jax" / "csrc",
+        root_path / "transformer_engine",
+    ]
+
+    # Compile flags
+    cxx_flags = [ "-O3" ]
+    nvcc_flags = [
+        "-O3",
+        "--forward-unknown-opts",
+    ]
+    if GLIBCXX_USECXX11_ABI:
+        # Core TE library was built with C++11 ABI (for PyTorch compat) so we need to do the same
+        # for all the framework extensions.
+        cxx_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+        nvcc_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+
+    # Linked libraries
+    libraries = [
+        'cudart',
+        'cublas',
+        'cublasLt',
+        'cudnn',
+    ]
+    lib_kwargs = {}
+    if lib_extension() == 'dll':
+        # Windows needs explicit file paths for each library.
+        cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
+        libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
+
+        # Core TE library is in the same folder as the extension library so it doesn't
+        # need an absolute path, just the full file name.
+        lib_kwargs['libraries'] = [ str(path) for path in libraries ] + \
+                                  [ 'libtransformer_engine.dll' ]
+    else:
+        # Set link and runtime paths for CUDA libraries.
+        cuda_lib_dir = CUDA_HOME / 'lib64'
+        if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
+            cuda_lib_dir = CUDA_HOME / 'lib'
+        lib_kwargs['libraries'] = libraries
+        lib_kwargs['library_dirs'] = [
+            str(cuda_lib_dir),
+            str(CUDNN_LINK),
+        ]
+        lib_kwargs['extra_link_args'] = [
+            f"-Wl,-rpath,{path}" for path in lib_kwargs['library_dirs']
+        ]
+        # Add core TE library with RPATH same as the extension library's $ORIGIN dir.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        lib_kwargs['libraries'] += [ 'transformer_engine' ]
+        lib_kwargs['library_dirs'] += [ '.' ]
+        lib_kwargs['extra_link_args'] += [ '-Wl,-rpath,$ORIGIN' ]
+
+    # Add PyBind11 to the extension
+    from pybind11.setup_helpers import Pybind11Extension
+    class Pybind11CUDAExtension(Pybind11Extension):
+        """Modified Pybind11Extension to allow combined CXX + NVCC compile flags."""
+
+        def _add_cflags(self, flags: List[str]) -> None:
+            if isinstance(self.extra_compile_args, dict):
+                cxx_flags = self.extra_compile_args.pop('cxx', [])
+                cxx_flags += flags
+                self.extra_compile_args['cxx'] = cxx_flags
+            else:
+                self.extra_compile_args[:0] = flags
+
+    return Pybind11CUDAExtension(
+        "transformer_engine_jax",
+        sources=[str(path) for path in sources],
+        include_dirs=[str(path) for path in include_dirs],
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": nvcc_flags
+        },
+        **lib_kwargs,
+    )
 
 def setup_paddle_extension() -> setuptools.Extension:
     """Setup CUDA extension for Paddle support"""
@@ -551,6 +737,11 @@ def setup_paddle_extension() -> setuptools.Extension:
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if GLIBCXX_USECXX11_ABI:
+        # Core TE library was built with C++11 ABI (for PyTorch compat) so we need to do the same
+        # for all the framework extensions.
+        cxx_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+        nvcc_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
 
     # Version-dependent CUDA options
     try:
@@ -565,6 +756,17 @@ def setup_paddle_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
+    # Link core TE library
+    lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
+    if lib_extension() == 'dll':
+        # Windows can load from the same folder as the extension library but needs full DLL name.
+        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+    else:
+        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
+
     # Construct Paddle CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
@@ -572,11 +774,11 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext = CUDAExtension(
         sources=sources,
         include_dirs=include_dirs,
-        libraries=["transformer_engine"],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        **lib_kwargs
     )
     ext.name = "transformer_engine_paddle_pd_"
     return ext
@@ -595,6 +797,9 @@ def main():
     ext_modules = [setup_common_extension()]
     if "pytorch" in frameworks():
         ext_modules.append(setup_pytorch_extension())
+
+    if "jax" in frameworks():
+        ext_modules.append(setup_jax_extension())
 
     if "paddle" in frameworks():
         ext_modules.append(setup_paddle_extension())
