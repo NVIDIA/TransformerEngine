@@ -2661,7 +2661,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         act_lu partitioning
         """
-        del result_infos, act_enum
+        del result_infos
         x_spec = get_padded_spec(arg_infos[0])
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
@@ -2790,7 +2790,7 @@ class DActLuPrimitive(BasePrimitive):
         """
         dact_lu partition
         """
-        del result_infos, act_enum
+        del result_infos
         dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = dx_sharding
@@ -4298,7 +4298,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         _check_valid_batch_dims(batch_dims)
         assert DBiasCastTransposePrimitive.outer_primitive is not None
         dz, amax, scale, scale_inv = batched_args
-        dz_bdim, _, amax_bdim, _, _ = batch_dims
+        dz_bdim, amax_bdim, _, _ = batch_dims
 
         # Minus batch dim.
         transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, dz.ndim - 1)
