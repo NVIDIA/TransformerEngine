@@ -18,3 +18,4 @@ pytest -v -s $TE_PATH/tests/pytorch/test_fused_rope.py
 NVTE_TORCH_COMPILE=0 pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py
 pytest -v -s $TE_PATH/tests/pytorch/test_float8tensor.py
 pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py
+pytest -v -s $TE_PATH/tests/pytorch/test_torch_save_load.py

@@ -855,3 +855,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
 
         return out
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                            missing_keys, unexpected_keys, error_msgs):
+        """
+        This function loads tensors and extra state including fp8 metadata.
+        This metadata is essential for copying fp8 tensors, as the copy_ function
+        uses the scale_inv parameter from fp8_meta to set the correct scaling factor
+        for the new tensor.
+        Hence, this extra state must be loaded before the tensor copying process,
+        not after, as is typically done in _load_from_state_dict.
+        Tensors are copied into fp8 tensors only when self.primary_weights_in_fp8=True,
+        otherwise, this behavior is not required.
+        """
+        if self.primary_weights_in_fp8:
+            extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
+            if extra_state_key in state_dict:
+                self.set_extra_state(state_dict[extra_state_key])
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                            missing_keys, unexpected_keys, error_msgs)
