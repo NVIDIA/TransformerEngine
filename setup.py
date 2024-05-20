@@ -15,10 +15,9 @@ from subprocess import CalledProcessError
 import sys
 import sysconfig
 import platform
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Any
 
 import setuptools
-from setuptools.command.build_ext import build_ext
 
 from te_version import te_version
 
@@ -324,13 +323,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             if val not in l:
                 l.append(val)
 
+    # Pybind11 has to be installed and imported here manually so we can define
+    # the framework extensions correctly
+    if not found_pybind11():
+        import importlib
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pybind11'])
+        globals()['pybind11'] = importlib.import_module('pybind11')
+
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
     if not found_ninja():
         add_unique(setup_reqs, "ninja")
-    if not found_pybind11():
-        add_unique(setup_reqs, "pybind11")
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
@@ -416,9 +420,6 @@ else:
 
 class CMakeBuildExtension(BuildExtension):
     """Setuptools command with support for CMake extension modules"""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
 
     def run(self) -> None:
 
@@ -679,8 +680,9 @@ def setup_jax_extension() -> setuptools.Extension:
         lib_kwargs['library_dirs'] += [ '.' ]
         lib_kwargs['extra_link_args'] += [ '-Wl,-rpath,$ORIGIN' ]
 
-    # Add PyBind11 to the extension
+    # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
+
     class Pybind11CUDAExtension(Pybind11Extension):
         """Modified Pybind11Extension to allow combined CXX + NVCC compile flags."""
 
