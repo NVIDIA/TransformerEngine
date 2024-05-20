@@ -1,0 +1,29 @@
+footer img {
+    display: block;
+    width: 137.5px;
+    position: relative;
+    left: -9px;
+    margin: 0 0 15px 0;
+}
+
+footer p {
+    color: #666666;
+    font-weight: normal;
+    font-size: 12px;
+    line-height: 1.25em;
+}
+
+footer p:not(.notices) {
+    display: inline;
+    margin: 0;
+}
+
+footer p a,
+footer p a:link,
+footer p a:visited {
+    color: #666666;
+}
+
+footer p a:hover {
+    color: #666666;
+}
