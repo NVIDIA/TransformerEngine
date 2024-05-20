@@ -202,6 +202,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        fuse_wgrad_accumulation: bool,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         if normalization == "RMSNorm":
@@ -285,6 +286,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
@@ -329,6 +331,12 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0],
                                                                   ctx.parallel_mode == "row")
 
+            if ctx.is_first_microbatch is not None:
+                accumulate_wgrad_into_param_main_grad = (ctx.fuse_wgrad_accumulation
+                                                         and not ctx.is_first_microbatch)
+            else:
+                accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
+
             # Prepare ln_out for Linear bwd
             linear_inputmat = ln_out
             if ctx.fp8_enabled:
@@ -365,6 +373,8 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 ctx.tensor_parallel,
                 ctx.sequence_parallel,
                 ctx.tp_group,
+                ctx.fuse_wgrad_accumulation,
+                accumulate_wgrad_into_param_main_grad,
             )
 
             if not ctx.fp8_enabled:
@@ -396,14 +406,16 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 # weight_fp8 and weight_t_fp8 are stop_gradient tensors
                 weight_cache_grad = (None, None)
 
-            return (
-                dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma if ctx.requires_ln_wgrad else None,
-                *dbeta_out,
-                wgrad if ctx.requires_wgrad else None,
-                *weight_cache_grad,
-                *bgrad_out,
-            )
+        if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+            wgrad = None
+        return (
+            dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgamma if ctx.requires_ln_wgrad else None,
+            *dbeta_out,
+            wgrad if ctx.requires_wgrad else None,
+            *weight_cache_grad,
+            *bgrad_out,
+        )
 
 
 class LayerNormLinear(TransformerEngineBaseLayer):
@@ -449,6 +461,15 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                    When set to `None`, no communication is performed.
     sequence_parallel : bool, default = `False`
                        if set to `True`, uses sequence parallelism.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
     """
 
     def __init__(
@@ -464,6 +485,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         parallel_mode: Optional[str] = None,
         sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
+        fuse_wgrad_accumulation: bool = False,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -496,6 +518,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
+
+        self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
 
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
@@ -610,6 +634,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                self.fuse_wgrad_accumulation,
                 is_first_microbatch,
             )
 

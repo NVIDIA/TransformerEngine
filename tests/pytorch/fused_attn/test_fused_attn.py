@@ -613,7 +613,7 @@ def _run_dot_product_attention(
             attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
             for i in range(config.batch_size):
                 attention_mask_q = torch.cat([attention_mask_q,
-                    torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                    torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = attention_mask_q.to(device="cuda")
         if config.attn_type == 'cross':
@@ -621,19 +621,18 @@ def _run_dot_product_attention(
             attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
             for i in range(config.batch_size):
                 attention_mask_q = torch.cat([attention_mask_q,
-                    torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                    torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
                 attention_mask_kv = torch.cat([attention_mask_kv, torch.Tensor(
-                    [True]*seqlens_kv[i] + [False]*(config.max_seqlen_kv-seqlens_kv[i]))
+                    [False]*seqlens_kv[i] + [True]*(config.max_seqlen_kv-seqlens_kv[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = (
                     attention_mask_q.to(device="cuda"), attention_mask_kv.to(device="cuda"))
+    window_size = None
     if swa:
         window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
     elif "causal" in config.attn_mask_type:
         window_size, attention_mask = (-1, 0), None
-    else:
-        window_size, attention_mask = None, None
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -1017,7 +1016,7 @@ def _run_transformer_layer(
         attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
         for i in range(config.batch_size):
             attention_mask_q = torch.cat([attention_mask_q,
-                torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                 .to(torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
         attention_mask = attention_mask_q.to(device="cuda")
 
