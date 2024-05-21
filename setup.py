@@ -219,12 +219,11 @@ def cudnn_path() -> Tuple[str, str]:
     cudnn_include = None
     cudnn_link = None
     lib_ext = lib_extension()
-    path_divider = '\\' if lib_ext == "dll" else '/'
     for line in find_cudnn.stderr.splitlines():
         if "cudnn.h" in line:
-            cudnn_include = line.lstrip(' ').rstrip(path_divider + 'cudnn.h')
+            cudnn_include = Path(line.lstrip()).parent
         elif "libcudnn." + lib_ext in line:
-            cudnn_link = line.lstrip(' ').rstrip(path_divider + 'libcudnn.so')
+            cudnn_link = Path(line.lstrip()).parent
         if cudnn_include is not None and cudnn_link is not None:
             break
     if cudnn_include is None or cudnn_link is None:
@@ -530,7 +529,7 @@ class CMakeExtension(setuptools.Extension):
                 raise RuntimeError(f"Error when running CMake: {e}")
 
 
-GLIBCXX_USECXX11_ABI = False
+GLIBCXX_USECXX11_ABI = None
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -549,10 +548,9 @@ def setup_common_extension() -> CMakeExtension:
     # the same C++ ABI version as PyTorch.
     if "pytorch" in frameworks():
         import torch
-        if "-D_GLIBCXX_USE_CXX11_ABI=1" in torch._C._show_config():  # pylint: disable=unsupported-membership-test
-            global GLIBCXX_USECXX11_ABI
-            GLIBCXX_USECXX11_ABI = True
-            cmake_flags += [ "-DUSE_CXX11_ABI=ON" ]
+        global GLIBCXX_USECXX11_ABI
+        GLIBCXX_USECXX11_ABI = torch.compiled_with_cxx11_abi()
+        cmake_flags.append(f"-DUSE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}")
 
     return CMakeExtension(
         name="transformer_engine",
@@ -686,11 +684,11 @@ def setup_jax_extension() -> setuptools.Extension:
         "-O3",
         "--forward-unknown-opts",
     ]
-    if GLIBCXX_USECXX11_ABI:
-        # Core TE library was built with C++11 ABI (for PyTorch compat) so we need to do the same
-        # for all the framework extensions.
-        cxx_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
-        nvcc_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+    if GLIBCXX_USECXX11_ABI is not None:
+        # Compile JAX extensions with same ABI as core library
+        flag = f"-D_GLIBCXX_USE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}"
+        cxx_flags.append(flag)
+        nvcc_flags.append(flag)
 
     # Linked libraries
     libraries = [
@@ -712,7 +710,7 @@ def setup_jax_extension() -> setuptools.Extension:
     else:
         # Set link and runtime paths for CUDA libraries.
         cuda_lib_dir = cuda_home / 'lib64'
-        if (not os.path.exists(cuda_lib_dir) and os.path.exists(cuda_home / 'lib')):
+        if (not cuda_lib_dir.exists() and (cuda_home / 'lib').exists()):
             cuda_lib_dir = cuda_home / 'lib'
         lib_kwargs['libraries'] = libraries
         lib_kwargs['library_dirs'] = [
@@ -789,11 +787,11 @@ def setup_paddle_extension() -> setuptools.Extension:
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
-    if GLIBCXX_USECXX11_ABI:
-        # Core TE library was built with C++11 ABI (for PyTorch compat) so we need to do the same
-        # for all the framework extensions.
-        cxx_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
-        nvcc_flags.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+    if GLIBCXX_USECXX11_ABI is not None:
+        # Compile PaddlePaddle extensions with same ABI as core library
+        flag = f"-D_GLIBCXX_USE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}"
+        cxx_flags.append(flag)
+        nvcc_flags.append(flag)
 
     # Version-dependent CUDA options
     try:

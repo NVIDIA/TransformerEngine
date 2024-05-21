@@ -86,11 +86,14 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Compile core library with the same ABI as PyTorch (if applicable)
-option(USE_CXX11_ABI "Compile with C++11 ABI" OFF)
+option(USE_CXX11_ABI "Compile with C++11 ABI" ON)
 message(STATUS "Use C++11 ABI: ${USE_CXX11_ABI}")
 if (USE_CXX11_ABI)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
 endif()
 
 # Install library
