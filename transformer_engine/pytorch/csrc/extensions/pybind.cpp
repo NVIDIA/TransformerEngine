@@ -101,10 +101,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
   m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
-
-
   m.def("attention_copy", &attention_copy, "attention_copy");
-  m.def("get_values", &get_values, "get_values");
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")

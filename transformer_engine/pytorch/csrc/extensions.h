@@ -34,6 +34,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -60,6 +61,7 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -85,6 +87,7 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -113,6 +116,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -139,6 +143,7 @@ std::vector<at::Tensor> fused_attn_fwd(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -168,6 +173,7 @@ std::vector<at::Tensor> fused_attn_bwd(
                 const c10::optional<at::Tensor> seq_offsets_q,
                 const c10::optional<at::Tensor> seq_offsets_k,
                 const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -183,7 +189,6 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
 void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len, torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s);
-void get_values(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len, torch::Tensor B,  int max_incoming_seq_len, int b, int d);
 
 /***************************************************************************************************
  * GEMM
@@ -641,12 +646,14 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads,
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input,
                                   const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs
+                                  const at::Tensor &freqs,
+                                  const at::Tensor &begins
 );
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
                                    const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs
+                                   const at::Tensor &freqs,
+                                   const at::Tensor &begins
 );
 
 /***************************************************************************************************

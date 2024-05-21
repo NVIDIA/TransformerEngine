@@ -79,6 +79,7 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor fr
  *  \param[in]     input         Input tensor for fused rope.
  *  \param[in]     cu_seqlens    The cumulative sum of sequence lengths tensor.
  *  \param[in]     freqs         The freqs tensor.
+ *  \param[in]     begins          The beginning offsets.
  *  \param[out]    output        Output tensor.
  *  \param[in]     max_s         Max sequence length.
  *  \param[in]     b             Batch size.
@@ -95,7 +96,9 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor fr
  */
 void nvte_fused_rope_thd_forward(const NVTETensor input,
                                  const NVTETensor cu_seqlens,
-                                 const NVTETensor freqs, NVTETensor output,
+                                 const NVTETensor freqs, 
+                                 NVTETensor begins,
+                                 NVTETensor output,
                                  const int max_s, const int b, const int h,
                                  const int d, const int d2, const int stride_t,
                                  const int stride_h, const int stride_d,
@@ -107,6 +110,7 @@ void nvte_fused_rope_thd_forward(const NVTETensor input,
  *  \param[in]     output_grads  Incoming gradient tensor for backward.
  *  \param[in]     cu_seqlens    The cumulative sum of sequence lengths tensor.
  *  \param[in]     freqs         The freqs tensor.
+ *  \param[in]     begins          The beginning offsets.
  *  \param[out]    input_grads   Input gradient to calculate.
  *  \param[in]     max_s         Max sequence length.
  *  \param[in]     b             Batch size.
@@ -123,7 +127,7 @@ void nvte_fused_rope_thd_forward(const NVTETensor input,
  */
 void nvte_fused_rope_thd_backward(
     const NVTETensor output_grads, const NVTETensor cu_seqlens,
-    const NVTETensor freqs, NVTETensor input_grads, const int max_s,
+    const NVTETensor freqs, NVTETensor begins, NVTETensor input_grads, const int max_s,
     const int b, const int h, const int d, const int d2, const int stride_t,
     const int stride_h, const int stride_d, const int o_stride_t,
     const int o_stride_h, const int o_stride_d, cudaStream_t stream);

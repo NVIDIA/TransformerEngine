@@ -42,7 +42,7 @@ class HyperParameters:
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
-        self.batch_size = 16
+        self.batch_size = 8
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps=5
@@ -229,7 +229,7 @@ def print_sample_of_generated_texts(model):
 
 
     max_length = inputs['input_ids'].size(1)
-    new_length = ((max_length + 63) // 64) * 64
+    new_length = ((max_length + 63) // 64) * 128
     inputs['input_ids'] = torch.nn.functional.pad(inputs['input_ids'], (new_length - max_length, 0), value=tokenizer.pad_token_id)
     inputs['attention_mask'] = torch.nn.functional.pad(inputs['attention_mask'], (new_length - max_length, 0), value=0)
 
@@ -243,7 +243,10 @@ def print_sample_of_generated_texts(model):
         print(text)
         print("=" * 100)
 
-def benchmark_generation(model, tokenizer, batch_size, context_length, max_new_tokens):
+
+
+def benchmark_generation(model, batch_size, context_length, max_new_tokens):
+    tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     inputs = tokenizer(["a" * context_length] * batch_size, return_tensors="pt", padding=True)
 
     start = torch.cuda.Event(enable_timing=True)
@@ -253,7 +256,7 @@ def benchmark_generation(model, tokenizer, batch_size, context_length, max_new_t
 
     model.generate(
         inputs['input_ids'].cuda(),
-        max_new_tokens = 256
+        max_new_tokens=max_new_tokens
     )
     torch.cuda.synchronize()
     end.record()
