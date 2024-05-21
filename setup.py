@@ -749,7 +749,7 @@ def setup_jax_extension() -> setuptools.Extension:
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        language=["c++"],
+        language="c++",
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
