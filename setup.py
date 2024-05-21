@@ -16,6 +16,9 @@ import sys
 import sysconfig
 import platform
 from typing import List, Optional, Tuple, Union
+import warnings
+import copy
+import shlex
 
 import setuptools
 
@@ -359,12 +362,10 @@ else:
     install_and_import('pybind11')
     from pybind11.setup_helpers import build_ext as BuildExtension
 
-
 class CMakeBuildExtension(BuildExtension):
     """Setuptools command with support for CMake extension modules"""
 
     def run(self) -> None:
-
         # Build CMake extensions
         for ext in self.extensions:
             if isinstance(ext, CMakeExtension):
@@ -426,51 +427,57 @@ class CMakeBuildExtension(BuildExtension):
             custom_write_stub(lib_name, stub_path)
 
     def build_extensions(self):
+        # BuildExtensions from PyTorch and PaddlePaddle already handle CUDA files correctly
+        # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
         if "pytorch" not in frameworks() and "paddle" not in frameworks():
             # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
             # extra_compile_args is a dict.
-            for extension in self.extensions:
-                if isinstance(extension.extra_compile_args, dict):
-                    for ext in ['cxx', 'nvcc']:
-                        if ext not in extension.extra_compile_args:
-                            extension.extra_compile_args[ext] = []
+            for ext in self.extensions:
+                if isinstance(ext.extra_compile_args, dict):
+                    for target in ['cxx', 'nvcc']:
+                        if target not in ext.extra_compile_args.keys():
+                            ext.extra_compile_args[target] = []
 
-            # BuildExtension from PyTorch and Paddle already handle NVCC builds for .cu files,
-            # but we need to customize it manually for the TE/JAX Pybind11Extension.
-            # Add .cu to list of supported extensions.
-            self.compiler.src_extensions += [ '.cu', '.cuh' ]
-
-            # Store reference to default compiler_so and _compile methods
-            # to dispatch non-CUDA compiles.
-            default_compiler_so = self.compiler.compiler_so
-            default_compile_fn = self.compiler._compile
-
-            # Define new _compile_fn that uses NVCC_BIN and extra_compile_args['nvcc']
-            # for .cu files, while preserving existing compiler with extra_compile_args['cxx']
-            # for everything else.
-            _, nvcc_bin = cuda_path()
-            def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts):
+            # Define new _compile method that redirects to NVCC for .cu and .cuh files.
+            original_compile_fn = self.compiler._compile
+            self.compiler.src_extensions += ['.cu', '.cuh']
+            def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
+                # Copy before we make any modifications.
+                cflags = copy.deepcopy(extra_postargs)
+                original_compiler = self.compiler.compiler_so
                 try:
-                    if os.path.splitext(src)[1] in [ '.cu', '.cuh' ]:
-                        self.compiler.set_executable('compiler_so', str(nvcc_bin))
-                        if isinstance(extra_postargs, dict):
-                            postargs = extra_postargs['nvcc']
-                        else:
-                            postargs = extra_postargs
-                        postargs += ['--compiler-options', "'-fPIC'"]
-                    else:
-                        if isinstance(extra_postargs, dict):
-                            postargs = extra_postargs['cxx']
-                        else:
-                            postargs = extra_postargs
-                    default_compile_fn(obj, src, ext, cc_args, postargs, pp_opts)
-                finally:
-                    self.compiler.compiler_so = default_compiler_so
+                    _, nvcc_bin = cuda_path()
+                    original_compiler = self.compiler.compiler_so
 
-            # Set the redefined _compile_fn back into the compiler.
+                    if os.path.splitext(src)[1] in ['.cu', '.cuh']:
+                        self.compiler.set_executable('compiler_so', str(nvcc_bin))
+                        if isinstance(cflags, dict):
+                            cflags = cflags['nvcc']
+
+                        # Add -fPIC if not already specified
+                        if not any('-fPIC' in flag for flag in cflags):
+                            cflags.extend(['--compiler-options', "'-fPIC'"])
+
+                        # Forward unknown options
+                        if not any('--forward-unknown-opts' in flag for flag in cflags):
+                            cflags.append('--forward-unknown-opts')
+
+                    elif isinstance(cflags, dict):
+                        cflags = cflags['cxx']
+
+                    # Append -std=c++17 if not already in flags
+                    if not any(flag.startswith('-std=') for flag in cflags):
+                        cflags.append('-std=c++17')
+
+                    return original_compile_fn(obj, src, ext, cc_args, cflags, pp_opts)
+
+                finally:
+                    # Put the original compiler back in place.
+                    self.compiler.set_executable('compiler_so', original_compiler)
+
             self.compiler._compile = _compile_fn
 
-        BuildExtension.build_extensions(self)
+        super().build_extensions()
 
 
 class CMakeExtension(setuptools.Extension):
@@ -680,10 +687,7 @@ def setup_jax_extension() -> setuptools.Extension:
 
     # Compile flags
     cxx_flags = [ "-O3" ]
-    nvcc_flags = [
-        "-O3",
-        "--forward-unknown-opts",
-    ]
+    nvcc_flags = [ "-O3" ]
     if GLIBCXX_USECXX11_ABI is not None:
         # Compile JAX extensions with same ABI as core library
         flag = f"-D_GLIBCXX_USE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}"
