@@ -1,0 +1,299 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Accelerating a Hugging Face Gemma model with Transformer Engine"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In the previous [tutorial](../te_llama/tutorial_accelerate_hf_llama_with_te.ipynb), we demonstrated how to accelerate HF Llama models using the Transformer Engine library. We replaced `GemmaDecoderLayer` with `TransformerLayer` from the Transformer Engine, achieving a **25%** speedup. Furthermore, we conducted the finetuning in FP8 precision, which yielded an additional **39%** speedup from the baseline.\n",
+    "\n",
+    "Now, we will undertake a similar enhancement for the Google's [Gemma](https://blog.google/technology/developers/gemma-open-models/) model."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Dependencies for this tutorial\n",
+    "\n",
+    "Following files and media are necessary to effectively run this tutorial:\n",
+    "\n",
+    "1. `te_gemma.py`\n",
+    "    - This file contains the code to load a Hugging Face Gemma checkpoint in Transformer Engine's `TransformerLayer` instead of Hugging Face's `GemmaDecoderLayer`. This is used in the following two sections of the tutorial - \"Improvement 1\" and \"Improvement 2\".\n",
+    "2. `utils.py`\n",
+    "    - This file contains the code related to dataloading, hyperparameters, setting up model/optimizers/accelerator, model training and other miscellaneous tasks like restarting the jupyter notebook from within the cell. \n",
+    "3. `media/`\n",
+    "    - This directory contains the images used in the following tutorial."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Differences between Llama and Gemma"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Thr Llama and the Gemma are very similar models - both are based on Transformer Decoder architecture. The most important architectural differences between them are the following:\n",
+    "\n",
+    "\n",
+    "| Feature                                      | Llama                              | Gemma                                      |\n",
+    "|----------------------------------------------|------------------------------------|--------------------------------------------|\n",
+    "| **Norm Layer**                               | Standard RMSNorm <br> $ y = \\frac{x - \\mathrm{E}[x]}{ \\sqrt{\\mathrm{Var}[x] + \\varepsilon}} * \\gamma + \\beta $                   | RMSNorm with zero centered gamma parameter <br>  $ y = \\frac{x - \\mathrm{E}[x]}{ \\sqrt{\\mathrm{Var}[x] + \\varepsilon}} * (\\textcolor{red}{1 +} \\gamma) + \\beta $   |\n",
+    "| **Embedding Dimension/Head Dimension**             | 4096/4096                              | 3072/4096                                  |\n",
+    "| **Activation Function**                      | SwiGlu                             | GeGlu                                      |\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# [Baseline] Running HF `GemmaModel` (Precision: `BF16`)\n",
+    "\n",
+    "Similarly to the Llama tutorial, we begin the experiments by running baseline Hugging Face Gemma model finetuning in BF16 precision.\n",
+    "\n",
+    "<div class=\"alert alert-info\">\n",
+    "\n",
+    "<b>Note</b>\n",
+    "    \n",
+    "This tutorial loads and trains a Gemma 7B model which takes up most of the GPU memory and therefore, we need to restart the jupyter notebook each time before running the following sections. A small utility method `restart_jupyter_notebook` is defined in the accompanying `utils.py` file. This function restarts the jupyter notebook so that the GPU memory is flushed before the model is loaded again from the checkpoint in order to avoid running into OOM (Out Of Memory) errors.\n",
+    "\n",
+    "If the utility doesn't work, comment this line `restart_jupyter_notebook()` in the following cell and manually restart the jupyter notebook before running the cell. Repeat the same for other sections in this tutorial.\n",
+    "\n",
+    "</div>\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "10 finetuning steps complete!\n",
+      "\n",
+      "Average time taken per step: \n",
+      "298 \n",
+      "milliseconds\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Restart the notebook (to flush the GPU memory)\n",
+    "from utils import restart_jupyter_notebook\n",
+    "restart_jupyter_notebook()\n",
+    "\n",
+    "\n",
+    "# Import necessary packages and methods\n",
+    "from utils import *\n",
+    "\n",
+    "\n",
+    "# Default hyperparams, also defined in `utils.py` in class `Hyperparameters`\n",
+    "## !!! `model_name` attr must point to the location of the model weights !!!\n",
+    "## Weights can be downloaded from: https://huggingface.co/google/gemma-7b\n",
+    "hyperparams.model_name = \"../../../../gemma-7b\" # <== Add model weight location here e.g. \"/path/to/downloaded/gemma/weights\"\n",
+    "hyperparams.mixed_precision = \"bf16\"\n",
+    "\n",
+    "\n",
+    "# Init the model and accelerator wrapper\n",
+    "model = init_baseline_model(hyperparams).cuda()\n",
+    "accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)\n",
+    "\n",
+    "\n",
+    "# Finetune the model\n",
+    "finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Let's add this information in a table and keep comparing it with a few possible improvements in future sections:\n",
+    "\n",
+    "| Models                                                      | Precision | Step Time (or ms per batch) | Speedup (over baseline) |\n",
+    "|-------------------------------------------------------------|-----------|-----------------------------|-------------------------|\n",
+    "| HF (baseline)                                               | BF16      | 298                         | 1                       |"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# [Improvement 1] Replace HF's `GemmaDecoderLayer` with TE's `TransformerLayer` (Precision: `BF16`)\n",
+    "\n",
+    "We replace *GemmaDecoderLayer* with the highly tuned *TransformerLayer*, similarly to our approach in the [Llama tutorial](../te_llama/tutorial_accelerate_hf_llama_with_te.ipynb). Let's observe the impact this change has on the model's speed."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "10 finetuning steps complete!\n",
+      "\n",
+      "Average time taken per step: \n",
+      "257 \n",
+      "milliseconds\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Restart the notebook (to flush the GPU memory)\n",
+    "from utils import restart_jupyter_notebook\n",
+    "restart_jupyter_notebook()\n",
+    "\n",
+    "\n",
+    "# Import necessary packages and methods\n",
+    "from utils import *\n",
+    "\n",
+    "\n",
+    "# Default hyperparams, also defined in `utils.py` in class `Hyperparameters`\n",
+    "## !!! `model_name` attr must point to the location of the model weights !!!\n",
+    "## Weights can be downloaded from: https://huggingface.co/google/gemma-7b\n",
+    "hyperparams.model_name = \"../../../../gemma-7b\"  # <== Add model weight location here e.g. \"/path/to/downloaded/gemma/weights\"\n",
+    "hyperparams.mixed_precision = \"bf16\"\n",
+    "\n",
+    "\n",
+    "# Init the model and accelerator wrapper\n",
+    "model = init_te_gemma_model(hyperparams).cuda()\n",
+    "accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)\n",
+    "\n",
+    "\n",
+    "# Finetune the model\n",
+    "finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Compared to the \"baseline\" implementation, we see that using Transformer Engine's `TransformerLayer` in place of Huggging Face's `GemmaDecoderLayer` gives a speedup of **16%** even when using only BF16 precision!\n",
+    "\n",
+    "| Models                                                      | Precision | Step Time (or ms per batch) | Speedup (over baseline) |\n",
+    "|-------------------------------------------------------------|-----------|-----------------------------|-------------------------|\n",
+    "| HF (baseline)                                               | BF16      | 298                        | 1                       |\n",
+    "| TE (replace `GemmaDecoderLayer` with `TE.TransformerLayer`) | BF16      | 257                         | 1.16                    |"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# [Improvement 2] Replace HF's `GemmaDecoderLayer` with TE's `TransformerLayer` (Precision: `FP8`)\n",
+    "\n",
+    "The last improvement is about enabling FP8 precision. Let's see how it works."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "10 finetuning steps complete!\n",
+      "\n",
+      "Average time taken per step: \n",
+      "214 \n",
+      "milliseconds\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Restart the notebook (to flush the GPU memory)\n",
+    "from utils import restart_jupyter_notebook\n",
+    "#restart_jupyter_notebook()\n",
+    "\n",
+    "\n",
+    "# Import necessary packages and methods\n",
+    "from utils import *\n",
+    "\n",
+    "\n",
+    "# Default hyperparams, also defined in `utils.py` in class `Hyperparameters`\n",
+    "## !!! `model_name` attr must point to the location of the model weights !!!\n",
+    "## Weights can be downloaded from: https://huggingface.co/google/gemma-7b\n",
+    "hyperparams.model_name = \"../../../../gemma-7b\"  # <== Add model weight location here e.g. \"/path/to/downloaded/gemma/weights\"\n",
+    "hyperparams.mixed_precision = \"fp8\"\n",
+    "\n",
+    "\n",
+    "# Init the model and accelerator wrapper\n",
+    "model = init_te_gemma_model(hyperparams).cuda()\n",
+    "accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)\n",
+    "\n",
+    "\n",
+    "# Finetune the model\n",
+    "finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "| Models                                                      | Precision | Step Time (or ms per batch) | Speedup (over baseline) |\n",
+    "|-------------------------------------------------------------|-----------|-----------------------------|-------------------------|\n",
+    "| HF (baseline)                                               | BF16      | 298                        | 1                       |\n",
+    "| TE (replace `GemmaDecoderLayer` with `TE.TransformerLayer`) | BF16      | 257                         | 1.16                    |\n",
+    "| TE (replace `GemmaDecoderLayer` with `TE.TransformerLayer`) | FP8       | 214                         | 1.39                    |\n",
+    "\n",
+    "\n",
+    "After turning on FP8 precision, we get even more speedup of almost **39%**!"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Conclusion\n",
+    "\n",
+    "As shown in the [Llama tutorial](../te_llama/tutorial_accelerate_hf_llama_with_te.ipynb), using the `TransformerLayer` module from Transformer Engine to replace Hugging Face's `GemmaDecoderLayer` results in a speedup compared to Hugging Face's native Gemma implementation."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## See more\n",
+    "\n",
+    "We also prepared [tutorial](./tutorial_generation_gemma_with_te.ipynb) in which we will show how to speedup the Gemma model generation using Transformer Engine."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
