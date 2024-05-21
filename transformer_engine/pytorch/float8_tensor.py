@@ -5,6 +5,7 @@
 """Tensor class with FP8 data"""
 from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple, Union
+import warnings
 
 import torch
 from torch.utils._pytree import tree_map
@@ -569,6 +570,7 @@ class Float8Tensor(torch.Tensor):
         force_compute: bool = False,
         fill_cache: bool = False,
         noop_flag: Optional[torch.Tensor] = None,
+        cache: Optional[bool] = None,
     ) -> torch.Tensor:
         """
         2D transpose with caching support.
@@ -583,9 +585,24 @@ class Float8Tensor(torch.Tensor):
         noop_flag: torch.Tensor, optional
                    float32 flag indicating whether to avoid updating
                    cached values, if possible.
+        cache: bool, deprecated
 
         """
         assert self.dim() == 2, f"{self.dim()}-D transpose not supported."
+
+        # Handle deprecated cache kwarg
+        if cache is not None:
+            msg = (
+                "cache kwarg for Float8Tensor.transpose_2d is deprecated, "
+                "please use force_compute and fill_cache instead"
+            )
+            warnings.warn(msg, DeprecationWarning)
+            if cache:
+                force_compute = False
+                fill_cache = True
+            else:
+                force_compute = True
+                fill_cache = False
 
         # Need to compute transpose if cache is invalid
         need_compute = force_compute
