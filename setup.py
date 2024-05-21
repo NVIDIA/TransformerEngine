@@ -544,7 +544,10 @@ def setup_common_extension() -> CMakeExtension:
     Also builds JAX or userbuffers support if needed.
 
     """
-    cmake_flags = []
+    # Build libtransformer_engine.so with the install rpath instead of building it with local
+    # rpath and re-linking it at install time.
+    cmake_flags = [ "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON" ]
+
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
         # FindPythonInterp and FindPythonLibs are deprecated in newer CMake versions,
@@ -621,12 +624,18 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Link core TE library
     lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
     if lib_extension() == 'dll':
-        # Windows can load from the same folder as the extension library but needs full DLL name.
-        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+        # Windows can dynamically load from the same folder as the extension library but needs full
+        # DLL path to link correctly at compile-time.
+        lib_kwargs['libraries'] = [
+            str(root_path / 'build' / 'cmake' / 'common' / 'libtransformer_engine.dll')
+        ]
     else:
-        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
-        # This ensures we can dynamically load libtransformer_engine.so from the same path
-        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        # We don't know the pip install path for libtransformer_engine.so, but we can link
+        # against it at compile time using the fixed CMake build path.
+        lib_kwargs['library_dirs'] = [ str(root_path / 'build' / 'cmake' / 'common') ]
+        # Pip will install the framework extension libraries into the same directory as
+        # libtransformer_engine.so, which means we can dynamically load from the framework
+        # extension's $ORIGIN path at runtime.
         lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
 
     # Add missing PyBind flags
@@ -645,9 +654,12 @@ def setup_pytorch_extension() -> setuptools.Extension:
         cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
         nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
         if lib_extension() == 'dll':
-            lib_kwargs['libraries'].append('transformer_engine_userbuffers.dll')
+            lib_kwargs['libraries'].append(
+                str(root_path / 'build' / 'cmake' / 'common' / 'transformer_engine_userbuffers.dll')
+            )
         else:
             lib_kwargs['libraries'].append('transformer_engine_userbuffers')
+            lib_kwargs['library_dirs'].append(str(root_path / 'build' / 'cmake' / 'common'))
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -703,14 +715,13 @@ def setup_jax_extension() -> setuptools.Extension:
     ]
     lib_kwargs = {}
     if lib_extension() == 'dll':
-        # Windows needs explicit file paths for each library.
+        # Windows can dynamically load from the same folder as the extension library but needs full
+        # DLL path to link correctly at compile-time.
         cuda_lib_dir = cuda_home / 'lib' / 'x64'
         libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
-
-        # Core TE library is in the same folder as the extension library so it doesn't
-        # need an absolute path, just the full file name.
-        lib_kwargs['libraries'] = [ str(path) for path in libraries ] + \
-                                  [ 'libtransformer_engine.dll' ]
+        lib_kwargs['libraries'] = [ str(path) for path in libraries ] + [
+            str(root_path / 'build' / 'cmake' / 'common' /'libtransformer_engine.dll')
+        ]
     else:
         # Set link and runtime paths for CUDA libraries.
         cuda_lib_dir = cuda_home / 'lib64'
@@ -724,12 +735,14 @@ def setup_jax_extension() -> setuptools.Extension:
         lib_kwargs['extra_link_args'] = [
             f"-Wl,-rpath,{path}" for path in lib_kwargs['library_dirs']
         ]
-        # Add core TE library with RPATH same as the extension library's $ORIGIN dir.
-        # This ensures we can dynamically load libtransformer_engine.so from the same path
-        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
-        lib_kwargs['libraries'] += [ 'transformer_engine' ]
-        lib_kwargs['library_dirs'] += [ '.' ]
-        lib_kwargs['extra_link_args'] += [ '-Wl,-rpath,$ORIGIN' ]
+        lib_kwargs['libraries'].append('transformer_engine')
+        # We don't know the pip install path for libtransformer_engine.so, but we can link
+        # against it at compile time using the fixed CMake build path.
+        lib_kwargs['library_dirs'].append(str(root_path / 'build' / 'cmake' / 'common'))
+        # Pip will install the framework extension libraries into the same directory as
+        # libtransformer_engine.so, which means we can dynamically load from the framework
+        # extension's $ORIGIN path at runtime.
+        lib_kwargs['extra_link_args'].append('-Wl,-rpath,$ORIGIN')
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
@@ -812,12 +825,18 @@ def setup_paddle_extension() -> setuptools.Extension:
     # Link core TE library
     lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
     if lib_extension() == 'dll':
-        # Windows can load from the same folder as the extension library but needs full DLL name.
-        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+        # Windows can dynamically load from the same folder as the extension library but needs full
+        # DLL path to link correctly at compile-time.
+        lib_kwargs['libraries'] = [
+            str(root_path / 'build' / 'cmake' / 'common' / 'libtransformer_engine.dll')
+        ]
     else:
-        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
-        # This ensures we can dynamically load libtransformer_engine.so from the same path
-        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        # We don't know the pip install path for libtransformer_engine.so, but we can link
+        # against it at compile time using the fixed CMake build path.
+        lib_kwargs['library_dirs'] += [ str(root_path / 'build' / 'cmake' / 'common') ]
+        # Pip will install the framework extension libraries into the same directory as
+        # libtransformer_engine.so, which means we can dynamically load from the framework
+        # extension's $ORIGIN path at runtime.
         lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
 
     # Construct Paddle CUDA extension
