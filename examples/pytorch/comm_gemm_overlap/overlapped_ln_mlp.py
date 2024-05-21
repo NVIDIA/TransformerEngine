@@ -6,15 +6,13 @@
 
 import os
 import sys
+import re
 import faulthandler
-import pdb
-import traceback
 import argparse
-from functools import partial
+from importlib.metadata import distribution
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Format, DelayedScaling
@@ -32,26 +30,29 @@ def torch_dtype(opt):
         raise TypeError
     return typemap[str(opt).lower()]
 
-def dist_print(rank, msg, end='\n', all_ranks=False):
-    if rank == 0 or all_ranks:
-        print(f"[RANK-{rank}] {msg}", end=end)
+def train(opts):
+    LOCAL_RANK = int(os.getenv("LOCAL_RANK"))
+    WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
+    def dist_print(msg, end='\n', all_ranks=False):
+        if LOCAL_RANK == 0 or all_ranks:
+            print(f"[RANK-{LOCAL_RANK}] {msg}", end=end)
 
-def train(nprocs, config, rank):
     # Debug log
-    if config.debug:
-        dbg_log = open(f'faulthandler_{rank}.log', 'w+')  #pylint: disable=consider-using-with
-        faulthandler.enable(dbg_log)
+    if opts.debug:
+        with open(f'faulthandler_{LOCAL_RANK}.log', 'w+') as dbg_log:
+            faulthandler.enable(dbg_log)
+
+    # Seed RNG
+    torch.cuda.set_device(LOCAL_RANK)
+    torch.manual_seed(opts.seed+LOCAL_RANK)
+    torch.cuda.manual_seed(opts.seed+LOCAL_RANK)
 
     # Initialize torch.distributed global process group and get TP group
-    torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl",
-                            init_method=None if config.with_torchrun else "file:///tmp/rdzv",
-                            rank=rank,
-                            world_size=nprocs)
+                            rank=LOCAL_RANK,
+                            world_size=WORLD_SIZE)
     tp_group = dist.new_group(backend="nccl")
     tp_size = dist.get_world_size(tp_group)
-    torch.manual_seed(config.seed+rank)
-    torch.cuda.manual_seed(config.seed+rank)
 
     # Intialize userbuffers
     ag_cfg = {  # Ring-exchange All-Gather overlap for fc1_fprop and fc2_dgrad
@@ -66,13 +67,13 @@ def train(nprocs, config, rank):
         'num_sm' : 1,
         'set_sm_margin' : True,
     }
-    hidden_size = config.num_heads * config.head_dim
-    if not config.no_comm_overlap:
+    hidden_size = opts.num_heads * opts.head_dim
+    if not opts.no_comm_overlap:
         te.initialize_ub(
-            [config.seq_length * config.batch_size, hidden_size],
+            [opts.seq_length * opts.batch_size, hidden_size],
             tp_group,
-            use_fp8 = config.fp8,
-            dtype = config.dtype,
+            use_fp8 = opts.fp8,
+            dtype = opts.dtype,
             ub_cfgs = {
                 'fc1_fprop': ag_cfg,
                 'fc1_dgrad': rs_cfg,
@@ -81,46 +82,20 @@ def train(nprocs, config, rank):
             },
         )
 
-    # Initialize TE models
-    # common_kwargs = {
-    #     'bias': True,
-    #     'device': 'cuda',
-    #     'params_dtype': config.dtype,
-    #     'sequence_parallel': True,
-    #     'tp_group': tp_group,
-    #     'tp_size': tp_size,
-    # }
-    # fc1 = te.Linear(
-    #     hidden_size, config.mlp_expansion_factor * hidden_size,
-    #     parallel_mode='column',
-    #     ub_overlap_ag=True,
-    #     ub_overlap_rs=True,
-    #     ub_name='fc1',
-    #     **common_kwargs
-    # )
-    # fc2 = te.Linear(
-    #     config.mlp_expansion_factor * hidden_size, hidden_size,
-    #     parallel_mode='row',
-    #     ub_overlap_ag=True,
-    #     ub_overlap_rs=True,
-    #     ub_name='fc2',
-    #     **common_kwargs
-    # )
-    # model = torch.nn.Sequential(fc1, fc2)
-
+    #
     model = te.LayerNormMLP(
-        hidden_size, config.mlp_expansion_factor * hidden_size,
-        params_dtype = config.dtype,
+        hidden_size, opts.mlp_expansion_factor * hidden_size,
+        params_dtype = opts.dtype,
         device = 'cuda',
         tp_group = tp_group,
         tp_size = tp_size,
         set_parallel_mode = True,
-        sequence_parallel = True,
-        seq_length = config.seq_length,
-        micro_batch_size = config.batch_size,
-        ub_overlap_rs_dgrad = not config.no_comm_overlap,
-        ub_overlap_rs = not config.no_comm_overlap,
-        ub_overlap_ag = not config.no_comm_overlap,
+        sequence_parallel = True,  # this is required for comm+GEMM overlap
+        seq_length = opts.seq_length,
+        micro_batch_size = opts.batch_size,
+        ub_overlap_rs_dgrad = not opts.no_comm_overlap,
+        ub_overlap_rs = not opts.no_comm_overlap,
+        ub_overlap_ag = not opts.no_comm_overlap,
     )
 
     # Initialize optimizer with model parameters
@@ -132,76 +107,97 @@ def train(nprocs, config, rank):
                                 amax_compute_algo="max")
 
     # Start dummy "training" iterations
-    for i in range(config.num_iters):
-        dist_print(rank, f"Iter {i+1}", all_ranks=config.verbose)
+    torch.cuda.synchronize()
+    dist.barrier()
+    for i in range(opts.num_iters):
+        dist_print(f"Iter {i+1}", all_ranks=opts.verbose)
 
-        dist_print(rank, "|-- Generate random input batch", all_ranks=config.verbose)
-        x = torch.rand((config.seq_length // tp_size, config.batch_size, hidden_size),
-                       dtype=config.dtype, device='cuda', requires_grad=True)
+        dist_print("|-- Generate random input batch", all_ranks=opts.verbose)
+        x = torch.rand((opts.seq_length // tp_size, opts.batch_size, hidden_size),
+                       dtype=opts.dtype, device='cuda', requires_grad=True)
 
-        dist_print(rank, "|-- Forward pass", all_ranks=config.verbose)
-        with te.fp8_autocast(enabled=config.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
+        dist_print("|-- Forward pass", all_ranks=opts.verbose)
+        with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
             y = model(x)
-            dist_print(rank, "|-- Compute loss", all_ranks=config.verbose)
+            dist_print("|-- Compute loss", all_ranks=opts.verbose)
             loss = y.flatten().sum()
 
-        dist_print(rank, "|-- Backward pass", all_ranks=config.verbose)
+        dist_print("|-- Backward pass", all_ranks=opts.verbose)
         loss.backward()
 
-        dist_print(rank, "|-- Optimizer step", all_ranks=config.verbose)
+        dist_print("|-- Optimizer step", all_ranks=opts.verbose)
         optim.step()
 
-    dist.destroy_process_group(tp_group)
+    te.destroy_ub()
 
-    if config.debug:
-        dbg_log.close()
+    torch.cuda.synchronize()
+    dist.barrier()
+    dist.destroy_process_group()
 
+
+def main():
+    if "TORCHELASTIC_RUN_ID" in os.environ.keys():
+        parser = argparse.ArgumentParser(
+            description="Test a te.LayerNormMLP module with GEMM+comm overlap via Userbuffers.")
+        parser.add_argument('-i', "--num-iters", type=int, default=5,
+                            help="Number of dummy 'training' iterations.")
+        parser.add_argument('-b', "--batch-size", type=int, default=2,
+                            help="Input batch size.")
+        parser.add_argument('-s', "--seq-length", type=int, default=2048,
+                            help="Input sequence length.")
+        parser.add_argument('-n', "--num-heads", type=int, default=64,
+                            help="Number of attention heads.")
+        parser.add_argument('-d', "--head-dim", type=int, default=128,
+                            help="Dimension of each attention head.")
+        parser.add_argument("--mlp-expansion-factor", type=int, default=4,
+                            help="MLP block intermediate size as a factor of hidden dimension.")
+        parser.add_argument("--seed", type=int, default=1234,
+                            help="RNG seed.")
+        parser.add_argument("--fp8", action="store_true", default=False,
+                            help="Enables the te.fp8_autocast() context.")
+        parser.add_argument("--no-comm-overlap", action="store_true", default=False,
+                            help="Disable the comm+GEMM overlap.")
+        parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
+                            help="Data type for input tensor and Transformer Engine module parameters.")
+        parser.add_argument("--debug", action="store_true")
+        parser.add_argument('-v', "--verbose", action="store_true", default=False)
+        args = parser.parse_args()
+        train(args)
+        os._exit(0)
+
+    else:
+        # Script is launched on its own, so we have to mimic how it would normally launch
+        # if we used `torchrun` from the commandline.
+        from torch.distributed.run import get_args_parser
+        from torch.distributed.launch import parse_args, launch
+        torch_parser = get_args_parser()
+        torch_argv = []
+        script_argv = []
+        for argv in sys.argv:
+            is_torch_argv = False
+            for action in torch_parser._actions:
+                if any(option in argv for option in action.option_strings):
+                    is_torch_argv = True
+                    break
+            if is_torch_argv:
+                torch_argv.append(argv)
+            else:
+                script_argv.append(argv)
+        del torch_parser
+
+        if not any('--nproc-per-node' in argv for argv in torch_argv):
+            torch_argv.append(f'--nproc-per-node={torch.cuda.device_count()}')
+
+        if not any('--use-env' in argv for argv in torch_argv):
+            torch_argv.append('--use-env')
+
+        if not any('--standalone' in argv for argv in torch_argv):
+            torch_argv.append('--standalone')
+
+        sys.argv = [ torch.distributed.launch.__file__ ] + torch_argv + script_argv
+        torch_args = parse_args(sys.argv)
+        launch(torch_args)
+        os._exit(0)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test a te.LayerNormMLP module with "
-                                                 "GEMM+comm overlap via Userbuffers.")
-    parser.add_argument("-np", "--nprocs", type=int, default=torch.cuda.device_count(),
-                        help="Number of processes/GPUs to run with. " + \
-                             "This option is ignored when launching with torchrun.")
-    parser.add_argument('-i', "--num-iters", type=int, default=5,
-                        help="Number of dummy 'training' iterations.")
-    parser.add_argument('-b', "--batch-size", type=int, default=2,
-                        help="Input batch size.")
-    parser.add_argument('-s', "--seq-length", type=int, default=2048,
-                        help="Input sequence length.")
-    parser.add_argument('-n', "--num-heads", type=int, default=64,
-                        help="Number of attention heads.")
-    parser.add_argument('-d', "--head-dim", type=int, default=128,
-                        help="Dimension of each attention head.")
-    parser.add_argument('-m', "--mlp-expansion-factor", type=int, default=4,
-                        help="MLP block intermediate size as a factor of hidden dimension.")
-    parser.add_argument("--seed", type=int, default=1234,
-                        help="RNG seed.")
-    parser.add_argument("--fp8", action="store_true", default=False,
-                        help="Enables the te.fp8_autocast() context.")
-    parser.add_argument("--no-comm-overlap", action="store_true", default=False,
-                        help="Disable the comm+GEMM overlap.")
-    parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
-                        help="Data type for input tensor and Transformer Engine module parameters.")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument('-v', "--verbose", action="store_true", default=False)
-    args = parser.parse_args()
-
-    try:
-        if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-            setattr(args, 'with_torchrun', True)
-            local_rank = int(os.environ["LOCAL_RANK"])
-            world_size = int(os.environ["WORLD_SIZE"])
-            train(world_size, args, local_rank)
-        else:
-            setattr(args, 'with_torchrun', False)
-            worker = partial(train, args.nprocs, args)
-            mp.spawn(worker, nprocs=args.nprocs)
-
-    except Exception as e:  #pylint: disable=broad-exception-caught
-        if args.debug:
-            extype, value, tb = sys.exc_info()
-            traceback.print_exc()
-            pdb.post_mortem(tb)
-        else:
-            raise e
+    main()

@@ -150,7 +150,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     }
 
     if (_atomic_gemm) {
-      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);;
+      auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
       _counters = torch::zeros({num_splits * 2}, counter_options);
       _counters.index_put_({Slice(None, num_splits)}, 1);
     }

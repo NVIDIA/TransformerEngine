@@ -405,6 +405,52 @@ int create_communicator_mpi(communicator **comm) {
   return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
 }
 
+void destroy_communicator(communicator *comm) {
+  for (int hndl = 0; hndl < comm->free_region; hndl++) {
+    if (comm->mem_dealloc[hndl]) {
+      cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
+                       comm->mem_size[hndl] * comm->nvsize);
+      for (int rank = 0; rank < comm->nvsize; rank++){
+        cuMemRelease(comm->uchandles[hndl][rank]);
+      }
+      free(reinterpret_cast<void *>(comm->uchandles[hndl]));
+    } else {
+      for (int rank = 0; rank < comm->nvsize; rank++) {
+        if (rank != comm->nvrank) {
+          cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]);
+        } else {
+          comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
+        }
+      }
+      free(comm->peer_ptr[hndl]);
+    }
+    comm->mem_ptr[hndl] = nullptr;
+  }
+  cudaFree(reinterpret_cast<void *>(comm->flags));
+  cudaFree(reinterpret_cast<void *>(comm->recv_id));
+  cudaFree(reinterpret_cast<void *>(comm->send_id));
+  if (comm->use_mc) {
+    cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->mc_baseptr), comm->mc_maxsize);
+    cuMemRelease(comm->mc_handle);
+  }
+  if (comm->mem_dealloc[0]) {
+    cudaFree(comm->gpu_ptrs);
+  }
+  free(comm->fifo);
+  free(comm);
+}
+
+void destroy_communicator_mpi(communicator *comm) {
+#ifdef UB_MPI_BOOTSTRAP
+  MPI_Comm_free(comm->comm_inter);
+  MPI_Comm_free(comm->comm_intra);
+  destroy_communicator(comm);
+#else
+  NVTE_UB_ERROR(std::string("Communicator is not bootstrapped with MPI and ") +
+                std::string("can only be deallocated with destroy_communicator()."));
+#endif
+}
+
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
   if (comm->free_region > NVTE_MAX_REGIONS)
     return -1;

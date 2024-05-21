@@ -132,11 +132,14 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Compile core library with the same ABI as PyTorch (if applicable)
-option(USE_CXX11_ABI "Compile with C++11 ABI" OFF)
+option(USE_CXX11_ABI "Compile with C++11 ABI" ON)
 message(STATUS "Use C++11 ABI: ${USE_CXX11_ABI}")
 if (USE_CXX11_ABI)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
 endif()
 
 # Install core library
@@ -149,17 +152,6 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(transformer_engine_pybind pybind.cpp)
 target_include_directories(transformer_engine_pybind PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(transformer_engine_pybind PUBLIC transformer_engine)
-
-# Check for DLPack headers
-set(DLPACK_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/dlpack/include")
-if(NOT EXISTS "${DLPACK_FRONTEND_INCLUDE_DIR}")
-    message(FATAL_ERROR
-            "Could not find DLPack headers. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
-endif()
-target_include_directories(transformer_engine_pybind PRIVATE ${DLPACK_FRONTEND_INCLUDE_DIR})
 
 # Install
 set_source_files_properties(pybind.cpp

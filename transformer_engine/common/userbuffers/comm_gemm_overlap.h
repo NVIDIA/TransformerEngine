@@ -120,6 +120,20 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_comm, 0));
   }
 
+  ~CommGemmOverlapBase() {
+    cudaEventDestroy(_stop_comm);
+    cudaEventDestroy(_start_comm);
+    cudaEventDestroy(_stop_compute);
+    cudaEventDestroy(_start_compute);
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
+      cudaStreamDestroy(_stream_compute[i]);
+    }
+    if (_comm_created) {
+      destroy_communicator(_ub_comm);
+      _comm_created = false;
+    }
+  }
+
   CommGemmOverlapBase(const CommGemmOverlapBase &other) = delete;
   CommGemmOverlapBase& operator=(const CommGemmOverlapBase &other) = delete;
 
@@ -157,6 +171,11 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
       alloc_copy_allgather_handle, bcast_int_handle, barrier_handle, free_handle) {
     NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_comm));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_d2dcopy, 0));
+  }
+
+  ~CommGemmOverlap() {
+    cudaEventDestroy(_start_d2dcopy);
+    cudaStreamDestroy(_stream_comm);
   }
 
   /*
@@ -476,7 +495,8 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
 
   CommGemmOverlapP2P(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
-    int num_max_streams, bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter,
+    int num_max_streams, bool set_sm_margin, bool atomic_gemm, bool aggregate,
+    bool is_reduce_scatter,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
     std::function<void(void *, int, char *)> bcast_int_handle,
     std::function<void(char *)> barrier_handle,
@@ -500,6 +520,13 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_recv));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
+  }
+
+  ~CommGemmOverlapP2P() {
+    cudaEventDestroy(_stop_recv);
+    cudaEventDestroy(_stop_send);
+    cudaStreamDestroy(_stream_recv);
+    cudaStreamDestroy(_stream_send);
   }
 
   /*

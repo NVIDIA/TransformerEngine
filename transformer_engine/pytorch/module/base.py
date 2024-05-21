@@ -265,6 +265,18 @@ def get_ub(name: str):
     return _ub_communicators[name]
 
 
+def destroy_ub():
+    """Destroy all allocated userbuffer communicators."""
+    global _ub_communicators
+    for key in _ub_communicators.keys():
+        ub_comm = _ub_communicators[key]
+        _ub_communicators[key] = None
+        del ub_comm
+    _ub_communicators = None
+    global layers_atomic_ring_exchange
+    layers_atomic_ring_exchange = []
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 

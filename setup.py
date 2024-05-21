@@ -16,6 +16,7 @@ import sys
 import sysconfig
 import platform
 from typing import List, Optional, Tuple, Union
+import copy
 
 import setuptools
 
@@ -147,6 +148,7 @@ def lib_extension():
         raise RuntimeError(f"Unsupported operating system ({system})")
     return lib_ext
 
+@lru_cache
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
@@ -161,7 +163,7 @@ def cuda_path() -> Tuple[str, str]:
         # Check if nvcc is in path
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.strip("/bin/nvcc"))
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
             nvcc_bin = Path(nvcc_bin)
     if nvcc_bin is None:
         # Last-ditch guess in /usr/local/cuda
@@ -172,13 +174,12 @@ def cuda_path() -> Tuple[str, str]:
 
     return cuda_home, nvcc_bin
 
-CUDA_HOME, NVCC_BIN = cuda_path()
-
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
+    _, nvcc_bin = cuda_path()
     output = subprocess.run(
-        [NVCC_BIN, "-V"],
+        [nvcc_bin, "-V"],
         capture_output=True,
         check=True,
         universal_newlines=True,
@@ -187,17 +188,22 @@ def cuda_version() -> Tuple[int, ...]:
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
 
+@lru_cache
 def cudnn_path() -> Tuple[str, str]:
     """cuDNN include and library paths.
 
     Throws FileNotFoundError if libcudnn.so is not found."""
-    cmake_module_path = str(root_path / "transformer_engine" / "cmake")
+    assert os.path.exists(root_path / "3rdparty" / "cudnn-frontend"), (
+        "Could not find cuDNN frontend API. Try running 'git submodule update --init --recursive' "
+        "within the Transformer Engine source.")
     try:
+        shutil.copy2(root_path / "3rdparty" / "cudnn-frontend" / "cmake" / "cuDNN.cmake",
+                     root_path / "FindCUDNN.cmake")
         find_cudnn = subprocess.run(
             [
                 str(cmake_bin()),
                 "--find-package",
-                f"-DCMAKE_MODULE_PATH={cmake_module_path}",
+                f"-DCMAKE_MODULE_PATH={str(root_path)}",
                 "-DCMAKE_FIND_DEBUG_MODE=ON",
                 "-DMODE=EXIST",
                 "-DCOMPILER_ID=CXX",
@@ -208,26 +214,24 @@ def cudnn_path() -> Tuple[str, str]:
             text=True,
             check=True,
         )
+        os.remove(root_path / "FindCUDNN.cmake")
     except subprocess.CalledProcessError as e:
         raise FileNotFoundError("Could not find a cuDNN installation.") from e
 
     cudnn_include = None
     cudnn_link = None
     lib_ext = lib_extension()
-    path_divider = '\\' if lib_ext == "dll" else '/'
     for line in find_cudnn.stderr.splitlines():
         if "cudnn.h" in line:
-            cudnn_include = line.lstrip(' ').rstrip(path_divider + 'cudnn.h')
+            cudnn_include = Path(line.lstrip()).parent
         elif "libcudnn." + lib_ext in line:
-            cudnn_link = line.lstrip(' ').rstrip(path_divider + 'libcudnn.so')
+            cudnn_link = Path(line.lstrip()).parent
         if cudnn_include is not None and cudnn_link is not None:
             break
     if cudnn_include is None or cudnn_link is None:
         raise FileNotFoundError("Could not find a cuDNN installation.")
 
-    return Path(cudnn_include), Path(cudnn_link)
-
-CUDNN_INCLUDE, CUDNN_LINK = cudnn_path()
+    return cudnn_include, cudnn_link
 
 @lru_cache(maxsize=1)
 def frameworks() -> List[str]:
@@ -286,6 +290,16 @@ def frameworks() -> List[str]:
 # command-line arguments. Future calls will use a cached value.
 frameworks()
 
+def install_and_import(package):
+    """Install a package via pip (if not already installed) and import into globals."""
+    import importlib
+    try:
+        importlib.import_module(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
+    finally:
+        globals()[package] = importlib.import_module(package)
+
 def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """Setup Python dependencies
 
@@ -296,9 +310,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Common requirements
     setup_reqs: List[str] = []
     install_reqs: List[str] = [
-        "pybind11",
         "pydantic",
         "importlib-metadata>=1.0; python_version<'3.8'",
+        "packaging",
     ]
     test_reqs: List[str] = ["pytest"]
 
@@ -315,8 +329,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "cmake>=3.18")
     if not found_ninja():
         add_unique(setup_reqs, "ninja")
-    if not found_pybind11():
-        add_unique(setup_reqs, "pybind11")
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
@@ -330,6 +342,135 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(test_reqs, "numpy")
 
     return setup_reqs, install_reqs, test_reqs
+
+
+# PyTorch extension modules require special handling
+if "pytorch" in frameworks():
+    from torch.utils.cpp_extension import BuildExtension  # pylint: disable=import-error
+elif "paddle" in frameworks():
+    from paddle.utils.cpp_extension import BuildExtension  # pylint: disable=import-error
+else:
+    install_and_import('pybind11')
+    from pybind11.setup_helpers import build_ext as BuildExtension
+
+
+class CMakeBuildExtension(BuildExtension):
+    """Setuptools command with support for CMake extension modules"""
+
+    def run(self) -> None:
+
+        # Build CMake extensions
+        for ext in self.extensions:
+            if isinstance(ext, CMakeExtension):
+                print(f"Building CMake extension {ext.name}")
+                # Set up incremental builds for CMake extensions
+                setup_dir = Path(__file__).resolve().parent
+                build_dir = setup_dir / "build" / "cmake"
+                build_dir.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+                package_path = Path(self.get_ext_fullpath(ext.name))
+                install_dir = package_path.resolve().parent
+                ext._build_cmake(
+                    build_dir=build_dir,
+                    install_dir=install_dir,
+                )
+
+        # Paddle requires linker search path for libtransformer_engine.so
+        paddle_ext = None
+        if "paddle" in frameworks():
+            for ext in self.extensions:
+                if "paddle" in ext.name:
+                    ext.library_dirs.append(self.build_lib)
+                    paddle_ext = ext
+                    break
+
+        # Build non-CMake extensions as usual
+        all_extensions = self.extensions
+        self.extensions = [
+            ext for ext in self.extensions
+            if not isinstance(ext, CMakeExtension)
+        ]
+        super().run()
+        self.extensions = all_extensions
+
+        # Manually write stub file for Paddle extension
+        if paddle_ext is not None:
+
+            # Load libtransformer_engine.so to avoid linker errors
+            for path in Path(self.build_lib).iterdir():
+                if path.name.startswith("libtransformer_engine."):
+                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+
+            # Figure out stub file path
+            module_name = paddle_ext.name
+            assert module_name.endswith("_pd_"), \
+                "Expected Paddle extension module to end with '_pd_'"
+            stub_name = module_name[:-4]  # remove '_pd_'
+            stub_path = os.path.join(self.build_lib, stub_name + ".py")
+
+            # Figure out library name
+            # Note: This library doesn't actually exist. Paddle
+            # internally reinserts the '_pd_' suffix.
+            so_path = self.get_ext_fullpath(module_name)
+            _, so_ext = os.path.splitext(so_path)
+            lib_name = stub_name + so_ext
+
+            # Write stub file
+            print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
+            from paddle.utils.cpp_extension.extension_utils import custom_write_stub
+            custom_write_stub(lib_name, stub_path)
+
+    def build_extensions(self):
+        # BuildExtensions from PyTorch and PaddlePaddle already handle CUDA files correctly
+        # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
+        if "pytorch" not in frameworks() and "paddle" not in frameworks():
+            # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
+            # extra_compile_args is a dict.
+            for ext in self.extensions:
+                if isinstance(ext.extra_compile_args, dict):
+                    for target in ['cxx', 'nvcc']:
+                        if target not in ext.extra_compile_args.keys():
+                            ext.extra_compile_args[target] = []
+
+            # Define new _compile method that redirects to NVCC for .cu and .cuh files.
+            original_compile_fn = self.compiler._compile
+            self.compiler.src_extensions += ['.cu', '.cuh']
+            def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
+                # Copy before we make any modifications.
+                cflags = copy.deepcopy(extra_postargs)
+                original_compiler = self.compiler.compiler_so
+                try:
+                    _, nvcc_bin = cuda_path()
+                    original_compiler = self.compiler.compiler_so
+
+                    if os.path.splitext(src)[1] in ['.cu', '.cuh']:
+                        self.compiler.set_executable('compiler_so', str(nvcc_bin))
+                        if isinstance(cflags, dict):
+                            cflags = cflags['nvcc']
+
+                        # Add -fPIC if not already specified
+                        if not any('-fPIC' in flag for flag in cflags):
+                            cflags.extend(['--compiler-options', "'-fPIC'"])
+
+                        # Forward unknown options
+                        if not any('--forward-unknown-opts' in flag for flag in cflags):
+                            cflags.append('--forward-unknown-opts')
+
+                    elif isinstance(cflags, dict):
+                        cflags = cflags['cxx']
+
+                    # Append -std=c++17 if not already in flags
+                    if not any(flag.startswith('-std=') for flag in cflags):
+                        cflags.append('-std=c++17')
+
+                    return original_compile_fn(obj, src, ext, cc_args, cflags, pp_opts)
+
+                finally:
+                    # Put the original compiler back in place.
+                    self.compiler.set_executable('compiler_so', original_compiler)
+
+            self.compiler._compile = _compile_fn
+
+        super().build_extensions()
 
 
 class CMakeExtension(setuptools.Extension):  # pylint disable=too-few-public-methods
@@ -390,81 +531,7 @@ class CMakeExtension(setuptools.Extension):  # pylint disable=too-few-public-met
             except (CalledProcessError, OSError) as e:
                 raise RuntimeError(f"Error when running CMake: {e}")  # pylint: disable=raise-missing-from
 
-
-# PyTorch extension modules require special handling
-if "pytorch" in frameworks():
-    from torch.utils.cpp_extension import BuildExtension  # pylint: disable=import-error
-elif "paddle" in frameworks():
-    from paddle.utils.cpp_extension import BuildExtension  # pylint: disable=import-error
-else:
-    from setuptools.command.build_ext import build_ext as BuildExtension
-
-
-class CMakeBuildExtension(BuildExtension):
-    """Setuptools command with support for CMake extension modules"""
-
-    def run(self) -> None:
-
-        # Build CMake extensions
-        for ext in self.extensions:
-            if isinstance(ext, CMakeExtension):
-                print(f"Building CMake extension {ext.name}")
-                # Set up incremental builds for CMake extensions
-                setup_dir = Path(__file__).resolve().parent
-                build_dir = setup_dir / "build" / "cmake"
-                build_dir.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
-                package_path = Path(self.get_ext_fullpath(ext.name))
-                install_dir = package_path.resolve().parent
-                ext._build_cmake(
-                    build_dir=build_dir,
-                    install_dir=install_dir,
-                )
-
-        # Paddle requires linker search path for libtransformer_engine.so
-        paddle_ext = None
-        if "paddle" in frameworks():
-            for ext in self.extensions:
-                if "paddle" in ext.name:
-                    ext.library_dirs.append(self.build_lib)
-                    paddle_ext = ext
-                    break
-
-        # Build non-CMake extensions as usual
-        all_extensions = self.extensions
-        self.extensions = [  # pylint: disable=attribute-defined-outside-init
-            ext for ext in self.extensions
-            if not isinstance(ext, CMakeExtension)
-        ]
-        super().run()
-        self.extensions = all_extensions  # pylint: disable=attribute-defined-outside-init
-
-        # Manually write stub file for Paddle extension
-        if paddle_ext is not None:
-
-            # Load libtransformer_engine.so to avoid linker errors
-            for path in Path(self.build_lib).iterdir():
-                if path.name.startswith("libtransformer_engine."):
-                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-
-            # Figure out stub file path
-            module_name = paddle_ext.name
-            assert module_name.endswith("_pd_"), \
-                "Expected Paddle extension module to end with '_pd_'"
-            stub_name = module_name[:-4]  # remove '_pd_'
-            stub_path = os.path.join(self.build_lib, stub_name + ".py")
-
-            # Figure out library name
-            # Note: This library doesn't actually exist. Paddle
-            # internally reinserts the '_pd_' suffix.
-            so_path = self.get_ext_fullpath(module_name)
-            _, so_ext = os.path.splitext(so_path)
-            lib_name = stub_name + so_ext
-
-            # Write stub file
-            print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
-            from paddle.utils.cpp_extension.extension_utils import custom_write_stub  # pylint: disable=import-error
-            custom_write_stub(lib_name, stub_path)
-
+GLIBCXX_USECXX11_ABI = None
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -489,8 +556,9 @@ def setup_common_extension() -> CMakeExtension:
     # the same C++ ABI version as PyTorch.
     if "pytorch" in frameworks():
         import torch
-        if "-D_GLIBCXX_USE_CXX11_ABI=1" in torch._C._show_config():  # pylint: disable=unsupported-membership-test
-            cmake_flags += [ "-DUSE_CXX11_ABI=ON" ]
+        global GLIBCXX_USECXX11_ABI
+        GLIBCXX_USECXX11_ABI = torch.compiled_with_cxx11_abi()
+        cmake_flags.append(f"-DUSE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}")
 
     return CMakeExtension(
         name="transformer_engine",
@@ -565,9 +633,11 @@ def setup_pytorch_extension() -> setuptools.Extension:
     lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
     if lib_extension() == 'dll':
         # Windows can load from the same folder as the extension library but needs full DLL name.
-        lib_kwargs['libraries'] = [ './libtransformer_engine.dll' ]
+        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
     else:
         # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
         lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
 
     # Construct PyTorch CUDA extension
@@ -595,9 +665,11 @@ def setup_jax_extension() -> setuptools.Extension:
     ]
 
     # Header files
+    cuda_home, _ = cuda_path()
+    cudnn_include, cudnn_link = cudnn_path()
     include_dirs = [
-        CUDA_HOME / "include",
-        CUDNN_INCLUDE,
+        cuda_home / "include",
+        cudnn_include,
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "jax" / "csrc",
         root_path / "transformer_engine",
@@ -605,10 +677,12 @@ def setup_jax_extension() -> setuptools.Extension:
 
     # Compile flags
     cxx_flags = [ "-O3" ]
-    nvcc_flags = [
-        "-O3",
-        "--forward-unknown-opts",
-    ]
+    nvcc_flags = [ "-O3" ]
+    if GLIBCXX_USECXX11_ABI is not None:
+        # Compile JAX extensions with same ABI as core library
+        flag = f"-D_GLIBCXX_USE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}"
+        cxx_flags.append(flag)
+        nvcc_flags.append(flag)
 
     # Linked libraries
     libraries = [
@@ -620,26 +694,29 @@ def setup_jax_extension() -> setuptools.Extension:
     lib_kwargs = {}
     if lib_extension() == 'dll':
         # Windows needs explicit file paths for each library.
-        cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
+        cuda_lib_dir = cuda_home / 'lib' / 'x64'
         libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
 
         # Core TE library is in the same folder as the extension library so it doesn't
         # need an absolute path, just the full file name.
-        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+        lib_kwargs['libraries'] = [ str(path) for path in libraries ] + \
+                                  [ 'libtransformer_engine.dll' ]
     else:
         # Set link and runtime paths for CUDA libraries.
-        cuda_lib_dir = CUDA_HOME / 'lib64'
-        if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
-            cuda_lib_dir = CUDA_HOME / 'lib'
+        cuda_lib_dir = cuda_home / 'lib64'
+        if (not os.path.exists(cuda_lib_dir) and os.path.exists(cuda_home / 'lib')):
+            cuda_lib_dir = cuda_home / 'lib'
         lib_kwargs['libraries'] = libraries
         lib_kwargs['library_dirs'] = [
             str(cuda_lib_dir),
-            str(CUDNN_LINK),
+            str(cudnn_link),
         ]
         lib_kwargs['extra_link_args'] = [
             f"-Wl,-rpath,{path}" for path in lib_kwargs['library_dirs']
         ]
         # Add core TE library with RPATH same as the extension library's $ORIGIN dir.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
         lib_kwargs['libraries'] += [ 'transformer_engine' ]
         lib_kwargs['library_dirs'] += [ '.' ]
         lib_kwargs['extra_link_args'] += [ '-Wl,-rpath,$ORIGIN' ]
@@ -703,6 +780,11 @@ def setup_paddle_extension() -> setuptools.Extension:
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if GLIBCXX_USECXX11_ABI is not None:
+        # Compile JAX extensions with same ABI as core library
+        flag = f"-D_GLIBCXX_USE_CXX11_ABI={int(GLIBCXX_USECXX11_ABI)}"
+        cxx_flags.append(flag)
+        nvcc_flags.append(flag)
 
     # Version-dependent CUDA options
     try:
@@ -717,6 +799,17 @@ def setup_paddle_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
+    # Link core TE library
+    lib_kwargs = { 'libraries' : [ 'transformer_engine' ] }
+    if lib_extension() == 'dll':
+        # Windows can load from the same folder as the extension library but needs full DLL name.
+        lib_kwargs['libraries'] = [ 'libtransformer_engine.dll' ]
+    else:
+        # Linux and maxOS support RPATH set to the extension library's $ORIGIN path.
+        # This ensures we can dynamically load libtransformer_engine.so from the same path
+        # that `transformer_engine-extensions.X-Y-Z.so` gets installed into by `pip`.
+        lib_kwargs['extra_link_args'] = [ '-Wl,-rpath,$ORIGIN' ]
+
     # Construct Paddle CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
@@ -724,11 +817,11 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext = CUDAExtension(
         sources=sources,
         include_dirs=include_dirs,
-        libraries=["transformer_engine"],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        **lib_kwargs
     )
     ext.name = "transformer_engine_paddle_pd_"
     return ext

@@ -264,6 +264,10 @@ int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipen
 
 int create_communicator_mpi(communicator **comm);
 
+void destroy_communicator(communicator *comm);
+
+void destroy_communicator_mpi(communicator *comm);
+
 // int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
 /*
     local calls, doesnt communicate between peers
