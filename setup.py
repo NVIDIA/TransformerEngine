@@ -15,7 +15,7 @@ from subprocess import CalledProcessError
 import sys
 import sysconfig
 import platform
-from typing import List, Optional, Tuple, Union, Any
+from typing import List, Optional, Tuple, Union
 
 import setuptools
 
@@ -146,6 +146,7 @@ def lib_extension():
         raise RuntimeError(f"Unsupported operating system ({system})")
     return lib_ext
 
+@lru_cache
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
@@ -171,13 +172,12 @@ def cuda_path() -> Tuple[str, str]:
 
     return cuda_home, nvcc_bin
 
-CUDA_HOME, NVCC_BIN = cuda_path()
-
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
+    _, nvcc_bin = cuda_path()
     output = subprocess.run(
-        [NVCC_BIN, "-V"],
+        [nvcc_bin, "-V"],
         capture_output=True,
         check=True,
         universal_newlines=True,
@@ -186,6 +186,7 @@ def cuda_version() -> Tuple[int, ...]:
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
 
+@lru_cache
 def cudnn_path() -> Tuple[str, str]:
     """cuDNN include and library paths.
 
@@ -230,8 +231,6 @@ def cudnn_path() -> Tuple[str, str]:
         raise FileNotFoundError("Could not find a cuDNN installation.")
 
     return Path(cudnn_include), Path(cudnn_link)
-
-CUDNN_INCLUDE, CUDNN_LINK = cudnn_path()
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -299,6 +298,16 @@ def frameworks() -> List[str]:
 # command-line arguments. Future calls will use a cached value.
 frameworks()
 
+def install_and_import(package):
+    """Install a package via pip (if not already installed) and import into globals."""
+    import importlib
+    try:
+        importlib.import_module(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
+    finally:
+        globals()[package] = importlib.import_module(package)
+
 def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """Setup Python dependencies
 
@@ -323,13 +332,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             if val not in l:
                 l.append(val)
 
-    # Pybind11 has to be installed and imported here manually so we can define
-    # the framework extensions correctly
-    if not found_pybind11():
-        import importlib
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pybind11'])
-        globals()['pybind11'] = importlib.import_module('pybind11')
-
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
@@ -349,73 +351,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     return setup_reqs, install_reqs, test_reqs
 
-
-class CMakeExtension(setuptools.Extension):
-    """CMake extension module"""
-
-    def __init__(
-            self,
-            name: str,
-            cmake_path: Path,
-            cmake_flags: Optional[List[str]] = None,
-    ) -> None:
-        super().__init__(name, sources=[])  # No work for base class
-        self.cmake_path: Path = cmake_path
-        self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
-
-    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
-
-        # Make sure paths are str
-        _cmake_bin = str(cmake_bin())
-        cmake_path = str(self.cmake_path)
-        build_dir = str(build_dir)
-        install_dir = str(install_dir)
-
-        # CMake configure command
-        build_type = "Debug" if with_debug_build() else "Release"
-        configure_command = [
-            _cmake_bin,
-            "-S",
-            cmake_path,
-            "-B",
-            build_dir,
-            f"-DPython_EXECUTABLE={sys.executable}",
-            f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
-            f"-DCMAKE_BUILD_TYPE={build_type}",
-            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-        ]
-        configure_command += self.cmake_flags
-        if found_ninja():
-            configure_command.append("-GNinja")
-        try:
-            import pybind11
-        except ImportError:
-            pass
-        else:
-            pybind11_dir = Path(pybind11.__file__).resolve().parent
-            pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
-            configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
-
-        # CMake build and install commands
-        build_command = [_cmake_bin, "--build", build_dir]
-        install_command = [_cmake_bin, "--install", build_dir]
-
-        # Run CMake commands
-        for command in [configure_command, build_command, install_command]:
-            print(f"Running command {' '.join(command)}")
-            try:
-                subprocess.run(command, cwd=build_dir, check=True)
-            except (CalledProcessError, OSError) as e:
-                raise RuntimeError(f"Error when running CMake: {e}")
-
-
 # PyTorch extension modules require special handling
 if "pytorch" in frameworks():
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks():
     from paddle.utils.cpp_extension import BuildExtension
 else:
-    from setuptools.command.build_ext import build_ext as BuildExtension
+    install_and_import('pybind11')
+    from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 class CMakeBuildExtension(BuildExtension):
@@ -482,6 +425,110 @@ class CMakeBuildExtension(BuildExtension):
             print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
             from paddle.utils.cpp_extension.extension_utils import custom_write_stub
             custom_write_stub(lib_name, stub_path)
+
+    def build_extensions(self):
+        if "pytorch" not in frameworks() and "paddle" not in frameworks():
+            # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
+            # extra_compile_args is a dict.
+            for extension in self.extensions:
+                if isinstance(extension.extra_compile_args, dict):
+                    for ext in ['cxx', 'nvcc']:
+                        if ext not in extension.extra_compile_args:
+                            extension.extra_compile_args[ext] = []
+
+            # BuildExtension from PyTorch and Paddle already handle NVCC builds for .cu files,
+            # but we need to customize it manually for the TE/JAX Pybind11Extension.
+            # Add .cu to list of supported extensions.
+            self.compiler.src_extensions += [ '.cu', '.cuh' ]
+
+            # Store reference to default compiler_so and _compile methods
+            # to dispatch non-CUDA compiles.
+            default_compiler_so = self.compiler.compiler_so
+            default_compile_fn = self.compiler._compile
+
+            # Define new _compile_fn that uses NVCC_BIN and extra_compile_args['nvcc']
+            # for .cu files, while preserving existing compiler with extra_compile_args['cxx']
+            # for everything else.
+            _, nvcc_bin = cuda_path()
+            def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts):
+                try:
+                    if os.path.splitext(src)[1] in [ '.cu', '.cuh' ]:
+                        self.compiler.set_executable('compiler_so', str(nvcc_bin))
+                        if isinstance(extra_postargs, dict):
+                            postargs = extra_postargs['nvcc']
+                        else:
+                            postargs = extra_postargs
+                        postargs += ['--compiler-options', "'-fPIC'"]
+                    else:
+                        if isinstance(extra_postargs, dict):
+                            postargs = extra_postargs['cxx']
+                        else:
+                            postargs = extra_postargs
+                    default_compile_fn(obj, src, ext, cc_args, postargs, pp_opts)
+                finally:
+                    self.compiler.compiler_so = default_compiler_so
+
+            # Set the redefined _compile_fn back into the compiler.
+            self.compiler._compile = _compile_fn
+
+        BuildExtension.build_extensions(self)
+
+
+class CMakeExtension(setuptools.Extension):
+    """CMake extension module"""
+
+    def __init__(
+            self,
+            name: str,
+            cmake_path: Path,
+            cmake_flags: Optional[List[str]] = None,
+    ) -> None:
+        super().__init__(name, sources=[])  # No work for base class
+        self.cmake_path: Path = cmake_path
+        self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
+
+    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
+
+        # Make sure paths are str
+        _cmake_bin = str(cmake_bin())
+        cmake_path = str(self.cmake_path)
+        build_dir = str(build_dir)
+        install_dir = str(install_dir)
+
+        # CMake configure command
+        build_type = "Debug" if with_debug_build() else "Release"
+        configure_command = [
+            _cmake_bin,
+            "-S",
+            cmake_path,
+            "-B",
+            build_dir,
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DCMAKE_BUILD_TYPE={build_type}",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        ]
+        configure_command += self.cmake_flags
+        if found_ninja():
+            configure_command.append("-GNinja")
+
+        import pybind11
+        pybind11_dir = Path(pybind11.__file__).resolve().parent
+        pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
+        configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
+
+        # CMake build and install commands
+        build_command = [_cmake_bin, "--build", build_dir]
+        install_command = [_cmake_bin, "--install", build_dir]
+
+        # Run CMake commands
+        for command in [configure_command, build_command, install_command]:
+            print(f"Running command {' '.join(command)}")
+            try:
+                subprocess.run(command, cwd=build_dir, check=True)
+            except (CalledProcessError, OSError) as e:
+                raise RuntimeError(f"Error when running CMake: {e}")
+
 
 GLIBCXX_USECXX11_ABI = False
 
@@ -623,9 +670,11 @@ def setup_jax_extension() -> setuptools.Extension:
     ]
 
     # Header files
+    cuda_home, _ = cuda_path()
+    cudnn_include, cudnn_link = cudnn_path()
     include_dirs = [
-        CUDA_HOME / "include",
-        CUDNN_INCLUDE,
+        cuda_home / "include",
+        cudnn_include,
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "jax" / "csrc",
         root_path / "transformer_engine",
@@ -653,7 +702,7 @@ def setup_jax_extension() -> setuptools.Extension:
     lib_kwargs = {}
     if lib_extension() == 'dll':
         # Windows needs explicit file paths for each library.
-        cuda_lib_dir = CUDA_HOME / 'lib' / 'x64'
+        cuda_lib_dir = cuda_home / 'lib' / 'x64'
         libraries = [ cuda_lib_dir / f'lib{name}.dll' for name in libraries ]
 
         # Core TE library is in the same folder as the extension library so it doesn't
@@ -662,13 +711,13 @@ def setup_jax_extension() -> setuptools.Extension:
                                   [ 'libtransformer_engine.dll' ]
     else:
         # Set link and runtime paths for CUDA libraries.
-        cuda_lib_dir = CUDA_HOME / 'lib64'
-        if (not os.path.exists(cuda_lib_dir) and os.path.exists(CUDA_HOME / 'lib')):
-            cuda_lib_dir = CUDA_HOME / 'lib'
+        cuda_lib_dir = cuda_home / 'lib64'
+        if (not os.path.exists(cuda_lib_dir) and os.path.exists(cuda_home / 'lib')):
+            cuda_lib_dir = cuda_home / 'lib'
         lib_kwargs['libraries'] = libraries
         lib_kwargs['library_dirs'] = [
             str(cuda_lib_dir),
-            str(CUDNN_LINK),
+            str(cudnn_link),
         ]
         lib_kwargs['extra_link_args'] = [
             f"-Wl,-rpath,{path}" for path in lib_kwargs['library_dirs']
@@ -698,6 +747,7 @@ def setup_jax_extension() -> setuptools.Extension:
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
+        language=["c++"],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
