@@ -8,7 +8,7 @@ from collections.abc import Iterable
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import BasicOperation
 from .._common import reshape
 
 

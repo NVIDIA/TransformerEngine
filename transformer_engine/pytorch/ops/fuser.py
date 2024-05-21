@@ -9,15 +9,15 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.fuser.ops.op import (
+from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusableOperation,
     OperationContext,
 )
-from transformer_engine.pytorch.fuser.ops.fused_forward import (
+from transformer_engine.pytorch.ops.fused_forward import (
     fuse_forward_linear_bias_activation,
 )
-from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.utils import clear_tensor_data
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):

@@ -22,9 +22,9 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
 )
-from transformer_engine.pytorch.fuser.ops.basic import BasicLinear, Bias
-from transformer_engine.pytorch.fuser.ops.op import FusedOperation
 from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
+from transformer_engine.pytorch.ops.op import FusedOperation
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,

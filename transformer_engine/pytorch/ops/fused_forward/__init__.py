@@ -6,8 +6,3 @@ from .linear_bias_activation import (
     ForwardLinearBiasActivation,
     fuse_forward_linear_bias_activation,
 )
-
-__all__ = [
-    "ForwardLinearBiasActivation",
-    "fuse_forward_linear_bias_activation",
-]

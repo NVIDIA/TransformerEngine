@@ -18,9 +18,9 @@ import torch
 import transformer_engine
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-import transformer_engine.pytorch.fuser as te_fuser
-from transformer_engine.pytorch.fuser.ops._common import is_float8_tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_extensions as tex
 
@@ -167,7 +167,7 @@ def _test_all_reduce(
     x_test.requires_grad_()
 
     # Implementation with fusable operation
-    op = te_fuser.ops.AllReduce(process_group=process_group)
+    op = te_ops.AllReduce(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -224,7 +224,7 @@ def _test_all_gather(
     x_test.requires_grad_()
 
     # Implementation with fusable operation
-    op = te_fuser.ops.AllGather(process_group=process_group)
+    op = te_ops.AllGather(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -281,7 +281,7 @@ def _test_reduce_scatter(
     x_test.requires_grad_()
 
     # Implementation with fusable operation
-    op = te_fuser.ops.ReduceScatter(process_group=process_group)
+    op = te_ops.ReduceScatter(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -392,7 +392,7 @@ def _test_basic_linear(
 
     # Implementation with fusable operation
     with te.fp8_model_init(enabled=fp8_weight):
-        op = te_fuser.ops.BasicLinear(
+        op = te_ops.BasicLinear(
             in_features,
             out_features,
             device=device,
@@ -554,8 +554,8 @@ def _test_linear(
 
     # Implementation with fusable operation
     with te.fp8_model_init(enabled=fp8_weight):
-        model = te_fuser.Sequential(
-            te_fuser.ops.Linear(
+        model = te_ops.Sequential(
+            te_ops.Linear(
                 in_features,
                 out_features,
                 bias=bias,
@@ -689,7 +689,7 @@ def _test_fp8_scale_update(
     x_test.requires_grad_()
 
     # Initialize fusable operation
-    op = te_fuser.ops.BasicLinear(
+    op = te_ops.BasicLinear(
         in_features,
         out_features,
         device=device,

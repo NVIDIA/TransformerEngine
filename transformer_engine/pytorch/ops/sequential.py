@@ -8,8 +8,8 @@ from collections import OrderedDict
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops import FusableOperation
-from transformer_engine.pytorch.fuser.fuser import OperationFuser
+from transformer_engine.pytorch.ops import FusableOperation
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
 class Sequential(torch.nn.Module):

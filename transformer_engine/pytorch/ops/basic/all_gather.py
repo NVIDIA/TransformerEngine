@@ -6,15 +6,15 @@ from __future__ import annotations
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import BasicOperation
 from .._common import convert_tensor, is_float8_tensor
 
 
-class ReduceScatter(BasicOperation):
-    """Reduce-scatter tensor along outer dimension
+class AllGather(BasicOperation):
+    """All-gather tensor along outer dimension
 
-    Equivalent to summing tensors from all processes and splitting
-    along the first dimension.
+    Equivalent to gathering tensors from all processes and
+    concatenating along the first dimension.
 
     Parameters
     ----------
@@ -45,24 +45,39 @@ class ReduceScatter(BasicOperation):
 
         # Tensor dimensions
         input_dims = input.size()
-        if not input_dims or input_dims[0] % self.process_group_size != 0:
+        if not input_dims:
             raise RuntimeError(
-                "Attempted to reduce-scatter a tensor "
+                "Attempted to all-gather a tensor "
                 f"with shape={list(input_dims)} "
                 f"over {self.process_group_size} processes"
             )
         output_dims = list(input_dims)
-        output_dims[0] //= self.process_group_size
+        output_dims[0] *= self.process_group_size
 
-        # Check input tensor
-        x = input
+        # Perform all-gather
+        x = convert_tensor(input, memory_format=torch.contiguous_format)
+        y = None
         if is_float8_tensor(x):
-            x = x.from_float8()
-        x = x.contiguous()
-
-        # Perform reduce-scatter
-        y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
-        torch.distributed.reduce_scatter_tensor(y, x, group=self.process_group)
+            y = Float8Tensor.make_like(
+                x,
+                data=torch.empty(
+                    output_shape,
+                    dtype=torch.uint8,
+                    device=x.device,
+                ),
+            )
+            torch.distributed.all_gather_into_tensor(
+                y._data,
+                x._data,
+                group=self.process_group,
+            )
+        else:
+            y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
+            torch.distributed.all_gather_into_tensor(
+                y,
+                x,
+                group=self.process_group,
+            )
         return y
 
     def op_backward(
@@ -77,38 +92,26 @@ class ReduceScatter(BasicOperation):
 
         # Tensor dimensions
         output_dims = grad_output.size()
-        if not output_dims:
+        if not output_dims or output_dims[0] % self.process_group_size != 0:
             raise RuntimeError(
-                "Attempted to all-gather a tensor "
+                "Attempted to reduce-scatter a tensor "
                 f"with shape={list(output_dims)} "
                 f"over {self.process_group_size} processes"
             )
         input_dims = list(output_dims)
-        input_dims[0] *= self.process_group_size
+        input_dims[0] //= self.process_group_size
 
-        # Perform all-gather
-        dy = convert_tensor(grad_output, memory_format=torch.contiguous_format)
-        dx = None
+        # Check output gradient tensor
+        dy = grad_output
         if is_float8_tensor(dy):
-            dx = Float8Tensor.make_like(
-                dy,
-                data=torch.empty(
-                    input_shape,
-                    dtype=torch.uint8,
-                    device=dy.device,
-                ),
-            )
-            torch.distributed.all_gather_into_tensor(
-                dx._data,
-                dy._data,
-                group=self.process_group,
-            )
-        else:
-            dx = torch.empty(input_dims, dtype=dy.dtype, device=dy.device)
-            torch.distributed.all_gather_into_tensor(
-                dx,
-                dy,
-                group=self.process_group,
-            )
+            dy = dy.from_float8()
+        dy = dy.contiguous()
 
+        # Perform reduce-scatter
+        dx = torch.empty(input_dims, dtype=dy.dtype, device=dy.device)
+        torch.distributed.reduce_scatter_tensor(
+            dx,
+            dy,
+            group=self.process_group,
+        )
         return dx, ()

@@ -9,13 +9,13 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.basic import (
+from transformer_engine.pytorch.ops.basic import (
     AllReduce,
     BasicLinear,
     Bias,
     ReduceScatter,
 )
-from transformer_engine.pytorch.fuser.ops.op import FusedOperation
+from transformer_engine.pytorch.ops.op import FusedOperation
 
 
 class Linear(FusedOperation):

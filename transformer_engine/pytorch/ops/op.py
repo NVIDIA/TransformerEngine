@@ -367,7 +367,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
 
     def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Apply operation"""
-        from ..fuser import OperationFuser
+        from .fuser import OperationFuser
         return OperationFuser([self], fuse_ops=False)(input, [kwargs])
 
 
@@ -417,5 +417,5 @@ class FusedOperation(FusableOperation):
         """Apply operation"""
         if basic_op_kwargs is None:
             basic_op_kwargs = [dict() for _ in range(len(self.basic_ops))]
-        from ..fuser import OperationFuser
+        from .fuser import OperationFuser
         return OperationFuser([self], fuse_ops=False)(input, basic_op_kwargs)

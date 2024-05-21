@@ -13,9 +13,9 @@ import transformer_engine
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-import transformer_engine.pytorch.fuser as te_fuser
-from transformer_engine.pytorch.fuser.ops._common import is_float8_tensor
-from transformer_engine.pytorch.fuser.ops.fused_forward import (
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops._common import is_float8_tensor
+from transformer_engine.pytorch.ops.fused_forward import (
     ForwardLinearBiasActivation,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -98,7 +98,7 @@ def make_reference_and_test_tensors(
 
 
 class TestFuser:
-    """Tests for fuser infrastructure"""
+    """Tests for operation fusion infrastructure"""
 
     @staticmethod
     def setup_class(cls) -> None:
@@ -129,7 +129,7 @@ class TestFuser:
 
         # Construct model
         with te.fp8_model_init():
-            model = te_fuser.ops.basic.BasicLinear(
+            model = te_ops.basic.BasicLinear(
                 size,
                 size,
                 device=device,
@@ -245,7 +245,7 @@ class TestBasicOps:
         dx_ref = dy_ref
 
         # Implementation with fusable operation
-        op = te_fuser.ops.Identity()
+        op = te_ops.Identity()
         y_test = op(x_test)
         y_test.backward(dy_test)
 
@@ -318,7 +318,7 @@ class TestBasicOps:
         y_ref.backward(dy_ref)
 
         # Implementation with fusable operation
-        op = te_fuser.ops.Reshape(out_shape)
+        op = te_ops.Reshape(out_shape)
         y_test = op(x_test)
         y_test.backward(dy_test)
 
@@ -385,7 +385,7 @@ class TestBasicOps:
         y_ref.backward(dy_ref)
 
         # Implementation with fusable operation
-        op = te_fuser.ops.Bias(size, device=device, dtype=dtype)
+        op = te_ops.Bias(size, device=device, dtype=dtype)
         with torch.no_grad():
             op.bias.copy_(b_test)
             del b_test
@@ -470,7 +470,7 @@ class TestBasicOps:
 
         # Implementation with fusable operation
         with te.fp8_model_init(enabled=fp8_weight):
-            op = te_fuser.ops.BasicLinear(
+            op = te_ops.BasicLinear(
                 in_features,
                 out_features,
                 device=device,
@@ -589,7 +589,7 @@ class TestBasicOps:
 
         # Implementation with fusable operation
         with te.fp8_model_init(enabled=fp8_weight):
-            op = te_fuser.ops.Linear(
+            op = te_ops.Linear(
                 in_features,
                 out_features,
                 bias=bias,
@@ -715,8 +715,8 @@ class TestFusedOps:
 
         # Implementation with fusable operations
         with te.fp8_model_init(enabled=fp8_weight):
-            model = te_fuser.Sequential(
-                te_fuser.ops.Linear(
+            model = te_ops.Sequential(
+                te_ops.Linear(
                     in_features,
                     out_features,
                     bias=bias,
@@ -808,14 +808,14 @@ class TestFusedOps:
 
         # Implementation with fusable operations
         with te.fp8_model_init(enabled=True):
-            model = te_fuser.Sequential(
-                te_fuser.ops.BasicLinear(
+            model = te_ops.Sequential(
+                te_ops.BasicLinear(
                     in_shape[-1],
                     in_shape[-1],
                     device=device,
                     dtype=dtype,
                 ),
-                te_fuser.ops.BasicLinear(
+                te_ops.BasicLinear(
                     in_shape[-1],
                     in_shape[-1],
                     device=device,

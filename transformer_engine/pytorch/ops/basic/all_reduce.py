@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch
 
-from transformer_engine.pytorch.fuser.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import BasicOperation
 from .._common import is_float8_tensor
 
 
