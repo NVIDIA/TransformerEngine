@@ -164,7 +164,7 @@ def cuda_path() -> Tuple[str, str]:
         # Check if nvcc is in path
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.strip("/bin/nvcc"))
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
             nvcc_bin = Path(nvcc_bin)
     if nvcc_bin is None:
         # Last-ditch guess in /usr/local/cuda
@@ -232,7 +232,7 @@ def cudnn_path() -> Tuple[str, str]:
     if cudnn_include is None or cudnn_link is None:
         raise FileNotFoundError("Could not find a cuDNN installation.")
 
-    return Path(cudnn_include), Path(cudnn_link)
+    return cudnn_include, cudnn_link
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -749,7 +749,6 @@ def setup_jax_extension() -> setuptools.Extension:
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        language="c++",
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
