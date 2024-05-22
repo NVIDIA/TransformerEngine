@@ -550,9 +550,6 @@ def setup_common_extension() -> CMakeExtension:
 
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
-        # FindPythonInterp and FindPythonLibs are deprecated in newer CMake versions,
-        # but PyBind11 still tries to use them unless we set PYBIND11_FINDPYTHON=ON.
-        cmake_flags.append("-DPYBIND11_FINDPYTHON=ON")
 
     # If we need to build TE/PyTorch extensions later, we need to compile core TE library with
     # the same C++ ABI version as PyTorch.
@@ -655,11 +652,13 @@ def setup_pytorch_extension() -> setuptools.Extension:
         nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
         if lib_extension() == 'dll':
             lib_kwargs['libraries'].append(
-                str(root_path / 'build' / 'cmake' / 'common' / 'transformer_engine_userbuffers.dll')
+                str(root_path / 'build' / 'cmake' / 'pytorch' / 'csrc' / 'userbuffers' /
+                    'transformer_engine_userbuffers.dll')
             )
         else:
             lib_kwargs['libraries'].append('transformer_engine_userbuffers')
-            lib_kwargs['library_dirs'].append(str(root_path / 'build' / 'cmake' / 'common'))
+            lib_kwargs['library_dirs'].append(
+                str(root_path / 'build' / 'cmake' / 'pytorch' / 'csrc' / 'userbuffers'))
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
