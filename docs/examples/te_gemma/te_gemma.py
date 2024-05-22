@@ -252,8 +252,8 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     ): 
         self.eval()
         assert self.config.qkv_format == "thd", "Generation using other qkv_layouts than thd is not provided in this tutorial"
-        print(f"self.config.fp8 = {self.config.fp8}")
-        with autocast(dtype=torch.bfloat16, cache_enabled=False):
+        with autocast(dtype=torch.bfloat16, cache_enabled=False), \
+             te.pytorch.fp8_autocast(enabled=self.config.fp8, fp8_recipe=self.fp8_recipe if self.config.fp8 else None):
             batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(input_ids)
             lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze() # [s]
             input_ids = F.pad(input_ids, (max_input_sequence_len - input_ids.shape[1], 0), "constant", 0)
@@ -280,10 +280,10 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             inference_params.thd_setup_before_new_input(next_tokens.unsqueeze(1))
             output_tokens = [next_tokens]
 
-            with te.pytorch.fp8_autocast(enabled=False, fp8_recipe=self.fp8_recipe if self.config.fp8 else None):
-                for _ in range(max_new_tokens):
-                    next_tokens = self._model_generation_phase(hidden_states)
-                    output_tokens.append(next_tokens.clone())
+
+            for _ in range(max_new_tokens):
+                next_tokens = self._model_generation_phase(hidden_states)
+                output_tokens.append(next_tokens.clone())
 
             result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
             return result
@@ -355,17 +355,3 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
                 num_warmup_iters=3
             )
         return graphed_function
-    
-    @torch.no_grad()
-    def generate(
-            self,
-            input_ids: Optional[torch.Tensor] = None,
-            *args,
-            **kwargs,
-        ): 
-        assert self.config.cuda_graphs_static_batch_size == input_ids.shape[0], \
-            f"Input_ids shape {input_ids.shape} does not match batch_size={self.batch_size} of recorded graphs" 
-        assert self.config.cuda_graphs_static_max_context_len >= input_ids.shape[1], \
-            f"Input_ids shape {input_ids.shape} is greater than max_seq_len={self.max_seq_len} of recorded graphs" 
-
-        return super().generate(input_ids, *args, **kwargs)
