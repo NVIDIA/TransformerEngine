@@ -5,10 +5,7 @@
 """Methods needed for distributed training (DP/TP)."""
 import warnings
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
-from typing import Any, Dict, Union, Optional, Callable, Tuple, List, final
-from abc import ABC
-from collections.abc import Iterable
-from functools import partial
+from typing import Any, Dict, Union, Optional, Callable, Tuple, List
 
 import torch
 from torch.cuda import _lazy_call, _lazy_init
@@ -881,7 +878,8 @@ def _fsdp_scatter_tensors(
                 target = t._data if isinstance(t, Float8Tensor) else t
                 shapes.append(target.data.shape)
                 safely_set_viewless_tensor_data(
-                    target, split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True)
+                    target, split_tensor_into_1d_equal_chunks(
+                        target.data, fsdp_group, new_buffer=True)
                 )
             else:
                 shapes.append(None)
