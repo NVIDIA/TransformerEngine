@@ -6,12 +6,3 @@
 from ._version import __version__
 from . import common
 
-try:
-    from . import pytorch
-except ImportError as e:
-    pass
-
-try:
-    from . import jax
-except ImportError as e:
-    pass
