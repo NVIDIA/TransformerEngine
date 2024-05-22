@@ -5,6 +5,8 @@
 import time
 import sys
 import IPython
+import random 
+import string
 
 from te_gemma_loading_weights import load_te_model
 
@@ -227,33 +229,44 @@ def run_forward_pass(model, hyperparams, num_iters):
 
 def print_sample_of_generated_texts(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-    inputs = tokenizer(["Another string ... ", "I "] * 32, return_tensors="pt", padding=True)
-
+    inputs = tokenizer(["Tell me something about GPUs:", "Tell me something about NVIDIA:"] * 32, return_tensors="pt", padding=True)
 
     max_length = inputs['input_ids'].size(1)
     new_length = ((max_length + 63) // 64) * 128
     inputs['input_ids'] = torch.nn.functional.pad(inputs['input_ids'], (new_length - max_length, 0), value=tokenizer.pad_token_id)
     inputs['attention_mask'] = torch.nn.functional.pad(inputs['attention_mask'], (new_length - max_length, 0), value=0)
 
-
     inputs['input_ids'] = inputs['input_ids'].cuda()
     inputs['attention_mask'] = inputs['attention_mask'].cuda()
 
-    outputs = model.generate(**inputs, max_new_tokens=100)
+    outputs = model.generate(**inputs, max_new_tokens=50)
     generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    for text in generated_texts[:2]:
-        print(text)
-        print("=" * 100)
+
+    print("=" * 30 + " Generation example 1 " + "=" * 30)
+    print(generated_texts[0])
+    print("=" * 30 + " Generation example 2 " + "=" * 30)
+    print(generated_texts[1])
 
 
+def _generate_random_words(num_words, max_word_length):
+    words = []
+    for _ in range(num_words):
+        word_length = random.randint(1, max_word_length)
+        word = ''.join(random.choices(string.ascii_lowercase, k=word_length))
+        words.append(word)
+    return words
 
-def benchmark_generation(model):
+def benchmark_generation(model, measure_memory=False):
     batch_size = 64
     context_length = 128
     max_new_tokens = 1024 - 128
-    print(f"Benchmarking for batch_size={batch_size} and total tokens = {context_length + max_new_tokens}")
+    print("=" * 30 + " Benchmarking " + "=" * 30)
+    print(f"Benchmarking for batch_size = {batch_size} and max total tokens = {context_length + max_new_tokens}")
+
+    input_str = _generate_random_words(batch_size, context_length)
+    
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-    inputs = tokenizer(["a" * context_length] * batch_size, return_tensors="pt", padding=True)
+    inputs = tokenizer(input_str, return_tensors="pt", padding=True)
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -267,5 +280,6 @@ def benchmark_generation(model):
     torch.cuda.synchronize()
     end.record()
     
-    print(f"Benchmark with context_length={context_length} and max_new_tokens={max_new_tokens} took {start.elapsed_time(end)} ms.")
-    print(f"Peak GPU memory usage: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    print(f"Time: {start.elapsed_time(end)/1000:.2f} s.")
+    if measure_memory:
+        print(f"Peak GPU memory usage: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
