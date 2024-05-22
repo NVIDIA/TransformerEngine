@@ -15,9 +15,13 @@ tests/test_onnx_export.py::test_export_cast_ops[112]
   Please consider adding it in symbolic function. (Triggered internally at
   /opt/pytorch/pytorch/torch/csrc/jit/passes/onnx/shape_type_inference.cpp:1880.)
     _C._jit_pass_onnx_graph_shape_type_inference(
-"""
 
-from typing import Union
+
+Scale tensors are treated as lists ("fs") instead of tensors ("v") because we need to access
+specific entries using the index passes as `fp8_tensor`. If you fail to do this you will get
+the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8_tensor]`):
+    TypeError: 'torch._C.Value' object is not subscriptable
+"""
 
 import torch
 from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
@@ -70,16 +74,7 @@ def is_dtype_bf16(t):
     return t.type().scalarType() == "BFloat16"
 
 
-def make_scalar_constant_op(
-    g,
-    val: Union[float, int],
-    dtype: torch.dtype = torch.float32,
-):
-    """ONNX constant op that outputs a tensor with a single value"""
-    return g.op("Constant", value_t=torch.tensor([val], dtype=dtype))
-
-
-def quantize(g, inputs, scale, fp8_tensor):
+def quantize(g, inputs, scale_inv, fp8_tensor):
     """Helper Function for Quantization"""
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
 
@@ -88,17 +83,7 @@ def quantize(g, inputs, scale, fp8_tensor):
     if not is_dtype_fp32(inputs):
         inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
-    scale = g.op(
-        "Reshape",
-        scale,
-        make_scalar_constant_op(g, -1, dtype=torch.int64),
-    )
-    scale = g.op(
-        "Slice",
-        scale,
-        make_scalar_constant_op(g, fp8_tensor, dtype=torch.int64),
-        make_scalar_constant_op(g, fp8_tensor+1, dtype=torch.int64),
-    )
+    scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
     q_op = g.op(
         make_op_name("TRT_FP8QuantizeLinear"), inputs, scale).setType(
             inputs.type().with_dtype(torch.uint8).with_sizes(output_shape))
@@ -109,18 +94,8 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
     """Helper Function for Dequantization"""
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
 
-    scale_inv = g.op(
-        "Reshape",
-        scale_inv,
-        make_scalar_constant_op(g, -1, dtype=torch.int64),
-    )
-    scale_inv = g.op(
-        "Slice",
-        scale_inv,
-        make_scalar_constant_op(g, fp8_tensor, dtype=torch.int64),
-        make_scalar_constant_op(g, fp8_tensor+1, dtype=torch.int64),
-    )
-    out = g.op(make_op_name("TRT_FP8DequantizeLinear"), inputs, scale_inv).setType(
+    scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
+    out = g.op(make_op_name("TRT_FP8DequantizeLinear"), inputs, scale).setType(
         inputs.type().with_dtype(torch.float32).with_sizes(output_shape))
 
     # DQ outputs are currently constrained to FP32 due to a similar limitation in ORT
@@ -148,45 +123,45 @@ def compute_in_fp32(g, inp, subgraph, *args, **kwargs):
     return sg_out
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for cast_to_fp8"""
     # pylint: disable=unused-argument
     return quantize(g, inputs, scale_inv, fp8_tensor)
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "v", "fs", "i", "i")
 def onnx_cast_to_fp8_noalloc(g, inputs, scale, output, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for cast_to_fp8_noalloc"""
     # pylint: disable=unused-argument
     return quantize(g, inputs, scale_inv, fp8_tensor)
 
 
-@symbolic_helper.parse_args("v", "v", "i", "i", "i")
+@symbolic_helper.parse_args("v", "fs", "i", "i", "i")
 def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
     """ONNX graph for cast_from_fp8"""
     # pylint: disable=unused-argument
     return dequantize(g, inputs, scale_inv, fp8_tensor, otype)
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
     # TE computes GELU using float32 precision so wrap the GELU subgraph with
     # conversion to/from float32.
     gelu = compute_in_fp32(g, inputs, torch.onnx.symbolic_opset9.gelu, "tanh")
-    if otype == int(tex.DType.kFloat8E4M3):
+    if scale_inv:
         gelu = quantize(g, gelu, scale_inv, fp8_tensor)
     return gelu
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_relu"""
     # pylint: disable=unused-argument
     relu = compute_in_fp32(g, inputs, torch.onnx.symbolic_opset9.relu)
-    if otype == int(tex.DType.kFloat8E4M3):
+    if scale_inv:
         relu = quantize(g, relu, scale_inv, fp8_tensor)
     return relu
 
@@ -202,12 +177,12 @@ def onnx_swiglu(g: jit_utils.GraphContext, inp, dim):
     return g.op("Mul", g.op("Sigmoid", first), second)
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_fp8_swiglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_swiglu"""
     # pylint: disable=unused-argument
     swiglu = compute_in_fp32(g, inputs, onnx_swiglu, 1)
-    if otype == int(tex.DType.kFloat8E4M3):
+    if scale_inv:
         swiglu = quantize(g, swiglu, scale_inv, fp8_tensor)
     return swiglu
 
@@ -223,12 +198,12 @@ def onnx_reglu(g: jit_utils.GraphContext, inp, dim):
     return g.op("Mul", g.op("Relu", first), second)
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_fp8_reglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_reglu"""
     # pylint: disable=unused-argument
     reglu = compute_in_fp32(g, inputs, onnx_reglu, 1)
-    if otype == int(tex.DType.kFloat8E4M3):
+    if scale_inv:
         reglu = quantize(g, reglu, scale_inv, fp8_tensor)
     return reglu
 
@@ -245,19 +220,19 @@ def onnx_geglu(g: jit_utils.GraphContext, inp, dim):
     return g.op("Mul", first_gelu, second)
 
 
-@symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_fp8_geglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_geglu"""
     # pylint: disable=unused-argument
     geglu = compute_in_fp32(g, inputs, onnx_geglu, 1)
-    if otype == int(tex.DType.kFloat8E4M3):
+    if scale_inv:
         geglu = quantize(g, geglu, scale_inv, fp8_tensor)
     return geglu
 
 
-@symbolic_helper.parse_args("v", "v", "i", "i", "i",
-                            "v", "v", "i", "i", "i",
-                            "v", "v", "i", "v", "v", "i", "v", "i",
+@symbolic_helper.parse_args("v", "fs", "i", "i", "i",
+                            "v", "fs", "i", "i", "i",
+                            "v", "fs", "i", "fs", "v", "i", "v", "i",
                             "v", "i", "i", "i")
 def onnx_te_gemm(
     g,
@@ -284,7 +259,6 @@ def onnx_te_gemm(
     accumulate,
     use_split_accumulator):
     """ONNX graph for te_gemm"""
-
     # pylint: disable=unused-argument
     is_fp16 = is_dtype_fp16(inputs)
     is_bf16 = is_dtype_bf16(inputs)
@@ -330,7 +304,7 @@ def _ones_like(g, inp, dtype):
     return one
 
 
-@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "v", "i", "i", "i", "b")
+@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
                            scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
     """ONNX graph for layernorm_fwd_fp8"""
@@ -378,7 +352,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, sm_margin, zero_centered_ga
     )
     return ln
 
-@symbolic_helper.parse_args("v", "v", "f", "v", "v", "v", "i", "i", "i", "b")
+@symbolic_helper.parse_args("v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
 def onnx_rmsnorm_fwd_fp8(g, inputs, weight, eps, scale, amax,
                          scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
     """ONNX graph for rmsnorm_fwd_fp8"""

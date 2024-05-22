@@ -852,7 +852,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     out._fp8_dtype,
                     out=out._data,
                 )
-                out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
+                if is_in_onnx_export_mode():
+                    # ONNX export expects FP8 scales can be
+                    # represented with constant ops. However, copying
+                    # into a buffer involves an expand op for array
+                    # broadcasting. We work around this by filling the
+                    # buffer instead.
+                    out._scale_inv.fill_(fp8_meta.scale_inv[fp8_meta_index].item())
+                else:
+                    out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
 
         return out
 
