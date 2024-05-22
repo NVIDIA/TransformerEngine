@@ -18,7 +18,7 @@ def generate_configs():
     if is_devices_enough(2):
         configs.append([2, (2,), ('dp'), MeshResource(dp_resource='dp')])
         configs.append([2, (2,), ('tp'), MeshResource(tp_resource='tp')])
-        
+
     if is_devices_enough(4):
         TP_size = 2
         DP_size = 2
