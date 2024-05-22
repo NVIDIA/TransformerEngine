@@ -112,6 +112,8 @@ def init_te_gemma_model(hyperparams):
     for key, value in hyperparams.__dict__.items():
                 setattr(config, key, value)
     model = load_te_model(cls, config)
+    if hyperparams.generation_cuda_graphs:
+        model.record()
     return model
 
 
@@ -245,7 +247,11 @@ def print_sample_of_generated_texts(model):
 
 
 
-def benchmark_generation(model, batch_size, context_length, max_new_tokens):
+def benchmark_generation(model):
+    batch_size = 64
+    context_length = 128
+    max_new_tokens = 1024 - 128
+    print(f"Benchmarking for batch_size={batch_size} and total tokens = {context_length + max_new_tokens}")
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     inputs = tokenizer(["a" * context_length] * batch_size, return_tensors="pt", padding=True)
 
@@ -253,7 +259,7 @@ def benchmark_generation(model, batch_size, context_length, max_new_tokens):
     end = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
     start.record()
-
+    
     model.generate(
         inputs['input_ids'].cuda(),
         max_new_tokens=max_new_tokens
@@ -262,4 +268,4 @@ def benchmark_generation(model, batch_size, context_length, max_new_tokens):
     end.record()
     
     print(f"Benchmark with context_length={context_length} and max_new_tokens={max_new_tokens} took {start.elapsed_time(end)} ms.")
-    print(f"Peak GPU memoty usage: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    print(f"Peak GPU memory usage: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")

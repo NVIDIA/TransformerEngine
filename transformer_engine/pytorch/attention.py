@@ -3940,6 +3940,9 @@ class DotProductAttention(torch.nn.Module):
                 # max512 backend will only support [1, h, s, s]
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
+        if self.qkv_format != "thd": # added by me #TODO - i need that in case d=256 fused attention is not run
+            use_fused_attention = False
+
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype]
