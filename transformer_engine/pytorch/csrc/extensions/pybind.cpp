@@ -42,8 +42,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD");
   m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
-  m.def("fused_cast_transpose_noop", &fused_cast_transpose_noop,
-                                              "Fused Cast + Transpose with noop option");
+  m.def("fused_cast_transpose_noop",
+        &fused_cast_transpose_noop,
+        "Fused Cast + Transpose with noop option",
+        py::arg("input"),
+        py::arg("noop"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("input_cast"),
+        py::arg("input_transpose"),
+        py::arg("otype"),
+        py::arg("scale_offset")=0);
   m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,

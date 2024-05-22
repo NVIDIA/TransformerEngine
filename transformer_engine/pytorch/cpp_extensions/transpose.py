@@ -43,12 +43,13 @@ def fp8_cast_transpose_fused(
         tex.fused_cast_transpose_noop(
             inp,
             noop_flag,
-            fp8_meta_tensor.scale[fp8_tensor],
-            fp8_meta_tensor.amax_history[0][fp8_tensor],
-            fp8_meta_tensor.scale_inv[fp8_tensor],
+            fp8_meta_tensor.scale,
+            fp8_meta_tensor.amax_history,
+            fp8_meta_tensor.scale_inv,
             cast_out,
             transpose_out,
             otype,
+            int(fp8_tensor),
         )
 
     if return_outputs:

@@ -39,23 +39,44 @@ void fused_cast_transpose_noop(at::Tensor input,
                                at::Tensor scale_inv,
                                at::Tensor input_cast,
                                at::Tensor input_transpose,
-                               transformer_engine::DType otype
-) {
+                               transformer_engine::DType otype,
+                               int scale_offset) {
   using namespace transformer_engine;
 
+  // Get pointers for FP8 scale, amax, scale-inverse
+  auto get_dptr = [scale_offset](at::Tensor& tensor) -> void* {
+    float* dptr = reinterpret_cast<float*>(tensor.data_ptr());
+    if (dptr != nullptr) {
+      dptr += scale_offset;
+    }
+    return reinterpret_cast<void*>(dptr);
+  };
+  void* scale_dptr = get_dptr(scale);
+  void* amax_dptr = get_dptr(amax);
+  void* scale_inv_dptr = get_dptr(scale_inv);
+
+  // Construct Transformer Engine tensors
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
-
   auto input_cu            = makeTransformerEngineTensor(input);
   auto noop_cu             = makeTransformerEngineTensor(noop);
-  auto output_cast_cu      = makeTransformerEngineTensor(input_cast.data_ptr(), {M, N}, otype,
-                                                         amax.data_ptr(), scale.data_ptr(),
-                                                         scale_inv.data_ptr());
-  auto output_transpose_cu = makeTransformerEngineTensor(input_transpose.data_ptr(), {N, M}, otype,
-                                                         amax.data_ptr(), scale.data_ptr(),
-                                                         scale_inv.data_ptr());
+  auto output_cast_cu      = makeTransformerEngineTensor(input_cast.data_ptr(),
+                                                         {M, N},
+                                                         otype,
+                                                         amax_dptr,
+                                                         scale_dptr,
+                                                         scale_inv_dptr);
+  auto output_transpose_cu = makeTransformerEngineTensor(input_transpose.data_ptr(),
+                                                         {N, M},
+                                                         otype,
+                                                         amax_dptr,
+                                                         scale_dptr,
+                                                         scale_inv_dptr);
 
-  nvte_cast_transpose_with_noop(input_cu.data(), noop_cu.data(), output_cast_cu.data(),
+  // Execute kernel
+  nvte_cast_transpose_with_noop(input_cu.data(),
+                                noop_cu.data(),
+                                output_cast_cu.data(),
                                 output_transpose_cu.data(),
                                 at::cuda::getCurrentCUDAStream());
 }

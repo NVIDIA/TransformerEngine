@@ -239,7 +239,8 @@ void fused_cast_transpose_noop(at::Tensor input,
                                at::Tensor scale_inv,
                                at::Tensor input_cast,
                                at::Tensor input_transpose,
-                               transformer_engine::DType otype
+                               transformer_engine::DType otype,
+                               int scale_offset
 );
 
 
