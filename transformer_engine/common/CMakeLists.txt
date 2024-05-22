@@ -40,16 +40,6 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-# Check for cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-    message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
-endif()
-
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
