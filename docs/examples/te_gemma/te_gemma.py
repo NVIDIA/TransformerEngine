@@ -296,7 +296,6 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
     """
     def __init__(self, config : GemmaConfig):
         super().__init__(config)
-        # Przekonwertuj siebie na bf16 chatgpt...
         # Preparation of the static buffers.
         self.config = config 
         self.hidden_states_buffer = torch.empty(
