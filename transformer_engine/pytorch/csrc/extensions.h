@@ -240,7 +240,9 @@ void fused_cast_transpose_noop(at::Tensor input,
                                at::Tensor input_cast,
                                at::Tensor input_transpose,
                                transformer_engine::DType otype,
-                               int scale_offset
+                               int scale_offset,
+                               int amax_offset,
+                               int scale_inv_offset
 );
 
 
@@ -248,16 +250,22 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,
                                                    at::Tensor scale_inv,
-                                                   transformer_engine::DType otype
+                                                   transformer_engine::DType otype,
+                                                   int scale_offset,
+                                                   int amax_offset,
+                                                   int scale_inv_offset
 );
 
 
 std::vector<at::Tensor> fused_fp8_transpose_bgrad(at::Tensor grad_output,
-                                              at::Tensor scale,
-                                              at::Tensor amax,
-                                              at::Tensor scale_inv,
-                                              transformer_engine::DType otype,
-                                              transformer_engine::DType grad_bias_type
+                                                  at::Tensor scale,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  transformer_engine::DType grad_bias_type,
+                                                  int scale_offset,
+                                                  int amax_offset,
+                                                  int scale_inv_offset
 );
 
 
@@ -266,7 +274,10 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                                          at::Tensor scale,
                                                          at::Tensor amax,
                                                          at::Tensor scale_inv,
-                                                         transformer_engine::DType otype
+                                                         transformer_engine::DType otype,
+                                                         int scale_offset,
+                                                         int amax_offset,
+                                                         int scale_inv_offset
 );
 
 

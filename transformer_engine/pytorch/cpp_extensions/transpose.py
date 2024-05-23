@@ -49,7 +49,9 @@ def fp8_cast_transpose_fused(
             cast_out,
             transpose_out,
             otype,
-            int(fp8_tensor),
+            scale_offset=int(fp8_tensor),
+            amax_offset=int(fp8_tensor),
+            scale_inv_offset=int(fp8_tensor),
         )
 
     if return_outputs:
@@ -66,10 +68,13 @@ def fp8_cast_transpose_bgrad_fused(
     """Cast + Transpose + BGRAD with FP8 output"""
     return tex.fused_cast_transpose_bgrad(
         inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
         otype,
+        scale_offset=int(fp8_tensor),
+        amax_offset=int(fp8_tensor),
+        scale_inv_offset=int(fp8_tensor),
     )
 
 
@@ -83,11 +88,14 @@ def fp8_transpose_bgrad_fused(
     """Transpose + BGRAD with FP8 output"""
     return tex.fused_fp8_transpose_bgrad(
         inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
         otype,
         TE_DType[grad_bias_type],
+        scale_offset=int(fp8_tensor),
+        amax_offset=int(fp8_tensor),
+        scale_inv_offset=int(fp8_tensor),
     )
 
 
@@ -102,8 +110,11 @@ def fp8_cast_transpose_bgrad_dgelu_fused(
     return tex.fused_cast_transpose_bgrad_dgelu(
         grad_output,
         gelu_input,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
         otype,
+        scale_offset=int(fp8_tensor),
+        amax_offset=int(fp8_tensor),
+        scale_inv_offset=int(fp8_tensor),
     )

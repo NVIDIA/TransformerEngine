@@ -53,13 +53,44 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input_cast"),
         py::arg("input_transpose"),
         py::arg("otype"),
-        py::arg("scale_offset")=0);
-  m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
-                                              "Fused Cast + Transpose + BGRAD");
-  m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
-                                              "Fused FP8 Transpose + BGRAD");
-  m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
-                                              "Fused Cast + Transpose + BGRAD + DGELU");
+        py::arg("scale_offset")=0,
+        py::arg("amax_offset")=0,
+        py::arg("scale_inv_offset")=0);
+  m.def("fused_cast_transpose_bgrad",
+        &fused_cast_transpose_bgrad,
+        "Fused Cast + Transpose + BGRAD",
+        py::arg("grad_output"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("scale_offset")=0,
+        py::arg("amax_offset")=0,
+        py::arg("scale_inv_offset")=0);
+  m.def("fused_fp8_transpose_bgrad",
+        &fused_fp8_transpose_bgrad,
+        "Fused FP8 Transpose + BGRAD",
+        py::arg("grad_output"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("grad_bias_type"),
+        py::arg("scale_offset")=0,
+        py::arg("amax_offset")=0,
+        py::arg("scale_inv_offset")=0);
+  m.def("fused_cast_transpose_bgrad_dgelu",
+        &fused_cast_transpose_bgrad_dgelu,
+        "Fused Cast + Transpose + BGRAD + DGELU",
+        py::arg("grad_output"),
+        py::arg("gelu_input"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("scale_offset")=0,
+        py::arg("amax_offset")=0,
+        py::arg("scale_inv_offset")=0);
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
                                               "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
