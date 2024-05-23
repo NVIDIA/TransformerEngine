@@ -5,14 +5,14 @@
 """Attention."""
 import collections
 from contextlib import nullcontext
-from importlib.metadata import version
+from importlib.metadata import version as get_pkg_version
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
 import numpy as np
-from pkg_resources import packaging
+from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
@@ -67,13 +67,13 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
-_flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_version_required = packaging.version.Version("2.0.6")
-_flash_attn_max_version = packaging.version.Version("2.5.8")
-_flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
-_flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
-_flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
-_flash_attn_2_4_1_plus = _flash_attn_version >= packaging.version.Version("2.4.1")
+_flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+_flash_attn_version_required = PkgVersion("2.0.6")
+_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
+_flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
+_flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
+_flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
@@ -313,7 +313,7 @@ def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     the samples in a batch.
     """
     mask = mask.squeeze(1).squeeze(1)
-    reduced_mask = mask.sum(dim=1)
+    reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
     cu_seqlens = torch.cat((zero, cu_seqlens))
@@ -331,13 +331,13 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
     mask = mask.squeeze(1).squeeze(1)
     bs, seqlen = mask.shape
 
-    reduced_mask = mask.sum(dim=1)
+    reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.reshape(-1)
-    indices = mask.nonzero()
+    indices = mask.logical_not().nonzero()
     indices = indices.unsqueeze(-1)
 
     num_nonzeros = indices.shape[0]
@@ -497,7 +497,7 @@ class PackTensors(torch.autograd.Function):
         *tensors: Tuple[torch.Tensor, ...]
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
-        ctx.indices = indices
+        ctx.save_for_backward(indices)
         ctx.dim0 = tensors[0].shape[0]
         if len(tensors) == 1:
             return pack_tensor(indices, *tensors)
@@ -507,11 +507,12 @@ class PackTensors(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
+        (indices,) = ctx.saved_tensors
         if len(grad_outputs) == 1:
-            return None, unpack_tensor(ctx.indices, ctx.dim0, *grad_outputs)
+            return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
         if len(grad_outputs) == 2:
-            return None, *unpack_2_tensors(ctx.indices, ctx.dim0, *grad_outputs)
-        return None, *unpack_3_tensors(ctx.indices, ctx.dim0, *grad_outputs)
+            return None, *unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
+        return None, *unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
 
 
 class UnpackTensor(torch.autograd.Function):
