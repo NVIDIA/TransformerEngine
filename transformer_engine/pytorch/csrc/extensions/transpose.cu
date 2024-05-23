@@ -71,7 +71,7 @@ void fused_cast_transpose_noop(at::Tensor input,
                                                          scale_dptr,
                                                          scale_inv_dptr);
 
-  // Execute kernel
+  // Launch kernel
   nvte_cast_transpose_with_noop(input_cu.data(),
                                 noop_cu.data(),
                                 output_cast_cu.data(),
@@ -141,7 +141,7 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                           workspace.shape(),
                                           workspace.dtype());
 
-  // Execute kernel
+  // Launch kernel
   nvte_cast_transpose_dbias(input_cu.data(), cast_output_cu.data(),
                             transposed_output_cu.data(), dbias_cu.data(),
                             workspace.data(), at::cuda::getCurrentCUDAStream());
@@ -199,7 +199,7 @@ std::vector<at::Tensor> fused_fp8_transpose_bgrad(at::Tensor grad_output,
                                           workspace.shape(),
                                           workspace.dtype());
 
-  // Execute kernel
+  // Launch kernel
   nvte_fp8_transpose_dbias(input_cu.data(), transposed_output_cu.data(), dbias_cu.data(),
                            workspace.data(), at::cuda::getCurrentCUDAStream());
 
@@ -265,7 +265,7 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                           workspace.shape(),
                                           workspace.dtype());
 
-  // Execute kernel
+  // Launch kernel
   nvte_cast_transpose_dbias_dgelu(input_cu.data(), gelu_input_cu.data(),
                                   cast_output_cu.data(), transposed_output_cu.data(),
                                   dbias_cu.data(), workspace.data(),
