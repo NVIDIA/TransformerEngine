@@ -102,7 +102,6 @@ _alibi_cache = {
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
 
-
 class InferenceParams: # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
@@ -814,8 +813,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if len(rest) > 0:
                                     attn_biases[i] = rest[0]
                             else:
-                                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                                q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
+                                if qkv_format == "thd":
+                                    # [t, np, hn] -> [t/2, np, hn]
+                                    q_inputs[i%2] = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
+                                else:
+                                    # [b, 2, sq//2, np, hn]->[b, sq//2, np, hn]->[b*sq//2, np, hn]
+                                    q_inputs[i%2] = \
+                                        q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
                                 # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
@@ -873,7 +877,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if i == 1:
                         out = torch.empty_like(q).zero_()
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
-                        if causal:
+                        if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
                             softmax_lse_ = softmax_lse.view(
                                 *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2
@@ -882,8 +886,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                         flash_attn_fwd_softmax_lse_correction(softmax_lse,
                                                               softmax_lse_per_step[i-1])
                     else:
-                        flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
-                                                              softmax_lse_per_step[i-1])
+                        if qkv_format == "thd":
+                            tex.thd_second_half_lse_correction(softmax_lse,
+                                                               softmax_lse_per_step[i-1],
+                                                               cu_seqlens_q,
+                                                               q.size(0))
+                        else:
+                            flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
+                                                                  softmax_lse_per_step[i-1])
 
                 if i < cp_size:
                     flash_attn_streams[(i-1)%2].record_event(fwd_results_correction_done)
@@ -891,7 +901,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         softmax_lse = softmax_lse.to(torch.float)
-        seq_dim = qkv_format.index("s")
+        if qkv_format in ["bshd", "sbhd"]:
+            seq_dim = qkv_format.index("s")
         for i in range(cp_size):
             if qkv_format == "bshd":
                 out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
@@ -900,17 +911,37 @@ class AttnFuncWithCP(torch.autograd.Function):
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
                 out_ = out[1]
             if i <= rank or not causal:
-                flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
-                                              out_per_step[i],
-                                              seq_dim,
-                                              softmax_lse,
-                                              softmax_lse_per_step[i])
+               if qkv_format in ["bshd", "sbhd"]:
+                    flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
+                                                  out_per_step[i],
+                                                  seq_dim,
+                                                  softmax_lse,
+                                                  softmax_lse_per_step[i])
+                elif qkv_format == "thd":
+                    tex.thd_out_correction(out,
+                                           out_per_step[i],
+                                           softmax_lse,
+                                           softmax_lse_per_step[i],
+                                           cu_seqlens_q,
+                                           False)
+                else:
+                    assert False, f"{qkv_format} is an unsupported qkv_format!"
             else:
-                flash_attn_fwd_out_correction(out_,
-                                              out_per_step[i],
-                                              seq_dim,
-                                              softmax_lse_[..., 1, :],
-                                              softmax_lse_per_step[i])
+                if qkv_format in ["bshd", "sbhd"]:
+                    flash_attn_fwd_out_correction(out_,
+                                                  out_per_step[i],
+                                                  seq_dim,
+                                                  softmax_lse_[..., 1, :],
+                                                  softmax_lse_per_step[i])
+                elif qkv_format == "thd":
+                    tex.thd_out_correction(out,
+                                           out_per_step[i],
+                                           softmax_lse,
+                                           softmax_lse_per_step[i],
+                                           cu_seqlens_q,
+                                           True)
+                else:
+                    assert False, f"{qkv_format} is an unsupported qkv_format!"
 
         kv = p2p_comm_buffers[-1]
         if use_fused_attention:
