@@ -526,12 +526,13 @@ class UnpackTensor(torch.autograd.Function):
         dim0: int,
         tensor: torch.Tensor,
     ) -> torch.Tensor:
-        ctx.indices = indices
+        ctx.save_for_backward(indices)
         return unpack_tensor(indices, dim0, tensor)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return None, None, pack_tensor(ctx.indices, grad_output)
+        (indices,) = ctx.saved_tensors
+        return None, None, pack_tensor(indices, grad_output)
 
 
 def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
