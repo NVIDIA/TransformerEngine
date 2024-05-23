@@ -1768,37 +1768,3 @@ void nvte_dqgeglu_cast_transpose(const NVTETensor input,
                         reinterpret_cast<Tensor*>(transposed_output),
                         stream);
 }
-
-void nvte_cast_transpose_dbias_dswish(const NVTETensor input,
-                                     const NVTETensor swish_input,
-                                     NVTETensor cast_output,
-                                     NVTETensor transposed_output,
-                                     NVTETensor dbias,
-                                     NVTETensor workspace,
-                                     cudaStream_t stream) {
-  NVTE_API_CALL(nvte_cast_transpose_dbias_dswish);
-  using namespace transformer_engine;
-  cast_transpose_dbias_dgelu<fp32, Empty, dswish<fp32, fp32>>(
-                             *reinterpret_cast<const Tensor*>(input),
-                             *reinterpret_cast<const Tensor*>(swish_input),
-                             reinterpret_cast<Tensor*>(cast_output),
-                             reinterpret_cast<Tensor*>(transposed_output),
-                             reinterpret_cast<Tensor*>(dbias),
-                             reinterpret_cast<Tensor*>(workspace),
-                             stream);
-}
-
-void nvte_dswiglu_cast_transpose(const NVTETensor input,
-                                const NVTETensor swiglu_input,
-                                NVTETensor cast_output,
-                                NVTETensor transposed_output,
-                                cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dswiglu_cast_transpose);
-  using namespace transformer_engine;
-  dgeglu_cast_transpose<fp32, Empty, dswish<fp32, fp32>, swish<fp32, fp32>>(
-                        *reinterpret_cast<const Tensor*>(input),
-                        *reinterpret_cast<const Tensor*>(swiglu_input),
-                        reinterpret_cast<Tensor*>(cast_output),
-                        reinterpret_cast<Tensor*>(transposed_output),
-                        stream);
-}
