@@ -5,14 +5,14 @@
 """Attention."""
 import collections
 from contextlib import nullcontext
-from importlib.metadata import version
+from importlib.metadata import version as get_pkg_version
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
 import numpy as np
-from pkg_resources import packaging
+from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
@@ -67,13 +67,13 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
-_flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_version_required = packaging.version.Version("2.0.6")
-_flash_attn_max_version = packaging.version.Version("2.5.8")
-_flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
-_flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
-_flash_attn_2_4_plus = _flash_attn_version >= packaging.version.Version("2.4")
-_flash_attn_2_4_1_plus = _flash_attn_version >= packaging.version.Version("2.4.1")
+_flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+_flash_attn_version_required = PkgVersion("2.0.6")
+_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
+_flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
+_flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
+_flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
