@@ -2293,3 +2293,35 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens,
 
   return output;
 }
+
+// Kernel used to update KV chache when attention layout is "thd".
+extern "C"
+__global__ void attention_copy_kernel(
+        __nv_bfloat16* cache_tensor, 
+        int* seq_len, 
+        int* incoming_seq_len, 
+        __nv_bfloat16* hidden_tensor, 
+        int max_incoming_seq_len, 
+        int max_seq_len, 
+        int b, 
+        int s
+    ) {
+    for(int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+        int to_copy = s * incoming_seq_len[batch_idx];
+        int offset = seq_len[batch_idx];
+
+        __nv_bfloat16* begin_cache_copy = cache_tensor + max_seq_len * s * batch_idx + s * offset; 
+        __nv_bfloat16* begin_hidden_copy = hidden_tensor + s * batch_idx * max_incoming_seq_len;
+
+        for(int i = threadIdx.x; i < to_copy; i += blockDim.x) {
+            *(begin_cache_copy + i) = *(begin_hidden_copy + i);
+        }
+    } 
+}
+
+void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len, torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s) {
+    attention_copy_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<__nv_bfloat16*>(A.data_ptr<torch::BFloat16>()),
+                          seq_len.data_ptr<int>(),
+                          incoming_seq_len.data_ptr<int>(),
+                          reinterpret_cast<__nv_bfloat16*>(B.data_ptr<torch::BFloat16>()), max_incoming_seq_len, max_seq_len, b, s);
+}
