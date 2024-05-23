@@ -542,6 +542,8 @@ class TransformerLayer(torch.nn.Module):
                         It should be in [batch_size, 1, 1, seqlen_q] for 'padding' mask,
                         and broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
                         for 'arbitrary'. It should be 'None' for 'causal' and 'no_mask'.
+                        A `True` value means the corresponding position is masked out and
+                        a `False` means that position is allowed to participate in attention.
         self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                             default = `causal`
                             Type of attention mask passed into softmax operation.
@@ -555,7 +557,9 @@ class TransformerLayer(torch.nn.Module):
              using `layer_type="decoder"`. It should be a tuple of two masks in
              [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for 'padding' mask.
              It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
-             for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'.
+             for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'. A `True` value
+             means the corresponding position is masked out and a `False` means that position is
+             allowed to participate in attention.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -655,7 +659,6 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
-                window_size=window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
