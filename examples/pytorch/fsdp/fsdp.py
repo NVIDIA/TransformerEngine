@@ -4,8 +4,6 @@
 
 import os
 import argparse
-import warnings
-warnings.filterwarnings("ignore")
 
 from functools import partial
 
@@ -78,28 +76,28 @@ def te_layer(l):
         return te_layer_map[lowercase(l)]
     return None
 
-def get_layer_args(args):
-    hidden_size = args.num_heads * args.head_dim
+def get_layer_args(opts):
+    hidden_size = opts.num_heads * opts.head_dim
     layer_args = (hidden_size, )
     layer_kwargs = {
-        'params_dtype': args.dtype,
-        'device': 'cuda' if args.no_defer_init else 'meta',
+        'params_dtype': opts.dtype,
+        'device': 'cuda' if opts.no_defer_init else 'meta',
         'get_rng_state_tracker': get_cuda_rng_tracker,
     }
-    if args.layer_type in [te.Linear, te.LayerNormLinear, te.LayerNormMLP]:
-        ffn_hidden_size = 3 * hidden_size if args.num_layers == 1 else hidden_size
+    if opts.layer_type in [te.Linear, te.LayerNormLinear, te.LayerNormMLP]:
+        ffn_hidden_size = 3 * hidden_size if opts.num_layers == 1 else hidden_size
         layer_args += (ffn_hidden_size, )
         layer_kwargs['bias'] = True
-        if args.layer_type == te.LayerNormMLP:
-            layer_kwargs['seq_length'] = args.seq_length
-    elif args.layer_type == te.MultiheadAttention:
-        layer_args += (args.num_heads, )
+        if opts.layer_type == te.LayerNormMLP:
+            layer_kwargs['seq_length'] = opts.seq_length
+    elif opts.layer_type == te.MultiheadAttention:
+        layer_args += (opts.num_heads, )
         layer_kwargs['fuse_qkv_params'] = True
         layer_kwargs['input_layernorm'] = True
-    elif args.layer_type == te.TransformerLayer:
-        layer_args += (3 * hidden_size, args.num_heads)
+    elif opts.layer_type == te.TransformerLayer:
+        layer_args += (3 * hidden_size, opts.num_heads)
         layer_kwargs['fuse_qkv_params'] = True
-        layer_kwargs['seq_length'] = args.seq_length
+        layer_kwargs['seq_length'] = opts.seq_length
     return layer_args, layer_kwargs
 
 def parse_fsdp_args():
@@ -146,25 +144,25 @@ def dist_print(text, all_ranks=False, no_new_line=False):
         end = '' if no_new_line else '\n'
         print(f"[GPU-{LOCAL_RANK}] " + text, end=end)
 
-def train(args):
+def train(opts):
     # Initialize torch.distributed global process group
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(LOCAL_RANK)
     dist_print(f"WORLD_SIZE = {WORLD_SIZE}")
-    torch.manual_seed(args.seed)
+    torch.manual_seed(opts.seed)
 
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
-    layer_args, layer_kwargs = get_layer_args(args)
-    if args.num_layers > 1:
+    layer_args, layer_kwargs = get_layer_args(opts)
+    if opts.num_layers > 1:
         te_layer_list = []
-        for i in range(args.num_layers):
-            if args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+        for i in range(opts.num_layers):
+            if opts.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
                 layer_kwargs['layer_number'] = i+1
-            te_layer_list.append(args.layer_type(*layer_args, **layer_kwargs))
+            te_layer_list.append(opts.layer_type(*layer_args, **layer_kwargs))
         te_model = nn.Sequential(*te_layer_list)
     else:
         # Single layer model
-        te_model = args.layer_type(*layer_args, **layer_kwargs)
+        te_model = opts.layer_type(*layer_args, **layer_kwargs)
 
     # Print out allocated device memory before the model parameters are sharded by FSDP
     pre_mem_use = torch.cuda.memory_allocated(device=f"cuda:{LOCAL_RANK}") * 1e-6
@@ -175,7 +173,7 @@ def train(args):
     #       controls all communication.
     all_gpus = dist.new_group(backend='nccl')
     fsdp_wrap_policy = always_wrap_policy
-    if args.layer_type == te.TransformerLayer:
+    if opts.layer_type == te.TransformerLayer:
         # NOTE: FSDP causes illegal memory access without this special policy for Transformers
         fsdp_wrap_policy = partial(transformer_auto_wrap_policy,
                                    transformer_layer_cls={te.TransformerLayer})
@@ -183,16 +181,16 @@ def train(args):
                                         process_group=all_gpus,
                                         use_orig_params=True,
                                         mixed_precision=MixedPrecision(
-                                            param_dtype=args.dtype,
+                                            param_dtype=opts.dtype,
                                             reduce_dtype=torch.float32,
                                         ),
                                         auto_wrap_policy=fsdp_wrap_policy)
 
-    if args.checkpoint_layer is not None:
+    if opts.checkpoint_layer is not None:
         # Recompute the activations of the selected layer during the backward pass instead of
         # saving them during the forward pass
-        apply_fsdp_checkpointing(te_model, blocks=args.checkpoint_layer)
-    elif not args.no_te_fsdp:
+        apply_fsdp_checkpointing(te_model, blocks=opts.checkpoint_layer)
+    elif not opts.no_te_fsdp:
         # Prepare TE modules to shard internal buffers that FSDP cannot shard on its own
         prepare_te_modules_for_fsdp(te_model)
 
@@ -209,7 +207,7 @@ def train(args):
     optim = torch.optim.Adam(te_model.parameters(), lr=0.0001)
 
     # Profile memory use
-    if args.profile_memory:
+    if opts.profile_memory:
         torch.cuda.memory._record_memory_history(max_entries=100000)
     else:
         torch.cuda.reset_peak_memory_stats()
@@ -218,27 +216,23 @@ def train(args):
         torch.cuda.synchronize()
         start.record()
 
-    for i in range(args.num_iters):
-        dist_print(f"Iter. {i+1}")
+    for i in range(opts.num_iters):
         # Generate a random input batch
-        x = torch.rand(args.seq_length, args.batch_size, args.num_heads*args.head_dim,
-                    dtype=args.dtype, device='cuda')
+        x = torch.rand(opts.seq_length, opts.batch_size, opts.num_heads*opts.head_dim,
+                    dtype=opts.dtype, device='cuda')
         # fp8_autocast needs to be given the FSDP process group for amax reductions
-        with te.fp8_autocast(enabled=not args.no_fp8, fp8_recipe=fp8_recipe, fp8_group=all_gpus):
+        with te.fp8_autocast(enabled=not opts.no_fp8, fp8_recipe=fp8_recipe, fp8_group=all_gpus):
             y = te_model(x)
             loss = y.sum()
-        dist_print("    FWD DONE")
         # calculate gradient and take training step outside the fp8_autocast context
         loss.backward()
-        dist_print("    BWD DONE")
         optim.step()
-        dist_print("    STEP DONE")
         optim.zero_grad(set_to_none=True)
         del x
 
 
-    if args.profile_memory:
-        torch.cuda.memory._dump_snapshot(f"gpu{LOCAL_RANK}_{args.profile_name}.pickle")
+    if opts.profile_memory:
+        torch.cuda.memory._dump_snapshot(f"gpu{LOCAL_RANK}_{opts.profile_name}.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
     else:
         end.record()
@@ -246,11 +240,12 @@ def train(args):
         peak_mem = torch.cuda.max_memory_allocated()
         train_time = start.elapsed_time(end)/1000.
         dist_print(f"Training Time: {train_time}s")
-        dist_print(f"Avg. Iter. Time: {train_time / args.num_iters}s")
+        dist_print(f"Avg. Iter. Time: {train_time / opts.num_iters}s")
         dist_print(f"Peak Memory Use: {peak_mem * 1e-6}MBs")
 
 
-# torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) test_fsdp.py --defer-init
+# Run with:
+#   torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) test_fsdp.py --defer-init
 if __name__ == "__main__":
     args = parse_fsdp_args()
     train(args)
