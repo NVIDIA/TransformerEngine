@@ -112,8 +112,7 @@ class _NoopCatFunc(torch.autograd.Function):
         dim: int,
         *tensors: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
-        #print("rrr")
-        #import pdb; pdb.set_trace()
+
         # Check first tensor
         if not tensors:
             raise ValueError("Attempted to concatenate 0 tensors")
@@ -156,12 +155,23 @@ class _NoopCatFunc(torch.autograd.Function):
         data_ptr_stride = strides[dim] * tensors[0].element_size()
         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
         for tensor in tensors[1:]:
-            if True:
+            if (
+                tensor.dtype != dtype
+                or tensor.device != device
+                or tensor.stride() != strides
+                or tensor.data_ptr() != data_ptr
+            ):
                 return torch.cat(tensors, dim=dim)
             data_ptr += tensor.size(dim) * data_ptr_stride
+
         # No-op concatenation
         out = tensors[0].new()
-        out.set_(tensors[0].untyped_storage(),tensors[0].storage_offset(),out_shape,strides,)
+        out.set_(
+            tensors[0].untyped_storage(),
+            tensors[0].storage_offset(),
+            out_shape,
+            strides,
+        )
         out.requires_grad = any(tensor.requires_grad for tensor in tensors)
         return out
 

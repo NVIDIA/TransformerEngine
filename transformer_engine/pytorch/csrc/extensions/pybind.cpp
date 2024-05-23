@@ -78,12 +78,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
   m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
+  m.def("srelu", &srelu, "Squared ReLU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
+  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
@@ -102,6 +104,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
   m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
   m.def("attention_copy", &attention_copy, "attention_copy");
+
+  // Support THD format for Context Parallel
+  m.def("thd_read_half_tensor", &thd_read_half_tensor,
+        "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
+        "tensor");
+  m.def("thd_second_half_lse_correction", &thd_second_half_lse_correction,
+        "Correct the second half of the softmax_lse");
+  m.def("thd_read_second_half_lse", &thd_read_second_half_lse,
+        "Read the second half of the softmax_lse");
+  m.def("thd_out_correction", &thd_out_correction,
+        "Correct the THD format output of context parallelism in forward pass");
+  m.def("thd_grad_correction", &thd_grad_correction,
+        "Correct the THD format gradients of context parallelism in backward pass");
+  m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
+        "Generate partitioned indices for inputs in THD format");
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")

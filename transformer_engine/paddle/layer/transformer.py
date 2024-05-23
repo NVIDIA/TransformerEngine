@@ -100,6 +100,16 @@ class TransformerLayer(paddle.nn.Layer):
                    specified name should be registered through
                    `paddle.distributed.fleet.meta_parallel.get_rng_state_tracker()
                    .add(rng_state_name, seed)`.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
+
     """
 
     def __init__(self,
@@ -124,6 +134,7 @@ class TransformerLayer(paddle.nn.Layer):
                  set_parallel_mode: bool = False,
                  sequence_parallel: bool = False,
                  tp_group: Optional[dist_group_type] = None,
+                 fuse_wgrad_accumulation: bool = False,
                  attention_dropout_rng_state_name: str = 'local_seed',
                  hidden_dropout_rng_state_name: str = 'global_seed',
                  backend: str = 'transformer_engine') -> None:
@@ -168,6 +179,7 @@ class TransformerLayer(paddle.nn.Layer):
             'max_sequence_length': max_sequence_length,
             "tp_group": tp_group,
             "num_gqa_groups": num_gqa_groups,
+            "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
             "rng_state_name": attention_dropout_rng_state_name,
             "backend": backend,
         }
@@ -202,6 +214,7 @@ class TransformerLayer(paddle.nn.Layer):
             set_parallel_mode=set_parallel_mode,
             sequence_parallel=self.sequence_parallel,
             tp_group=tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
             backend=backend,
         )
 

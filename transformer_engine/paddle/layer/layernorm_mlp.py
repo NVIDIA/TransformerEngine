@@ -211,6 +211,8 @@ def _mlp_backward(
     tensor_parallel: bool,
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
+    fuse_wgrad_accumulation: bool,
+    accumulate_wgrad_into_param_main_grad: bool,
 ):
     (
         fc1_dgrad,
@@ -238,6 +240,7 @@ def _mlp_backward(
             fc2_input,
             None,
             fc2_input_fp8_index,
+            fc2_weight,
             fc2_weight_t_fp8,
             fc2_weight_fp8_index,
             grad_output,
@@ -253,6 +256,8 @@ def _mlp_backward(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad,
         )
 
         if activation == "gelu":
@@ -299,6 +304,7 @@ def _mlp_backward(
             fc1_input,
             None,
             fc1_input_fp8_index,
+            fc1_weight,
             fc1_weight_t_fp8,
             fc1_weight_fp8_index,
             dgelu_no_fp8,
@@ -314,6 +320,8 @@ def _mlp_backward(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad,
         )
     else:
         dgelu, fc2_wgrad, fc2_bgrad = _linear_bwd_non_fp8(
@@ -328,6 +336,8 @@ def _mlp_backward(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
             gelu_input=fc1_out,
             activation=activation,
         )
@@ -347,6 +357,8 @@ def _mlp_backward(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
         )
     return (
         fc1_dgrad,
@@ -393,6 +405,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        fuse_wgrad_accumulation: bool,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         if normalization == "RMSNorm":
@@ -498,6 +511,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_fc1_wgrad = not fc1_weight.stop_gradient
             ctx.requires_fc2_wgrad = not fc2_weight.stop_gradient
@@ -548,6 +562,12 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc2_bgrad,
             ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0], True)
 
+            if ctx.is_first_microbatch is not None:
+                accumulate_wgrad_into_param_main_grad = (ctx.fuse_wgrad_accumulation
+                                                         and not ctx.is_first_microbatch)
+            else:
+                accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
+
             (
                 fc1_dgrad,
                 fc1_wgrad,
@@ -585,6 +605,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 ctx.tensor_parallel,
                 ctx.sequence_parallel,
                 ctx.tp_group,
+                ctx.fuse_wgrad_accumulation,
+                accumulate_wgrad_into_param_main_grad,
             )
             if not ctx.fp8_enabled:
                 # fc2_bias is fused with gemm for non-FP8 path
@@ -619,17 +641,22 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc1_weight_cache_grad = (None, None)
                 fc2_weight_cache_grad = (None, None)
 
-            return (
-                dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma if ctx.requires_ln_wgrad else None,
-                *dbeta_out,
-                fc1_wgrad if ctx.requires_fc1_wgrad else None,
-                *fc1_weight_cache_grad,
-                *fc1_bgrad_out,
-                fc2_wgrad if ctx.requires_fc2_wgrad else None,
-                *fc2_weight_cache_grad,
-                *fc2_bgrad_out,
-            )
+        if ctx.requires_fc1_wgrad and ctx.fuse_wgrad_accumulation:
+            fc1_wgrad = None
+        if ctx.requires_fc2_wgrad and ctx.fuse_wgrad_accumulation:
+            fc2_wgrad = None
+
+        return (
+            dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgamma if ctx.requires_ln_wgrad else None,
+            *dbeta_out,
+            fc1_wgrad if ctx.requires_fc1_wgrad else None,
+            *fc1_weight_cache_grad,
+            *fc1_bgrad_out,
+            fc2_wgrad if ctx.requires_fc2_wgrad else None,
+            *fc2_weight_cache_grad,
+            *fc2_bgrad_out,
+        )
 
 
 class LayerNormMLP(TransformerEngineBaseLayer):
@@ -679,6 +706,14 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     tp_group : paddle.distributed.collective.Group, default = `None`
                tensor parallel process group.
 
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
     """
 
     def __init__(
@@ -695,6 +730,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         set_parallel_mode: bool = False,
         sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
+        fuse_wgrad_accumulation: bool = False,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -719,6 +755,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self.tensor_parallel = self.tp_size > 1
         self.set_parallel_mode = set_parallel_mode
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
+
+        self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
 
         if self.set_parallel_mode:
             self.size_per_partition = divide(self.ffn_hidden_size, self.tp_size)
@@ -876,6 +914,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                self.fuse_wgrad_accumulation,
                 is_first_microbatch,
             )
 

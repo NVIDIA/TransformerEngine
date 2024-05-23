@@ -859,21 +859,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     ) -> List[torch.Tensor]:
         """Needs override."""
 
-
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                             missing_keys, unexpected_keys, error_msgs):
         """
-            The function loads an extra state containing fp8_meta weights. 
-            This metadata is crucial when copying fp8 parameters.
-            For instance, when casting fp16 parameters to fp8, the _copy function 
-            utilizes the scale_inv parameter from fp8_meta
-            to set the appropriate scaling factor for the new tensor.
-            Therefore, this extra state must be loaded before the tensor copying process, 
-            not after, as is the default behavior in _load_from_state_dict.
+        This function loads tensors and extra state including fp8 metadata.
+        This metadata is essential for copying fp8 tensors, as the copy_ function
+        uses the scale_inv parameter from fp8_meta to set the correct scaling factor
+        for the new tensor.
+        Hence, this extra state must be loaded before the tensor copying process,
+        not after, as is typically done in _load_from_state_dict.
+        Tensors are copied into fp8 tensors only when self.primary_weights_in_fp8=True,
+        otherwise, this behavior is not required.
         """
-        extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
-        if extra_state_key in state_dict:
-            self.set_extra_state(state_dict[extra_state_key])
+        if self.primary_weights_in_fp8:
+            extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
+            if extra_state_key in state_dict:
+                self.set_extra_state(state_dict[extra_state_key])
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
                             missing_keys, unexpected_keys, error_msgs)
-        

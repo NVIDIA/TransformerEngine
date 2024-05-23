@@ -237,7 +237,6 @@ def fused_attn_fwd_qkvpacked(
             max_seqlen, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o, attn_bias,
             rng_gen, rng_elts_per_thread,
     )
@@ -386,7 +385,6 @@ def fused_attn_bwd_qkvpacked(
             max_seqlen, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -567,7 +565,6 @@ def fused_attn_fwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -730,7 +727,6 @@ def fused_attn_bwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -899,13 +895,25 @@ def fused_attn_fwd(
     if fused_attention_backend == FusedAttnBackend["FP8"]:
         rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
-    
+
+        assert (d_scale_qkv is not None
+                ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert (d_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_s is not None
+                ), "q_scale_s is required as an input for FP8 fused attention."
+        assert (q_scale_o is not None
+                ), "q_scale_o is required as an input for FP8 fused attention."
+        assert (amax_s is not None
+                ), "amax_s is required as an input for FP8 fused attention."
+        assert (amax_o is not None
+                ), "amax_o is required as an input for FP8 fused attention."
+
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -1076,7 +1084,6 @@ def fused_attn_bwd(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
