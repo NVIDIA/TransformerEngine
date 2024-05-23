@@ -15,7 +15,7 @@ from .cpp_extensions import act_lu, act_lu_fp8, dact_lu
 from .cpp_extensions import dact_lu_dbias_cast_transpose, dgated_act_lu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
-from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize, dequantize
+from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
