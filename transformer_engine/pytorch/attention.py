@@ -766,8 +766,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                                 q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
+                                if qkv_format == "thd":
+                                    # [2, t, np, hn] -> [2, t/2, np, hn]
+                                    kv_inputs[i%2] = tex.thd_read_half_tensor(
+                                        kv_inputs[i%2], cu_seqlens_k, 0)
+                                else:
+                                    # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                                    kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                                 # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
@@ -911,7 +916,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
                 out_ = out[1]
             if i <= rank or not causal:
-               if qkv_format in ["bshd", "sbhd"]:
+                if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
                                                   out_per_step[i],
                                                   seq_dim,
