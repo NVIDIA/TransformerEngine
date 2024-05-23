@@ -915,6 +915,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             elif qkv_format == "sbhd":
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
                 out_ = out[1]
+
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
@@ -956,7 +957,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 out = out.view(-1, *out.shape[-3:])
         else:
             out = out.view(-1, *out.shape[-2:])
-        ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+        ctx.save_for_backward(q, kv, out, softmax_lse,
+            cu_seqlens_q, cu_seqlens_k, *rng_states, *attn_biases)
         ctx.rng_states = rng_states
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -968,16 +970,17 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.qkv_format = qkv_format
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
-        ctx.attn_biases = attn_biases
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
-
+        (q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k) = ctx.saved_tensors[:6]
         cp_size = get_distributed_world_size(ctx.cp_group)
+        rng_states = ctx.saved_tensors[6:6+cp_size]
+        attn_biases = ctx.saved_tensors[6+cp_size:6+cp_size*2]
+
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
@@ -985,12 +988,12 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
-        if ctx.attn_biases[0] is not None:
+        if attn_biases[0] is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)]
             attn_dbias = torch.zeros(
                 *ctx.attn_bias_shape,
-                dtype=ctx.attn_biases[0].dtype,
-                device=ctx.attn_biases[0].device
+                dtype=attn_biases[0].dtype,
+                device=attn_biases[0].device
             )
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_dbias_ = attn_dbias.view(
@@ -1000,12 +1003,16 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias = None
 
         if ctx.causal:
-            # [b, np, sq] -> [b, np, 2, sq//2]
-            softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
-            softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
-            if ctx.use_fused_attention:
-                # [b, np, sq//2] -> [b, np, sq//2, 1]
-                softmax_lse_.unsqueeze_(-1)
+            if ctx.qkv_format == "thd":
+                softmax_lse_ = tex.thd_read_second_half_lse(softmax_lse, cu_seqlens_q, q.size(0))
+            else:
+                # [b, np, sq] -> [b, np, 2, sq//2]
+                softmax_lse_ = \
+                    softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+                softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
+                if ctx.use_fused_attention:
+                    # [b, np, sq//2] -> [b, np, sq//2, 1]
+                    softmax_lse_.unsqueeze_(-1)
         if ctx.use_fused_attention:
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
@@ -1068,9 +1075,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
-                        aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
+                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
-                            aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                            aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             cu_seqlens_q, cu_seqlens_k,
@@ -1100,7 +1107,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
                             ctx.max_seqlen_q, ctx.max_seqlen_k,
                             ctx.dropout_p, ctx.softmax_scale, True,
-                            rng_state=ctx.rng_states[cp_size-i-1],
+                            rng_state=rng_states[cp_size-i-1],
                             **fa_optional_backward_kwargs
                         )
                 elif i >= (cp_size-rank-1):
@@ -1121,9 +1128,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
-                        aux_ctx_tensors = [softmax_lse, ctx.rng_states[cp_size-i-1]]
+                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
-                            aux_ctx_tensors += [ctx.attn_biases[cp_size-i-1]]
+                            aux_ctx_tensors += [attn_biases[cp_size-i-1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
                             ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                             cu_seqlens_q, cu_seqlens_k//2,
