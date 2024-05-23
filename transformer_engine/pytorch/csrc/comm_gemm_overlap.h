@@ -52,7 +52,7 @@ static struct TorchCallbacks : torch::CustomClassHolder {
   bool initialized{false};
   std::unordered_map<void *, at::Tensor> gathered_tensors;
   std::function<at::Tensor(at::Tensor&, const std::string &)> allgather;
-  std::function<void(at::Tensor &, int, const std::string &)> bcast_int;
+  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast_int;
   std::function<void(const std::string &)> barrier;
   std::function<void(at::Tensor &)> free;
 } torch_callbacks;
@@ -62,7 +62,7 @@ static struct TorchCallbacks : torch::CustomClassHolder {
 */
 void set_collective_callbacks(
   std::function<at::Tensor(at::Tensor&, const std::string &)> allgather,
-  std::function<void(at::Tensor &, int, const std::string &)> bcast_int,
+  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast_int,
   std::function<void(const std::string &)> barrier,
   std::function<void(at::Tensor &)> free
 ) {
@@ -90,10 +90,12 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
 /*
 ** Python callback for torch.distributed.broadcast(datatensor, tp_group).
 */
-void ub_bcast_int(void *data, int src, char *group) {
+void ub_bcast_int(int *data, int src, char *group) {
   assert(torch_callbacks.initialized);
-  auto datatensor = torch::from_blob(data, {1}, at::device(torch::kCPU).dtype(torch::kUInt8));
-  torch_callbacks.bcast_int(datatensor, src, group);
+  auto datatensor = torch::from_blob(
+    reinterpret_cast<void *>(data), {1}, at::device(torch::kCPU).dtype(torch::kInt32));
+  datatensor = torch_callbacks.bcast_int(datatensor, src, group);
+  *data = datatensor.accessor<int, 1>()[0];
 }
 
 /*

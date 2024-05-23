@@ -6,13 +6,14 @@
 
 import os
 import sys
-import re
+import uuid
 import faulthandler
 import argparse
-from importlib.metadata import distribution
 
 import torch
 import torch.distributed as dist
+from torch.distributed.run import get_args_parser, config_from_args, elastic_launch
+from torch.distributed.launch import parse_args as parse_torch_args
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Format, DelayedScaling
@@ -30,27 +31,57 @@ def torch_dtype(opt):
         raise TypeError
     return typemap[str(opt).lower()]
 
-def train(opts):
-    LOCAL_RANK = int(os.getenv("LOCAL_RANK"))
+def parse_train_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Test a te.LayerNormMLP module with GEMM+comm overlap via Userbuffers.")
+    parser.add_argument('-i', "--num-iters", type=int, default=5,
+                        help="Number of dummy 'training' iterations.")
+    parser.add_argument('-b', "--batch-size", type=int, default=2,
+                        help="Input batch size.")
+    parser.add_argument('-s', "--seq-length", type=int, default=2048,
+                        help="Input sequence length.")
+    parser.add_argument('-n', "--num-heads", type=int, default=64,
+                        help="Number of attention heads.")
+    parser.add_argument('-d', "--head-dim", type=int, default=128,
+                        help="Dimension of each attention head.")
+    parser.add_argument("--mlp-expansion-factor", type=int, default=4,
+                        help="MLP block intermediate size as a factor of hidden dimension.")
+    parser.add_argument("--seed", type=int, default=1234,
+                        help="RNG seed.")
+    parser.add_argument("--fp8", action="store_true", default=False,
+                        help="Enables the te.fp8_autocast() context.")
+    parser.add_argument("--no-comm-overlap", action="store_true", default=False,
+                        help="Disable the comm+GEMM overlap.")
+    parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
+                        help="Data type for input tensor and Transformer Engine module parameters.")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument('-v', "--verbose", action="store_true", default=False)
+    return parser.parse_args(argv)
+
+def train(*argv):
+    opts = parse_train_args(argv)
+
+    WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
     def dist_print(msg, end='\n', all_ranks=False):
-        if LOCAL_RANK == 0 or all_ranks:
-            print(f"[RANK-{LOCAL_RANK}] {msg}", end=end)
+        if WORLD_RANK == 0 or all_ranks:
+            print(f"[RANK-{WORLD_RANK}] {msg}", end=end)
 
     # Debug log
     if opts.debug:
-        with open(f'faulthandler_{LOCAL_RANK}.log', 'w+') as dbg_log:
+        with open(f'faulthandler_{WORLD_RANK}.log', 'w+') as dbg_log:
             faulthandler.enable(dbg_log)
 
     # Seed RNG
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.manual_seed(opts.seed+LOCAL_RANK)
-    torch.cuda.manual_seed(opts.seed+LOCAL_RANK)
+    torch.cuda.set_device(WORLD_RANK)
+    torch.manual_seed(opts.seed+WORLD_RANK)
+    torch.cuda.manual_seed(opts.seed+WORLD_RANK)
 
     # Initialize torch.distributed global process group and get TP group
     dist.init_process_group(backend="nccl",
-                            rank=LOCAL_RANK,
-                            world_size=WORLD_SIZE)
+                            rank=WORLD_RANK,
+                            world_size=WORLD_SIZE,
+                            device_id=torch.device(f'cuda:{WORLD_RANK}'))
     tp_group = dist.new_group(backend="nccl")
     tp_size = dist.get_world_size(tp_group)
 
@@ -130,74 +161,39 @@ def train(opts):
 
     te.destroy_ub()
 
-    torch.cuda.synchronize()
-    dist.barrier()
-    dist.destroy_process_group()
+def dist_launch(func) -> None:
+    torch_parser = get_args_parser()
+    torch_argv = []
+    func_argv = []
+    for argv in sys.argv:
+        is_torch_argv = False
+        for action in torch_parser._actions:
+            if any(option in argv for option in action.option_strings):
+                is_torch_argv = True
+                break
+        if is_torch_argv:
+            torch_argv.append(argv)
+        else:
+            func_argv.append(argv)
+    del torch_parser
 
+    fake_sys_argv = [ torch.distributed.run.__file__ ] + torch_argv + func_argv
+    torch_args = parse_torch_args(fake_sys_argv)
+    setattr(torch_args, "standalone", "True")
+    setattr(torch_args, "rdzv_backend", "c10d")
+    setattr(torch_args, "rdzv_endpoint", "localhost:0")
+    setattr(torch_args, "rdzv_id", str(uuid.uuid4()))
+    setattr(torch_args, "nnodes", "1:1")
+    setattr(torch_args, "nproc_per_node", torch.cuda.device_count())
+    setattr(torch_args, "use_env", True)
 
-def main():
-    if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-        parser = argparse.ArgumentParser(
-            description="Test a te.LayerNormMLP module with GEMM+comm overlap via Userbuffers.")
-        parser.add_argument('-i', "--num-iters", type=int, default=5,
-                            help="Number of dummy 'training' iterations.")
-        parser.add_argument('-b', "--batch-size", type=int, default=2,
-                            help="Input batch size.")
-        parser.add_argument('-s', "--seq-length", type=int, default=2048,
-                            help="Input sequence length.")
-        parser.add_argument('-n', "--num-heads", type=int, default=64,
-                            help="Number of attention heads.")
-        parser.add_argument('-d', "--head-dim", type=int, default=128,
-                            help="Dimension of each attention head.")
-        parser.add_argument("--mlp-expansion-factor", type=int, default=4,
-                            help="MLP block intermediate size as a factor of hidden dimension.")
-        parser.add_argument("--seed", type=int, default=1234,
-                            help="RNG seed.")
-        parser.add_argument("--fp8", action="store_true", default=False,
-                            help="Enables the te.fp8_autocast() context.")
-        parser.add_argument("--no-comm-overlap", action="store_true", default=False,
-                            help="Disable the comm+GEMM overlap.")
-        parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
-                            help="Data type for input tensor and Transformer Engine module parameters.")
-        parser.add_argument("--debug", action="store_true")
-        parser.add_argument('-v', "--verbose", action="store_true", default=False)
-        args = parser.parse_args()
-        train(args)
-        os._exit(0)
+    torch_config, *_ = config_from_args(torch_args)
+    elastic_launch(config=torch_config, entrypoint=func)(*func_argv[1:])
 
-    else:
-        # Script is launched on its own, so we have to mimic how it would normally launch
-        # if we used `torchrun` from the commandline.
-        from torch.distributed.run import get_args_parser
-        from torch.distributed.launch import parse_args, launch
-        torch_parser = get_args_parser()
-        torch_argv = []
-        script_argv = []
-        for argv in sys.argv:
-            is_torch_argv = False
-            for action in torch_parser._actions:
-                if any(option in argv for option in action.option_strings):
-                    is_torch_argv = True
-                    break
-            if is_torch_argv:
-                torch_argv.append(argv)
-            else:
-                script_argv.append(argv)
-        del torch_parser
-
-        if not any('--nproc-per-node' in argv for argv in torch_argv):
-            torch_argv.append(f'--nproc-per-node={torch.cuda.device_count()}')
-
-        if not any('--use-env' in argv for argv in torch_argv):
-            torch_argv.append('--use-env')
-
-        if not any('--standalone' in argv for argv in torch_argv):
-            torch_argv.append('--standalone')
-
-        sys.argv = [ torch.distributed.launch.__file__ ] + torch_argv + script_argv
-        torch_args = parse_args(sys.argv)
-        launch(torch_args)
-        os._exit(0)
 
 if __name__ == "__main__":
-    main()
+    if "TORCHELASTIC_RUN_ID" in os.environ.keys():
+        train(sys.argv)
+    else:
+        dist_launch(train)
+    os._exit(0)

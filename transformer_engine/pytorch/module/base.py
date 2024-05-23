@@ -205,6 +205,7 @@ def initialize_ub(
         data = data.cuda()
         torch.distributed.broadcast(data, src, group=pg)
         data = data.cpu()
+        return data
 
     def barrier_callback(group: str):
         pg = None if group == "world" else tp_group
