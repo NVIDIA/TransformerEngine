@@ -214,9 +214,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -304,9 +304,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -384,9 +384,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -600,9 +600,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -697,9 +697,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -786,9 +786,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -877,9 +877,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
                                                   static_cast<size_t>(pre_gelu_out.size(1))};
     auto pre_gelu_out_ = makeTransformerEngineTensor(pre_gelu_out.data_ptr(),
-                                                    gelu_shape,
-                                                    GetTransformerEngineDType(
-                                                      pre_gelu_out.scalar_type()));
+                                                     gelu_shape,
+                                                     GetTransformerEngineDType(
+                                                       pre_gelu_out.scalar_type()));
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -926,8 +926,8 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
         NVTE_ERROR("input and ubuf size do not match!");
       }
       NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].data_ptr(), input.data_ptr(),
-                                     input.numel() * input.element_size(),
-                                     cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
+                                      input.numel() * input.element_size(),
+                                      cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
     } else {
       if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");

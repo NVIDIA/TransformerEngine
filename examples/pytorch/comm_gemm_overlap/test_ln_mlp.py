@@ -31,7 +31,7 @@ def torch_dtype(opt):
         raise TypeError
     return typemap[str(opt).lower()]
 
-def parse_train_args(argv=None):
+def parse_train_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(
         description="Test a te.LayerNormMLP module with GEMM+comm overlap via Userbuffers.")
     parser.add_argument('-i', "--num-iters", type=int, default=5,
@@ -56,9 +56,9 @@ def parse_train_args(argv=None):
                         help="Data type for input tensor and Transformer Engine module parameters.")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
-    return parser.parse_args(argv)
+    return parser.parse_args(argv, namespace)
 
-def train(*argv):
+def train(argv=None):
     opts = parse_train_args(argv)
 
     WORLD_RANK = int(os.getenv("RANK"))
@@ -160,6 +160,7 @@ def train(*argv):
         optim.step()
 
     te.destroy_ub()
+    dist.destroy_process_group()
 
 def dist_launch(func) -> None:
     torch_parser = get_args_parser()
@@ -193,7 +194,7 @@ def dist_launch(func) -> None:
 
 if __name__ == "__main__":
     if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-        train(sys.argv)
+        train()
     else:
         dist_launch(train)
     os._exit(0)
