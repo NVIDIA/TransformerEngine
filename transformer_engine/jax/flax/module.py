@@ -1148,8 +1148,8 @@ class LayerNormMLP(TransformerEngineBase):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
                 z = functools.reduce(operator.mul, activations)
-                if num_activations == 1:
-                    z = jnp.reshape(z, (*z.shape[:-2], -1))
+                # Remove act axis
+                z = jnp.reshape(z, (*z.shape[:-2], -1))
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
                            broadcast_dims=self.intermediate_hidden_dropout_dims,
