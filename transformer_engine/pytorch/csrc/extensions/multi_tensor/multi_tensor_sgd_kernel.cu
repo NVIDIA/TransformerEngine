@@ -34,7 +34,8 @@
 template <int N, typename T_grad, typename T_weight>
 struct SGDFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int* noop_gmem,
-                                             TensorListMetadata<N>& tl, float wd, float momentum,
+                                             TensorListMetadata<N>& tl,  // NOLINT(*)
+                                             float wd, float momentum,
                                              float dampening, float lr, bool nesterov,
                                              bool first_run, bool wd_after_momentum, float scale) {
     // Early exit if we don't need to do anything
@@ -44,13 +45,13 @@ struct SGDFunctor {
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
     int n = tl.sizes[tensor_loc];
 
-    T_grad* grad_in = (T_grad*)tl.addresses[0][tensor_loc];
+    T_grad* grad_in = reinterpret_cast<T_grad*>(tl.addresses[0][tensor_loc]);
     grad_in += chunk_idx * chunk_size;
 
-    T_weight* weight_in = (T_weight*)tl.addresses[1][tensor_loc];
+    T_weight* weight_in = reinterpret_cast<T_weight*>(tl.addresses[1][tensor_loc]);
     weight_in += chunk_idx * chunk_size;
 
-    T_weight* mom_in = (T_weight*)tl.addresses[2][tensor_loc];
+    T_weight* mom_in = reinterpret_cast<T_weight*>(tl.addresses[2][tensor_loc]);
     mom_in += chunk_idx * chunk_size;
 
     at::Half* model_weights_out = nullptr;
@@ -129,10 +130,11 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
   auto grad_type = tensor_lists[0][0].scalar_type();
   auto weight_type = tensor_lists[1][0].scalar_type();
 
-  if (num_tensors == 4)
+  if (num_tensors == 4) {
     for (int i = 0; i < tensor_lists[3].size(); i++)
       TORCH_CHECK(tensor_lists[3][i].scalar_type() == at::ScalarType::Half,
                   "Additional output tensors should always be fp16.");
+  }
 
   TORCH_CHECK(noop_flag.device() == tensor_lists[0][0].device(),
               "expected noop flag to be on the same device as tensors");
@@ -173,21 +175,21 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
   //       wd_after_momentum);
   // }
   // Case 2. fp32, fp32, fp32, No
-  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&
+  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&  // NOLINT(*)
            num_tensors == 3) {
     multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<3, float, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 3. fp16, fp32, fp32, Yes
-  else if (grad_type == at::ScalarType::Half && weight_type == at::ScalarType::Float &&
+  else if (grad_type == at::ScalarType::Half && weight_type == at::ScalarType::Float &&  // NOLINT(*)
            num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, at::Half, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 4. fp32, fp32, fp32, Yes
-  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&
+  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&  // NOLINT(*)
            num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, float, float>(), wd, momentum, dampening, lr, nesterov,

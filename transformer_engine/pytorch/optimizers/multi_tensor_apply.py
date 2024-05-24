@@ -2,8 +2,9 @@
 #
 # See LICENSE for license information.
 
-
-class MultiTensorApply:
+"""Multi-tensor apply entry."""
+class MultiTensorApply:  # pylint: disable=too-few-public-methods
+    """Multi-tensor apply entry."""
 
     def __init__(self, chunk_size):
         self.chunk_size = chunk_size

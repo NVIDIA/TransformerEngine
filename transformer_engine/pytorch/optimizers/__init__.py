@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+"""Fused optimizers and multi-tensor kernels."""
 from .fused_adam import FusedAdam
 from .fused_sgd import FusedSGD
 from .multi_tensor_apply import MultiTensorApply, multi_tensor_applier
