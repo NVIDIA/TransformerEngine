@@ -66,9 +66,6 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None)
     failed = False
     failed_tensors = ""
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        with torch.no_grad():
-            t1.masked_fill_(t1.isnan(), 1.0)
-            t2.masked_fill_(t2.isnan(), 1.0)
         if not torch.equal(t1, t2):
             failed = True
             failed_tensors += f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
@@ -77,7 +74,7 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None)
 
 def generate_data(
     s: int, b: int, h: int, nheads: int, kv: int, dtype: torch.dtype,
-    dpa: bool = False, warmup: bool = False, gen_labels: bool = False,
+    dpa: bool = False, warmup: bool = False, gen_grad_output: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
@@ -86,11 +83,11 @@ def generate_data(
     else:
         inputs = [gen_func(s, b, h, device="cuda", requires_grad=True, dtype=dtype)]
 
-    if not gen_labels:
+    if not gen_grad_output:
         return inputs
 
-    target = torch.randn(s, b, h, device="cuda", dtype=dtype)
-    return inputs, target
+    grad_output = torch.randn(s, b, h, device="cuda", dtype=dtype)
+    return inputs, grad_output
 
 
 def get_outputs(model, output):
@@ -104,7 +101,31 @@ def get_outputs(model, output):
     return values
 
 
-def _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, graph, module, optimizer, graph_mode=""):
+class _Sequential(torch.nn.Sequential):
+
+    def forward(self, input_: torch.Tensor, is_first_microbatch=None) -> torch.Tensor:
+        kwargs = {}
+        if is_first_microbatch is not None:
+            kwargs["is_first_microbatch"] = is_first_microbatch
+        x = input_
+        for module in self:
+            x = module(x, **kwargs)
+        return x
+
+
+def _test_cuda_graphs(
+    *,
+    config: ModelConfig,
+    bs: int,
+    num_layers: int,
+    dtype: torch.dtype,
+    fp8: bool,
+    fp8_params: bool,
+    fp8_weight_caching: bool,
+    module: str,
+    optimizer: torch.optim.Optimizer,
+    graph_mode: str,
+) -> List[torch.Tensor]:
     """Helper function for test."""
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -150,40 +171,50 @@ def _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, graph, mod
             ) for _ in range(num_layers)]
 
         # Generate model and wrap API to return graphed version.
-        if graph:
-            # Graph entire module at once.
-            if graph_mode == "full":
-                model = modules[0] if dpa else torch.nn.Sequential(*modules)
-                model = make_graphed_callables(
-                        model,
-                        generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, warmup=True),
-                        num_warmup_iters=10,
-                        fp8_enabled=fp8)
-            else:
-                modules = [make_graphed_callables(
+        if graph_mode == "full":
+            # Graph entire model at once.
+            model = modules[0] if dpa else torch.nn.Sequential(*modules)
+            model = make_graphed_callables(
+                model,
+                generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, warmup=True),
+                num_warmup_iters=10,
+                fp8_enabled=fp8,
+                fp8_weight_caching=fp8_weight_caching,
+            )
+        elif graph_mode == "individual":
+            # Graph individual modules
+            modules = [
+                make_graphed_callables(
                     module,
                     generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, warmup=True),
                     num_warmup_iters=10,
-                    fp8_enabled=fp8) for module in modules]
-                model = modules[0] if dpa else torch.nn.Sequential(*modules)
+                    fp8_enabled=fp8,
+                    fp8_weight_caching=fp8_weight_caching,
+                )
+                for module in modules
+            ]
+            model = modules[0] if dpa else _Sequential(*modules)
         else:
-            model = modules[0] if dpa else torch.nn.Sequential(*modules)
+            model = modules[0] if dpa else _Sequential(*modules)
 
     # Loss function and optimizer.
-    loss_fn = torch.nn.MSELoss()
     if not dpa:
         optimizer = optimizer(model.parameters(), lr=0.001)
 
     # Launch.
-    for _ in range(10):
-        inputs, target = generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, gen_labels=True)
-        with fp8_autocast(enabled=fp8):
-            output = model(*inputs)
-        loss = loss_fn(output, target)
-        loss.backward()
+    for train_step in range(3):
+        if not dpa:
+            optimizer.zero_grad(set_to_none=False)
+        for grad_accumulation_step in range(2):
+            inputs, grad_output = generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, gen_grad_output=True)
+            with fp8_autocast(enabled=fp8):
+                kwargs = {}
+                if fp8_weight_caching:
+                    kwargs["is_first_microbatch"] = (grad_accumulation_step == 0)
+                output = model(*inputs, **kwargs)
+            (output * grad_output).sum().backward()
         if not dpa:
             optimizer.step()
-            optimizer.zero_grad()
 
     return get_outputs(model, output)
 
@@ -194,21 +225,45 @@ def _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, graph, mod
 @pytest.mark.parametrize("num_layers", [1, 10])
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_params", all_boolean)
+@pytest.mark.parametrize("fp8_weight_caching", all_boolean)
 @pytest.mark.parametrize("module", modules)
 @pytest.mark.parametrize("optimizer", optimizers)
-def test_gpt_make_graphed_callables(dtype, bs, model, num_layers, fp8, fp8_params, module, optimizer):
+def test_gpt_make_graphed_callables(
+    dtype: torch.dtype,
+    bs: int,
+    model: str,
+    num_layers: int,
+    fp8: bool,
+    fp8_params: bool,
+    fp8_weight_caching: bool,
+    module: str,
+    optimizer: torch.optim.Optimizer,
+) -> None:
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if fp8_params and not fp8:
+        pytest.skip("FP8 needed for FP8 parameters.")
+    if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if module == "dpa" and num_layers > 1:
         pytest.skip("Max 1 layer for DPA.")
 
     config = model_configs[model]
 
-    outputs = _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, False, module, optimizer)
-    graph_outputs_mode1 = _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, True, module, optimizer, graph_mode="full")
-    graph_outputs_mode2 = _test_cuda_graphs(config, bs, num_layers, dtype, fp8, fp8_params, True, module, optimizer, graph_mode="individual")
+    kwargs = dict(
+        config=config,
+        bs=bs,
+        num_layers=num_layers,
+        dtype=dtype,
+        fp8=fp8,
+        fp8_params=fp8_params,
+        fp8_weight_caching=fp8_weight_caching,
+        module=module,
+        optimizer=optimizer,
+    )
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+    graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
+    graph_outputs_mode2 = _test_cuda_graphs(graph_mode="individual", **kwargs)
 
     # Check that results match
     assert_all_equal(outputs, graph_outputs_mode1)
