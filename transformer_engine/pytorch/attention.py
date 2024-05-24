@@ -114,18 +114,29 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     max_sequence_length: int
                     maximum sequence length during inference.
     qkv_format: str
-                    {'bshd', 'sbhd', 'thd'}
+                    Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
+                    the sequence length dimension, `b` batch size, `h` the number of attention heads,
+                    `d` head size, and `t` the total number of sequences in a batch, i.e.
+                    `t = sum(s_i) for i = 0...b-1`.
     """
 
     def __init__(self, max_batch_size, max_sequence_length, qkv_format="bshd"):
         assert qkv_format in ["bsdh", "sbhd", "thd"]
-        
+
         self.max_sequence_length = max_sequence_length
         self.max_batch_size = max_batch_size
-        self.key_value_memory_dict = {}
+
+        # self.key_value_memory_dict[layer number] = (key_cache, value_cache)
+        # if qkv_format in ["bshd", "sbhd"]: (key/value)_cache.shape = [b/s, s/b, h, d]
+        # # if qkv_format = "thd":  (key/value)_cache.shape = [t, h, d]
+        self.key_value_memory_dict = {} 
         self.qkv_format = qkv_format
         
         if qkv_format == "thd":
+            # In thd attention layout input sequences can have different lenghts.
+            # self.input_sequence_lengths stores tensor of shape [b] with lengths of input sequences
+            # and self.cached_sequence_lengths is the sum of all previous input lengths tensors -
+            # equivalently it contains total lengths of cached sequences.
             self.cached_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
             self.input_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
         else:
@@ -160,10 +171,8 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     
     def thd_setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
         """
-            After every context/generation phase, the parameters representing
-            for example sequence lengths and incmoing sequence lengths,
-            need to be updated. This function does exactly that.
-
+            Updates parameters representing incoming sequence lengths and lengths 
+            of sequence in the cache. Should be called before every forward pass in inference.
 
             Parameters
             ----------
@@ -174,7 +183,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 It is supposed to be used after last generation phase to 
                 allow inference_params to be reused.
             pad_token_id: int
-                Value of padding token - used to compute sequence_lengths. If pad_token_id=None, 
+                Value of padding token - used to compute sequence lengths. If pad_token_id=None, 
                 we assume that all new_input sequence lengths
                 are equal to the corresponding dimension of new_input.
         """
@@ -193,11 +202,23 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     def save_to_kv_cache(self, layer_number, key_layer, value_layer):
         """
             Saves key_layer and value_layer in the cache.
+
+            Parameters
+            ----------
+            layer_number: input
+                layer number of the current `TransformerLayer` when multiple such modules are
+                 concatenated to form a transformer block.
+            key_layer: torch.Tensor
+                Tensor of format corresponding to self.qkv_format with current key_layer.
+            value_layer: int
+                Tensor of format corresponding to self.qkv_format with current value_layer.
         """
         (inference_key_memory, inference_value_memory,
             ) = self.key_value_memory_dict[layer_number]
         if self.qkv_format == "thd":
             channels = inference_key_memory.shape[1] * inference_key_memory.shape[2] # h * d
+            # This kernels copies kernels from input layers into cache,
+            # taking into account the thd format and sequence lengths.
             tex.attention_copy(
                 inference_key_memory, 
                 self.cached_sequence_lengths, 
@@ -243,12 +264,24 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             num_gqa_groups_per_partition, 
             hidden_size_per_attention_head, 
             dtype):
+        """
+            Allocates memory for kv_cache for given layer, if it hasn't been alocated before.
+
+            Parameters
+            ----------
+            layer_number: input
+                layer number of the current `TransformerLayer` when multiple such modules are
+                 concatenated to form a transformer block.
+            num_gqa_groups_per_partition: torch.Tensor
+                This will be third dimension of cache tensor.
+            hidden_size_per_attention_head: int
+                This will be fourth dimension of cache tensor.
+        """
 
         if layer_number in self.key_value_memory_dict:
             return # Already allocated
 
-        s = self.max_sequence_length
-        b = self.max_batch_size
+        b, s = self.max_batch_size, self.max_sequence_length
 
         def _allocate_memory(dims):
             return torch.empty(
@@ -271,9 +304,31 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         )
     
     def set_params_to_thd_attention(self, buffers, channels):
+        """
+            Fused attention with q/k/v of thd layout needs some parameters which give information
+            about sequence lengths. This method computes them and saves them into fiven buffers.
+
+            Parameters
+            ----------
+            buffers: List[torch.Tensor]
+                buffers of size [batch_size + 1] for the parameters:
+                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, 
+                seq_offsets_k, seq_offsets_v, seq_offsets_o
+                respectively.
+            channels: int
+                value of num_heads * hidden_dim_for_each_head.
+
+            Returns
+            ----------
+            max_seqlen_q: int
+                Maximal value of query sequence length.
+            max_seqlen_kv: int
+                Maximal value of key/value sequence length.
+            buffers: torch.Tensor
+                Tensor with filled buffers.
+        """
         max_seqlen_q, max_seqlen_kv = self.max_incoming_seq_len, self.max_sequence_length
 
-        # Allocation of buffers, works with CUDA Graphs.
         cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
             buffers
 
@@ -3826,7 +3881,7 @@ class DotProductAttention(torch.nn.Module):
             )
 
             if qkv_format == "thd":
-                # Allocation of buffers, works with CUDA Graphs.
+                # Allocation of buffers, it works correctly with CUDA Graphs.
                 buffers = [self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
 
                 max_seqlen_q, max_seqlen_kv, buffers = inference_params.set_params_to_thd_attention(buffers, self.channels)
