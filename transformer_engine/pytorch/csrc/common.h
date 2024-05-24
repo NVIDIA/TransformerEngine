@@ -186,6 +186,6 @@ at::Tensor allocateTorchTensor(int M,
                                transformer_engine::DType dtype
 );
 
-void* getDataPtr(at::Tensor& tensor, int offset=0);
+void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_

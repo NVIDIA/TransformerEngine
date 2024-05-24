@@ -138,7 +138,7 @@ at::Tensor allocateTorchTensor(int M,
                      at::CUDA(GetATenDType(dtype)));
 }
 
-void* getDataPtr(at::Tensor& tensor, int offset) {
+void* getDataPtr(at::Tensor tensor, int offset) {
     void* dptr = nullptr;
     if (tensor.numel() > 0) {
         dptr = tensor.data_ptr();

@@ -44,9 +44,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"),
         py::arg("sm_margin"),
         py::arg("zero_centered_gamma"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("layernorm_fwd_fp8_noalloc",
         &layernorm_fwd_fp8_noalloc,
         "LN FWD FP8",
@@ -61,9 +61,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"),
         py::arg("sm_margin"),
         py::arg("zero_centered_gamma"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
   m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
@@ -79,9 +79,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"),
         py::arg("sm_margin"),
         py::arg("zero_centered_gamma"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("rmsnorm_fwd_fp8_noalloc",
         &rmsnorm_fwd_fp8_noalloc,
         "RMSNorm FWD FP8",
@@ -95,9 +95,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"),
         py::arg("sm_margin"),
         py::arg("zero_centered_gamma"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "RMSNorm BWD");
   m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD");
   m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD");
@@ -113,9 +113,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input_cast"),
         py::arg("input_transpose"),
         py::arg("otype"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("fused_cast_transpose_bgrad",
         &fused_cast_transpose_bgrad,
         "Fused Cast + Transpose + BGRAD",
@@ -124,9 +124,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("amax"),
         py::arg("scale_inv"),
         py::arg("otype"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("fused_fp8_transpose_bgrad",
         &fused_fp8_transpose_bgrad,
         "Fused FP8 Transpose + BGRAD",
@@ -136,9 +136,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("scale_inv"),
         py::arg("otype"),
         py::arg("grad_bias_type"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("fused_cast_transpose_bgrad_dgelu",
         &fused_cast_transpose_bgrad_dgelu,
         "Fused Cast + Transpose + BGRAD + DGELU",
@@ -148,9 +148,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("amax"),
         py::arg("scale_inv"),
         py::arg("otype"),
-        py::arg("scale_offset")=0,
-        py::arg("amax_offset")=0,
-        py::arg("scale_inv_offset")=0);
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
                                               "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
