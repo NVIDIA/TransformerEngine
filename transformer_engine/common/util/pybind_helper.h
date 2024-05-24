@@ -15,4 +15,6 @@
     m.attr("NVTE_QKV_Layout") = nvte.attr("NVTE_QKV_Layout");                               \
     m.attr("NVTE_Fused_Attn_Backend") = nvte.attr("NVTE_Fused_Attn_Backend");               \
     m.attr("NVTE_Comm_Overlap_Type") = nvte.attr("NVTE_Comm_Overlap_Type");                 \
-    m.attr("NVTE_Comm_Overlap_Algo") = nvte.attr("NVTE_Comm_Overlap_Algo");
+    m.attr("NVTE_Comm_Overlap_Algo") = nvte.attr("NVTE_Comm_Overlap_Algo");                 \
+    m.attr("overlapped_comm_type") = nvte.attr("overlapped_comm_type");                     \
+    m.attr("comm_overlap_is_p2p") = nvte.attr("comm_overlap_is_p2p");

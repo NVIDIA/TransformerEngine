@@ -49,6 +49,31 @@ enum class NVTE_Comm_Overlap_Algo {
   ATOMIC_GEMM_RS_P2P = 7
 };
 
+NVTE_Comm_Overlap_Type nvte_overlapped_comm_type(NVTE_Comm_Overlap_Algo overlap_algo) {
+  switch (overlap_algo) {
+    case NVTE_Comm_Overlap_Algo::BULK_OVERLAP_AG:
+    case NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_AG_P2P:
+    case NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P:
+      return NVTE_Comm_Overlap_Type::ALL_GATHER;
+
+    default:
+      return NVTE_Comm_Overlap_Type::REDUCE_SCATTER;
+  }
+};
+
+bool nvte_comm_overlap_is_p2p(NVTE_Comm_Overlap_Algo overlap_algo) {
+  switch (overlap_algo) {
+    case NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_AG_P2P:
+    case NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P:
+    case NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_RS_P2P:
+    case NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS_P2P:
+      return true;
+
+    default:
+      return false;
+  }
+};
+
 namespace transformer_engine {
 
 namespace userbuffers {

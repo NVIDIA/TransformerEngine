@@ -92,6 +92,9 @@ PYBIND11_MODULE(transformer_engine_pybind, m) {
     .value("ATOMIC_GEMM_RS", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS)
     .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P)
     .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P);
+
+  m.def("overlapped_comm_type", &nvte_overlapped_comm_type);
+  m.def("comm_overlap_is_p2p", &nvte_comm_overlap_is_p2p);
 }  // PYBIND11_MODULE
 
 }  // namespace transformer_engine

@@ -121,10 +121,8 @@ def main(opts):
     sample_buffer = torch.empty((outer_size, hidden_size),
                                 dtype=torch.uint8 if opts.fp8 else torch.bfloat16, device='cuda')
 
-    is_p2p = True
-    ub_algo = tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P
-    comm_type = tex.NVTE_Comm_Overlap_Type.AG
-
+    ub_algo = tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS_P2P
+    comm_type = tex.overlapped_comm_type(ub_algo)
     ub_obj = tex.UbufP2PCommOverlap(
         sample_buffer,
         world_rank,
@@ -136,7 +134,7 @@ def main(opts):
         False,
         False,
         comm_type == tex.NVTE_Comm_Overlap_Type.RS
-    ) if is_p2p else tex.UbufCommOverlap(
+    ) if tex.comm_overlap_is_p2p(ub_algo) else tex.UbufCommOverlap(
         sample_buffer,
         world_rank,
         world_size,
@@ -153,17 +151,19 @@ def main(opts):
     # Figure out problem sizing:
     # M = sequence * batch
     # N = hidden size
-    # K = FFN hidden size
-    # P = sequence/tensor parallel size
+    # K = MLP intermediate size (usually 4x hidden size)
+    # P = number of devices for sequence/tensor parallelism
+    # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
     ffn_hidden_size = 4 * hidden_size
     if comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-        # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
+        # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M, N)
         local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
         local_inp_shape = (outer_size, ffn_hidden_size // local_size)
     else:
-        # (M/P, N) x (K/P, N)^T = (M/P, K/P) -> overlapped AG -> (M, K/P)
+        # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
         local_kernel_t_shape = (ffn_hidden_size // local_size, hidden_size)
         local_inp_shape = (outer_size // local_size, hidden_size)
+    print(f"local input shape: {local_inp_shape} | local kernel shape: {local_kernel_t_shape}")
 
     # Initialize kernel and input tensors
     kernel_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda')
@@ -261,24 +261,26 @@ def main(opts):
 
     # Compare against standard GEMM
     if comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-        # Kernel: (N, K/P) -> (K/P, N) -> (K, N)
+        # Kernel: (N, K/P) -> transpose -> (K/P, N) -> gather dim=0 -> (K, N)
         ker_g = te.distributed.gather_along_first_dim(torch.transpose(kernel_t, 0, 1), tp_group)[0]
-        # Input: (M, K/P) -> (K/P, M) -> (K, M) -> (M, K)
+        # Input: (M, K/P) -> transpose -> (K/P, M) -> gather dim=0 -> (K, M) -> transpose -> (M, K)
         inp_g = torch.transpose(
             te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1)
-        # Output: (M/P, N) -> (M, N)
-        out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
+        # Output already (M, N)
+        out_g = output
     else:
-        # Kernel: (K/P, N) -> (K, N) -> (N, K)
+        # Kernel: (K/P, N) -> gather dim=0 -> (K, N) -> transpose -> (N, K)
         ker_g = torch.transpose(
             te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1)
-        # Input: (M/P, N) -> (M, N)
+        # Input: (M/P, N) -> gather dim=0 -> (M, N)
         inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
-        # Output: (M, K/P) -> (K/P, M) -> (K, M) -> (M, K)
+        # Output: (M, K/P) -> transpose -> (K/P, M) -> gather dim=0 -> (K, M) -> transpose -> (M, K)
         out_g = torch.transpose(
             te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1), tp_group)[0], 0, 1)
 
+    print(f"inp shape: {inp_g.shape} | kernel shape: {ker_g.shape}")
     ref_g = torch.matmul(inp_g, ker_g)
+    print(f"out shape: {out_g.shape} | ref shape: {ref_g.shape}")
     torch.allclose(out_g, ref_g, atol=5e-3)
 
     if opts.debug:
