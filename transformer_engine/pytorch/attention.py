@@ -109,21 +109,25 @@ class InferenceParams: # pylint: disable=too-few-public-methods
 
     Parameters
     ----------
-    max_batch_size : int
+    max_batch_size: int
                     maximum batch size during inference.
-    max_sequence_length : int
-                         maximum sequence length during inference.
+    max_sequence_length: int
+                    maximum sequence length during inference.
+    qkv_format: str
+                    {'bshd', 'sbhd', 'thd'}
     """
 
     def __init__(self, max_batch_size, max_sequence_length, qkv_format="bshd"):
+        assert qkv_format in ["bsdh", "sbhd", "thd"]
+        
         self.max_sequence_length = max_sequence_length
         self.max_batch_size = max_batch_size
         self.key_value_memory_dict = {}
         self.qkv_format = qkv_format
         
         if qkv_format == "thd":
-            self.seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
-            self.incoming_seq_len = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
+            self.cached_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
+            self.input_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
         else:
             self.sequence_len_offset = 0
             self.batch_size_offset = 0
@@ -176,44 +180,44 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         """
         assert self.qkv_format == "thd"
 
-        self.seq_len.copy_(self.seq_len + self.incoming_seq_len)
+        self.cached_sequence_lengths.copy_(self.cached_sequence_lengths + self.input_sequence_lengths)
         if pad_token_id is not None:
-            self.incoming_seq_len.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
+            self.input_sequence_lengths.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
         else:
-            self.incoming_seq_len.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
+            self.input_sequence_lengths.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
         self.max_incoming_seq_len = new_input.shape[1]
 
         if reset:
-            self.seq_len.copy_(torch.zeros_like(self.seq_len))
+            self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
     
-    def save_new_key_and_value_layer(self, layer_number, key_layer, value_layer):
+    def save_to_kv_cache(self, layer_number, key_layer, value_layer):
         """
             Saves key_layer and value_layer in the cache.
         """
         (inference_key_memory, inference_value_memory,
             ) = self.key_value_memory_dict[layer_number]
         if self.qkv_format == "thd":
-            batch_size = key_layer.shape[0]
-            channels = inference_key_memory.shape[2] * inference_key_memory.shape[3] # h * d
+            channels = inference_key_memory.shape[1] * inference_key_memory.shape[2] # h * d
             tex.attention_copy(
                 inference_key_memory, 
-                self.seq_len, 
-                self.incoming_seq_len,
+                self.cached_sequence_lengths, 
+                self.input_sequence_lengths,
                 key_layer, 
                 self.max_incoming_seq_len,
                 self.max_sequence_length,  
-                batch_size,
+                self.max_batch_size,
                 channels)
             
             tex.attention_copy(
                 inference_value_memory, 
-                self.seq_len, 
-                self.incoming_seq_len,
+                self.cached_sequence_lengths, 
+                self.input_sequence_lengths,
                 value_layer, 
                 self.max_incoming_seq_len,
                 self.max_sequence_length,  
-                batch_size,
+                self.max_batch_size,
                 channels)
+            key_layer, value_layer = inference_key_memory, inference_value_memory
         else:
             assert self.qkv_format in ["bshd", "sbhd"], "Attention format not supported by the inference."
             batch_start = self.batch_size_offset
@@ -231,8 +235,63 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
             key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-            return key_layer, value_layer
+        return key_layer, value_layer
+
+    def allocate_memory_for_kv_cache_if_empty(
+            self, 
+            layer_number, 
+            num_gqa_groups_per_partition, 
+            hidden_size_per_attention_head, 
+            dtype):
+
+        if layer_number in self.key_value_memory_dict:
+            return # Already allocated
+
+        s = self.max_sequence_length
+        b = self.max_batch_size
+
+        def _allocate_memory(dims):
+            return torch.empty(
+                *dims,
+                num_gqa_groups_per_partition,
+                hidden_size_per_attention_head,
+                dtype=dtype,
+                device=torch.cuda.current_device(),
+            )
+
+        if self.qkv_format == "thd":
+            inference_key_memory = _allocate_memory((b * s,))
+            inference_value_memory = _allocate_memory((b * s,))
+        else:
+            inference_key_memory = _allocate_memory((s, b))
+            inference_value_memory = _allocate_memory((s, b))
+        self.key_value_memory_dict[layer_number] = (
+            inference_key_memory,
+            inference_value_memory,
+        )
     
+    def set_params_to_thd_attention(self, buffers, channels):
+        max_seqlen_q, max_seqlen_kv = self.max_incoming_seq_len, self.max_sequence_length
+
+        # Allocation of buffers, works with CUDA Graphs.
+        cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
+            buffers
+
+        cu_seqlens_q[1:].copy_(torch.cumsum(self.input_sequence_lengths, dim=0))
+        cu_seqlens_kv[1:].copy_(
+            torch.cumsum(
+                self.cached_sequence_lengths + self.input_sequence_lengths, dim=0
+            )
+        )
+
+        # If layer has shape [b * s_layer, h, d] 
+        # offsets are of the form [k * s_layer * h * d for k = 0, ..., batch_size]
+        seq_offsets_q.copy_(torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_q)
+        seq_offsets_k.copy_(torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_kv)
+        seq_offsets_v.copy_(seq_offsets_k)
+        seq_offsets_o.copy_(seq_offsets_q)
+
+        return max_seqlen_q, max_seqlen_kv, buffers
 
 
 @torch.no_grad()
@@ -3762,45 +3821,25 @@ class DotProductAttention(torch.nn.Module):
                 key_layer = key_layer.transpose(0, 1)
                 value_layer = value_layer.transpose(0, 1)
 
-            (inference_key_memory, inference_value_memory,
-            ) = inference_params.key_value_memory_dict[self.layer_number]
+            key_layer, value_layer = inference_params.save_to_kv_cache(
+                self.layer_number, key_layer, value_layer
+            )
 
-            if qkv_format in ["bshd", "sbhd"]:
-                key_layer, value_layer = inference_params.save_new_key_and_value_layer(self.layer_number, key_layer, value_layer)
-            elif qkv_format == "thd":
+            if qkv_format == "thd":
+                # Allocation of buffers, works with CUDA Graphs.
+                buffers = [self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
 
-                inference_params.save_new_key_and_value_layer(self.layer_number, key_layer, value_layer)
+                max_seqlen_q, max_seqlen_kv, buffers = inference_params.set_params_to_thd_attention(buffers, self.channels)
+                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
+                    buffers
 
-                """
-                    We compute parameters needed by the THD attention with offsets.
-                """
-                batch_size = query_layer.shape[0] 
-                max_seqlen_q = inference_params.max_incoming_seq_len
-                max_seqlen_kv = inference_params.max_sequence_length
-                cu_seqlens_q = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-                cu_seqlens_kv = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_q = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_k = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_v = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-                seq_offsets_o = self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
-
-                cu_seqlens_q[1:].copy_(torch.cumsum(inference_params.incoming_seq_len, dim=0))
-                cu_seqlens_kv[1:].copy_(torch.cumsum(inference_params.seq_len + inference_params.incoming_seq_len, dim=0))
-
-                seq_offsets_q.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_q)
-                seq_offsets_o.copy_(seq_offsets_q)
-                seq_offsets_k.copy_(torch.arange(0, batch_size + 1, dtype=torch.int32, device="cuda") * self.channels * max_seqlen_kv)
-                seq_offsets_v.copy_(seq_offsets_k)
-
-                # qkv layers are reshaped to the format [t, h, d]
-                query_layer = query_layer.view(-1, query_layer.shape[2], query_layer.shape[3]).to(torch.bfloat16)
-                key_layer = inference_key_memory.view(-1, inference_key_memory.shape[2], inference_key_memory.shape[3]).to(torch.bfloat16)
-                value_layer = inference_value_memory.view(-1, inference_value_memory.shape[2], inference_value_memory.shape[3]).to(torch.bfloat16)
-
+                # query_layer is reshaped to the format [t, h, d]
+                query_layer = query_layer.view(-1, *query_layer.shape[2:])
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
                 value_layer = value_layer.transpose(0, 1)
+
             key_layer = key_layer.contiguous()
             value_layer = value_layer.contiguous()
         
@@ -4515,20 +4554,6 @@ class MultiheadAttention(torch.nn.Module):
 
         self._allocator = StaticBufferAllocator()
 
-
-
-    def _allocate_memory(
-        self, inference_max_sequence_len: int, batch_size: int, dtype: torch.dtype
-    ) -> torch.Tensor:
-        return torch.empty(
-            inference_max_sequence_len,
-            batch_size,
-            self.num_gqa_groups_per_partition,
-            self.hidden_size_per_attention_head,
-            dtype=dtype,
-            device=torch.cuda.current_device(),
-        )
-
     def alloc(self, size, dtype, device):
         return self._allocator(size, dtype, device)
 
@@ -4670,33 +4695,13 @@ class MultiheadAttention(torch.nn.Module):
         # Pre-allocate memory for key-values for inference
         # =================================================
 
-        if inference_params and self.layer_number is not None:
-            if self.layer_number not in inference_params.key_value_memory_dict:
-                inf_max_seq_len = inference_params.max_sequence_length
-                inf_max_batch_size = inference_params.max_batch_size
-                if self.qkv_format == "thd":
-                    inference_key_memory = self._allocate_memory(
-                        inf_max_batch_size, inf_max_seq_len, hidden_states.dtype
-                    )
-                    inference_value_memory = self._allocate_memory(
-                        inf_max_batch_size, inf_max_seq_len, hidden_states.dtype
-                    )
-                else:
-                    inference_key_memory = self._allocate_memory(
-                        inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                    )
-                    inference_value_memory = self._allocate_memory(
-                        inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                    )
-                inference_params.key_value_memory_dict[self.layer_number] = (
-                    inference_key_memory,
-                    inference_value_memory,
-                )
-            else:
-                (
-                    inference_key_memory,
-                    inference_value_memory,
-                ) = inference_params.key_value_memory_dict[self.layer_number]
+        
+        inference_params.allocate_memory_for_kv_cache_if_empty(
+            self.layer_number, 
+            self.num_gqa_groups_per_partition, 
+            self.hidden_size_per_attention_head, 
+            hidden_states.dtype
+        )
 
         # ======================
         # Query, Key, and Value
@@ -4855,8 +4860,16 @@ class MultiheadAttention(torch.nn.Module):
                 key_layer = key_layer.contiguous()
                 query_layer = query_layer.contiguous()
 
-                key_layer.copy_(apply_rotary_pos_emb(key_layer, k_pos_emb, "bshd", fused=True, begins=inference_params.seq_len))
-                query_layer.copy_(apply_rotary_pos_emb(query_layer, q_pos_emb, "bshd", fused=True, begins=inference_params.seq_len))
+                key_layer.copy_(
+                    apply_rotary_pos_emb(
+                        key_layer, k_pos_emb, "bshd", fused=True, begins=inference_params.cached_sequence_lengths
+                    )
+                )
+                query_layer.copy_(
+                    apply_rotary_pos_emb(
+                        query_layer, q_pos_emb, "bshd", fused=True, begins=inference_params.cached_sequence_lengths
+                    )
+                )
             else:
                 # adjust key and value for inference
                 if inference_params is not None:
