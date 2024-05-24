@@ -171,6 +171,26 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
+class TestFusedSGD(TestFusedOptimizer):
+    def __init__(self, *args, **kwargs):
+        super(TestFusedSGD, self).__init__(*args, **kwargs)
+        self.options = {"lr": .25, "momentum": .125}
+        self.ref_optim = torch.optim.SGD
+        self.fused_optim = te.optimizers.FusedSGD
+
+    def test_float(self):
+        self.gen_single_type_test(param_type=torch.float)
+
+    def test_half(self):
+        self.gen_single_type_test(param_type=torch.float16)
+
+    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
+    def test_multi_device(self):
+        devices = ("cuda:0", "cuda:1")
+        for current_dev, tensor_dev in product(devices, devices):
+            with torch.cuda.device(current_dev):
+                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
+
 
 class Model(torch.nn.Module):
     def __init__(self):

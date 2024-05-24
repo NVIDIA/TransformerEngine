@@ -301,8 +301,9 @@ reduce_block_into_lanes(T *x, T val, int lanes = 1,
   if (share_result) {
     if (tid < lanes) x[tid] = final;  // EpilogueOp
     // Make sure the smem result is visible to all warps.
-    __syncthreads();
   }
+  __syncthreads();
+  // Avoid potential write before read race when reduce_block_into_lanes is called back to back
 
   return final;
 }
