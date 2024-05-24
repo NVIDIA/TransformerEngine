@@ -3450,8 +3450,8 @@ class DotProductAttention(torch.nn.Module):
 
         .. note::
 
-            Input tensor :attr:`query_layer` must be of shape 
-            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`, 
+            Input tensor :attr:`query_layer` must be of shape
+            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`,
             :attr:`kv_channels`) and the tensors :attr:`key_layer` and :attr:`value_layer`
             must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
             :attr:`num_gqa_groups`, :attr:`kv_channels`). Output of shape
