@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+from dataclasses import dataclass
 from typing import List, Tuple
 import pytest
 
@@ -25,17 +26,16 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
-
+@dataclass
 class ModelConfig:
-    def __init__(self, hidden_size, nheads, kv, seq_len):
-        self.h = hidden_size
-        self.nheads = nheads
-        self.kv = kv
-        self.s = seq_len
+    """Data tensor dimensions within Transformer model"""
+    sequence_length: int
+    batch_size: int
+    hidden_size: int
+    num_heads: int
+    kv_channels: int
 
-model_configs = {
-    "small": ModelConfig(64, 2, 32, 32),
-}
+model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
 
 modules = ["transformer", "layernorm_mlp", "layernorm_linear", "linear", "mha", "dpa"]
 
@@ -71,20 +71,49 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None)
 
 
 def generate_data(
-    s: int, b: int, h: int, nheads: int, kv: int, dtype: torch.dtype,
-    dpa: bool = False, warmup: bool = False, gen_grad_output: bool = False,
+    config: ModelConfig,
+    dtype: torch.dtype,
+    dpa: bool = False,
+    warmup: bool = False,
+    return_grad_output: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
     if dpa:
-        inputs = [gen_func(s, b, nheads, kv, device="cuda", requires_grad=True, dtype=dtype) for _ in range(3)]
+        inputs = [
+            gen_func(
+                config.sequence_length,
+                config.batch_size,
+                config.num_heads,
+                config.kv_channels,
+                device="cuda",
+                requires_grad=True,
+                dtype=dtype,
+            )
+            for _ in range(3)
+        ]
     else:
-        inputs = [gen_func(s, b, h, device="cuda", requires_grad=True, dtype=dtype)]
+        inputs = [
+            gen_func(
+                config.sequence_length,
+                config.batch_size,
+                config.hidden_size,
+                device="cuda",
+                requires_grad=True,
+                dtype=dtype,
+            )
+        ]
 
-    if not gen_grad_output:
+    if not return_grad_output:
         return inputs
 
-    grad_output = torch.randn(s, b, h, device="cuda", dtype=dtype)
+    grad_output = torch.randn(
+        config.sequence_length,
+        config.batch_size,
+        config.hidden_size,
+        device="cuda",
+        dtype=dtype,
+    )
     return inputs, grad_output
 
 
@@ -100,11 +129,9 @@ def get_outputs(model, output):
 
 
 class _Sequential(torch.nn.Sequential):
+    """Sequential model that forwards keyword arguments to modules"""
 
-    def forward(self, input_: torch.Tensor, is_first_microbatch=None) -> torch.Tensor:
-        kwargs = {}
-        if is_first_microbatch is not None:
-            kwargs["is_first_microbatch"] = is_first_microbatch
+    def forward(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
         x = input_
         for module in self:
             x = module(x, **kwargs)
@@ -114,7 +141,6 @@ class _Sequential(torch.nn.Sequential):
 def _test_cuda_graphs(
     *,
     config: ModelConfig,
-    bs: int,
     num_layers: int,
     dtype: torch.dtype,
     fp8: bool,
@@ -132,9 +158,9 @@ def _test_cuda_graphs(
         # Create modules.
         if module == "transformer":
             modules = [TransformerLayer(
-                            config.h,
-                            config.h,
-                            config.nheads,
+                            config.hidden_size,
+                            config.hidden_size,
+                            config.num_heads,
                             hidden_dropout=0.0,
                             attention_dropout=0.0,
                             fuse_qkv_params=True,
@@ -142,29 +168,29 @@ def _test_cuda_graphs(
                        ) for _ in range(num_layers)]
         elif module == "layernorm_mlp":
             modules = [LayerNormMLP(
-                config.h, config.h, params_dtype=dtype
+                config.hidden_size, config.hidden_size, params_dtype=dtype
             ) for _ in range(num_layers)]
         elif module == "layernorm_linear":
             modules = [LayerNormLinear(
-                config.h, config.h, params_dtype=dtype
+                config.hidden_size, config.hidden_size, params_dtype=dtype
             ) for _ in range(num_layers)]
         elif module == "mha":
             modules = [MultiheadAttention(
-                            config.h,
-                            config.nheads,
+                            config.hidden_size,
+                            config.num_heads,
                             attention_dropout=0.0,
                             params_dtype=dtype,
                             fuse_qkv_params=True,
                        ) for _ in range(num_layers)]
         elif dpa:
-            assert config.h % config.nheads == 0, "Err."
+            assert config.hidden_size % config.num_heads == 0, "Err."
             assert num_layers == 1, "Err."
             modules = [DotProductAttention(
-                        config.nheads, config.kv, attention_dropout=0.0
+                        config.num_heads, config.kv_channels, attention_dropout=0.0
                         ) for _ in range(num_layers)]
         else:
             modules = [Linear(
-                config.h, config.h, device="cuda", params_dtype=dtype
+                config.hidden_size, config.hidden_size, device="cuda", params_dtype=dtype
             ) for _ in range(num_layers)]
 
         # Initialize gradient buffers.
@@ -178,7 +204,7 @@ def _test_cuda_graphs(
             model = modules[0] if dpa else torch.nn.Sequential(*modules)
             model = make_graphed_callables(
                 model,
-                generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, warmup=True),
+                generate_data(config, dtype, dpa=dpa, warmup=True),
                 num_warmup_iters=10,
                 fp8_enabled=fp8,
                 fp8_weight_caching=fp8_weight_caching,
@@ -188,7 +214,7 @@ def _test_cuda_graphs(
             modules = [
                 make_graphed_callables(
                     module,
-                    generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, warmup=True),
+                    generate_data(config, dtype, dpa=dpa, warmup=True),
                     num_warmup_iters=10,
                     fp8_enabled=fp8,
                     fp8_weight_caching=fp8_weight_caching,
@@ -208,7 +234,7 @@ def _test_cuda_graphs(
         if not dpa:
             optimizer.zero_grad(set_to_none=False)
         for grad_accumulation_step in range(2):
-            inputs, grad_output = generate_data(config.s, bs, config.h, config.nheads, config.kv, dtype, dpa=dpa, gen_grad_output=True)
+            inputs, grad_output = generate_data(config, dtype, dpa=dpa, return_grad_output=True)
             with fp8_autocast(enabled=fp8):
                 kwargs = {}
                 if fp8_weight_caching:
@@ -222,7 +248,6 @@ def _test_cuda_graphs(
 
 
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("bs", [1, 2])
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("num_layers", [1, 3])
 @pytest.mark.parametrize("fp8", all_boolean)
@@ -231,7 +256,6 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("module", modules)
 def test_gpt_make_graphed_callables(
     dtype: torch.dtype,
-    bs: int,
     model: str,
     num_layers: int,
     fp8: bool,
@@ -252,7 +276,6 @@ def test_gpt_make_graphed_callables(
 
     kwargs = dict(
         config=config,
-        bs=bs,
         num_layers=num_layers,
         dtype=dtype,
         fp8=fp8,
