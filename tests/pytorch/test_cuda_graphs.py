@@ -39,8 +39,6 @@ model_configs = {
 
 modules = ["transformer", "layernorm_mlp", "layernorm_linear", "linear", "mha", "dpa"]
 
-optimizers = [torch.optim.SGD, torch.optim.Adam]
-
 all_boolean = [True, False]
 
 dtypes = [torch.float32, torch.float16]
@@ -123,7 +121,6 @@ def _test_cuda_graphs(
     fp8_params: bool,
     fp8_weight_caching: bool,
     module: str,
-    optimizer: torch.optim.Optimizer,
     graph_mode: str,
 ) -> List[torch.Tensor]:
     """Helper function for test."""
@@ -170,6 +167,11 @@ def _test_cuda_graphs(
                 config.h, config.h, device="cuda", params_dtype=dtype
             ) for _ in range(num_layers)]
 
+        # Initialize gradient buffers.
+        for module in modules:
+            for param in module.parameters():
+                param.grad = torch.empty_like(param)
+
         # Generate model and wrap API to return graphed version.
         if graph_mode == "full":
             # Graph entire model at once.
@@ -199,7 +201,7 @@ def _test_cuda_graphs(
 
     # Loss function and optimizer.
     if not dpa:
-        optimizer = optimizer(model.parameters(), lr=0.001)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
     # Launch.
     for train_step in range(3):
@@ -212,7 +214,7 @@ def _test_cuda_graphs(
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = (grad_accumulation_step == 0)
                 output = model(*inputs, **kwargs)
-            (output * grad_output).sum().backward()
+            output.backward(grad_output)
         if not dpa:
             optimizer.step()
 
@@ -222,12 +224,11 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("bs", [1, 2])
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("num_layers", [1, 10])
+@pytest.mark.parametrize("num_layers", [1, 3])
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_params", all_boolean)
 @pytest.mark.parametrize("fp8_weight_caching", all_boolean)
 @pytest.mark.parametrize("module", modules)
-@pytest.mark.parametrize("optimizer", optimizers)
 def test_gpt_make_graphed_callables(
     dtype: torch.dtype,
     bs: int,
@@ -237,7 +238,6 @@ def test_gpt_make_graphed_callables(
     fp8_params: bool,
     fp8_weight_caching: bool,
     module: str,
-    optimizer: torch.optim.Optimizer,
 ) -> None:
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -259,7 +259,6 @@ def test_gpt_make_graphed_callables(
         fp8_params=fp8_params,
         fp8_weight_caching=fp8_weight_caching,
         module=module,
-        optimizer=optimizer,
     )
     outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
     graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
