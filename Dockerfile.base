@@ -1,0 +1,38 @@
+ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+ARG FRAMEWORK=pytorch
+
+FROM scratch as transformerengine
+COPY 3rdparty/ 3rdparty/
+COPY docs/ docs/
+COPY examples/ examples/
+COPY qa/ qa/
+COPY tests/ tests/
+COPY transformer_engine/ transformer_engine/
+COPY CONTRIBUTING.rst LICENSE README.rst setup.py te_version.p[y] VERSION .
+
+FROM ${FROM_IMAGE_NAME}
+ARG FRAMEWORK
+
+WORKDIR /opt/transformerengine/
+COPY --from=transformerengine . .
+
+# Install dependencies for building
+# Note: pybind11 is not a strict dependency since it may be installed
+# outside of Python, e.g. installed via apt.
+RUN pip install ninja pybind11
+
+# Install Transformer Engine
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ pytorch|all ]] \
+  && export NVTE_WITH_USERBUFFERS=1 \
+  && export MPI_HOME=/usr/local/mpi \
+  && export MAX_JOBS=4 \
+  || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
+
+  NVTE_FRAMEWORK=${FRAMEWORK} \
+  pip install .[test]
+
+  rm -rf transformer_engine.egg-info dist build
+EOF
+
+WORKDIR /workspace/
