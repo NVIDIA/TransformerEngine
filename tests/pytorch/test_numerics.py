@@ -1578,14 +1578,16 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     assert_allclose(full_output, incremental_output, atol[dtype])
 
 
-def _torch_grouped_gemm(A, B, layout):
+def _torch_grouped_gemm(A, B, C, layout, accumulate):
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     return [
-        torch.mm(
+        torch.addmm(
+            c,
             b.t() if transb else b,
             a.t() if transa else a,
-        ) for a, b in zip(A, B)
+            beta=1 if accumulate else 0,
+        ) for a, b, c in zip(A, B, C)
     ]
 
 
@@ -1595,7 +1597,8 @@ def _torch_grouped_gemm(A, B, layout):
                                    (16, 10027, 128, 512),])
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
-def test_grouped_gemm(shape, dtype, layout):
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_grouped_gemm(shape, dtype, layout, accumulate):
     z, m, k, n = shape
 
     dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
@@ -1606,23 +1609,20 @@ def test_grouped_gemm(shape, dtype, layout):
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]      # weight
         B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)   # input
-        out = torch.split(torch.empty(m, n, dtype=dtype, device="cuda"), m_splits) # output
+        out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits) # output
         grad = False
-        accumulate = False
     elif layout == "NN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]      # weight
         B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)   # grad_output
-        out = torch.split(torch.empty(m, k, dtype=dtype, device="cuda"), m_splits) # dgrad
+        out = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits) # dgrad
         grad = True
-        accumulate = False
     else:  # layout == "NT"
         A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits) # input
         B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits) # grad_output
-        out = [torch.zeros(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
         grad = True
-        accumulate = True
 
+    out_ref = _torch_grouped_gemm(A, B, out, layout, accumulate)
     grouped_gemm(A, B, out, dtype, get_multi_stream_cublas_workspace(), grad, accumulate, layout)
-    out_ref = _torch_grouped_gemm(A, B, layout)
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref)

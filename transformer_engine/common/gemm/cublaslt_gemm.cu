@@ -75,7 +75,6 @@ void cublas_gemm(const Tensor *inputA,
   void *A_scale_inverse = inputA->scale_inv.dptr;
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
-  if (A == nullptr || B == nullptr) return;
   void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
   void *D_scale = outputD->scale.dptr;

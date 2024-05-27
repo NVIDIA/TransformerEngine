@@ -192,6 +192,10 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
     return tensor_wrappers.back().data();
   };
   for (size_t i = 0; i < A.size(); i++) {
+    if (A[i].data_ptr() == nullptr || B[i].data_ptr() == nullptr) {
+      if (D[i].data_ptr() != nullptr && !accumulate) D[i].zero_();
+      continue;
+    }
     te_A.emplace_back(make_tensor(A[i].data_ptr(),
                                   {static_cast<size_t>(A[i].size(0)),
                                   static_cast<size_t>(A[i].size(1))},
