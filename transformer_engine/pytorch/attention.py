@@ -121,7 +121,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     """
 
     def __init__(self, max_batch_size, max_sequence_length, qkv_format="bshd"):
-        assert qkv_format in ["bsdh", "sbhd", "thd"]
+        assert qkv_format in ["bshd", "sbhd", "thd"]
 
         self.max_sequence_length = max_sequence_length
         self.max_batch_size = max_batch_size
@@ -142,6 +142,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         else:
             self.sequence_len_offset = 0
             self.batch_size_offset = 0
+            self.input_sequence_length = None
 
     def swap_key_value_dict(self, batch_indices):
         """
@@ -169,7 +170,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
     
     
-    def thd_setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
+    def setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
         """
             Updates parameters representing incoming sequence lengths and lengths 
             of sequence in the cache. Should be called before every forward pass in inference.
@@ -187,17 +188,21 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 we assume that all new_input sequence lengths
                 are equal to the corresponding dimension of new_input.
         """
-        assert self.qkv_format == "thd"
+        if self.qkv_format == "thd":
+            self.cached_sequence_lengths.copy_(self.cached_sequence_lengths + self.input_sequence_lengths)
+            if pad_token_id is not None:
+                self.input_sequence_lengths.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
+            else:
+                self.input_sequence_lengths.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
+            self.max_incoming_seq_len = new_input.shape[1]
 
-        self.cached_sequence_lengths.copy_(self.cached_sequence_lengths + self.input_sequence_lengths)
-        if pad_token_id is not None:
-            self.input_sequence_lengths.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
+            if reset:
+                self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
         else:
-            self.input_sequence_lengths.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
-        self.max_incoming_seq_len = new_input.shape[1]
+            if self.input_sequence_length is not None:
+                self.sequence_len_offset += self.input_sequence_length
+            self.input_sequence_length = new_input.shape[1]
 
-        if reset:
-            self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
     
     def save_to_kv_cache(self, layer_number, key_layer, value_layer):
         """
@@ -1606,21 +1611,24 @@ class FusedRoPEFunc(torch.autograd.Function):
         freqs: torch.Tensor,
         tensor_format: str = "sbhd",
         cu_seqlens: Union[torch.Tensor, None] = None,
-        begins: Union[torch.Tensor, None] = None,
+        beginning_offsets: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        if begins is None:
-            begins = torch.Tensor()
+        if beginning_offsets is None:
+            # Each sequence will start from positional encoding corresponding to 0.
+            # Otherwise sequence i will start from positional encoding 
+            # corresponding to beginning_offsets[i].
+            beginning_offsets = torch.Tensor()
         if tensor_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, begins, False)
+            output = tex.fused_rope_forward(t, freqs, beginning_offsets, False)
         elif tensor_format == "bshd":
             output = tex.fused_rope_forward(
-                t.transpose(0, 1), freqs, begins, True
+                t.transpose(0, 1), freqs, beginning_offsets, True
             ).transpose(0, 1)
         elif tensor_format == "thd":
-            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, begins)
+            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, beginning_offsets)
         else:
             raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
-        ctx.save_for_backward(freqs, cu_seqlens, begins)
+        ctx.save_for_backward(freqs, cu_seqlens, beginning_offsets)
         ctx.tensor_format = tensor_format
 
         return output
@@ -3884,7 +3892,8 @@ class DotProductAttention(torch.nn.Module):
                 # Allocation of buffers, it works correctly with CUDA Graphs.
                 buffers = [self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
 
-                max_seqlen_q, max_seqlen_kv, buffers = inference_params.set_params_to_thd_attention(buffers, self.channels)
+                max_seqlen_q, max_seqlen_kv, buffers = \
+                    inference_params.set_params_to_thd_attention(buffers, self.channels)
                 cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
                     buffers
 
@@ -4139,7 +4148,10 @@ class DotProductAttention(torch.nn.Module):
         if self.qkv_format == "thd":
             use_flash_attention = False
             use_fused_attention = True
-            fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+        
+        if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1]:
+            use_flash_attention = False # Flash attention does not support max_seqlen_q != max_seqlen_kv
+
 
         if use_flash_attention:
             if _NVTE_DEBUG:
@@ -4750,13 +4762,13 @@ class MultiheadAttention(torch.nn.Module):
         # Pre-allocate memory for key-values for inference
         # =================================================
 
-        
-        inference_params.allocate_memory_for_kv_cache_if_empty(
-            self.layer_number, 
-            self.num_gqa_groups_per_partition, 
-            self.hidden_size_per_attention_head, 
-            hidden_states.dtype
-        )
+        if inference_params is not None:
+            inference_params.allocate_memory_for_kv_cache_if_empty(
+                self.layer_number, 
+                self.num_gqa_groups_per_partition, 
+                self.hidden_size_per_attention_head, 
+                hidden_states.dtype
+            )
 
         # ======================
         # Query, Key, and Value

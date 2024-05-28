@@ -80,13 +80,13 @@ class StaticGemmaModel(torch.nn.Module):
     def set_inference_params(self, inference_params):
         self.inference_params = inference_params
     
-    def forward(self, hidden_states : torch.Tensor):
+    def forward(self, hidden_states : torch.Tensor, attention_mask : torch.Tensor = None):
         with torch.no_grad():
             hidden_states.data[:] = hidden_states.data[:] * self.normalizer # static operation - for CUDA graphs
             for decoder_layer in self.model.layers:
                 hidden_states.data[:] = decoder_layer(
                     hidden_states,
-                    attention_mask=None,
+                    attention_mask=attention_mask,
                     self_attn_mask_type=self.mask,
                     inference_params=self.inference_params
                 )[0] # static copy - for CUDA graphs
@@ -102,17 +102,18 @@ class GemmaGenerator(torch.nn.Module):
         GemmaGenerator gets one layer of embeddins,
         makes forward pass and returns next tokens.
     """
-    def __init__(self, model : GemmaModel, lm_head: torch.nn.Module, dtype : torch.dtype):
+    def __init__(self, model : GemmaModel, lm_head: torch.nn.Module, dtype : torch.dtype, qkv_format : str):
         super().__init__()
         self.model = model
         self.gemma_layers = StaticGemmaModel(model, dtype, 'padding', lm_head)
+        self.qkv_format = qkv_format
     
     def set_inference_params(self, inference_params):
         self.inference_params = inference_params
         self.gemma_layers.set_inference_params(inference_params)
 
-    def forward(self, hidden_states : torch.Tensor):
-        logits = self.gemma_layers(hidden_states)
+    def forward(self, hidden_states : torch.Tensor, mask : torch.Tensor = None):
+        logits = self.gemma_layers(hidden_states, attention_mask=mask)
 
         assert logits.shape[0] == hidden_states.shape[0] # b
         assert logits.shape[1] == hidden_states.shape[1] # seq_len
@@ -127,7 +128,7 @@ class GemmaGenerator(torch.nn.Module):
         # to update the information of sequence lengths.
         # Here we increase sequence offsets by one, 
         # because we generated one token for every sequence.
-        self.inference_params.thd_setup_before_new_input(next_tokens.unsqueeze(1)) # static copy for CUDA graphs
+        self.inference_params.setup_before_new_input(next_tokens.unsqueeze(1))
 
         return next_tokens
 
@@ -163,6 +164,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             lm_head=self.lm_head,
             model=self.model, 
             dtype=torch.bfloat16,
+            qkv_format=config.qkv_format
         )
         self._model_context_phase = StaticGemmaModel(self.model, torch.bfloat16, 'padding_causal', self.lm_head)
 
@@ -200,7 +202,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
 
     # This function is overriden in TeGEmmaForCausalLMCudaGraphs.
     def _create_inference_params(self, max_batch_size : int, max_sequence_length : int):
-        return InferenceParams(max_batch_size, max_sequence_length, qkv_format="thd")
+        return InferenceParams(max_batch_size, max_sequence_length, qkv_format=self.config.qkv_format)
 
     # This function is overriden in TeGEmmaForCausalLMCudaGraphs.
     def _get_max_input_seq_len(self, input_ids):
@@ -226,22 +228,36 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     ):
         hidden_states = self._create_hidden_states_buffer(input_ids)
         hidden_states.data[:] = self.model.embed_tokens(input_ids)
-
-        # We need to update offsets before every forward pass to make cache work properly.
-        inference_params.thd_setup_before_new_input(input_ids, pad_token_id=0, reset=True)
         
+        
+        # We need to update offsets before every forward pass to make cache work properly.
+        inference_params.setup_before_new_input(input_ids, pad_token_id=0, reset=True)
+ 
         hidden_states.data[:] = self.model.embed_tokens(input_ids)
-        logits = self._model_context_phase(hidden_states)
+        logits = self._model_context_phase(
+            hidden_states, 
+            attention_mask=((input_ids == 0) if self.config.qkv_format != "thd" else None)
+        )
 
         # We choose logits coresponding with last token in each sequence,
-        # which have various lengths - they are stored in (inference_params.incoming_seq_len - 1) Tensor.
-        logits = logits[torch.arange(logits.size(0)), inference_params.input_sequence_lengths - 1, :]
+        # which have various lengths - they are stored in (inference_params.incoming_seq_len - 1) Tensor
+        # when qkv_format == "thd" and they are the last token in the sequence when qkv_format != "thd".
+        if self.config.qkv_format == "thd":
+            logits = logits[torch.arange(logits.size(0)), inference_params.input_sequence_lengths - 1, :]
+        else:
+            logits = logits[:, -1, :]
         next_tokens = torch.argmax(logits, dim=1)
 
         # self.hidden_states have shape [b, s, hd].
         # We return hidden state for the last token - output has shape [b, 1, hd]
         hidden_states = self._get_generation_buffer(hidden_states, self.model.embed_tokens(next_tokens))
         return hidden_states, next_tokens
+
+    def _make_mask_one_token_longer(self, mask):
+        return torch.cat(
+            [mask, torch.zeros(mask.size(0), 1, 1, 1, dtype=torch.bool, device=mask.device)], 
+            dim=-1
+        )
 
     @torch.no_grad()
     def generate(
@@ -252,7 +268,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         *args, **kwargs
     ): 
         self.eval()
-        assert self.config.qkv_format == "thd", "Generation using other qkv_layouts than thd is not provided in this tutorial"
 
         # We need both autocasts: FP8 for operations that can run in lower precision 
         # and BF16 for those that cannot.
@@ -274,8 +289,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             self._model_context_phase.set_inference_params(inference_params)
             self._model_generation_phase.set_inference_params(inference_params)
 
-            # Context phase
-            TEGemmaForCausalLM._padding_to_end(input_ids, lengths)
+            if self.config.qkv_format == "thd":
+                # For thd layout padding is at the end, otherwise at the beginning.
+                TEGemmaForCausalLM._padding_to_end(input_ids, lengths)
 
             hidden_states, next_tokens = self._generate_context_phase(
                 input_ids,
@@ -283,13 +299,22 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             )
 
             # Generation phase.
-            inference_params.thd_setup_before_new_input(next_tokens.unsqueeze(1))
+
+            inference_params.setup_before_new_input(next_tokens.unsqueeze(1))
+            
             output_tokens = [next_tokens]
 
+            if self.config.qkv_format != "thd":
+                mask = (input_ids == 0).unsqueeze(1).unsqueeze(1)
+
             for _ in range(max_new_tokens):
-                next_tokens = self._model_generation_phase(hidden_states)
+                if self.config.qkv_format != "thd":
+                    # It will not work with cuda graphs, but it is not used for thd qkv_format.
+                    mask = self._make_mask_one_token_longer(mask) 
+
+                next_tokens = self._model_generation_phase(hidden_states, mask)
                 # next_tokens is static output tensor, so we need to clone it - it gets changed every iteration.
-                output_tokens.append(next_tokens.clone()) 
+                output_tokens.append(next_tokens.clone())
 
             result = torch.cat((input_ids, torch.stack(output_tokens).permute([1, 0])), dim=1)
             return result
@@ -302,6 +327,8 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
     """
     def __init__(self, config : GemmaConfig):
         super().__init__(config)
+        assert config.qkv_format == "thd", "Generation with CUDA Graphs are implemented only for thd format."
+
         # Preparation of the static buffers.
         self.config = config 
         self.hidden_states_buffer = torch.empty(
@@ -326,12 +353,12 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         # captured graph will be replayed with minimal usage of CPU,
         # what will lead to huge speedup.
         input_shape = (self.config.cuda_graphs_static_batch_size, self.config.cuda_graphs_static_max_context_len)
-        self.inference_params.thd_setup_before_new_input(torch.randn(input_shape), reset=True)
+        self.inference_params.setup_before_new_input(torch.randn(input_shape), reset=True)
         self._model_context_phase = self.record_graph(
             self._model_context_phase, self.hidden_states_buffer) # CUDA Graphs recording
 
         input_shape = torch.randn((self.config.cuda_graphs_static_batch_size, 1))
-        self.inference_params.thd_setup_before_new_input(input_shape, reset=True)        
+        self.inference_params.setup_before_new_input(input_shape, reset=True)        
         self._model_generation_phase = self.record_graph(
             self._model_generation_phase, self.generation_buffer) # CUDA Graphs recording
 
