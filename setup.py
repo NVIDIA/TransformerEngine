@@ -832,7 +832,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     else:
         # We don't know the pip install path for libtransformer_engine.so, but we can link
         # against it at compile time using the fixed CMake build path.
-        lib_kwargs['library_dirs'] += [ str(root_path / 'build' / 'cmake' / 'common') ]
+        lib_kwargs['library_dirs'] = [ str(root_path / 'build' / 'cmake' / 'common') ]
         # Pip will install the framework extension libraries into the same directory as
         # libtransformer_engine.so, which means we can dynamically load from the framework
         # extension's $ORIGIN path at runtime.
