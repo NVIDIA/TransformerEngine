@@ -3252,7 +3252,7 @@ class DotProductAttention(torch.nn.Module):
     num_attention_heads : int
                          number of attention heads in the transformer layer.
     kv_channels : int
-                number of key-value channels.
+                number of key-query-value channels per attention head.
     num_gqa_groups : Optional[int] = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
@@ -3357,6 +3357,7 @@ class DotProductAttention(torch.nn.Module):
         self.cp_stream = cp_stream
 
         self.hidden_size_per_attention_head = kv_channels
+
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
@@ -3373,7 +3374,7 @@ class DotProductAttention(torch.nn.Module):
             set_all_rng_states(self.rng_states_tracker.get_states())
             attention_dropout_ctx = self.rng_states_tracker.fork
 
-        norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        norm_factor = math.sqrt(kv_channels)
 
         self.device_compute_capability = get_device_compute_capability()
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))) \
@@ -3508,9 +3509,11 @@ class DotProductAttention(torch.nn.Module):
 
         .. note::
 
-            Input tensors :attr:`query_layer`, :attr:`key_layer`, and :attr:`value_layer`
+            Input tensor :attr:`query_layer` must be of shape
+            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`,
+            :attr:`kv_channels`) and the tensors :attr:`key_layer` and :attr:`value_layer`
             must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
-            :attr:`num_attention_heads`, :attr:`kv_channels`). Output of shape
+            :attr:`num_gqa_groups`, :attr:`kv_channels`). Output of shape
             (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
             * :attr:`kv_channels`) is returned.
 
@@ -4217,7 +4220,7 @@ class MultiheadAttention(torch.nn.Module):
         bias: bool = True,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
-        qkv_format: str = "sbhd",
+        qkv_format: str = "sbhd"
     ) -> None:
         super().__init__()
 
@@ -4254,7 +4257,6 @@ class MultiheadAttention(torch.nn.Module):
         self.tp_size = tp_size
         self.sequence_parallel = (tp_size > 1) and sequence_parallel
 
-        self.hidden_size_per_attention_head = kv_channels
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
@@ -4264,7 +4266,10 @@ class MultiheadAttention(torch.nn.Module):
         assert (self.num_gqa_groups % tp_size == 0
                 ), "The number of GQA groups must be divisible by tensor parallel size!"
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
-        self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // num_attention_heads)
+
+        self.hidden_size_per_attention_head = kv_channels
+        self.hidden_size_q = self.hidden_size_per_attention_head * num_attention_heads
+        self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -4282,14 +4287,14 @@ class MultiheadAttention(torch.nn.Module):
             parameters_split = None
             if not fuse_qkv_params:
                 parameters_split = collections.OrderedDict([
-                    ("query", hidden_size),
+                    ("query", self.hidden_size_q),
                     ("key", self.hidden_size_kv),
                     ("value", self.hidden_size_kv),
                 ])
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
-                    hidden_size + 2 * self.hidden_size_kv,
+                    self.hidden_size_q + 2 * self.hidden_size_kv,
                     eps=layernorm_epsilon,
                     init_method=init_method,
                     bias=bias,
@@ -4309,7 +4314,7 @@ class MultiheadAttention(torch.nn.Module):
             else:
                 self.qkv = Linear(
                     hidden_size,
-                    hidden_size + 2 * self.hidden_size_kv,
+                    self.hidden_size_q + 2 * self.hidden_size_kv,
                     init_method=init_method,
                     bias=bias,
                     return_bias=False,
@@ -4321,7 +4326,7 @@ class MultiheadAttention(torch.nn.Module):
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
-                    hidden_size,
+                    self.hidden_size_q,
                     eps=layernorm_epsilon,
                     init_method=init_method,
                     bias=bias,
@@ -4341,7 +4346,7 @@ class MultiheadAttention(torch.nn.Module):
             else:
                 self.query_layer = Linear(
                     hidden_size,
-                    hidden_size,
+                    self.hidden_size_q,
                     init_method=init_method,
                     bias=bias,
                     return_bias=False,
@@ -4362,7 +4367,7 @@ class MultiheadAttention(torch.nn.Module):
         # Attention.
         self.core_attention = DotProductAttention(
             num_attention_heads,
-            kv_channels,
+            self.hidden_size_per_attention_head,
             num_gqa_groups=self.num_gqa_groups,
             attention_dropout=attention_dropout,
             qkv_format=self.qkv_format,
@@ -4376,7 +4381,7 @@ class MultiheadAttention(torch.nn.Module):
 
         # Linear
         self.proj = Linear(
-            hidden_size,
+            self.hidden_size_q,
             hidden_size,
             init_method=output_layer_init_method,
             bias=bias,
