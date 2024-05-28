@@ -712,7 +712,7 @@ class Float8Tensor(torch.Tensor):
             noop_flag = None
 
         # Launch cast-transpose kernel
-        fp8_meta_index = self._fp8_meta_index
+        fp8_meta_index = int(self._fp8_meta_index)
         fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
             forward=self._fp8_meta_forward,
         )
@@ -726,17 +726,15 @@ class Float8Tensor(torch.Tensor):
             transpose_out=transpose,
             noop_flag=noop_flag,
         )
+        scale = fp8_meta.scale[fp8_meta_index:fp8_meta_index+1]
         scale_inv = self._scale_inv
         if noop_flag is None:
-            torch.reciprocal(
-                fp8_meta.scale[fp8_meta_index].view(1),
-                out=scale_inv,
-            )
+            torch.reciprocal(scale, out=scale_inv)
         else:
             torch.where(
-                noop_flag,
+                noop_flag.bool(),
                 scale_inv,
-                fp8_meta.scale[fp8_meta_index].view(1).reciprocal(),
+                scale.reciprocal(),
                 out=scale_inv,
             )
         self._transpose_invalid = False
