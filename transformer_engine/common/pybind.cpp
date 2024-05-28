@@ -7,7 +7,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
-#include <dlpack/dlpack.h>
 
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/fused_attn.h>

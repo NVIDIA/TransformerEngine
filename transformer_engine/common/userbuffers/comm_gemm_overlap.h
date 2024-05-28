@@ -8,7 +8,6 @@
 #define TRANSFORMER_ENGINE_USERBUFFERS_COMM_GEMM_OVERLAP_H_
 
 #include <cstring>
-#include <dlpack/dlpack.h>
 #include <pybind11/pybind11.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/gemm.h>
@@ -20,14 +19,6 @@
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
-
-// Hacky type restriction to comply with userbuffers
-#if __CUDA_ARCH__ >= 800
-#include <cuda_bf16.h>
-#define half nv_bfloat16
-#else
-#include <cuda_fp16.h>
-#endif
 
 namespace py = pybind11;
 
@@ -59,7 +50,7 @@ NVTE_Comm_Overlap_Type nvte_overlapped_comm_type(NVTE_Comm_Overlap_Algo overlap_
     default:
       return NVTE_Comm_Overlap_Type::REDUCE_SCATTER;
   }
-};
+}
 
 bool nvte_comm_overlap_is_p2p(NVTE_Comm_Overlap_Algo overlap_algo) {
   switch (overlap_algo) {
@@ -72,7 +63,7 @@ bool nvte_comm_overlap_is_p2p(NVTE_Comm_Overlap_Algo overlap_algo) {
     default:
       return false;
   }
-};
+}
 
 namespace transformer_engine {
 
