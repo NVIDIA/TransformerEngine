@@ -61,13 +61,15 @@ def parse_args(argv=None, namespace=None):
     parser.add_argument("--aggregate", action="store_true", default=False,
                         help="Aggregate 2X chunks for P2P split pipelined all-gather.")
     parser.add_argument("--comm-type", type=partial(mapped_argtype, typemap=nvte_comm_types),
-                        default=tex.NVTE_Comm_Overlap_Type.RS, choices=nvte_comm_types.keys(),
+                        default=tex.NVTE_Comm_Overlap_Type.RS,
                         help="Comm type to overlap.")
     parser.add_argument("--dtype", type=partial(mapped_argtype, typemap=torch_dtypes),
-                        default=torch.bfloat16, choices=torch_dtypes.keys(),
+                        default=torch.bfloat16,
                         help="Data type for input tensor and Transformer Engine module parameters.")
     parser.add_argument("--check-numerics", action="store_true", default=False,
                         help="Test numerical result against torch.matmul(...)")
+    parser.add_argument("--atol", type=float, default=5e-3,
+                        help="Absolute tolerance for numerical check when --check-numerics is on.")
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
     return parser.parse_args(argv, namespace)
