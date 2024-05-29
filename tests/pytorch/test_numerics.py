@@ -24,8 +24,9 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import grouped_gemm
+from transformer_engine.pytorch.cpp_extensions import grouped_gemm, fp8_grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace
+import transformer_engine_extensions as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -38,6 +39,11 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+# Numerical tolerances with FP8 types
+_tols: Dict[tex.DType, Dict[str, float]] = {
+    tex.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
+    tex.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
+}
 
 class ModelConfig:
     def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
@@ -410,7 +416,6 @@ class TorchGPT(nn.Module):
             n = self.ln_mlp(x)
             x = x + nn.functional.dropout(n, p=0.1, training=self.training)
         return x
-
 
 
 def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
@@ -1389,7 +1394,6 @@ def test_gpt_fp8_parameters(dtype, bs, model):
         )
 
 
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -1623,6 +1627,77 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         grad = True
 
     out_ref = _torch_grouped_gemm(A, B, out, layout, accumulate)
-    grouped_gemm(A, B, out, dtype, get_multi_stream_cublas_workspace(), grad, accumulate, layout)
+    grouped_gemm(
+        A,
+        B,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        grad=grad,
+        accumulate=accumulate,
+        layout=layout,
+    )
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref)
+
+
+@pytest.mark.parametrize("shape", [(1, 127, 128, 512),
+                                   (8, 15, 128, 512),
+                                   (8, 1027, 128, 512),
+                                   (16, 10027, 128, 512),])
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    z, m, k, n = shape
+    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    assert m_splits.sum() == m and len(m_splits) == z
+    m_splits = m_splits.tolist()
+
+    dtype = torch.bfloat16
+    A = [torch.rand(n, k, dtype=dtype, device="cuda") for _ in range(z)]      # weight
+    B = torch.split(torch.rand(m, k, dtype=dtype, device="cuda"), m_splits)   # input
+    out = torch.split(torch.rand(m, n, dtype=dtype, device="cuda"), m_splits) # output
+
+    out_ref = _torch_grouped_gemm(A, B, out, "TN", accumulate)
+
+    scale = 1 + torch.rand(z * 3, dtype=torch.float32, device="cuda")
+    scale_inv = 1 / scale
+    amax = torch.zeros(1024, z * 3, dtype=torch.float32, device="cuda")
+
+    A_fp8 = [torch.ops.tex_ts.cast_to_fp8_ts(
+        A[i],
+        scale,
+        amax,
+        scale_inv,
+        i,  # fp8 meta tensor index
+        tex.DType.kFloat8E4M3,
+    ) for i in range(z)]
+    B_fp8 = [torch.ops.tex_ts.cast_to_fp8_ts(
+        B[i],
+        scale,
+        amax,
+        scale_inv,
+        z + i,  # fp8 meta tensor index
+        fp8_dtype,
+    ) for i in range(z)]
+
+    fp8_grouped_gemm(
+        A_fp8,
+        scale_inv,
+        0,  # A_offset
+        tex.DType.kFloat8E4M3,
+        B_fp8,
+        scale_inv,
+        z,  # B_offset
+        fp8_dtype,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        accumulate=accumulate,
+    )
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref, **_tols[fp8_dtype])

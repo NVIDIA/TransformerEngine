@@ -157,17 +157,20 @@ void te_atomic_gemm(at::Tensor A,
 }
 
 void te_grouped_gemm(std::vector<at::Tensor> A,
-                     std::vector<at::Tensor> A_scale_inverse,
+                     at::Tensor A_scale_inverse,
+                     int A_offset,
                      transformer_engine::DType A_type,
                      bool transa,
                      std::vector<at::Tensor> B,
-                     std::vector<at::Tensor> B_scale_inverse,
+                     at::Tensor B_scale_inverse,
+                     int B_offset,
                      transformer_engine::DType B_type,
                      bool transb,
                      std::vector<at::Tensor> D,
-                     std::vector<at::Tensor> D_scale,
+                     int D_offset,
+                     at::Tensor D_scale,
                      transformer_engine::DType D_type,
-                     std::vector<at::Tensor> D_amax,
+                     at::Tensor D_amax,
                      std::vector<at::Tensor> bias,
                      transformer_engine::DType bias_type,
                      std::vector<at::Tensor> pre_gelu_out,
@@ -200,17 +203,17 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
                                   {static_cast<size_t>(A[i].size(0)),
                                   static_cast<size_t>(A[i].size(1))},
                                   A_type, nullptr, nullptr,
-                                  A_scale_inverse[i].data_ptr()));
+                                  getDataPtr(A_scale_inverse, A_offset + i)));
     te_B.emplace_back(make_tensor(B[i].data_ptr(),
                                   {static_cast<size_t>(B[i].size(0)),
                                   static_cast<size_t>(B[i].size(1))},
                                   B_type, nullptr, nullptr,
-                                  B_scale_inverse[i].data_ptr()));
+                                  getDataPtr(B_scale_inverse, B_offset + i)));
     te_D.emplace_back(make_tensor(D[i].data_ptr(),
                                   {static_cast<size_t>(D[i].size(0)),
                                   static_cast<size_t>(D[i].size(1))},
-                                  D_type, D_amax[i].data_ptr(),
-                                  D_scale[i].data_ptr(), nullptr));
+                                  D_type, getDataPtr(D_amax, D_offset + i),
+                                  getDataPtr(D_scale, D_offset + i), nullptr));
     te_bias.emplace_back(make_tensor(bias[i].data_ptr(),
                                      {static_cast<size_t>(bias[i].size(0))},
                                      bias_type, nullptr, nullptr, nullptr));
