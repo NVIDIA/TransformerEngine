@@ -87,9 +87,11 @@ pygments_style = 'sphinx'
 html_theme = 'sphinx_rtd_theme'
 html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 html_static_path = ['_static']
+html_show_sphinx = False
 
 html_css_files = [
         'css/nvidia_font.css',
+        'css/nvidia_footer.css',
 ]
 
 html_theme_options = {
