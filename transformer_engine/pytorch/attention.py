@@ -1432,6 +1432,8 @@ class FusedRoPEFunc(torch.autograd.Function):
         tensor_format: str = "sbhd",
         cu_seqlens: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
+        if freqs.dtype != torch.float32:
+            freqs = freqs.float()
         if tensor_format == "sbhd":
             output = tex.fused_rope_forward(t, freqs, False)
         elif tensor_format == "bshd":
