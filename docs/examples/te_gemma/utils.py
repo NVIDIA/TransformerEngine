@@ -104,7 +104,7 @@ def init_baseline_model(hyperparams):
         config=config,
         torch_dtype=torch.bfloat16,
     )
-    return model
+    return model.cuda()
 
 def init_te_gemma_model(hyperparams):
     cls = TEGemmaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TEGemmaForCausalLM
@@ -116,7 +116,7 @@ def init_te_gemma_model(hyperparams):
     model = load_te_model(cls, config)
     if hyperparams.generation_cuda_graphs:
         model.record()
-    return model
+    return model.cuda()
 
 
 def wrap_with_accelerator(model, hyperparams):
@@ -256,7 +256,7 @@ def _generate_random_words(num_words, max_word_length):
         words.append(word)
     return words
 
-def benchmark_generation(model, measure_memory=False):
+def benchmark_generation(model):
     batch_size = 64
     context_length = 128
     max_new_tokens = 1024 - 128
@@ -281,5 +281,3 @@ def benchmark_generation(model, measure_memory=False):
     end.record()
     
     print(f"Time: {start.elapsed_time(end)/1000:.2f} s.")
-    if measure_memory:
-        print(f"Peak GPU memory usage: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
