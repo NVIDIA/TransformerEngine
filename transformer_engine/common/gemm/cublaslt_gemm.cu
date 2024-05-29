@@ -327,7 +327,6 @@ void cublas_gemm(const Tensor *inputA,
 static std::once_flag init_flag;
 static cudaStream_t compute_streams[num_streams];
 static cudaEvent_t cublas_event[num_streams];
-static cudaEvent_t main_stream_event;
 
 // Warning: only call once per device!
 static void init_streams_and_events() {
@@ -335,7 +334,6 @@ static void init_streams_and_events() {
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
     NVTE_CHECK_CUDA(cudaEventCreate(&cublas_event[i]));
   }
-  NVTE_CHECK_CUDA(cudaEventCreate(&main_stream_event));
 }
 
 }  // namespace transformer_engine
@@ -493,21 +491,24 @@ void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A,
   // Inits streams and events (once, globally)
   std::call_once(init_flag, init_streams_and_events);
 
-  NVTE_CHECK_CUDA(cudaEventRecord(main_stream_event, stream));
-  for (size_t i = 0; i < A.size(); i++) {
-    cudaStream_t compute_stream = compute_streams[i % num_streams];
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_stream, main_stream_event));
-    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                     workspace[i % num_streams], accumulate, use_split_accumulator,
-                     math_sm_count, compute_stream);
+  int num_stream_used = std::min(num_streams, static_cast<int>(A.size()));
+  // wait for current stream to finish
+  NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
   }
 
-  int num_stream_used = std::min(num_streams, static_cast<int>(A.size()));
-  // record events
+  for (size_t i = 0; i < A.size(); i++) {
+    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+                     workspace[i % num_streams], accumulate, use_split_accumulator,
+                     math_sm_count, compute_streams[i % num_streams]);
+  }
+
+  // record events on compute streams
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[s], compute_streams[s]));
   }
-  // wait for all streams to finish
+  // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
   }
