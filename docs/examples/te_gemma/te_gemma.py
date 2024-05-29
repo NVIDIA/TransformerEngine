@@ -45,7 +45,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             activation="geglu",
             attn_input_format=config.qkv_format,
             num_gqa_groups=config.num_key_value_heads,
-            attention_hidden_size=4096,
+            kv_channels=4096,
             layer_number=(layer_idx+1), # Layer numbers in TE starts from 1, not from 0 like in the HF.
             zero_centered_gamma=True
         )
