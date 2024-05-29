@@ -229,7 +229,7 @@ def run_forward_pass(model, hyperparams, num_iters):
 
 def print_sample_of_generated_texts(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-    inputs = tokenizer(["Tell me something about GPUs:", "Tell me something about NVIDIA:"] * 32, return_tensors="pt", padding=True)
+    inputs = tokenizer(["Some facts about GPUs:", "Some facts about NVIDIA:"] * 32, return_tensors="pt", padding=True)
 
     max_length = inputs['input_ids'].size(1)
     new_length = ((max_length + 63) // 64) * 128
