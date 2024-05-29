@@ -128,8 +128,8 @@ class TransformerLayer(torch.nn.Module):
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
                `encoder` option.
-    attention_hidden_size: int, default = `None`
-                number of channels of queue/key/value. defaults to
+    kv_channels: int, default = `None`
+                number of query-key-value channels per attention head. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
                         default = `causal`
