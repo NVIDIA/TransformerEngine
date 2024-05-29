@@ -304,6 +304,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             
             output_tokens = [next_tokens]
 
+            mask = None
             if self.config.qkv_format != "thd":
                 mask = (input_ids == 0).unsqueeze(1).unsqueeze(1)
 
