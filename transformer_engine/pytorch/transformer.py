@@ -236,7 +236,7 @@ class TransformerLayer(torch.nn.Module):
         init_method: Optional[Callable] = None,
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
-        attention_hidden_size: Optional[int] = None,
+        kv_channels: Optional[int] = None,
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
@@ -315,6 +315,10 @@ class TransformerLayer(torch.nn.Module):
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
 
+        self.kv_channels = (
+            kv_channels if kv_channels else (hidden_size // num_attention_heads)
+        )
+
         if init_method is None:
             init_method = get_default_init_method()
         if output_layer_init_method is None:
@@ -331,7 +335,7 @@ class TransformerLayer(torch.nn.Module):
         attention_args = (
             hidden_size,
             num_attention_heads,
-            attention_hidden_size,
+            self.kv_channels,
             attention_dropout,
             layernorm_epsilon,
             init_method,
@@ -622,7 +626,6 @@ class TransformerLayer(torch.nn.Module):
             hidden_states = cast_if_needed(
                 hidden_states, torch.get_autocast_gpu_dtype()
             )
-        
 
         # Self attention.
         self_attention_outputs = self.self_attention(
@@ -639,7 +642,6 @@ class TransformerLayer(torch.nn.Module):
             alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
         )
-
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
             attention_output, attention_bias, residual = self_attention_outputs
@@ -678,7 +680,6 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             is_first_microbatch=is_first_microbatch,
         )
-        
         if self.apply_residual_connection_post_layernorm:
             mlp_output, mlp_bias, residual = mlp_outputs
             output = self._bias_dropout_add(mlp_output, mlp_bias, residual, self.drop_path)

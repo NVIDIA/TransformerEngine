@@ -3522,7 +3522,7 @@ class DotProductAttention(torch.nn.Module):
     def __init__(
         self,
         num_attention_heads: int,
-        channels: int,
+        kv_channels: int,
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
