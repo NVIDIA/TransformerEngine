@@ -90,12 +90,13 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
 /*
 ** Python callback for torch.distributed.broadcast(datatensor, tp_group).
 */
-void ub_bcast_int(int *data, int src, char *group) {
+void ub_bcast_int(void *data, size_t bytes, int src, char *group) {
   assert(torch_callbacks.initialized);
   auto datatensor = torch::from_blob(
-    reinterpret_cast<void *>(data), {1}, at::device(torch::kCPU).dtype(torch::kInt32));
+    data, {static_cast<int64_t>(bytes / sizeof(uint8_t))},
+    at::device(torch::kCPU).dtype(torch::kUInt8));
   datatensor = torch_callbacks.bcast_int(datatensor, src, group);
-  *data = datatensor.accessor<int, 1>()[0];
+  data = datatensor.data_ptr();
 }
 
 /*

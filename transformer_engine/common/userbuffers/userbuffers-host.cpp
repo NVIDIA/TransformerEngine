@@ -92,7 +92,7 @@ int pipe_rank(communicator *comm, int step) {
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(int*, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
@@ -234,7 +234,7 @@ int create_communicator_grouped2(communicator **comm,
       CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
                                           CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
     }
-    (*comm)->_bcast_int(&fd, 0, (*comm)->comm_intra);
+    (*comm)->_bcast_int(reinterpret_cast<void *>(&fd), sizeof(int), 0, (*comm)->comm_intra);
     if ((*comm)->ar2_nvrank > 0) {
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
@@ -316,7 +316,7 @@ int create_communicator_grouped2(communicator **comm,
 int create_communicator_grouped(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(int*, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes) {
@@ -329,7 +329,7 @@ int create_communicator_grouped(communicator **comm,
 int create_communicator(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(int*, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free) {
   return create_communicator_grouped2(

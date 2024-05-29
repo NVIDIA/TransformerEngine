@@ -91,7 +91,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(int *, int, char *)> bcast_int_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_int_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle
   ) {
@@ -178,7 +178,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(int *, int, char *)> bcast_int_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_int_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle)
   : CommGemmOverlapBase(
@@ -514,7 +514,7 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     int num_max_streams, bool set_sm_margin, bool atomic_gemm, bool aggregate,
     bool is_reduce_scatter,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(int *, int, char *)> bcast_int_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_int_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle)
   : CommGemmOverlapBase(
