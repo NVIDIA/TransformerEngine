@@ -56,6 +56,9 @@ class HyperParameters:
         
 hyperparams = HyperParameters()
 
+assert torch.backends.cudnn.version() >= 9100, \
+    "cuDNN version >= 9.1.0 is needed to run this tutorial."
+
 def get_dataloaders(accelerator:Accelerator, hyperparams):
     dataset = load_dataset(hyperparams.dataset_name, split="train")
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
