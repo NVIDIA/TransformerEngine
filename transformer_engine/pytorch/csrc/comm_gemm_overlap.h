@@ -96,12 +96,14 @@ void ub_bcast_int(void *data, size_t bytes, int src, char *group) {
     data, {static_cast<int64_t>(bytes / sizeof(uint8_t))},
     at::device(torch::kCPU).dtype(torch::kUInt8));
   datatensor = torch_callbacks.bcast_int(datatensor, src, group);
-  // Python callback does a CPU->GPU copy, bcast on device, and a GPU->CPU copy.
-  // This causes PyTorch to create a new tensor on the copy back to the CPU, leaving the
-  // original torch::from_blob(..) to be garbage collected, and the original data
-  // pointer dangling without a Torch tensor. Here, we need to copy the data from the new
-  // tensor into the original pointer. The new tensor will be garbage collected later.
-  memcpy(data, datatensor.data_ptr(), bytes);
+  // A torch.distributed.broadcast() callback with NCCL backend would require a host-to-device copy
+  // before broadcast on device, and a device-to-host copy after. This causes PyTorch to create a
+  // new tensor on the host-to-device copy, leaving the original torch::from_blob() to be gargabe
+  // collected, and the original data pointer dangling without a Torch tensor. To guard against
+  // this, we need to memcpy from the new tensor into the original data pointer. The same broadcast
+  // with GLOO or MPI backend would be done in-place, in which case we skip the memcpy.
+  if (datatensor.data_ptr() != data)
+    memcpy(data, datatensor.data_ptr(), bytes);
 }
 
 /*
