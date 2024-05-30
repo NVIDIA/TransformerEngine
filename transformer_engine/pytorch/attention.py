@@ -1023,6 +1023,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     flash_attn_streams[(i-1)%2].record_event(fwd_results_correction_done)
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+
         softmax_lse = softmax_lse.to(torch.float)
         if qkv_format in ["bshd", "sbhd"]:
             seq_dim = qkv_format.index("s")
@@ -2877,7 +2878,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta):
-        
         if fp8:
             if _NVTE_DEBUG:
                 print('[DotProductAttention]: using FP8 forward')
@@ -3900,7 +3900,7 @@ class DotProductAttention(torch.nn.Module):
 
         if qkv_format is None:
             qkv_format = self.qkv_format
-        
+
         if inference_params is not None:
             assert self.layer_number is not None, "Layer number must be set!"
 
@@ -3930,7 +3930,7 @@ class DotProductAttention(torch.nn.Module):
 
             key_layer = key_layer.contiguous()
             value_layer = value_layer.contiguous()
-        
+
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
             ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
@@ -4214,10 +4214,6 @@ class DotProductAttention(torch.nn.Module):
                     seq_offsets_o=seq_offsets_o,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
-                    seq_offsets_q=seq_offsets_q,
-                    seq_offsets_k=seq_offsets_k,
-                    seq_offsets_v=seq_offsets_v,
-                    seq_offsets_o=seq_offsets_o,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     fused_attention_backend=fused_attention_backend,
@@ -4241,10 +4237,6 @@ class DotProductAttention(torch.nn.Module):
                 seq_offsets_o=seq_offsets_o,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                seq_offsets_q=seq_offsets_q,
-                seq_offsets_k=seq_offsets_k,
-                seq_offsets_v=seq_offsets_v,
-                seq_offsets_o=seq_offsets_o,
                 attn_mask_type=attn_mask_type,
                 attention_mask=attention_mask,
                 fused_attention_backend=fused_attention_backend,
@@ -4823,7 +4815,6 @@ class MultiheadAttention(torch.nn.Module):
                 )
             num_queries_per_key_value = (self.num_attention_heads_per_partition //
                                          self.num_gqa_groups_per_partition)
-            
             if self.qkv_weight_interleaved:
                 # [sq, b, ng * (np/ng + 2) * hn] --> [sq, b, ng, (np/ng + 2), hn]
                 new_tensor_shape = mixed_x_layer.size()[:-1] + (
@@ -4929,7 +4920,6 @@ class MultiheadAttention(torch.nn.Module):
                 self.hidden_size_per_attention_head,
             )
             query_layer = query_layer.view(*new_tensor_shape)
-
 
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
