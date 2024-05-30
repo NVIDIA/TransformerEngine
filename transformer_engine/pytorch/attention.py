@@ -1033,6 +1033,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             elif qkv_format == "sbhd":
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
                 out_ = out[1]
+
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
@@ -1065,6 +1066,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                            True)
                 else:
                     assert False, f"{qkv_format} is an unsupported qkv_format!"
+
         kv = p2p_comm_buffers[-1]
         if use_fused_attention:
             if qkv_format == "bshd":
@@ -1089,17 +1091,21 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         return out
+
     @staticmethod
     def backward(ctx, dout):
         (q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k) = ctx.saved_tensors[:6]
         cp_size = get_distributed_world_size(ctx.cp_group)
         rng_states = ctx.saved_tensors[6:6+cp_size]
         attn_biases = ctx.saved_tensors[6+cp_size:6+cp_size*2]
+
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
+
         if attn_biases[0] is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)]
             attn_dbias = torch.zeros(
@@ -1113,6 +1119,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             )
         else:
             attn_dbias = None
+
         if ctx.causal:
             if ctx.qkv_format == "thd":
                 softmax_lse_ = tex.thd_read_second_half_lse(softmax_lse, cu_seqlens_q, q.size(0))
@@ -1132,19 +1139,23 @@ class AttnFuncWithCP(torch.autograd.Function):
         dout = dout.view(*q.shape)
         # Flash Attn outputs
         dq = torch.empty_like(q)
+
         p2p_comm_buffers = [torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device), \
                             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device)]
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
+
         fa_optional_backward_kwargs = {}
         if _flash_attn_2_4_plus:
             fa_optional_backward_kwargs["alibi_slopes"] = None
         if _flash_attn_2_4_1_plus:
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+
         for i in range(cp_size):
             # wait until KV is received
             for req in send_recv_reqs:
                 req.wait()
+
             send_tensor = p2p_comm_buffers[i%2]
             recv_tensor = p2p_comm_buffers[(i+1)%2]
             if i == 0:
@@ -1153,6 +1164,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             if i == (cp_size-1):
                 send_tensor = send_tensor[1]
                 recv_tensor = recv_tensor[1]
+
             send_recv_reqs = flash_attn_p2p_communicate(rank,
                                                         send_tensor,
                                                         send_dst,
@@ -1160,6 +1172,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                                         recv_src,
                                                         ctx.cp_group,
                                                         batch_p2p_comm)
+
             kv = p2p_comm_buffers[i%2][0]
             # In reversed order of fwd
             if ctx.causal:
@@ -1370,6 +1383,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         ctx.dropout_p, ctx.softmax_scale, False,
                         **fa_optional_backward_kwargs
                     )
+
             if i >= (cp_size-rank-1) or not ctx.causal:
                 # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
                 # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
@@ -1381,6 +1395,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 elif ctx.qkv_format == "sbhd":
                     # [b*sq//2, np, hn] -> [sq//2, b, np, hn]
                     dq_ = dq_.view(-1, *dq.shape[-3:])
+
             if ctx.causal:
                 if i > (cp_size-rank-1):
                     dq.add_(dq_)
@@ -1415,6 +1430,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dq.copy_(dq_)
                 else:
                     dq.add_(dq_)
+
             if attn_dbias is not None:
                 idx = (rank+i+1)%cp_size
                 if i == (cp_size - 1) or not ctx.causal:
@@ -1430,9 +1446,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
                     attn_dbias_[..., 1, :, idx, :].copy_(dbias_[..., 0, :])
                     attn_dbias_[..., 1, :, (2*cp_size-idx-1), :].copy_(dbias_[..., 1, :])
+
             # wait until dKV is received
             for req in send_recv_reqs:
                 req.wait()
+
             dkv = p2p_comm_buffers[(i+1)%2][1]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
@@ -1447,6 +1465,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn] if causal
                 # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
                 dkv_ = dkv_.view(*dkv.shape)
+
             if ctx.causal:
                 if i == (cp_size-1):
                     if rank == 0:
