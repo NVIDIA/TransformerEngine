@@ -6,7 +6,7 @@
 
 #include "extensions.h"
 
-at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs, 
+at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const at::Tensor &begins, const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
@@ -66,7 +66,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   return output;
 }
 
-at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs, 
+at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
                                const at::Tensor &begins, const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
@@ -174,7 +174,7 @@ at::Tensor fused_rope_thd_forward(const at::Tensor &input,
 
   nvte_fused_rope_thd_forward(
       input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(), output_cu.data(),
-      begins_cu.data(), max_s, b, h, d, d2, 
+      begins_cu.data(), max_s, b, h, d, d2,
       stride_t, stride_h, stride_d, o_stride_t, o_stride_h,
       o_stride_d, at::cuda::getCurrentCUDAStream());
 

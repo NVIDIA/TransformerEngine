@@ -94,7 +94,7 @@ __device__ void fused_rope_block_backward(
 
 template <typename scalar_t>
 __global__ void fused_rope_forward_kernel(
-    const scalar_t *src, const float *freqs, const int *begins, 
+    const scalar_t *src, const float *freqs, const int *begins,
     scalar_t *dst, const int h,
     const int d, const int d2, const int stride_s, const int stride_b,
     const int stride_h, const int stride_d, const int o_stride_s,
@@ -109,7 +109,7 @@ __global__ void fused_rope_forward_kernel(
 
 template <typename scalar_t>
 __global__ void fused_rope_backward_kernel(
-    const scalar_t *src, const float *freqs, const int *begins, 
+    const scalar_t *src, const float *freqs, const int *begins,
     scalar_t *dst, const int h,
     const int d, const int d2, const int stride_s, const int stride_b,
     const int stride_h, const int stride_d, const int o_stride_s,
@@ -156,7 +156,7 @@ __global__ void fused_rope_thd_backward_kernel(
 
 template <typename scalar_t>
 void fused_rope_forward_launcher(const scalar_t *input, const float *freqs,
-                                 const int *begins, scalar_t *output, 
+                                 const int *begins, scalar_t *output,
                                  const int s, const int b,
                                  const int h, const int d, const int d2,
                                  const int stride_s, const int stride_b,
@@ -212,7 +212,7 @@ void fused_rope_thd_forward_launcher(
 
 template <typename scalar_t>
 void fused_rope_thd_backward_launcher(
-    const scalar_t *output_grads, const int *cu_seqlens, 
+    const scalar_t *output_grads, const int *cu_seqlens,
     const float *freqs,  const int *begins,
     scalar_t *input_grads, const int max_s, const int b, const int h,
     const int d, const int d2, const int stride_t, const int stride_h,
@@ -284,7 +284,7 @@ void fused_rope_thd_forward(const Tensor &input, const Tensor &cu_seqlens,
           stream););
 }
 
-void fused_rope_thd_backward(const Tensor &output_grads, const Tensor &cu_seqlens, 
+void fused_rope_thd_backward(const Tensor &output_grads, const Tensor &cu_seqlens,
                              const Tensor &freqs, const Tensor &begins,
                              Tensor *input_grads, const int max_s, const int b,
                              const int h, const int d, const int d2,
@@ -307,7 +307,7 @@ void fused_rope_thd_backward(const Tensor &output_grads, const Tensor &cu_seqlen
 }  // end namespace transformer_engine
 
 void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs,
-                             const NVTETensor begins, NVTETensor output, 
+                             const NVTETensor begins, NVTETensor output,
                              const int s, const int b,
                              const int h, const int d, const int d2,
                              const int stride_s, const int stride_b,
@@ -326,7 +326,7 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs,
 }
 
 void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor freqs,
-                              const NVTETensor begins, NVTETensor input_grads, 
+                              const NVTETensor begins, NVTETensor input_grads,
                               const int s, const int b, const int h,
                               const int d, const int d2, const int stride_s,
                               const int stride_b, const int stride_h,
@@ -345,7 +345,7 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor fr
 
 void nvte_fused_rope_thd_forward(const NVTETensor input,
                                  const NVTETensor cu_seqlens,
-                                 const NVTETensor freqs, 
+                                 const NVTETensor freqs,
                                  const NVTETensor begins, NVTETensor output,
                                  const int max_s, const int b, const int h,
                                  const int d, const int d2, const int stride_t,
