@@ -20,3 +20,5 @@ pytest -v -s $TE_PATH/tests/pytorch/test_float8tensor.py
 pytest -v -s $TE_PATH/tests/pytorch/test_torch_save_load.py
 pytest -v -s $TE_PATH/tests/pytorch/test_gqa.py
 pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py
+pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py
+pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py
