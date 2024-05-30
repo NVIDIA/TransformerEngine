@@ -249,7 +249,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             std::vector<int64_t> o_stride(4);
             generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
                     layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
-            O->set_output(true).set_dim({b, h, s_q, d}).set_stride(o_stride);
+            if (is_ragged) {
+                O->set_output(true)
+                    .set_dim({b, h, s_q, d})
+                    .set_stride(o_stride)
+                    .set_ragged_offset(offset_o);
+            } else {
+                O->set_output(true)
+                    .set_dim({b, h, s_q, d})
+                    .set_stride(o_stride);
+            }
 
             Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
                     .set_dim({b, h, s_q, 1})

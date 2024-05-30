@@ -2529,9 +2529,9 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         (qkv, out, cu_seqlens,
             seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
             qkv_fp8, out_fp8,
-            fwd_scales, fwd_scale_invs) = ctx.saved_tensors
-        if not ctx.aux_ctx_tensors[0].is_contiguous():
-            ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
+            fwd_scales, fwd_scale_invs, *aux_ctx_tensors) = ctx.saved_tensors
+        if not aux_ctx_tensors[0].is_contiguous():
+            aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
@@ -2610,11 +2610,11 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None,None, None, None, None, dqkv, None, None, None,
+            return (None, None, None, None, None, None, None, dqkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, None, None, dqkv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, dqkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -2835,11 +2835,11 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, None, None, None, None, None, dq, dkv, None, None, None,
+            return (None, None, None, None, None, None, None, None, None, dq, dkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -3970,7 +3970,10 @@ class DotProductAttention(torch.nn.Module):
         # The following section filters out some backends based on
         # certain asserts before executing the forward pass.
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> main7
         # Filter: QKV layout.
         if qkv_format == 'thd':
             use_unfused_attention = False
@@ -4190,6 +4193,10 @@ class DotProductAttention(torch.nn.Module):
                     qkv_layout=qkv_layout,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
+                    seq_offsets_q=seq_offsets_q,
+                    seq_offsets_k=seq_offsets_k,
+                    seq_offsets_v=seq_offsets_v,
+                    seq_offsets_o=seq_offsets_o,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     seq_offsets_q=seq_offsets_q,
@@ -4213,6 +4220,10 @@ class DotProductAttention(torch.nn.Module):
                 qkv_layout=qkv_layout,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
+                seq_offsets_q=seq_offsets_q,
+                seq_offsets_k=seq_offsets_k,
+                seq_offsets_v=seq_offsets_v,
+                seq_offsets_o=seq_offsets_o,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 seq_offsets_q=seq_offsets_q,

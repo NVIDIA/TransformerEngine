@@ -120,6 +120,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format");
 
+  // multi-tensor functions
+  m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
+        "Fused overflow check + scale for a list of contiguous tensors");
+  m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors");
+  m.def("multi_tensor_unscale_l2norm", &multi_tensor_unscale_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors after unscaling (unscaling is only "
+        "performed for L2 norm computation, and tensors are not updated)");
+  m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer");
+  m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support and LR scheduling");
+  m.def("multi_tensor_adam_capturable_master", &multi_tensor_adam_capturable_master_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support, LR scheduling and FP32 master weights");
+  m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
+        "Fused SGD optimizer for list of contiguous tensors");
+
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
     .def(py::init<>())
