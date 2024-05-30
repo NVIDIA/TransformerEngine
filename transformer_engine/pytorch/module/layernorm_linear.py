@@ -832,6 +832,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   would not fit in GPU memory.
     """
 
+    def __new__(
+        cls,
+        *args,
+        **kwargs,
+    ) -> None:
+        with fp8_model_init(enabled=kwargs.get("fp8_model_init", False))
+            module = cls(*args, **kwargs)
+        return module
+
+
     def __init__(
         self,
         in_features: int,
