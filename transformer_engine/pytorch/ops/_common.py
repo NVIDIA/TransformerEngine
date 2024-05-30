@@ -8,9 +8,6 @@ import math
 
 import torch
 
-from transformer_engine.pytorch.cpp_extensions import (
-    fp8_cast_transpose_fused,
-)
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
@@ -148,51 +145,3 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
-
-
-@torch.no_grad()
-def fp8_cast_transpose(
-    tensor: torch.Tensor,
-    fp8_meta: Dict[str, Any],
-    fp8_meta_forward: bool,
-    fp8_meta_index: int,
-    fp8_dtype: tex.DType,
-) -> Float8Tensor:
-    """Fused FP8 cast and transpose"""
-
-    # Make sure tensor is in expected format
-    device = tensor.device
-    if device.type != "cuda":
-        device = canonicalize_device(None)
-    dtype = tensor.dtype
-    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        dtype = torch.float32
-    tensor = convert_tensor(
-        tensor,
-        device=device,
-        dtype=dtype,
-        memory_format=torch.contiguous_format,
-    )
-
-    # Compute FP8 cast and FP8 transpose
-    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-        forward=fp8_meta_forward,
-    )
-    data, data_t = fp8_cast_transpose_fused(
-        tensor,
-        fp8_meta[fp8_meta_key],
-        fp8_meta_index,
-        fp8_dtype,
-    )
-
-    # Construct FP8 tensor and populate transpose cache
-    out = Float8Tensor(
-        data=data,
-        fp8_meta=fp8_meta,
-        fp8_meta_forward=fp8_meta_forward,
-        fp8_meta_index=fp8_meta_index,
-        fp8_dtype=fp8_dtype,
-    )
-    out._transpose = data_t
-    out._transpose_invalid = False
-    return out

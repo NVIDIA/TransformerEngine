@@ -29,7 +29,6 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
-    fp8_cast_transpose,
     is_float8_tensor,
     reshape,
 )
