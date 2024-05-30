@@ -1912,7 +1912,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 dtype=params_dtype,
             )
         )
-        self.fp8_weight_shapes.append(self.qkv_weight.shape)
         self.qkv_bias = torch.nn.Parameter(
             torch.empty(
                 self.hidden_size * 3,
@@ -1946,9 +1945,3 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 self.training,
                 self.mask_type)
         return out
-
-    def get_fp8_weights_scratchpad(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
-        """Needs override."""
