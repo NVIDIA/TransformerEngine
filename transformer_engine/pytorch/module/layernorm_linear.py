@@ -837,7 +837,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         *args,
         **kwargs,
     ) -> None:
-        with fp8_model_init(enabled=kwargs.get("fp8_model_init", False))
+        if "fp8_model_init" in kwargs:
+            with fp8_model_init(enabled=kwargs.get("fp8_model_init", False))
+                module = cls(*args, **kwargs)
+        else:
             module = cls(*args, **kwargs)
         return module
 
