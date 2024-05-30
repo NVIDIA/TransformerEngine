@@ -264,10 +264,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                     .set_dim({b, h, s_q, 1})
                     .set_stride({h * s_q, s_q, 1, 1});
 
-            Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT)
-                    .set_dim({b, h, s_q, 1})
-                    .set_stride({h * s_q, s_q, 1, 1});
-
             std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // K
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // V
