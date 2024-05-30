@@ -21,9 +21,11 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
         # Use default CUDA device
         device = torch.get_default_device()
         if device.type != "cuda":
-            device = torch.device("cuda")
+            device = torch.device("cuda", torch.cuda.current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
     return device
 
 def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
@@ -57,7 +59,6 @@ def is_float8_tensor(tensor: Any) -> bool:
     """Check if object is a `Float8Tensor`"""
     return isinstance(tensor, Float8Tensor)
 
-@torch.no_grad()
 def convert_tensor(
     tensor: torch.Tensor | Float8Tensor,
     device: Optional[torch.device] = None,
@@ -98,7 +99,6 @@ def convert_tensor(
     # Convert standard PyTorch tensor
     return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
 
-@torch.no_grad()
 def reshape(
     tensor: torch.Tensor | Float8Tensor,
     shape: Iterable[int],
