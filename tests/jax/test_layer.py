@@ -177,6 +177,8 @@ ATTRS = [{}, {
     _KEY_OF_SELF_ATTN_BIAS_TYPE: "no_bias",
 }, {
     _KEY_OF_ATTENTION_DROPOUT: 0.3,
+}, {
+    _KEY_OF_MLP_ACTIVATIONS: (('relu', 'relu')),
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]

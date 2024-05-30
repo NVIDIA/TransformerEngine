@@ -37,7 +37,7 @@ from transformer_engine.jax.softmax import SoftmaxType
 
 is_fp8_supported, reason = is_fp8_available()
 
-DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]
+DATA_SHAPE = [(32, 128, 512), (32, 512, 512)]    # (B, S, H)
 DTYPE = [jnp.float32, jnp.bfloat16]
 ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
@@ -736,7 +736,7 @@ class TestDotProductAttn(TestLayer):
         q_key, k_key, v_key = jax.random.split(key, 3)
         b, s, *_ = shape
         if self.attrs[DotProductAttnAttr.TRANSPOSE_BS]:
-            b, s = s, b
+            shape = (shape[1], shape[0]) + shape[2:]
         mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
         return [
             *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, k_key, v_key]), mask
@@ -786,6 +786,7 @@ class MultiHeadAttnAttr:
     ZERO_CEN = 'zero_centered_gamma'
     NUM_ATTN_HEADS = 'num_attention_heads'
     NUM_GQA_GROUPS = 'num_gqa_groups'
+    TRANSPOSE_BS = 'transpose_batch_sequence'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
     ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
     LORA_SCOPE = 'low_rank_adaptation_scope'
@@ -795,42 +796,48 @@ class MultiHeadAttnAttr:
         ZERO_CEN: False,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
@@ -839,7 +846,8 @@ class MultiHeadAttnAttr:
         ROPE_GROUP_METHOD: 'consecutive',
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
@@ -848,7 +856,8 @@ class MultiHeadAttnAttr:
         ROPE_GROUP_METHOD: 'consecutive',
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
@@ -857,7 +866,8 @@ class MultiHeadAttnAttr:
         ROPE_GROUP_METHOD: 'alternate',
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -865,7 +875,8 @@ class MultiHeadAttnAttr:
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'padding',
-        LORA_SCOPE: 'all'
+        LORA_SCOPE: 'all',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -873,7 +884,8 @@ class MultiHeadAttnAttr:
         ENABLE_ROPE: False,
         ROPE_GROUP_METHOD: 'consecutive',
         ATTN_MASK_TYPE: 'causal',
-        LORA_SCOPE: 'all'
+        LORA_SCOPE: 'all',
+        TRANSPOSE_BS: True,
     }]
 
 
@@ -882,7 +894,9 @@ class TestMultiHeadAttn(TestLayer):
     def input_getter(self, shape, dtype):
         key = jax.random.PRNGKey(seed=1234)
         q_key, kv_key = jax.random.split(key, 2)
-        s, b, *_ = shape
+        b, s, *_ = shape
+        if self.attrs[MultiHeadAttnAttr.TRANSPOSE_BS]:
+            shape = (shape[1], shape[0]) + shape[2:]
         mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
         return [*map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask]
 
@@ -906,7 +920,7 @@ class TestMultiHeadAttn(TestLayer):
         rotary_pos_emb_group_method = attrs[MultiHeadAttnAttr.ROPE_GROUP_METHOD]
         low_rank_adaptation_scope = attrs.get(MultiHeadAttnAttr.LORA_SCOPE, 'none')
         fuse_qkv_params = True
-        transpose_batch_sequence = True
+        transpose_batch_sequence = attrs[MultiHeadAttnAttr.TRANSPOSE_BS]
         scale_attn_logits = False
         scaled_query_init = True
         float32_logits = False
@@ -962,6 +976,7 @@ class TestMultiHeadAttn(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', MultiHeadAttnAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -977,7 +992,7 @@ class TestMultiHeadAttn(TestLayer):
                                   fp8_format,
                                   rtol=1e-05,
                                   atol=1e-08):
-
+        self.attrs = attrs
         ds = DelayedScaling(fp8_format=fp8_format)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
@@ -1240,7 +1255,7 @@ class TestTransformer(TestLayer):
         q_key, kv_key = jax.random.split(key, 2)
         b, s, *_ = shape
         if self.attrs[TransformerLayerAttr.TRANSPOSE_BS]:
-            b, s = s, b
+            shape = (shape[1], shape[0]) + shape[2:]
         mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
         return [
             *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask, mask

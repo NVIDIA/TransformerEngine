@@ -129,7 +129,7 @@ class TransformerLayer(torch.nn.Module):
                This can be used for structures like `T5` Transformer in conjunction with the
                `encoder` option.
     kv_channels: int, default = `None`
-                number of key-value channels. defaults to
+                number of query-key-value channels per attention head. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
                         default = `causal`
