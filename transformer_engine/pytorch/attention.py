@@ -114,8 +114,9 @@ class InferenceParams: # pylint: disable=too-few-public-methods
     max_sequence_length: int
                     maximum sequence length during inference.
     qkv_format: str
-                    Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
-                    the sequence length dimension, `b` batch size, `h` the number of attention heads,
+                    Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}.
+                    `s` stands for the sequence length dimension,
+                    `b` batch size, `h` the number of attention heads,
                     `d` head size, and `t` the total number of sequences in a batch, i.e.
                     `t = sum(s_i) for i = 0...b-1`.
     """
@@ -129,16 +130,18 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         # self.key_value_memory_dict[layer number] = (key_cache, value_cache)
         # if qkv_format in ["bshd", "sbhd"]: (key/value)_cache.shape = [b/s, s/b, h, d]
         # # if qkv_format = "thd":  (key/value)_cache.shape = [t, h, d]
-        self.key_value_memory_dict = {} 
+        self.key_value_memory_dict = {}
         self.qkv_format = qkv_format
-        
+
         if qkv_format == "thd":
             # In thd attention layout input sequences can have different lenghts.
             # self.input_sequence_lengths stores tensor of shape [b] with lengths of input sequences
             # and self.cached_sequence_lengths is the sum of all previous input lengths tensors -
             # equivalently it contains total lengths of cached sequences.
-            self.cached_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
-            self.input_sequence_lengths = torch.empty((max_batch_size,), device="cuda", dtype=torch.int32)
+            self.cached_sequence_lengths = torch.empty(
+                (max_batch_size,), device="cuda", dtype=torch.int32)
+            self.input_sequence_lengths = torch.empty(
+                (max_batch_size,), device="cuda", dtype=torch.int32)
         else:
             self.sequence_len_offset = 0
             self.batch_size_offset = 0
@@ -168,11 +171,11 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_key_memory,
                 new_inference_value_memory,
             )
-    
-    
+
+
     def setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
         """
-            Updates parameters representing incoming sequence lengths and lengths 
+            Updates parameters representing incoming sequence lengths and lengths
             of sequence in the cache. Should be called before every forward pass in inference.
 
             Parameters
@@ -180,20 +183,23 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             new_input: torch.Tensor
                 Tensor with token_ids (not embeddings!) on which we want to do next forward pass.
             reset: int
-                If reset=True, all previous sequence lengths will be set to 0. 
-                It is supposed to be used after last generation phase to 
+                If reset=True, all previous sequence lengths will be set to 0.
+                It is supposed to be used after last generation phase to
                 allow inference_params to be reused.
             pad_token_id: int
-                Value of padding token - used to compute sequence lengths. If pad_token_id=None, 
+                Value of padding token - used to compute sequence lengths. If pad_token_id=None,
                 we assume that all new_input sequence lengths
                 are equal to the corresponding dimension of new_input.
         """
         if self.qkv_format == "thd":
-            self.cached_sequence_lengths.copy_(self.cached_sequence_lengths + self.input_sequence_lengths)
+            self.cached_sequence_lengths.copy_(
+                self.cached_sequence_lengths + self.input_sequence_lengths)
             if pad_token_id is not None:
-                self.input_sequence_lengths.copy_(torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
+                self.input_sequence_lengths.copy_(
+                    torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
             else:
-                self.input_sequence_lengths.copy_(torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
+                self.input_sequence_lengths.copy_(
+                    torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
             self.max_incoming_seq_len = new_input.shape[1]
 
             if reset:
@@ -203,7 +209,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 self.sequence_len_offset += self.input_sequence_length
             self.input_sequence_length = new_input.shape[1]
 
-    
+
     def save_to_kv_cache(self, layer_number, key_layer, value_layer):
         """
             Saves key_layer and value_layer in the cache.
@@ -225,27 +231,28 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             # This kernels copies kernels from input layers into cache,
             # taking into account the thd format and sequence lengths.
             tex.attention_copy(
-                inference_key_memory, 
-                self.cached_sequence_lengths, 
+                inference_key_memory,
+                self.cached_sequence_lengths,
                 self.input_sequence_lengths,
-                key_layer, 
+                key_layer,
                 self.max_incoming_seq_len,
-                self.max_sequence_length,  
+                self.max_sequence_length,
                 self.max_batch_size,
                 channels)
-            
+
             tex.attention_copy(
-                inference_value_memory, 
-                self.cached_sequence_lengths, 
+                inference_value_memory,
+                self.cached_sequence_lengths,
                 self.input_sequence_lengths,
-                value_layer, 
+                value_layer,
                 self.max_incoming_seq_len,
-                self.max_sequence_length,  
+                self.max_sequence_length,
                 self.max_batch_size,
                 channels)
             key_layer, value_layer = inference_key_memory, inference_value_memory
         else:
-            assert self.qkv_format in ["bshd", "sbhd"], "Attention format not supported by the inference."
+            assert self.qkv_format in ["bshd", "sbhd"], \
+                "Attention format not supported by the inference."
             batch_start = self.batch_size_offset
             batch_end = batch_start + key_layer.size(1)
             assert batch_end <= inference_key_memory.size(1)
@@ -264,10 +271,10 @@ class InferenceParams: # pylint: disable=too-few-public-methods
         return key_layer, value_layer
 
     def allocate_memory_for_kv_cache_if_empty(
-            self, 
-            layer_number, 
-            num_gqa_groups_per_partition, 
-            hidden_size_per_attention_head, 
+            self,
+            layer_number,
+            num_gqa_groups_per_partition,
+            hidden_size_per_attention_head,
             dtype):
         """
             Allocates memory for kv_cache for given layer, if it hasn't been alocated before.
@@ -307,7 +314,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             inference_key_memory,
             inference_value_memory,
         )
-    
+
     def set_params_to_thd_attention(self, buffers, channels):
         """
             Fused attention with q/k/v of thd layout needs some parameters which give information
@@ -317,7 +324,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             ----------
             buffers: List[torch.Tensor]
                 buffers of size [batch_size + 1] for the parameters:
-                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, 
+                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q,
                 seq_offsets_k, seq_offsets_v, seq_offsets_o
                 respectively.
             channels: int
@@ -344,10 +351,12 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
         )
 
-        # If layer has shape [b * s_layer, h, d] 
+        # If layer has shape [b * s_layer, h, d]
         # offsets are of the form [k * s_layer * h * d for k = 0, ..., batch_size]
-        seq_offsets_q.copy_(torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_q)
-        seq_offsets_k.copy_(torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_kv)
+        seq_offsets_q.copy_(
+            torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_q)
+        seq_offsets_k.copy_(
+            torch.arange(0, self.max_batch_size + 1, device="cuda") * channels * max_seqlen_kv)
         seq_offsets_v.copy_(seq_offsets_k)
         seq_offsets_o.copy_(seq_offsets_q)
 
@@ -1642,7 +1651,7 @@ class FusedRoPEFunc(torch.autograd.Function):
     ) -> torch.Tensor:
         if beginning_offsets is None:
             # Each sequence will start from positional encoding corresponding to 0.
-            # Otherwise sequence i will start from positional encoding 
+            # Otherwise sequence i will start from positional encoding
             # corresponding to beginning_offsets[i].
             beginning_offsets = torch.Tensor()
         if freqs.dtype != torch.float32:
@@ -1718,11 +1727,12 @@ def apply_rotary_pos_emb(
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
     begins: torch.Tensor, default = None.
-        We may not want begin all the sequences from the 0 embedding. This tensor argument allows that.
+        We may not want begin all the sequences from the 0 embedding.
+        This tensor argument allows that.
     """
     assert not (begins is not None and not fused), \
         """begins != None and fused=False is not supported"""
-    
+
     if fused:
         assert (
             tensor_format != "thd" or cu_seqlens is not None
@@ -3649,11 +3659,14 @@ class DotProductAttention(torch.nn.Module):
 
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
-    
+
         self._allocator = StaticBufferAllocator()
 
 
     def alloc(self, size, dtype, device):
+        """
+            Allocated the buffer and works correctly with CUDA Graphs.
+        """
         return self._allocator(size, dtype, device)
 
 
@@ -3914,12 +3927,13 @@ class DotProductAttention(torch.nn.Module):
 
             if qkv_format == "thd":
                 # Allocation of buffers, it works correctly with CUDA Graphs.
-                buffers = [self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
+                buffers = [
+                    self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
 
                 max_seqlen_q, max_seqlen_kv, buffers = \
                     inference_params.set_params_to_thd_attention(buffers, self.channels)
-                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
-                    buffers
+                cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, \
+                    seq_offsets_k, seq_offsets_v, seq_offsets_o = buffers
 
                 # query_layer is reshaped to the format [t, h, d]
                 query_layer = query_layer.view(-1, *query_layer.shape[2:])
@@ -4106,7 +4120,8 @@ class DotProductAttention(torch.nn.Module):
                 # max512 backend will only support [1, h, s, s]
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
-        if self.qkv_format != "thd": # added by me #TODO - i need that in case d=256 fused attention is not run
+        if self.query_layer.shape[-1] == 256 and query_layer.requires_grad:
+            # Fused attention is not supported for backward with head_dim = 256.
             use_fused_attention = False
 
         if use_fused_attention:
@@ -4164,13 +4179,14 @@ class DotProductAttention(torch.nn.Module):
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
             if self.device_compute_capability == (9, 0):
                 use_flash_attention = False
-        
+
         if self.qkv_format == "thd":
             use_flash_attention = False
             use_fused_attention = True
-        
+
         if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1]:
-            use_flash_attention = False # Flash attention does not support max_seqlen_q != max_seqlen_kv
+            # Flash attention does not support max_seqlen_q != max_seqlen_kv
+            use_flash_attention = False
 
 
         if use_flash_attention:
@@ -4252,7 +4268,7 @@ class DotProductAttention(torch.nn.Module):
                 if q_size > 1:
                     out = out.view((batch_size, -1, out.shape[2])).contiguous()
 
-                
+
             return out
 
         assert (not context_parallel), \
@@ -4644,6 +4660,9 @@ class MultiheadAttention(torch.nn.Module):
         self._allocator = StaticBufferAllocator()
 
     def alloc(self, size, dtype, device):
+        """
+            Allocated the buffer and works correctly with CUDA Graphs.
+        """
         return self._allocator(size, dtype, device)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -4786,9 +4805,9 @@ class MultiheadAttention(torch.nn.Module):
 
         if inference_params is not None:
             inference_params.allocate_memory_for_kv_cache_if_empty(
-                self.layer_number, 
-                self.num_gqa_groups_per_partition, 
-                self.hidden_size_per_attention_head, 
+                self.layer_number,
+                self.num_gqa_groups_per_partition,
+                self.hidden_size_per_attention_head,
                 hidden_states.dtype
             )
 
@@ -4934,14 +4953,14 @@ class MultiheadAttention(torch.nn.Module):
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
 
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            
+
             if self.qkv_format == "thd" and inference_params is not None:
                 # For thd attention incoming tokens can be on different positions,
                 # so we need to copy different positional encoding freqency
                 # for every sequence in a batch.
                 #
                 # For example if sequence lengths in context phase are: 2 and 5 (batch size=2),
-                # in first generation phase key_layer have shape [2, 1, d]. 
+                # in first generation phase key_layer have shape [2, 1, d].
                 # key_layer[0, :] corresponds  to the token with position 3 = 2 + 1,
                 # and key_layer [1, :] corresponds  to the token with position 6 = 5 + 1.
                 key_layer = key_layer.contiguous()
@@ -4949,12 +4968,14 @@ class MultiheadAttention(torch.nn.Module):
 
                 key_layer.copy_(
                     apply_rotary_pos_emb(
-                        key_layer, k_pos_emb, "bshd", fused=True, begins=inference_params.cached_sequence_lengths
+                        key_layer, k_pos_emb, "bshd", fused=True,
+                        begins=inference_params.cached_sequence_lengths
                     )
                 )
                 query_layer.copy_(
                     apply_rotary_pos_emb(
-                        query_layer, q_pos_emb, "bshd", fused=True, begins=inference_params.cached_sequence_lengths
+                        query_layer, q_pos_emb, "bshd", fused=True,
+                        begins=inference_params.cached_sequence_lengths
                     )
                 )
             else:
@@ -4967,12 +4988,14 @@ class MultiheadAttention(torch.nn.Module):
 
                     sequence_start = inference_params.sequence_len_offset
                     sequence_end = sequence_start + sequence_length
-                    
+
                     q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
                     k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
 
-                query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
-                key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+                query_layer = apply_rotary_pos_emb(
+                    query_layer, q_pos_emb, self.qkv_format, fused=True)
+                key_layer = apply_rotary_pos_emb(
+                    key_layer, k_pos_emb, self.qkv_format, fused=True)
         query_layer = query_layer.contiguous()
         key_layer = key_layer.contiguous()
 
@@ -5023,14 +5046,16 @@ class MultiheadAttention(torch.nn.Module):
 
 class StaticBufferAllocator(torch.nn.Module):
     """
-        This class is used when we use te.make_graphed_callable(). 
-        CUDA Graphs require all tensors to be static. Neverthless, 
+        This class is used when we use te.make_graphed_callable().
+        CUDA Graphs require all tensors to be static. Neverthless,
         torch API make_graphed_callable() takes care of output of torch modules,
         and makes them static. Thus by wrapping allocation of memory into
         torch.nn.Module, we can greatly simplify our code.
     """
-    def __init__(self):
-        super().__init__()
-    
+
+    # pylint: disable=no-self-use
     def forward(self, size, dtype, device):
+        """
+            Return buffer of given size, dtype and device.
+        """
         return torch.zeros(size, dtype=dtype, device=device)
