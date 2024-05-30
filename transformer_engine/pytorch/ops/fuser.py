@@ -77,7 +77,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 for idx in basic_op_idxs
             ]
             next_ops = [
-                basic_ops[idx+1] if (idx < len(basic_op_idxs) - 1) else None
+                basic_ops[idx+1] if (idx < len(basic_ops) - 1) else None
                 for idx in basic_op_idxs
             ]
             x = op.fuser_forward(
