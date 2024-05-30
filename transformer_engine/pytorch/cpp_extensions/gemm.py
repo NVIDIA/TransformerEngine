@@ -374,7 +374,7 @@ def fp8_grouped_gemm(
         assert fp8_meta_tensor is not None and out_offset is not None
     for a, b in zip(A, B):
         assert_dim_for_fp8_exec(a)
-        assert_dim_for_fp8_exec(a)
+        assert_dim_for_fp8_exec(b)
     assert A[0].dtype == torch.uint8
     assert B[0].dtype == torch.uint8
 
