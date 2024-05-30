@@ -3555,7 +3555,7 @@ class DotProductAttention(torch.nn.Module):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
-        self.channels = channels
+        self.channels = kv_channels * num_attention_heads
 
         self.hidden_size_per_attention_head = kv_channels
 
@@ -4295,8 +4295,8 @@ class MultiheadAttention(torch.nn.Module):
                  size of each input sample.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    attention_hidden_size: int, default = `None`
-                number of key-query-value channels. defaults to
+    kv_channels: int, default = `None`
+                number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     attention_dropout: float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
@@ -4419,7 +4419,7 @@ class MultiheadAttention(torch.nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        attention_hidden_size: Optional[int] = None,
+        kv_channels: Optional[int] = None,
         attention_dropout: float = 0.1,
         layernorm_epsilon: float = 1e-5,
         init_method: Optional[Callable] = None,
@@ -4468,7 +4468,7 @@ class MultiheadAttention(torch.nn.Module):
         self.num_attention_heads = num_attention_heads
         self.return_bias = return_bias
 
-        self.attention_hidden_size = attention_hidden_size if attention_hidden_size else (hidden_size // num_attention_heads)
+        kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
 
         if init_method is None:
             init_method = get_default_init_method()
