@@ -336,16 +336,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
     if fused_attn_supported and flash_attn_supported:
         if _NVTE_DEBUG:
             print("[test_dot_product_attention]: fused attn vs flash attn")
-            print("fused_attn_fwd min {:.8f} max {:.8f}".format(
-                fused_attn_fwd.min().item(), fused_attn_fwd.max().item()))  
-            print("flash_attn_fwd min {:.8f} max {:.8f}".format(
-                flash_attn_fwd.min().item(), flash_attn_fwd.max().item()))  
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
-            print("fused_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
-                fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item()))  
-            print("flash_attn_bwd[{}] min {:.8f} max {:.8f}".format(i,
-                flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item()))  
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backend) == 2:
         if _NVTE_DEBUG:
@@ -600,10 +592,6 @@ def _run_dot_product_attention(
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
-    #print('seqlens_q',seqlens_q)
-    #print('seqlens_kv',seqlens_kv)
-    #print('cu_seqlens_q',cu_seqlens_q)
-    #print('cu_seqlens_kv',cu_seqlens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
@@ -733,34 +721,6 @@ def _run_dot_product_attention(
             seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
             seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
             seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
-
-    # Create ragged offsets for q/k/v
-    seq_offsets_q, seq_offsets_k, seq_offsets_v = None, None, None
-    qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
-    if qkv_format == 'thd':
-        if qkv_group == 'hd_hd_hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-        if qkv_group == '3hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-        if qkv_group == 'h3d':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_heads * config.head_dim * 2 * cu_seqlens_q
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q
-        if qkv_group == 'hd_2hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
-        if qkv_group == 'hd_h2d':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv
-    #print('seq_offsets_q',seq_offsets_q)
-    #print('seq_offsets_k',seq_offsets_k)
-    #print('seq_offsets_v',seq_offsets_v)
 
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
