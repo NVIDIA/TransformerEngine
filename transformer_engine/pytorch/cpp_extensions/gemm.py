@@ -255,6 +255,27 @@ def gemm(
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS_P2P requires extra output tensor'
             args = tuple(args + (extra_output_tensor,))
-    _ = fn(*args)
+        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P:
+            fn = ub.atomic_gemm_overlap_ag_p2p
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS:
+            fn = ub.atomic_gemm_overlap_rs
+            assert (
+                extra_output_tensor is not None
+            ), 'ATOMIC_GEMM_RS requires extra output tensor'
+            args = tuple(args + (True, extra_output_tensor,))
+        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P:
+            fn = ub.atomic_gemm_overlap_rs_p2p
+            assert (
+                extra_output_tensor is not None
+            ), 'ATOMIC_GEMM_RS_P2P requires extra output tensor'
+            args = tuple(args + (extra_output_tensor,))
+    if ub_algo is not None and ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P:
+        out = fn(*args)
+    else:
+        _ = fn(*args)
 
     return out, grad_bias, gelu_input

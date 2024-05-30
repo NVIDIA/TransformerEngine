@@ -338,38 +338,41 @@ class TensorWrapper {
   }
 
   /*! \brief Get the number of dimensions for this TensorWrapper.
-    *
-    *  \return Number of dimensions for this TensorWrapper.
-    */
+   *
+   *  \return Number of dimensions for this TensorWrapper.
+   */
   size_t ndim() const noexcept {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_ndims(tensor_);
   }
 
-  /*! \brief Get the number of elements in the tensor.
-    *
-    *  \return Number of elements in the tensor.
-    */
+  /*! \brief Get the number of allocated elements in the tensor. This will return 0 for tensors
+   *         with nullptr data even if the TensorWrapper has a non-zero shape.
+   *
+   *
+   *  \return Number of elements in the tensor.
+   */
   size_t numel() const noexcept {
-    if (tensor_ == nullptr) return 0;
+    if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
     return nvte_tensor_numel(tensor_);
   }
 
   /*! \brief Get the tensor's element size in bytes.
-    *
-    *  \return Element size in bytes.
-    */
+   *
+   *  \return Element size in bytes.
+   */
   size_t element_size() const noexcept {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_element_size(tensor_);
   }
 
-  /*! \brief Get the tensor's total size in bytes.
-    *
-    *  \return Total tensor size in bytes.
-    */
+  /*! \brief Get the tensor's allocated size in bytes. This will return 0 for tensors with nullptr
+   *         data even if the TensorWrapper has a non-zero shape and valid dtype.
+   *
+   *  \return Total tensor size in bytes.
+   */
   size_t bytes() const noexcept {
-    if (tensor_ == nullptr) return 0;
+    if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
     return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
   }
 

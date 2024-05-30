@@ -130,6 +130,8 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
                                 : prop.multiProcessorCount;
     _math_sms -= getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
+    _atomic_gemm = atomic_gemm;
+
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_comm, 0));
