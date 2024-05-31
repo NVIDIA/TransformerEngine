@@ -1371,8 +1371,6 @@ def attn_forward_func_with_cp(
         ), f"QKV format of {qkv_format} is not supported with context parallelism!"
     assert(qkv_format != "sbhd" or use_fused_attention
         ), "FlashAttention does not support sbhd format!"
-    assert(not(qkv_format == "thd" and use_fused_attention)
-        ), "FusedAttention does not support thd format!"
     assert (attn_mask_type in ["causal", "no_mask"]
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
     assert (attn_bias is None or use_fused_attention
