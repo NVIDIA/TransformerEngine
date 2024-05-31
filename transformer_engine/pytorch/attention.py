@@ -618,6 +618,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
                                     kv_inputs[i%2] = kv_inputs[i%2].view(
                                         2, -1, *k.shape[-3:])
+                                elif qkv_format == "thd":
+                                    # [t, np, hn]
+                                    q_inputs[i%2] = q
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
                                     attn_bias_inputs[i%2] = torch.cat(
@@ -628,7 +631,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
-                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k, seq_offsets_q, seq_offsets_k, seq_offsets_v,
+                                    seq_offsets_o, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
@@ -661,13 +665,22 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     q_inputs[i%2] = q.view(-1, *q.shape[-3:])
                                     # [2, 2, sk//2, b, np, hn] -> [2, sk//2, b, np, hn]
                                     kv_inputs[i%2] = kv_inputs[i%2][:, 0, ...].contiguous()
+                                elif qkv_format == "thd":
+                                    # [t, np, hn]
+                                    q_inputs[i%2] = q
+                                    # [2, t, np, hn] -> [2, t/2, np, hn]
+                                    kv_inputs[i%2] = tex.thd_read_half_tensor(
+                                        kv_inputs[i%2], cu_seqlens_k, 0)
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
                                     attn_bias_inputs[i%2] = attn_bias[..., idx, :].contiguous()
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q,
-                                    cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k//2, seq_offsets_q,
+                                    None if seq_offsets_k is None else seq_offsets_k//2,
+                                    None if seq_offsets_v is None else seq_offsets_v//2,
+                                    seq_offsets_o, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
@@ -711,6 +724,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
                                     kv_inputs[i%2] = kv_inputs[i%2].view(
                                         2, -1, *k.shape[-3:])
+                                elif qkv_format == "thd":
+                                    # [t, np, hn] -> [t/2, np, hn]
+                                    q_inputs[i%2] = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
                                     attn_bias_inputs[i%2] = torch.cat(
@@ -721,7 +737,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2,
-                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k, None if seq_offsets_q is None else seq_offsets_q//2,
+                                    seq_offsets_k, seq_offsets_v,
+                                    None if seq_offsets_o is None else seq_offsets_o//2,
+                                    q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
@@ -760,7 +779,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                             fused_attn_fwd(
                                 is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
-                                cu_seqlens_k, q, kv_inputs[i%2][0],
+                                cu_seqlens_k, seq_offsets_q, seq_offsets_k, seq_offsets_v.
+                                seq_offsets_o, q, kv_inputs[i%2][0],
                                 kv_inputs[i%2][1], TE_DType[q.dtype],
                                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                 attn_scale=softmax_scale, dropout=dropout_p,
@@ -993,6 +1013,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
+                        elif ctx.qkv_format == "thd":
+                            q_, kv_, out_, dout_ = q, kv, out, dout
                         aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size-i-1]]
@@ -1002,6 +1024,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             q_, kv_[0], kv_[1], out_, dout_,
                             TE_DType[q.dtype], TE_DType[kv.dtype], aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
@@ -1046,6 +1069,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
+                        elif ctx.qkv_format == "thd":
+                            q_, out_, dout_ = q, out, dout
+                            # [2, t, np, hn] -> [2, t/2, np, hn]
+                            kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_k, 0)
                         aux_ctx_tensors = [softmax_lse, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size-i-1]]
@@ -1055,6 +1082,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             q_, kv_[0], kv_[1], out_, dout_,
                             TE_DType[q.dtype], TE_DType[kv.dtype], aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            seq_offsets_q, None if seq_offsets_k is None else seq_offsets_k//2,
+                            None if seq_offsets_v is None else seq_offsets_v//2, seq_offsets_o,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
@@ -1103,6 +1132,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             out_ = out[1].contiguous()
                             dout_ = dout[1].contiguous()
+                        elif ctx.qkv_format == "thd":
+                            # [t, np, hn] -> [t/2, np, hn]
+                            q_ = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
+                            kv_, out_, dout_ = kv, out, dout
                         aux_ctx_tensors = [softmax_lse_, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size-i-1]]
@@ -1112,6 +1145,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             q_, kv_[0], kv_[1], out_, dout_,
                             TE_DType[q.dtype], TE_DType[kv.dtype], aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            None if seq_offsets_q is None else seq_offsets_q//2, seq_offsets_k,
+                            seq_offsets_v, None if seq_offsets_o is None else seq_offsets_o//2,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
@@ -1157,6 +1192,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         q, kv[0], kv[1], out, dout,
                         TE_DType[q.dtype], TE_DType[kv.dtype], aux_ctx_tensors,
                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                        seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
                         attn_scale=ctx.softmax_scale,
                         dropout=ctx.dropout_p,
                         qkv_layout=qkv_layout,
