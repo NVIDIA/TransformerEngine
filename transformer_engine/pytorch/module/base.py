@@ -76,11 +76,6 @@ def initialize_ub(
     local_rank = torch.distributed.get_rank(group=tp_group)
     local_size = torch.distributed.get_world_size(group=tp_group)
 
-    # Create a host communicator for bootstrapping
-    host_group = torch.distributed.new_group(
-        ranks=torch.distributed.get_process_group_ranks(tp_group),
-        backend="gloo")
-
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
     _cublas_workspace = get_workspace().repeat(tex.NVTE_MAX_USERBUFFER_STREAMS)
@@ -199,19 +194,20 @@ def initialize_ub(
 
 
     def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str):
-        pg = torch.distributed.new_group(backend="gloo") if group == "world" else host_group
+        pg = None if group == "world" else tp_group
         global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype)
-        torch.distributed.all_gather_into_tensor(global_data, local_data, group=pg)
-        return global_data
+        global_data = torch.zeros(global_size, dtype=local_data.dtype, device='cuda')
+        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
+        return global_data.cpu()
 
     def bcast_int_callback(data: torch.Tensor, src: int, group: str):
-        pg = torch.distributed.new_group(backend="gloo") if group == "world" else host_group
+        pg = None if group == "world" else tp_group
+        data = data.cuda()
         torch.distributed.broadcast(data, src, group=pg)
-        return data
+        return data.cpu()
 
     def barrier_callback(group: str):
-        pg = None if group == "world" else host_group
+        pg = None if group == "world" else tp_group
         torch.distributed.barrier(group=pg)
 
     def free_callback(data: torch.Tensor):

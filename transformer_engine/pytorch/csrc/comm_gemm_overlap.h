@@ -52,7 +52,7 @@ static struct TorchCallbacks : torch::CustomClassHolder {
   bool initialized{false};
   std::unordered_map<void *, at::Tensor> gathered_tensors;
   std::function<at::Tensor(at::Tensor&, const std::string &)> allgather;
-  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast_int;
+  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast;
   std::function<void(const std::string &)> barrier;
   std::function<void(at::Tensor &)> free;
 } torch_callbacks;
@@ -62,12 +62,12 @@ static struct TorchCallbacks : torch::CustomClassHolder {
 */
 void set_collective_callbacks(
   std::function<at::Tensor(at::Tensor&, const std::string &)> allgather,
-  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast_int,
+  std::function<at::Tensor(at::Tensor &, int, const std::string &)> bcast,
   std::function<void(const std::string &)> barrier,
   std::function<void(at::Tensor &)> free
 ) {
   torch_callbacks.allgather = allgather;
-  torch_callbacks.bcast_int = bcast_int;
+  torch_callbacks.bcast = bcast;
   torch_callbacks.barrier = barrier;
   torch_callbacks.free = free;
   torch_callbacks.initialized = true;
@@ -90,12 +90,12 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
 /*
 ** Python callback for torch.distributed.broadcast(datatensor, tp_group).
 */
-void ub_bcast_int(void *data, size_t bytes, int src, char *group) {
+void ub_bcast(void *data, size_t bytes, int src, char *group) {
   assert(torch_callbacks.initialized);
   auto datatensor = torch::from_blob(
     data, {static_cast<int64_t>(bytes / sizeof(uint8_t))},
     at::device(torch::kCPU).dtype(torch::kUInt8));
-  datatensor = torch_callbacks.bcast_int(datatensor, src, group);
+  datatensor = torch_callbacks.bcast(datatensor, src, group);
   // A torch.distributed.broadcast() callback with NCCL backend would require a host-to-device copy
   // before broadcast on device, and a device-to-host copy after. This causes PyTorch to create a
   // new tensor on the host-to-device copy, leaving the original torch::from_blob() to be gargabe
@@ -141,7 +141,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     bool set_sm_margin, bool atomic_gemm)
   : CommGemmOverlap(world_rank, world_size, tp_rank, tp_size, 0, 1, num_splits, num_max_streams,
                     comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm,
-                    &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free) {
+                    &ub_alloc_copy_allgather, &ub_bcast, &ub_barrier, &ub_free) {
     _ubuf_bytes = sample.numel() * sample.element_size();
     _ubuf_dtype = (sample.element_size() == 1) ? DType::kFloat8E4M3
                                                : GetTransformerEngineDType(sample.scalar_type());
@@ -486,7 +486,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter)
   : CommGemmOverlapP2P(world_rank, world_size, tp_rank, tp_size, /* node_id */ 0, /* num_nodes */ 1,
                        num_max_streams, set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter,
-                       &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free) {
+                       &ub_alloc_copy_allgather, &ub_bcast, &ub_barrier, &ub_free) {
     _ubuf_bytes = sample.numel() * sample.element_size();
     _ubuf_chunk_bytes = _ubuf_bytes / tp_size;
     if (is_reduce_scatter) {
@@ -554,7 +554,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     at::Tensor B_copy
   ) {
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for ubuf" << std::endl;
     void *ubuf_scale_inv_ptr = nullptr;
     if (_ubuf.element_size() == 1) {
       NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
@@ -566,7 +565,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                              _ubuf_dtype, nullptr, nullptr,
                                              ubuf_scale_inv_ptr);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for ubuf chunks" << std::endl;
     std::vector<TensorWrapper> ubufs_;
     for (int i = 0; i < _num_ubuf_chunks; i++)
       ubufs_.push_back(makeTransformerEngineTensor(_ubufs[i].data_ptr(),
@@ -575,7 +573,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                    _ubuf_dtype, nullptr, nullptr,
                                                    ubuf_scale_inv_ptr));
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for A" << std::endl;
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
     auto A_ = makeTransformerEngineTensor(A.data_ptr(),
@@ -584,7 +581,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                           A_type, nullptr, nullptr,
                                           A_scale_inv_ptr);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for B" << std::endl;
     void *B_scale_inv_ptr = nullptr;
     if (B_scale_inverse.numel()) B_scale_inv_ptr = B_scale_inverse[B_fp8_tensor].data_ptr();
     auto B_ = makeTransformerEngineTensor(B.data_ptr(),
@@ -593,7 +589,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                           B_type, nullptr, nullptr,
                                           B_scale_inv_ptr);
 
-    std::cout << "[rank:" << _tp_id << "] Create D_buffer for N+1 chunks" << std::endl;
     // Create an GEMM output buffer with N+1 chunks in a contiguous memory
     int m = (transa) ? A.size(0) : A.size(1);
     int n = _ubuf.size(0);
@@ -601,7 +596,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     torch::Tensor D_buffer = torch::zeros({n_chunk * (_tp_size + 1), m}, D.options());
     D = torch::from_blob(D_buffer.data_ptr(), {D.size(0), D.size(1)}, D.options());
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for D" << std::endl;
     void *D_amax_ptr = nullptr;
     void *D_scale_ptr = nullptr;
     if (D_amax.numel()) D_amax_ptr = D_amax.data_ptr();
@@ -611,12 +605,10 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                            static_cast<size_t>(D.size(1))},
                                           D_type, D_amax_ptr, D_scale_ptr, nullptr);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for bias" << std::endl;
     auto bias_ = makeTransformerEngineTensor(bias.data_ptr(),
                                              {static_cast<size_t>(bias.size(0))},
                                              bias_type);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for pre_gelu_out" << std::endl;
     const auto gelu_shape = (pre_gelu_out.data_ptr() == nullptr)
                             ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
                             : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
@@ -626,17 +618,14 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                      GetTransformerEngineDType(
                                                        pre_gelu_out.scalar_type()));
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for workspace" << std::endl;
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
                                                   DType::kByte);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for counters" << std::endl;
     auto counters_ = makeTransformerEngineTensor(_counters.data_ptr(),
                                                  {static_cast<size_t>(_counters.size(0))},
                                                  DType::kInt32);
 
-    std::cout << "[rank:" << _tp_id << "] TensorWrapper for B_copy (extra_out)" << std::endl;
     const auto B_copy_shape = (B_copy.data_ptr() == nullptr)
                               ? std::vector<size_t>{static_cast<size_t>(B_copy.size(0))}
                               : std::vector<size_t>{static_cast<size_t>(B_copy.size(0)),
@@ -650,14 +639,12 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                   static_cast<size_t>(D_buffer.size(1))},
                                                  D_type, D_amax_ptr, D_scale_ptr, nullptr);
 
-    std::cout << "[rank:" << _tp_id << "] Calling CommGemmOverlapP2P::atomic_gemm_overlap_ag" << std::endl;
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CommGemmOverlapP2P::atomic_gemm_overlap_ag(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubuf_, ubufs_, counters_, B_copy_, D_buffer_, workspace_,
       grad, accumulate, use_split_accumulator);
 
-    std::cout << "[rank:" << _tp_id << "] Returning narrowed D_buffer" << std::endl;
     // Return the last N rows of D_buffer
     torch::Tensor D_return = D_buffer.narrow(0, n_chunk, n);
     return D_return;
@@ -922,11 +909,11 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       grad, accumulate, use_split_accumulator);
 
     // Reduce GEMM output chunks
-    char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].data_ptr());
+    void *reduce_buf_ptr = _ubufs[_tp_size - 1].data_ptr();
     if (_ubuf.element_size() == 1) {
       assert(rs_output.element_size() == 2);
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
-      char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
+      void *rs_output_ptr = rs_output.data_ptr();
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
     } else {

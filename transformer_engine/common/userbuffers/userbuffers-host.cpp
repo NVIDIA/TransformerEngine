@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "ipcsocket.h"
 #include "userbuffers.h"
 #include <assert.h>
 #include <chrono>
@@ -92,7 +93,7 @@ int pipe_rank(communicator *comm, int step) {
 int create_communicator_grouped2(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
@@ -100,7 +101,7 @@ int create_communicator_grouped2(communicator **comm,
 
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
-  (*comm)->_bcast_int = ext_bcast_int;
+  (*comm)->_bcast = ext_bcast;
   (*comm)->_barrier = ext_barrier;
   (*comm)->_free = ext_free;
   (*comm)->nranks = numranks;
@@ -228,19 +229,39 @@ int create_communicator_grouped2(communicator **comm,
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
 
+    // Broadcast the a POSIX file descriptor from the local root rank to other local ranks.
+    // NOTE: This cannot be done via MPI_Bcast or other external comm libraries. They mangle the
+    //       file descriptor and prevent cuMemImportFromShareableHandle() from correctly
+    //       interpreting the file. Instead, we use system socket to send/recv the file handle
+    //       without mangling.
     int fd;
+    volatile uint32_t abortFlag = 0;
+    struct ncclIpcSocket ipcSock = {0};
+    uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
+    ncclResult_t ret = ncclSuccess;
+    NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
+    (*comm)->_barrier((*comm)->comm_world);
+
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
       CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
-                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
-    }
-    (*comm)->_bcast_int(reinterpret_cast<void *>(&fd), sizeof(int), 0, (*comm)->comm_intra);
-    if ((*comm)->ar2_nvrank > 0) {
+                                           CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+      for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
+        (*comm)->_barrier((*comm)->comm_intra);
+        NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
+      }
+    } else {
+      for (int i = 0; i < (*comm)->ar2_nvrank; i++)
+        (*comm)->_barrier((*comm)->comm_intra);
+      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
+      for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
+        (*comm)->_barrier((*comm)->comm_intra);
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-                                            CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
+  error:
+    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
     close(fd);
-
     CUCHECK(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
 
     CUdeviceptr mc_va;
@@ -316,25 +337,25 @@ int create_communicator_grouped2(communicator **comm,
 int create_communicator_grouped(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free,
   int pipegpus, int pipenodes) {
   return create_communicator_grouped2(
     comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    ext_alloc_copy_allgather, ext_bcast_int, ext_barrier, ext_free,
+    ext_alloc_copy_allgather, ext_bcast, ext_barrier, ext_free,
     pipegpus, pipenodes, 1, 1);
 }
 
 int create_communicator(communicator **comm,
   int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
   std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(void*, size_t, int, ExtComm)> ext_bcast_int,
+  std::function<void(void*, size_t, int, ExtComm)> ext_bcast,
   std::function<void(ExtComm)> ext_barrier,
   std::function<void(void*)> ext_free) {
   return create_communicator_grouped2(
     comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    ext_alloc_copy_allgather, ext_bcast_int, ext_barrier, ext_free,
+    ext_alloc_copy_allgather, ext_bcast, ext_barrier, ext_free,
     1, 1, 1, 1);
 }
 
@@ -389,7 +410,7 @@ int create_communicator_grouped2_mpi(communicator **comm,
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm,
     myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    &ub_alloc_copy_allgather, &ub_bcast_int, &ub_barrier, &ub_free,
+    &ub_alloc_copy_allgather, &ub_bcast, &ub_barrier, &ub_free,
     pipegpus, pipenodes, tensorgpus, tensornodes);
 #else
   NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
@@ -491,23 +512,39 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
     CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
 
-    int myfd;
-    int *peerfd;
-    CUCHECK(cuMemExportToShareableHandle(&myfd, comm->uchandles[hndl][myrank],
+    int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
+    CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
-    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&peerfd), reinterpret_cast<void *>(&myfd),
-                                sizeof(int), comm->comm_intra);
+
+    volatile uint32_t abortFlag = 0;
+    struct ncclIpcSocket ipcSock = {0};
+    uint64_t opId = 0xdeadcafebeef;
+    ncclResult_t ret = ncclSuccess;
+
+    // All-gather POSIX file descriptors across local ranks.
+    // NOTE: This cannot be done via MPI_Allgather or other external comm libraries. They mangle
+    //       the file descriptor and prevent cuMemImportFromShareableHandle() from correctly
+    //       interpreting the file. Instead, we use system socket to send/recv the file handle
+    //       without mangling.
+    NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
+    for (int p = 1; p < nranks; p++) {
+      comm->_barrier(comm->comm_intra);
+      NCCLCHECKGOTO(
+          ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
+          error);
+      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
+                    error);
+    }
+  error:
+    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
         CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
                                                reinterpret_cast<void *>(peerfd[p]),
                                                CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
-    }
-    close(myfd);
-    for (int p = 0; p < nranks; p++)
       close(peerfd[p]);
-    comm->_free(reinterpret_cast<void *>(peerfd));
-
+    }
     CUdeviceptr ptr;
     CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
@@ -548,6 +585,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,
              aligned_size / 1024 / 1024);
     }
+
   } else {
     assert(comm->nvsize <= 8);
 

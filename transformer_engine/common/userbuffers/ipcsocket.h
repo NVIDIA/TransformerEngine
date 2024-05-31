@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef NCCL_IPCSOCKET_H
-#define NCCL_IPCSOCKET_H
+#ifndef TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H
+#define TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H
 
 // #include "nccl.h"
 #include <errno.h>
@@ -49,4 +49,4 @@ ncclResult_t ncclIpcSocketRecvFd(struct ncclIpcSocket *handle, int *fd);
 ncclResult_t ncclIpcSocketSendFd(struct ncclIpcSocket *handle, const int fd,
                                  int rank, uint64_t hash);
 
-#endif /* NCCL_IPCSOCKET_H */
+#endif /* TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H */

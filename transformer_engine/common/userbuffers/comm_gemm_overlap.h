@@ -91,7 +91,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(void *, size_t, int, char *)> bcast_int_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle
   ) {
@@ -102,7 +102,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
 #else
       create_communicator_grouped2(&_ub_comm,
         worldrank, worldsize, localrank, localsize, nodeid, numnodes,
-        alloc_copy_allgather_handle, bcast_int_handle, barrier_handle, free_handle,
+        alloc_copy_allgather_handle, bcast_handle, barrier_handle, free_handle,
         1, 1, localsize, 1);
 #endif
       if (worldrank == 0) {
@@ -180,13 +180,13 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
     int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
     bool set_sm_margin, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(void *, size_t, int, char *)> bcast_int_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle)
   : CommGemmOverlapBase(
       worldrank, worldsize, localrank, localsize, nodeid, numnodes,
       num_splits, num_max_streams, num_comm_cga, num_comm_sms, set_sm_margin, atomic_gemm,
-      alloc_copy_allgather_handle, bcast_int_handle, barrier_handle, free_handle) {
+      alloc_copy_allgather_handle, bcast_handle, barrier_handle, free_handle) {
     NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_comm));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_d2dcopy, 0));
   }
