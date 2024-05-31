@@ -3181,7 +3181,8 @@ class FusedAttention(TransformerEngineBaseModule):
             if (seq_offsets_q is None
                 or seq_offsets_k is None
                 or seq_offsets_v is None
-                or seq_offsets_o is None):
+                or seq_offsets_o is None
+                or context_parallel):
                 qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
                 qkv_group = 'hd_hd_hd' if context_parallel else qkv_group
                 num_heads = query_layer.shape[-2]
