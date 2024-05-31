@@ -26,6 +26,7 @@ def gemm(
     accumulate: bool = False,
     layout: str = "TN",
     out: Optional[paddle.Tensor] = None,
+    out_dtype: Optional[paddle.dtype] = None,
     bias: Optional[paddle.Tensor] = None,
     use_bias: bool = False,
 ) -> Tuple[Union[paddle.Tensor, None], ...]:
@@ -35,16 +36,23 @@ def gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
-    return_output = False
     if out is None:
-        out = paddle.empty(
-            shape=[
-                B.shape[1] if transb else B.shape[0],
-                A.shape[0] if transa else A.shape[1],
-            ],
-            dtype=dtype,
-        )
-        return_output = True
+        if accumulate:
+            out = paddle.zeros(
+                shape=[
+                    B.shape[1] if transb else B.shape[0],
+                    A.shape[0] if transa else A.shape[1],
+                ],
+                dtype=out_dtype if out_dtype is not None else dtype,
+            )
+        else:
+            out = paddle.empty(
+                shape=[
+                    B.shape[1] if transb else B.shape[0],
+                    A.shape[0] if transa else A.shape[1],
+                ],
+                dtype=out_dtype if out_dtype is not None else dtype,
+            )
 
     if gelu and not grad:
         gelu_input = paddle.empty_like(out, dtype=dtype)
@@ -94,9 +102,7 @@ def gemm(
         0,    # math_sm_count
     )
 
-    if return_output:
-        return out, grad_bias, gelu_input
-    return None, grad_bias, gelu_input
+    return out, grad_bias, gelu_input
 
 
 def fp8_gemm(
@@ -125,16 +131,24 @@ def fp8_gemm(
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_index is not None
 
-    return_output = False
     if out is None:
-        out = paddle.empty(
-            shape=[
-                B.shape[0],
-                A.shape[0],
-            ],
-            dtype=out_dtype,
-        )
-        return_output = True
+        if accumulate:
+            out = paddle.zeros(
+                shape=[
+                    B.shape[0],
+                    A.shape[0],
+                ],
+                dtype=out_dtype,
+            )
+        else:
+            out = paddle.empty(
+                shape=[
+                    B.shape[0],
+                    A.shape[0],
+                ],
+                dtype=out_dtype,
+            )
+
     # Use bfloat16 as default bias_dtype
     bias_dtype = paddle.bfloat16 if bias is None else bias.dtype
     if gelu:
@@ -172,13 +186,7 @@ def fp8_gemm(
         0,    # math_sm_count
     )
 
-    if return_output:
-        if gelu:
-            return out, gelu_input
-        return out
-    if gelu:
-        return gelu_input
-    return None
+    return out, gelu_input
 
 
 def cast_to_fp8(
