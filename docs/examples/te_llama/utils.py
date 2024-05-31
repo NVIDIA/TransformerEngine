@@ -193,3 +193,4 @@ def restart_jupyter_notebook():
     if not sys.warnoptions:
         import warnings
         warnings.simplefilter("ignore")
+        torch.set_warn_always(False)
