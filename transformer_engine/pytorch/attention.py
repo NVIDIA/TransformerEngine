@@ -520,8 +520,9 @@ class AttnFuncWithCP(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format,
-                attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention):
+                seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
+                cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
+                attn_bias_type, attn_bias, deterministic, use_fused_attention):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -870,8 +871,11 @@ class AttnFuncWithCP(torch.autograd.Function):
         else:
             out = out.view(-1, *out.shape[-2:])
 
-        ctx.save_for_backward(q, kv, out, softmax_lse,
-            cu_seqlens_q, cu_seqlens_k, *rng_states, *attn_biases)
+        ctx.save_for_backward(
+            q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k,
+            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
+            *rng_states, *attn_biases
+        )
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
@@ -889,9 +893,10 @@ class AttnFuncWithCP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout):
         (q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k) = ctx.saved_tensors[:6]
+        (seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o) = ctx.saved_tensors[6:10]
         cp_size = get_distributed_world_size(ctx.cp_group)
-        rng_states = ctx.saved_tensors[6:6+cp_size]
-        attn_biases = ctx.saved_tensors[6+cp_size:6+cp_size*2]
+        rng_states = ctx.saved_tensors[10:10+cp_size]
+        attn_biases = ctx.saved_tensors[10+cp_size:10+cp_size*2]
 
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
@@ -1314,13 +1319,14 @@ class AttnFuncWithCP(torch.autograd.Function):
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
-        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, \
-                None, None, None, None, None, None, attn_dbias, None, None
+        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, \
+                None, None, None, None, None, None, None, None, attn_dbias, None, None
 
 
 def attn_forward_func_with_cp(
     is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-    dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd",
+    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
+    cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd",
     attn_mask_type="causal", attn_bias_type="no_bias", attn_bias=None, deterministic=False,
     use_fused_attention=False
 ) -> torch.Tensor:
@@ -1337,8 +1343,9 @@ def attn_forward_func_with_cp(
         ), "Attention bias is only supported with FusedAttention!"
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-        dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format,
-        attn_mask_type, attn_bias_type, attn_bias, deterministic, use_fused_attention
+        seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
+        cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
+        attn_bias_type, attn_bias, deterministic, use_fused_attention
     )
     return out
 
@@ -2147,6 +2154,7 @@ class FlashAttention(torch.nn.Module):
                 output = attn_forward_func_with_cp(
                     self.training, query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
+                    None, None, None, None,
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
@@ -3181,6 +3189,7 @@ class FusedAttention(TransformerEngineBaseModule):
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv,
                     max_seqlen_q, max_seqlen_kv,
+                    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
