@@ -61,7 +61,7 @@ model_configs_fused_attn = {
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
-@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'])
+@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd', 'thd'])
 def test_cp_with_fused_attention(dtype, model, qkv_format):
     subprocess.run(
         get_bash_arguments(
