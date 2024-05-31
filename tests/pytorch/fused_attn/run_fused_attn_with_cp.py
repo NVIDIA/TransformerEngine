@@ -112,9 +112,9 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     out.backward(dout)
 
     # run core_attn wit CP
+    q_, k_, v_, dout_, *rest = [x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])]
+    bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        q_, k_, v_, dout_, *rest = [x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])]
-        bias_ = rest[0] if len(rest) else None
         seq_dim = qkv_format.index('s')
         q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
             for x in [q_, k_, v_, dout_]]
@@ -122,14 +122,12 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
     elif qkv_format == "thd":
-        q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
         seq_idx_q  = tex.thd_get_partitioned_indices(cu_seqlens_q, q_.size(0), world_size, rank)
         seq_idx_kv = tex.thd_get_partitioned_indices(cu_seqlens_kv, k_.size(0), world_size, rank)
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
         cu_seqlens_q = cu_seqlens_q // world_size
         cu_seqlens_kv = cu_seqlens_kv // world_size
-        bias_ = None
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
