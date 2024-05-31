@@ -246,6 +246,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0; python_version<'3.8'",
+        "packaging",
     ]
     test_reqs: List[str] = ["pytest"]
 
@@ -434,7 +435,11 @@ def setup_common_extension() -> CMakeExtension:
     )
 
 def _all_files_in_dir(path):
-    return list(path.iterdir())
+    all_files = []
+    for dirname, _, names in os.walk(path):
+        for name in names:
+            all_files.append(Path(dirname, name))
+    return all_files
 
 def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""

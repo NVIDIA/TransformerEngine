@@ -194,12 +194,16 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
             return False
     return True
 
-
-def _is_unfused_attention_supported(config: ModelConfig) -> bool:
+def _is_unfused_attention_supported(
+    config: ModelConfig,
+    qkv_format: str,
+    ) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
     if ("padding" in config.attn_mask_type):
         return False
     if ("causal" in config.attn_mask_type and config.attn_type == 'cross'):
+        return False
+    if qkv_format == 'thd':
         return False
     return True
 
@@ -210,6 +214,8 @@ model_configs_base = {
     "base_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 1
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
+    "base_3_0": ModelConfig(8, 16, 16, 128,    1, 2048, 0.0, "no_mask", "no_bias"), # inference
+    "base_3_1": ModelConfig(8, 16, 16, 256,    1, 2048, 0.0, "no_mask", "no_bias"), # inference
 }
 
 
@@ -239,7 +245,9 @@ def get_swa(seq_q, seq_kv, w=None):
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
-def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa):
+@pytest.mark.parametrize("pad_between_seqs", [False])
+def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
+    workspace_opt, qkv_layout, swa, pad_between_seqs):
     """Test DotProductAttention module"""
 
     # Get configs
@@ -258,7 +266,8 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         )
 
     # Skip if only unfused backend is supported
-    unfused_attn_supported = _is_unfused_attention_supported(config)
+    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
     if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
@@ -269,14 +278,19 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     flash_attn_supported = _is_flash_attention_supported(config)
     if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
+    if (qkv_format == 'thd' and 'padding' not in config.attn_mask_type):
+        pytest.skip("THD layout requires padding/padding_causal mask type.")
 
+    # d=256 is supported by cuDNN 9.0+ for inference but not training
+    is_training = (config.head_dim <= 128)
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         if swa:
             attn_mask_type = config.attn_mask_type
             config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, config, "UnfusedDotProductAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+            dtype, config, "UnfusedDotProductAttention",
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
         )
         if swa:
             config.attn_mask_type = attn_mask_type
@@ -285,22 +299,26 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     if fused_attn_supported:
         if len(fused_attn_backend) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
         if len(fused_attn_backend) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
 
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype, config, "FlashAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
+            dtype, config, "FlashAttention",
+            ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -335,7 +353,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 
 model_configs_mask = {
@@ -361,7 +379,7 @@ model_configs_mask = {
 @pytest.mark.parametrize("model", model_configs_mask.keys())
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_bias = {
@@ -399,7 +417,7 @@ model_configs_bias = {
 @pytest.mark.parametrize("model", model_configs_bias.keys())
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_bias_shapes = {
@@ -426,7 +444,8 @@ model_configs_bias_shapes = {
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
 def test_dpa_bias_shapes(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types and shapes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
 
 model_configs_swa = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
@@ -443,7 +462,8 @@ model_configs_swa = {
 @pytest.mark.parametrize("model", model_configs_swa.keys())
 def test_dpa_sliding_window(dtype, model_configs, model):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+
 
 model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
@@ -460,14 +480,12 @@ model_configs_alibi_slopes = {
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
 def test_dpa_alibi_slopes(dtype, model_configs, model):
     """Test DotProductAttention module with ALiBi slopes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-    # will add tests for thd layouts later when the support is available in fused attention
-    #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
     ]
 
 
@@ -481,6 +499,8 @@ model_configs_layout = {
     "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
     "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding",         "no_bias"),
     "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
+    "layout_2_0": ModelConfig(2, 16, 16, 256,    1, 2048, 0.0,        "no_mask",         "no_bias"),
+    "layout_2_1": ModelConfig(2, 24, 24, 256, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
 }
 
 
@@ -491,7 +511,41 @@ model_configs_layout = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+qkv_layouts_thd = ['t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd']
+model_configs_layout_thd = {
+    #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    "layout_0_1": ModelConfig(1, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_0_2": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"),
+    "layout_0_4": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_1": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"),
+    "layout_1_2": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0,        "padding",         "no_bias"),
+    "layout_1_3": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_4": ModelConfig(8, 16, 16,  64, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_2_1": ModelConfig(1, 16, 16, 128,  128,  128, 0.0,        "padding",         "no_bias"),
+    "layout_2_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"),
+    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal",         "no_bias"),
+    "layout_2_4": ModelConfig(8, 16, 16,  64, 2048, 4096, 0.0, "padding_causal",         "no_bias"),
+}
+
+
+@pytest.mark.skipif(_cudnn_version() < (9,0,0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
+@pytest.mark.parametrize("model", model_configs_layout_thd.keys())
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with different QKV layouts"""
+    pad_between_seqs = False
+    test_dot_product_attention(dtype, model_configs, model, False, True,
+        qkv_layout, False, pad_between_seqs)
+    pad_between_seqs = True
+    test_dot_product_attention(dtype, model_configs, model, False, True,
+        qkv_layout, False, pad_between_seqs)
 
 
 def _run_dot_product_attention(
@@ -502,6 +556,8 @@ def _run_dot_product_attention(
         qkv_layout: str,
         workspace_opt: bool,
         swa: bool,
+        pad_between_seqs: bool,
+        is_training: bool,
         ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
 
@@ -537,6 +593,19 @@ def _run_dot_product_attention(
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
 
+    seqlens_q_after_pad = seqlens_q.clone()
+    seqlens_kv_after_pad = seqlens_kv.clone()
+    cu_seqlens_q_after_pad = cu_seqlens_q.clone()
+    cu_seqlens_kv_after_pad = cu_seqlens_kv.clone()
+    pad_len = [0] * config.batch_size
+    if pad_between_seqs:
+        max_pad_len = 3
+        pad_len = torch.randint(0, max_pad_len+1, [config.batch_size], device="cuda") #3
+        seqlens_q_after_pad = seqlens_q + pad_len
+        seqlens_kv_after_pad = seqlens_kv + pad_len
+        cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
+        cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
+
     # Create attention mask if padding
     attention_mask = None
     if "padding" in config.attn_mask_type:
@@ -544,7 +613,7 @@ def _run_dot_product_attention(
             attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
             for i in range(config.batch_size):
                 attention_mask_q = torch.cat([attention_mask_q,
-                    torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                    torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = attention_mask_q.to(device="cuda")
         if config.attn_type == 'cross':
@@ -552,19 +621,18 @@ def _run_dot_product_attention(
             attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
             for i in range(config.batch_size):
                 attention_mask_q = torch.cat([attention_mask_q,
-                    torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                    torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
                 attention_mask_kv = torch.cat([attention_mask_kv, torch.Tensor(
-                    [True]*seqlens_kv[i] + [False]*(config.max_seqlen_kv-seqlens_kv[i]))
+                    [False]*seqlens_kv[i] + [True]*(config.max_seqlen_kv-seqlens_kv[i]))
                     .to(dtype=torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
             attention_mask = (
                     attention_mask_q.to(device="cuda"), attention_mask_kv.to(device="cuda"))
+    window_size = None
     if swa:
         window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
     elif "causal" in config.attn_mask_type:
         window_size, attention_mask = (-1, 0), None
-    else:
-        window_size, attention_mask = None, None
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -583,13 +651,14 @@ def _run_dot_product_attention(
         'h'  : config.num_heads,
         'hg' : config.num_gqa_groups,
         'd'  : config.head_dim,
-        't'  : cu_seqlens_q[-1],
-        'tg' : cu_seqlens_kv[-1],
+        't'  : cu_seqlens_q_after_pad[-1],
+        'tg' : cu_seqlens_kv_after_pad[-1],
         '3'  : 3,
         '2'  : 2,
         '1'  : 1,
         }
     inp = []
+    inp_orig = []
     for i,layout in enumerate(qkv_layout.split('_')):
         layout = '_'.join(layout)
         if i == 0:
@@ -600,6 +669,21 @@ def _run_dot_product_attention(
             layout = layout.replace('t', 'tg')
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        tensor_orig = tensor
+        if qkv_format == 'thd' and pad_between_seqs:
+            tensor_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            if layout in ['t_h_d', 't_3_h_d', 't_h_3_d']:
+                for i in range(1, config.batch_size+1):
+                    valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                    pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
+                    tensor[pad_range[0]:pad_range[1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
+            if layout in ['tg_hg_d', 'tg_2_hg_d', 'tg_hg_2_d']:
+                for i in range(1, config.batch_size+1):
+                    valid_range = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
+                    pad_range = (cu_seqlens_kv_after_pad[i] - pad_len[i-1], cu_seqlens_kv_after_pad[i])
+                    tensor[pad_range[0]:pad_range[1]] = 0.0
+                    tensor_orig = torch.cat([tensor_orig, tensor[valid_range[0]:valid_range[1]]], dim=0)
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split('_')):
@@ -608,13 +692,35 @@ def _run_dot_product_attention(
                 split_dim = dim
                 break
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
+        tensors_orig = torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
         for j in range(tensor_count):
             if split_dim != 0:
                 inp.append(tensors[j].squeeze(split_dim))
+                inp_orig.append(tensors_orig[j].squeeze(split_dim))
             else:
                 inp.append(tensors[j])
+                inp_orig.append(tensors_orig[j])
     for i in range(3):
         inp[i].requires_grad = True
+        inp_orig[i].requires_grad = True
+
+    # Create ragged offsets for q/k/v
+    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
+    qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
+    if qkv_format == 'thd':
+        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+        if qkv_group == 'hd_hd_hd':
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
+        if qkv_group in ['3hd', 'h3d']:
+            seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+        if qkv_group in ['hd_2hd', 'hd_h2d']:
+            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+            seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
+            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
 
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
@@ -622,6 +728,15 @@ def _run_dot_product_attention(
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split('_')]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
+    out_grad_orig = out_grad
+    if qkv_format == 'thd' and pad_between_seqs:
+        out_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+        if qkv_format_kv == 't_h_d':
+            for i in range(1, config.batch_size+1):
+                valid_range = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i-1], cu_seqlens_q_after_pad[i])
+                out_grad[pad_range[0]:pad_range[1]] = 0.0
+                out_grad_orig = torch.cat([out_grad_orig, out_grad[valid_range[0]:valid_range[1]]], dim=0)
 
     # Create bias
     if config.attn_bias_type in ['no_bias', 'alibi']:
@@ -660,21 +775,64 @@ def _run_dot_product_attention(
     )
 
     # Run a forward and backward pass
-    out = block(inp[0], inp[1], inp[2],
+    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+        q = inp_orig[0]
+        k = inp_orig[1]
+        v = inp_orig[2]
+        d_out = out_grad_orig
+    if backend == "FusedAttention":
+        q = inp[0]
+        k = inp[1]
+        v = inp[2]
+        d_out = out_grad
+    out = block(q, k, v,
             window_size=window_size,
             attention_mask=attention_mask,
             qkv_format=qkv_format,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            seq_offsets_q=seq_offsets_q,
+            seq_offsets_k=seq_offsets_k,
+            seq_offsets_v=seq_offsets_v,
+            seq_offsets_o=seq_offsets_o,
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias=bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=True)
-    out.backward(out_grad)
+    if is_training:
+        out.backward(d_out)
 
-    return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+        if is_training:
+            return out, (q.grad, k.grad, v.grad)
+        else:
+            return out, (None, None, None)
+    if backend == "FusedAttention":
+        if qkv_format == 'thd' and pad_between_seqs:
+            out_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            q_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            k_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            v_grad_orig = torch.Tensor([]).to(device="cuda",dtype=dtype)
+            for i in range(1, config.batch_size+1):
+                valid_range_q = (cu_seqlens_q_after_pad[i-1], cu_seqlens_q_after_pad[i] - pad_len[i-1])
+                valid_range_kv = (cu_seqlens_kv_after_pad[i-1], cu_seqlens_kv_after_pad[i] - pad_len[i-1])
+                out_orig = torch.cat([out_orig, out[valid_range_q[0]:valid_range_q[1]]], dim=0)
+                q_grad_orig = torch.cat([q_grad_orig, q.grad[valid_range_q[0]:valid_range_q[1]]], dim=0)
+                k_grad_orig = torch.cat([k_grad_orig, k.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+                v_grad_orig = torch.cat([v_grad_orig, v.grad[valid_range_kv[0]:valid_range_kv[1]]], dim=0)
+            if is_training:
+                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+            else:
+                return out_orig, (None, None, None)
+        else:
+            if is_training:
+                return out, (q.grad, k.grad, v.grad)
+            else:
+                return out, (None, None, None)
 
 
 model_configs_te_layer = {
@@ -715,7 +873,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
     )
     flash_attn_supported = _is_flash_attention_supported(config)
-    unfused_attn_supported = _is_unfused_attention_supported(config)
+    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
     if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
@@ -858,7 +1016,7 @@ def _run_transformer_layer(
         attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
         for i in range(config.batch_size):
             attention_mask_q = torch.cat([attention_mask_q,
-                torch.Tensor([True]*seqlens_q[i] + [False]*(config.max_seqlen_q-seqlens_q[i]))
+                torch.Tensor([False]*seqlens_q[i] + [True]*(config.max_seqlen_q-seqlens_q[i]))
                 .to(torch.bool).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=0)
         attention_mask = attention_mask_q.to(device="cuda")
 
@@ -944,7 +1102,7 @@ def _run_transformer_layer(
 
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_9 ": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_9" : ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
     "fp8_11": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0,  "causal", "no_bias"),
@@ -1143,24 +1301,49 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         dtype, config, False, qkv_layout)
 
     tols = dict(atol=5e-1, rtol=5e-2)
+    rmse_tol = 0.1
+    bwd_names = ['dq', 'dk', 'dv']
+    fwd_rmse = _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)
+    fwd_range = max(fused_attn_fwd_fp8.max().item(),
+        fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
+        fused_attn_fwd_f16.min().item())
     if _NVTE_DEBUG:
-        print('[test_dpa_fp8_vs_f16]: ', tols)
+        print()
+        print('========== {:^25s} =========='.format('forward output'))
         print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
         print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd RMSE: {:.6f}'.format(
-            _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)))
-    torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+        print('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+        except Exception as e:
+            print(e)
+            print()
+    assert(fwd_rmse < rmse_tol * fwd_range
+        ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
     for i,_ in enumerate(fused_attn_bwd_f16):
+        bwd_rmse = _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])
+        bwd_range = max(fused_attn_bwd_fp8[i].max().item(),
+            fused_attn_bwd_f16[i].max().item()) - min(fused_attn_bwd_fp8[i].min().item(),
+            fused_attn_bwd_f16[i].min().item())
         if _NVTE_DEBUG:
-            print('fused_attn_bwd_fp8 min {:.6f} max {:.6f}'.format(
+            print()
+            print('========== {:^25s} =========='.format(bwd_names[i]))
+            print('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
-            print('fused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
+            print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
-            print('fused_attn_bwd RMSE: {:.6f}'.format(
-                _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])))
-        torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
+            try:
+                torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+            except Exception as e:
+                print(e)
+                print()
+        assert(bwd_rmse < rmse_tol * bwd_range
+            ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
@@ -1231,7 +1414,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
             layout = layout.replace('h', 'hg')
             layout = layout.replace('t', 'tg')
         tensor_shape = [dim_to_num[j] for j in layout.split('_')]
-        tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        tensor = torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split('_')):
@@ -1252,7 +1435,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
     qkv_format_kv = qkv_format_kv.replace('s', 'sq')
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split('_')]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
-    out_grad = 0.1 * torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
+    out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
     with fp8_autocast(enabled=fp8_dpa, fp8_recipe=fp8_recipe):
         out = dpa(inp[0], inp[1], inp[2],
@@ -1359,7 +1542,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = 0.0001 * torch.randint(0, 100,
+    inp = 0.0001 * torch.randint(-100, 100,
             (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim),
             dtype=dtype, device="cuda", requires_grad=True)
     seqlens = torch.full([config.batch_size], config.max_seqlen_q,
@@ -1544,7 +1727,7 @@ class _custom_mha_fp8(torch.autograd.Function):
                 qkv[:,:,2,:,:] if cudnn_frontend_version == 1 else qkv[:,2,:,:],
                 fp8_dtype_forward,
                 FusedAttnBackend["FP8"],
-                None,
+                None, None, None, None, None,
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV],
                 fp8_meta["scaling_fwd"].scale_inv[META_S],
                 fp8_meta["scaling_fwd"].scale[META_S],
@@ -1624,6 +1807,7 @@ class _custom_mha_fp8(torch.autograd.Function):
                     fp8_dtype_backward,
                     ctx.aux_ctx_tensors,
                     FusedAttnBackend["FP8"],
+                    None, None, None, None,
                     fwd_scale_inverses[META_QKV], # d_scale_qkv,
                     fwd_scale_inverses[META_S], # d_scale_s,
                     fwd_scale_inverses[META_O], # d_scale_o,
@@ -1728,7 +1912,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 dtype=params_dtype,
             )
         )
-        self.fp8_weight_shapes.append(self.qkv_weight.shape)
         self.qkv_bias = torch.nn.Parameter(
             torch.empty(
                 self.hidden_size * 3,
@@ -1762,9 +1945,3 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 self.training,
                 self.mask_type)
         return out
-
-    def get_fp8_weights_scratchpad(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
-        """Needs override."""

@@ -31,6 +31,10 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 const at::Tensor cu_seqlens,
                 const at::Tensor QKV,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -54,6 +58,10 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 const transformer_engine::DType qkv_type,
                 const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -76,6 +84,10 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 const at::Tensor Q,
                 const at::Tensor KV,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -101,6 +113,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 const transformer_engine::DType qkv_type,
                 const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -124,6 +140,10 @@ std::vector<at::Tensor> fused_attn_fwd(
                 const at::Tensor K,
                 const at::Tensor V,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
@@ -150,6 +170,10 @@ std::vector<at::Tensor> fused_attn_bwd(
                 const transformer_engine::DType qkv_type,
                 const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
@@ -340,6 +364,13 @@ at::Tensor qgelu(at::Tensor input,
                   transformer_engine::DType otype
 );
 
+at::Tensor srelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+);
+
 at::Tensor dgelu(at::Tensor grad,
                  at::Tensor input,
                  transformer_engine::DType otype
@@ -368,6 +399,11 @@ at::Tensor dswiglu(at::Tensor grad,
 at::Tensor dqgelu(at::Tensor grad,
                    at::Tensor input,
                    transformer_engine::DType otype
+);
+
+at::Tensor dsrelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
 );
 
 /***************************************************************************************************
@@ -679,3 +715,44 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens,
                                        int world_size,
                                        int rank
 );
+
+
+/***************************************************************************************************
+ * multi_tensor_* kernels
+ **************************************************************************************************/
+
+void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
+                             std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+
+std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    at::optional<bool> per_tensor_python);
+
+std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    at::Tensor inv_scale, at::optional<bool> per_tensor_python);
+
+void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
+                            std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                            const float beta1, const float beta2, const float epsilon,
+                            const int step, const int mode, const int bias_correction,
+                            const float weight_decay);
+
+void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
+                                       std::vector<std::vector<at::Tensor>> tensor_lists,
+                                       at::Tensor lr, const float beta1, const float beta2,
+                                       const float epsilon, at::Tensor step, const int mode,
+                                       const int bias_correction, const float weight_decay,
+                                       at::Tensor inv_scale);
+
+void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_flag,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists,
+                                              at::Tensor lr, const float beta1, const float beta2,
+                                              const float epsilon, at::Tensor step, const int mode,
+                                              const int bias_correction, const float weight_decay,
+                                              at::Tensor inv_scale);
+
+void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
+                           std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
+                           float momentum, float dampening, float lr, bool nesterov, bool first_run,
+                           bool wd_after_momentum, float scale);

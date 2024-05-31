@@ -78,12 +78,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
   m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
+  m.def("srelu", &srelu, "Squared ReLU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
+  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
@@ -116,6 +118,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Correct the THD format gradients of context parallelism in backward pass");
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format");
+
+  // multi-tensor functions
+  m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
+        "Fused overflow check + scale for a list of contiguous tensors");
+  m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors");
+  m.def("multi_tensor_unscale_l2norm", &multi_tensor_unscale_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors after unscaling (unscaling is only "
+        "performed for L2 norm computation, and tensors are not updated)");
+  m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer");
+  m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support and LR scheduling");
+  m.def("multi_tensor_adam_capturable_master", &multi_tensor_adam_capturable_master_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support, LR scheduling and FP32 master weights");
+  m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
+        "Fused SGD optimizer for list of contiguous tensors");
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")

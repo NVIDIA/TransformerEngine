@@ -96,7 +96,7 @@ def _linear_fwd_fp8(
                 out=weight_fp8,
             )
 
-    out = fp8_gemm(
+    out, _ = fp8_gemm(
         weight_fp8,
         fp8_meta["scaling_fwd"].scale_inv,
         weight_fp8_index,
@@ -245,6 +245,7 @@ def _linear_bwd_fp8(
     inputmat: paddle.Tensor,
     inputmat_t: paddle.Tensor,
     inputmat_fp8_index: FP8FwdTensors,
+    weight: paddle.Tensor,
     weight_t_fp8: paddle.Tensor,
     weight_fp8_index: FP8FwdTensors,
     grad_output: paddle.Tensor,
@@ -260,6 +261,8 @@ def _linear_bwd_fp8(
     tensor_parallel: bool,
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
+    fuse_wgrad_accumulation: bool,
+    accumulate_wgrad_into_param_main_grad: bool,
 ):
     dgrad, wgrad, handle = None, None, None
 
@@ -275,7 +278,7 @@ def _linear_bwd_fp8(
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
     fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
     if requires_dgrad:
-        dgrad = fp8_gemm(
+        dgrad, _ = fp8_gemm(
             weight_t_fp8,
             fwd_scale_inverses,
             weight_fp8_index,
@@ -303,7 +306,8 @@ def _linear_bwd_fp8(
             if inputmat_t_total is None:
                 inputmat_t_total = transpose(inputmat_total, fp8_dtype_backward)
                 clear_tensor_data(inputmat_total)
-            wgrad = fp8_gemm(
+
+            wgrad, _ = fp8_gemm(
                 inputmat_t_total,
                 fwd_scale_inverses,
                 inputmat_fp8_index,
@@ -312,8 +316,10 @@ def _linear_bwd_fp8(
                 fp8_meta["scaling_bwd"].scale_inv,
                 grad_output_fp8_index,
                 fp8_dtype_backward,
-                activation_dtype,
+                "float32" if fuse_wgrad_accumulation else activation_dtype,
                 get_workspace(),
+                accumulate=accumulate_wgrad_into_param_main_grad,
+                out=weight.main_grad if fuse_wgrad_accumulation else None,
                 use_split_accumulator=_2X_ACC_WGRAD,
             )
             clear_tensor_data(inputmat_t_total, grad_output_t)
@@ -323,10 +329,16 @@ def _linear_bwd_fp8(
                 grad_output,
                 activation_dtype,
                 get_workspace(),
-                layout="NT",
                 grad=True,
+                accumulate=accumulate_wgrad_into_param_main_grad,
+                layout="NT",
+                out=weight.main_grad if fuse_wgrad_accumulation else None,
+                out_dtype="float32" if fuse_wgrad_accumulation else None,
             )
             clear_tensor_data(inputmat_total)
+
+        if fuse_wgrad_accumulation:
+            weight.main_grad = wgrad
 
     if parallel_mode == "column" and tensor_parallel and handle is not None:
         handle.wait()
@@ -346,6 +358,8 @@ def _linear_bwd_non_fp8(
     tensor_parallel: bool,
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
+    fuse_wgrad_accumulation: bool,
+    accumulate_wgrad_into_param_main_grad: bool,
     gelu_input: Union[paddle.Tensor, None] = None,
     activation: str = "",
 ):
@@ -386,10 +400,16 @@ def _linear_bwd_non_fp8(
             grad_output,
             activation_dtype,
             get_workspace(),
-            layout="NT",
             grad=True,
+            accumulate=accumulate_wgrad_into_param_main_grad,
+            layout="NT",
+            out=weight.main_grad if fuse_wgrad_accumulation else None,
+            out_dtype="float32" if fuse_wgrad_accumulation else None,
             use_bias=requires_bgrad,
         )
+        if fuse_wgrad_accumulation:
+            weight.main_grad = wgrad
+
     elif requires_bgrad:
         bgrad = grad_output.sum(axis=0)
 
@@ -421,6 +441,8 @@ def _linear_bwd(
     tensor_parallel: bool,
     sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
+    fuse_wgrad_accumulation: bool,
+    accumulate_wgrad_into_param_main_grad: bool,
 ):
     dgrad, wgrad, bgrad = None, None, None
     if fp8_enabled:
@@ -428,6 +450,7 @@ def _linear_bwd(
             inputmat,
             inputmat_t,
             inputmat_fp8_index,
+            weight,
             weight_t_fp8,
             weight_fp8_index,
             grad_output,
@@ -443,6 +466,8 @@ def _linear_bwd(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
         )
     else:
         dgrad, wgrad, bgrad = _linear_bwd_non_fp8(
@@ -457,6 +482,8 @@ def _linear_bwd(
             tensor_parallel,
             sequence_parallel,
             tp_group,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
         )
     return dgrad, wgrad, bgrad
 
@@ -483,6 +510,7 @@ class _Linear(paddle.autograd.PyLayer):
         sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
+        fuse_wgrad_accumulation: bool,
         is_first_microbatch: bool,
     ) -> paddle.Tensor:
         # Make sure input dimensions are compatible
@@ -561,6 +589,7 @@ class _Linear(paddle.autograd.PyLayer):
             ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
@@ -591,6 +620,11 @@ class _Linear(paddle.autograd.PyLayer):
                 bgrad,
             ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_output,
                                                                   ctx.parallel_mode == "row")
+            if ctx.is_first_microbatch is not None:
+                accumulate_wgrad_into_param_main_grad = (ctx.fuse_wgrad_accumulation
+                                                         and not ctx.is_first_microbatch)
+            else:
+                accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
             dgrad, wgrad, bgrad_ = _linear_bwd(
                 inputmat,
@@ -614,6 +648,8 @@ class _Linear(paddle.autograd.PyLayer):
                 ctx.tensor_parallel,
                 ctx.sequence_parallel,
                 ctx.tp_group,
+                ctx.fuse_wgrad_accumulation,
+                accumulate_wgrad_into_param_main_grad,
             )
 
             if not ctx.fp8_enabled:
@@ -626,19 +662,23 @@ class _Linear(paddle.autograd.PyLayer):
                 # weight_fp8 and weight_t_fp8 are stop_gradient tensors
                 weight_cache_grad = (None, None)
 
+            dgrad_return = dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None
             if not ctx.use_bias:
-                return (
-                    wgrad if ctx.requires_wgrad else None,
-                    *weight_cache_grad,
-                    dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                )
+                bgrad_return = ()
+            elif ctx.requires_bgrad:
+                bgrad_return = (bgrad,)
+            else:
+                bgrad_return = (None,)
 
-            return (
-                wgrad if ctx.requires_wgrad else None,
-                *weight_cache_grad,
-                dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                bgrad if ctx.requires_bgrad else None,
-            )
+        if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+            wgrad = None
+
+        return (
+            wgrad if ctx.requires_wgrad else None,
+            *weight_cache_grad,
+            dgrad_return,
+            *bgrad_return,
+        )
 
 
 class Linear(TransformerEngineBaseLayer):
@@ -668,6 +708,16 @@ class Linear(TransformerEngineBaseLayer):
                    When set to `None`, no communication is performed.
     sequence_parallel : bool, default = `False`
                        if set to `True`, uses sequence parallelism.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
+
     """
 
     def __init__(
@@ -679,6 +729,7 @@ class Linear(TransformerEngineBaseLayer):
         parallel_mode: Optional[str] = None,
         sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
+        fuse_wgrad_accumulation: bool = False,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -704,6 +755,8 @@ class Linear(TransformerEngineBaseLayer):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
+
+        self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
 
         # Initialize weight parameter
         with track_rng_state(enable=self.tensor_parallel):
@@ -779,6 +832,7 @@ class Linear(TransformerEngineBaseLayer):
                 self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
+                self.fuse_wgrad_accumulation,
                 is_first_microbatch,
             )
 
