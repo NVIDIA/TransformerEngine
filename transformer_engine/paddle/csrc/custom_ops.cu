@@ -647,10 +647,13 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_fwd_qkvpacked(
         te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
-        te_cu_seqlens.data(), te_rng_state.data(), max_seqlen, is_training, attn_scale, p_dropout,
+        te_cu_seqlens.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(), te_rng_state.data(),
+        max_seqlen, is_training, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), QKV.stream());
 
     // allocate memory for workspace and auxiliary output tensors
@@ -664,7 +667,9 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     // execute the kernel
     nvte_fused_attn_fwd_qkvpacked(
         te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
-        te_cu_seqlens.data(), te_rng_state.data(), max_seqlen, is_training, attn_scale, p_dropout,
+        te_cu_seqlens.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(), te_rng_state.data(),
+        max_seqlen, is_training, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), QKV.stream());
 
     // destroy tensor wrappers, but not allocated memory
@@ -730,10 +735,13 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_bwd_qkvpacked(
         te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
-        te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), max_seqlen, attn_scale, p_dropout,
+        te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        max_seqlen, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), QKV.stream());
 
     // allocate memory for workspace
@@ -743,7 +751,9 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     // execute kernel
     nvte_fused_attn_bwd_qkvpacked(
         te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
-        te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), max_seqlen, attn_scale, p_dropout,
+        te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        max_seqlen, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), QKV.stream());
 
     // destroy tensor wrappers
@@ -816,10 +826,13 @@ void te_fused_attn_fwd_kvpacked(
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_fwd_kvpacked(te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(),
                                  te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                                 te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q,
+                                 te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
+                                 dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                                 dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q,
                                  max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout_enum,
                                  bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
 
@@ -834,7 +847,9 @@ void te_fused_attn_fwd_kvpacked(
     // execute the kernel
     nvte_fused_attn_fwd_kvpacked(te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(),
                                  te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                                 te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q,
+                                 te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
+                                 dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                                 dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q,
                                  max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout_enum,
                                  bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
 
@@ -909,11 +924,14 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_bwd_kvpacked(
         te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
         &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
-        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
 
     // allocate memory for workspace
@@ -924,7 +942,9 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     nvte_fused_attn_bwd_kvpacked(
         te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
         &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
-        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+        max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
 
     // destroy tensor wrappers
@@ -989,10 +1009,13 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
                         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                        te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
+                        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
                         is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
                         attn_mask_type_enum, workspace.data(), Q.stream());
 
@@ -1008,7 +1031,9 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
     // execute the kernel
     nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
                         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                        te_cu_seqlens_kv.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
+                        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        te_rng_state.data(), max_seqlen_q, max_seqlen_kv,
                         is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
                         attn_mask_type_enum, workspace.data(), Q.stream());
 
@@ -1084,11 +1109,14 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
     // create workspace
     TensorWrapper workspace;
 
+    auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
     // populate tensors with appropriate shapes and dtypes
     nvte_fused_attn_bwd(te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(),
                         te_S.data(), te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(),
                         te_dK.data(), te_dV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
-                        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+                        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
                         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(),
                         Q.stream());
 
@@ -1100,7 +1128,9 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
     nvte_fused_attn_bwd(te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(),
                         te_S.data(), te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(),
                         te_dK.data(), te_dV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
-                        te_cu_seqlens_kv.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
+                        te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        dummy_seq_offsets.data(), dummy_seq_offsets.data(),
+                        max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
                         qkv_layout_enum, bias_type_enum, attn_mask_type_enum, workspace.data(),
                         Q.stream());
 
