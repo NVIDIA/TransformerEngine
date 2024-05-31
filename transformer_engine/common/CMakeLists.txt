@@ -8,7 +8,8 @@ list(APPEND transformer_engine_SOURCES
      transformer_engine.cpp
      transpose/cast_transpose.cu
      transpose/transpose.cu
-     transpose/cast_transpose_fusion.cu
+    #  transpose/cast_transpose_fusion.cu
+     transpose/cast_transpose_fusion_template.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
