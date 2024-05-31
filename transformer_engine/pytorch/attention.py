@@ -3175,7 +3175,6 @@ class FusedAttention(TransformerEngineBaseModule):
                         key_layer.device,
                     )
         if qkv_format == 'thd':
-            assert not context_parallel, "thd format not supported with context parallelism!"
             assert (max_seqlen_q is not None
                 and max_seqlen_kv is not None
                 and cu_seqlens_q is not None
@@ -3186,6 +3185,7 @@ class FusedAttention(TransformerEngineBaseModule):
                 or seq_offsets_v is None
                 or seq_offsets_o is None):
                 qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
+                qkv_group = 'hd_hd_hd' if context_parallel else qkv_group
                 num_heads = query_layer.shape[-2]
                 num_gqa_groups = key_layer.shape[-2]
                 head_dim = query_layer.shape[-1]
