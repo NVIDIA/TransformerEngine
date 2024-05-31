@@ -22,6 +22,8 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
+        if qkv_format == 'thd' and config.num_heads != config.num_gqa_groups:
+            return
 
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv('WORLD_SIZE', '1'))
