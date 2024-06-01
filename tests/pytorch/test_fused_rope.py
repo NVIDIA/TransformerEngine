@@ -11,7 +11,7 @@ from transformer_engine.pytorch.attention import (
 
 
 def apply_rotary_pos_emb_thd(
-    t: torch.Tensor, cu_seqlens: torch.Tensor, freqs: torch.Tensor
+    t: torch.Tensor, cu_seqlens: torch.Tensor, freqs: torch.Tensor, begins: torch.Tensor
 ) -> torch.Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -20,17 +20,102 @@ def apply_rotary_pos_emb_thd(
         cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`,
         with shape [b + 1] and dtype torch.int32.
         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [max_s, 1, 1, d]
+        begins (Tensor): Tensor of shape [b] determining the beginning offsets
+                         of frequeuncies applied to  sequences.
 
     Returns:
         Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
     """
     seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-    return torch.cat(
-        [
-            apply_rotary_pos_emb(x.unsqueeze(1), freqs[: x.size(0)])
-            for x in torch.split(t, seqlens)
-        ]
-    ).squeeze(1)
+    if begins is None:
+        return torch.cat(
+            [
+                apply_rotary_pos_emb(x.unsqueeze(1), freqs[:x.size(0)])
+                for x in torch.split(t, seqlens)
+            ]
+        ).squeeze(1)
+    else:
+        return torch.cat(
+            [
+                apply_rotary_pos_emb(x.unsqueeze(1), freqs[begins[i]:(x.size(0) + begins[i])])
+                for i, x in enumerate(torch.split(t, seqlens))
+            ]
+        ).squeeze(1)
+
+
+def apply_rotary_pos_emb_with_begins(
+    t: torch.Tensor,
+    freqs: torch.Tensor,
+    tensor_format: str = "sbhd",
+    begins: Union[torch.Tensor, None] = None,
+) -> torch.Tensor:
+    """
+    Apply rotary positional embedding tensor to the input tensor.
+    This is non-fused version which supports begins parameters.
+    Non-fused implementation with begins is slow, thus it is not included in the
+    Transformer Engine directly.
+
+    Parameters
+    ----------
+    t: torch.Tensor
+        Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
+        rotary positional embedding will be applied.
+    freqs: torch.Tensor
+        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
+    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    begins: torch.Tensor, default = None.
+        We may not want begin all the sequences from the 0 embedding.
+        This tensor argument allows that.
+    """
+
+    max_seq_len = freqs.shape[0]
+    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+
+    # Only apply the rotary embeddings up to the sequence length of the running
+    # input.
+    assert cur_seq_len <= max_seq_len, (
+        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    )
+    if begins is None:
+        freqs = freqs[:cur_seq_len]
+    if tensor_format == "bshd":
+        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    # cos/sin first then dtype conversion for better precision
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
+
+    rot_dim = freqs.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    if begins is not None:
+        if tensor_format == "bshd":
+            sin_1 = sin_[:, :cur_seq_len, :, :].expand(t.shape).clone()
+            cos_1 = cos_[:, :cur_seq_len, :, :].expand(t.shape).clone()
+            sin_2 = sin_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
+            cos_2 = cos_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
+
+        else:
+            sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
+            cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
+            sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+            cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+        for b in range(begins.shape[0]):
+            assert max_seq_len >= begins[b]
+            if tensor_format == "bshd":
+                sin_1[b, :] = sin_2[b, begins[b]:(begins[b] + cur_seq_len), :]
+                cos_1[b, :] = cos_2[b, begins[b]:(begins[b] + cur_seq_len), :]
+            else:
+                sin_1[:, b, :] = sin_2[begins[b]:(begins[b] + cur_seq_len), b, :]
+                cos_1[:, b, :] = cos_2[begins[b]:(begins[b] + cur_seq_len), b, :]
+        t = (t * cos_1) + (_rotate_half(t) * sin_1)
+        return torch.cat((t, t_pass), dim=-1)
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * cos_) + (_rotate_half(t) * sin_)
+    return torch.cat((t, t_pass), dim=-1)
 
 
 def get_tol(dtype: torch.dtype) -> Dict:
@@ -56,8 +141,9 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("margin", [0, 10])
+@pytest.mark.parametrize("begins", [True, False])
 @pytest.mark.parametrize("transpose", [None, (0, 1), (2, 3)])
-@pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
+@pytest.mark.parametrize("tensor_format", ["bshd", "sbhd"])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 def test_fused_rope(
     dtype: torch.dtype,
@@ -65,6 +151,7 @@ def test_fused_rope(
     hidden_size: int,
     rotary_percent: float,
     margin: int,
+    begins: bool,
     transpose: Union[Tuple, None],
     tensor_format: str,
     loss_func: Callable,
@@ -82,12 +169,18 @@ def test_fused_rope(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
+    if margin == 0:
+        begins = False
+    begins = torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device) if begins else None
+
+
+
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(seq_length)
 
     # unfused
-    output_unfused = apply_rotary_pos_emb(
-        t, emb, tensor_format=tensor_format, fused=False
+    output_unfused = apply_rotary_pos_emb_with_begins(
+        t, emb, tensor_format=tensor_format, begins=begins
     )
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
@@ -100,6 +193,7 @@ def test_fused_rope(
         emb,
         tensor_format=tensor_format,
         fused=True,
+        begins=begins
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
@@ -116,12 +210,14 @@ def test_fused_rope(
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("transpose", [None, (1, 2)])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+@pytest.mark.parametrize("begins", [True, False])
 def test_fused_rope_thd(
     dtype: torch.dtype,
     hidden_size: int,
     rotary_percent: float,
     transpose: Union[Tuple, None],
     loss_func: Callable,
+    begins: bool,
 ) -> None:
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -139,11 +235,13 @@ def test_fused_rope_thd(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
+    begins = torch.randint(0, 20, (cu_seqlens.shape[-1],), dtype=torch.int32, device=device) if begins else None
+
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(cu_seqlens[-1])
 
     # unfused
-    output_unfused = apply_rotary_pos_emb_thd(t, cu_seqlens, emb)
+    output_unfused = apply_rotary_pos_emb_thd(t, cu_seqlens, emb, begins=begins)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
     grad_unfused = t.grad.detach().clone()
@@ -151,7 +249,7 @@ def test_fused_rope_thd(
 
     # fused
     output_fused = apply_rotary_pos_emb(
-        t, emb, fused=True, tensor_format="thd", cu_seqlens=cu_seqlens
+        t, emb, fused=True, tensor_format="thd", cu_seqlens=cu_seqlens, begins=begins
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
