@@ -188,9 +188,6 @@ std::vector<at::Tensor> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len,
-                    torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s);
-
 /***************************************************************************************************
  * GEMM
  **************************************************************************************************/
@@ -647,26 +644,26 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
 
 at::Tensor fused_rope_forward(const at::Tensor &input,
                               const at::Tensor &freqs,
-                              const at::Tensor &begins,
+                              const at::Tensor &start_positions,
                               const bool transpose_output_memory
 );
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads,
                                const at::Tensor &freqs,
-                               const at::Tensor &begins,
+                               const at::Tensor &start_positions,
                                const bool transpose_output_memory
 );
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input,
                                   const at::Tensor &cu_seqlens,
                                   const at::Tensor &freqs,
-                                  const at::Tensor &begins
+                                  const at::Tensor &start_positions
 );
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
                                    const at::Tensor &cu_seqlens,
                                    const at::Tensor &freqs,
-                                   const at::Tensor &begins
+                                   const at::Tensor &start_positions
 );
 
 /***************************************************************************************************
@@ -680,6 +677,14 @@ size_t get_cudnn_version();
 bool userbuf_comm_available();
 
 void placeholder();
+
+/***************************************************************************************************
+ * Generation
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len,
+                    torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s);
 
 
 /***************************************************************************************************

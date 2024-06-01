@@ -102,7 +102,7 @@ _alibi_cache = {
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
 
-class InferenceParams: # pylint: disable=too-few-public-methods
+class InferenceParams:
     """
     Inference parameters that are passed to the main model in order
     to efficienly calculate and store the context during inference.
@@ -138,9 +138,9 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             # self.input_sequence_lengths stores tensor of shape [b] with lengths of input sequences
             # and self.cached_sequence_lengths is the sum of all previous input lengths tensors -
             # equivalently it contains total lengths of cached sequences.
-            self.cached_sequence_lengths = torch.empty(
+            self.cached_sequence_lengths = torch.zeros(
                 (max_batch_size,), device="cuda", dtype=torch.int32)
-            self.input_sequence_lengths = torch.empty(
+            self.input_sequence_lengths = torch.zeros(
                 (max_batch_size,), device="cuda", dtype=torch.int32)
         else:
             self.sequence_len_offset = 0
@@ -173,42 +173,52 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
 
 
-    def setup_before_new_input(self, new_input, reset=False, pad_token_id=None):
+    def setup_before_new_input(self, lengths_tensor=None, max_input_length=None, length=None):
         """
             Updates parameters representing incoming sequence lengths and lengths
-            of sequence in the cache. Should be called before every forward pass in inference.
+            of sequences in the cache. Should be called before every forward pass in inference.
 
             Parameters
             ----------
-            new_input: torch.Tensor
-                Tensor with token_ids (not embeddings!) on which we want to do next forward pass.
-            reset: int
-                If reset=True, all previous sequence lengths will be set to 0.
-                It is supposed to be used after last generation phase to
-                allow inference_params to be reused.
-            pad_token_id: int
-                Value of padding token - used to compute sequence lengths. If pad_token_id=None,
-                we assume that all new_input sequence lengths
-                are equal to the corresponding dimension of new_input.
+            lengths_tensor: torch.Tensor
+                1d tensor with sequence lengths in new input.
+                Should be used only when self.qkv_format = "thd".
+            max_input_length: int
+                If the incoming sequences tensor has shape [b, s, h, d],
+                this should be equal to s.
+                Should be used only when self.qkv_format = "thd".
+            length: int
+                Length of incoming sequences.
+                Should be used only when self.qkv_format in ["bshd", "thd"].
         """
         if self.qkv_format == "thd":
+            assert lengths_tensor is not None and max_input_length is not None, \
+                "lengths_tensor and max_input_length should not be none for qkv_format = \"thd\""
             self.cached_sequence_lengths.copy_(
                 self.cached_sequence_lengths + self.input_sequence_lengths)
-            if pad_token_id is not None:
-                self.input_sequence_lengths.copy_(
-                    torch.sum(new_input.ne(pad_token_id), dim=-1, dtype=torch.int32).squeeze())
-            else:
-                self.input_sequence_lengths.copy_(
-                    torch.ones(new_input.shape[0], device="cuda") * new_input.shape[1])
-            self.max_incoming_seq_len = new_input.shape[1]
+            self.input_sequence_lengths.copy_(lengths_tensor)
+            self.max_incoming_seq_len = max_input_length
 
-            if reset:
-                self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
         else:
+            assert length is not None, \
+                "length should not be none for qkv_format in [\"bshd\", \"sbhd\"]"
             if self.input_sequence_length is not None:
                 self.sequence_len_offset += self.input_sequence_length
-            self.input_sequence_length = new_input.shape[1]
+            self.input_sequence_length = length
 
+    def reset(self):
+        """
+            Resets parameters to allow use of this object with new iteration of generation.
+            It does not reallocate buffers - it is more efficient than creating new InferenceParams
+            object. Moreover, reusing one object
+            with the same buffers helps is usage of CUDA Graphs.
+        """
+        if self.qkv_format == "thd":
+            self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
+            self.input_sequence_lengths.copy_(torch.zeros_like(self.input_sequence_lengths))
+        else:
+            self.input_sequence_length = None
+            self.sequence_len_offset = 0
 
     def save_to_kv_cache(self, layer_number, key_layer, value_layer):
         """
@@ -221,8 +231,14 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                  concatenated to form a transformer block.
             key_layer: torch.Tensor
                 Tensor of format corresponding to self.qkv_format with current key_layer.
+                Notice: if self.qkv_format in ["bshd", "sbhd"] both layers are in format sbhd
+                Notice: if self.qkv_format = "thd", we assume that offsets of the sequences
+                        are of the form k * self.max_incoming_seq_len for k = 0, ..., batch_size-1.
             value_layer: int
                 Tensor of format corresponding to self.qkv_format with current value_layer.
+                Notice: if self.qkv_format in ["bshd", "sbhd"] both layers are in format sbhd
+                Notice: if self.qkv_format = "thd", we assume that offsets of the sequences
+                        are of the form k * self.max_incoming_seq_len for k = 0, ..., batch_size-1.
         """
         (inference_key_memory, inference_value_memory,
             ) = self.key_value_memory_dict[layer_number]
@@ -1675,15 +1691,15 @@ class FusedRoPEFunc(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        freqs, cu_seqlens, begins = ctx.saved_tensors
+        freqs, cu_seqlens, start_positions = ctx.saved_tensors
         if ctx.tensor_format == "sbhd":
-            grad_input = tex.fused_rope_backward(grad_output, freqs, begins, False)
+            grad_input = tex.fused_rope_backward(grad_output, freqs, start_positions, False)
         elif ctx.tensor_format == "bshd":
             grad_input = tex.fused_rope_backward(
-                grad_output.transpose(0, 1), freqs, True
+                grad_output.transpose(0, 1), freqs, start_positions, True
             ).transpose(0, 1)
         elif ctx.tensor_format == "thd":
-            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, begins, freqs)
+            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs, start_positions)
         else:
             raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
 
@@ -1705,7 +1721,7 @@ def apply_rotary_pos_emb(
     tensor_format: str = "sbhd",
     fused: bool = False,
     cu_seqlens: Union[torch.Tensor, None] = None,
-    begins: Union[torch.Tensor, None] = None,
+    start_positions: Union[torch.Tensor, None] = None,
 ) -> torch.Tensor:
     """
     Apply rotary positional embedding tensor to the input tensor.
@@ -1726,18 +1742,18 @@ def apply_rotary_pos_emb(
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
-    begins: torch.Tensor, default = None.
-        We may not want begin all the sequences from the 0 embedding.
-        This tensor argument allows that.
+    start_positions: torch.Tensor, default = None.
+        Token i from sequence s have position encoding corresponding to
+        position start_positions[i]. If start_positions=None, then this token has position i.
     """
-    assert not (begins is not None and not fused), \
-        """begins != None and fused=False is not supported"""
+    assert not (start_positions is not None and not fused), \
+        """start_positions != None and fused=False is not supported"""
 
     if fused:
         assert (
             tensor_format != "thd" or cu_seqlens is not None
         ), "cu_seqlens must not be None when tensor_format is 'thd'."
-        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens, begins)
+        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens, start_positions)
 
     assert tensor_format in ("sbhd", "bshd"), (
         "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
@@ -3916,6 +3932,8 @@ class DotProductAttention(torch.nn.Module):
 
         if inference_params is not None:
             assert self.layer_number is not None, "Layer number must be set!"
+            assert self.qkv_format == inference_params.qkv_format, \
+                'self.qkv_format need to be equal to the inference_params.qkv_format'
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
@@ -4120,7 +4138,7 @@ class DotProductAttention(torch.nn.Module):
                 # max512 backend will only support [1, h, s, s]
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
-        if self.query_layer.shape[-1] == 256 and query_layer.requires_grad:
+        if query_layer.shape[-1] == 256 and query_layer.requires_grad:
             # Fused attention is not supported for backward with head_dim = 256.
             use_fused_attention = False
 
@@ -4240,6 +4258,7 @@ class DotProductAttention(torch.nn.Module):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     is_first_microbatch=is_first_microbatch)
+
             out =  self.fused_attention(
                 query_layer,
                 key_layer,
@@ -4969,13 +4988,13 @@ class MultiheadAttention(torch.nn.Module):
                 key_layer.copy_(
                     apply_rotary_pos_emb(
                         key_layer, k_pos_emb, "bshd", fused=True,
-                        begins=inference_params.cached_sequence_lengths
+                        start_positions=inference_params.cached_sequence_lengths
                     )
                 )
                 query_layer.copy_(
                     apply_rotary_pos_emb(
                         query_layer, q_pos_emb, "bshd", fused=True,
-                        begins=inference_params.cached_sequence_lengths
+                        start_positions=inference_params.cached_sequence_lengths
                     )
                 )
             else:

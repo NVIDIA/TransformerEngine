@@ -134,7 +134,12 @@ class GemmaGenerator(torch.nn.Module):
         # to update the information of sequence lengths.
         # Here we increase sequence offsets by one,
         # because we generated one token for every sequence.
-        self.inference_params.setup_before_new_input(next_tokens.unsqueeze(1))
+        if self.qkv_format == "thd":
+            self.inference_params.setup_before_new_input(
+                lengths_tensor=torch.ones((next_tokens.shape[0],), device="cuda"),
+                max_input_length=1)
+        else:
+            self.inference_params.setup_before_new_input(length=1)
 
         return next_tokens
 
@@ -244,7 +249,13 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
 
 
         # We need to update offsets before every forward pass to make cache work properly.
-        inference_params.setup_before_new_input(input_ids, pad_token_id=0, reset=True)
+        inference_params.reset()
+        lengths = input_ids.ne(0).sum(dim=1)
+        if self.config.qkv_format == "thd":
+            inference_params.setup_before_new_input(
+                lengths_tensor=lengths, max_input_length=input_ids.shape[1])
+        else:
+            inference_params.setup_before_new_input(length=input_ids.shape[1])
 
         hidden_states.data[:] = self.model.embed_tokens(input_ids)
         logits = self._model_context_phase(
@@ -317,8 +328,12 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             )
 
             # Generation phase.
-
-            inference_params.setup_before_new_input(next_tokens.unsqueeze(1))
+            if self.config.qkv_format == "thd":
+                inference_params.setup_before_new_input(
+                    lengths_tensor=torch.ones((next_tokens.shape[0],), device="cuda"),
+                    max_input_length=1)
+            else:
+                inference_params.setup_before_new_input(length=1)
 
             output_tokens = [next_tokens]
 
@@ -380,12 +395,22 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         # what will lead to huge speedup.
         input_shape = (self.config.cuda_graphs_static_batch_size,
                        self.config.cuda_graphs_static_max_context_len)
-        self.inference_params.setup_before_new_input(torch.randn(input_shape), reset=True)
+        self.inference_params.reset()
+        self.inference_params.setup_before_new_input(
+            lengths_tensor=torch.tensor(input_shape[0] * [input_shape[1]], device="cuda"),
+            max_input_length=input_shape[1]
+        )
         self._model_context_phase = self.record_graph(
-            self._model_context_phase, self.hidden_states_buffer) # CUDA Graphs recording
+            self._model_context_phase,
+            self.hidden_states_buffer
+        ) # CUDA Graphs recording
 
-        input_shape = torch.randn((self.config.cuda_graphs_static_batch_size, 1))
-        self.inference_params.setup_before_new_input(input_shape, reset=True)
+        input_shape = (self.config.cuda_graphs_static_batch_size, 1)
+        self.inference_params.reset()
+        self.inference_params.setup_before_new_input(
+            lengths_tensor=torch.tensor(input_shape[0] * [input_shape[1]], device="cuda"),
+            max_input_length=input_shape[1]
+        )
         self._model_generation_phase = self.record_graph(
             self._model_generation_phase, self.generation_buffer) # CUDA Graphs recording
 
