@@ -532,7 +532,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         recv_src = cp_global_ranks[(rank - 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
-        causal = (attn_mask_type == "causal")
+        causal = ("causal" in attn_mask_type)
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
@@ -634,7 +634,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout=qkv_layout, attn_mask_type="causal",
+                                    qkv_layout=qkv_layout, attn_mask_type=attn_mask_type,
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=seq_offsets_q, seq_offsets_k=seq_offsets_k,
                                     seq_offsets_v=seq_offsets_v, seq_offsets_o=seq_offsets_o,
@@ -679,8 +679,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                                    attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout=qkv_layout, attn_mask_type="no_mask",
+                                    attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
+                                    attn_mask_type="padding" if qkv_format == "thd" else "no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=seq_offsets_q,
                                     seq_offsets_k=None if seq_offsets_k is None else seq_offsets_k//2,
@@ -740,8 +740,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                                    attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout=qkv_layout, attn_mask_type="no_mask",
+                                    attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
+                                    attn_mask_type="padding" if qkv_format == "thd" else "no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=None if seq_offsets_q is None else seq_offsets_q//2,
                                     seq_offsets_k=seq_offsets_k, seq_offsets_v=seq_offsets_v,
@@ -783,7 +783,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 kv_inputs[i%2][1], TE_DType[q.dtype],
                                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                 attn_scale=softmax_scale, dropout=dropout_p,
-                                qkv_layout=qkv_layout, attn_mask_type="no_mask",
+                                qkv_layout=qkv_layout, attn_mask_type=attn_mask_type,
                                 attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                 seq_offsets_q=seq_offsets_q, seq_offsets_k=seq_offsets_k,
                                 seq_offsets_v=seq_offsets_v, seq_offsets_o=seq_offsets_o,
@@ -903,8 +903,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
         ctx.qkv_format = qkv_format
+        ctx.attn_mask_type = attn_mask_type
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
@@ -924,6 +924,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
+        causal = ("causal" in ctx.attn_mask_type)
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         if attn_biases[0] is not None:
@@ -940,7 +941,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         else:
             attn_dbias = None
 
-        if ctx.causal:
+        if causal:
             if ctx.qkv_format == "thd":
                 softmax_lse_ = tex.thd_read_second_half_lse(softmax_lse, cu_seqlens_q, q.size(0))
             else:
@@ -995,7 +996,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
             kv = p2p_comm_buffers[i%2][0]
             # In reversed order of fwd
-            if ctx.causal:
+            if causal:
                 if i == (cp_size-1):
                     if ctx.use_fused_attention:
                         if ctx.qkv_format == "bshd":
@@ -1029,7 +1030,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type="causal",
+                            attn_mask_type=ctx.attn_mask_type,
                             attn_bias_type=ctx.attn_bias_type,
                         )
                     else:
@@ -1088,7 +1089,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type="no_mask",
+                            attn_mask_type="padding" if ctx.qkv_format == "thd" else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
                         )
                     else:
@@ -1151,7 +1152,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type="no_mask",
+                            attn_mask_type="padding" if ctx.qkv_format == "thd" else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
                         )
                     else:
@@ -1197,7 +1198,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         attn_scale=ctx.softmax_scale,
                         dropout=ctx.dropout_p,
                         qkv_layout=qkv_layout,
-                        attn_mask_type="no_mask",
+                        attn_mask_type=ctx.attn_mask_type,
                         attn_bias_type=ctx.attn_bias_type,
                     )
                 else:
@@ -1220,7 +1221,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         **fa_optional_backward_kwargs
                     )
 
-            if i >= (cp_size-rank-1) or not ctx.causal:
+            if i >= (cp_size-rank-1) or not causal:
                 # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
                 # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
                 dq_ = dq_.view(*dq.shape)
@@ -1232,7 +1233,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     # [b*sq//2, np, hn] -> [sq//2, b, np, hn]
                     dq_ = dq_.view(-1, *dq.shape[-3:])
 
-            if ctx.causal:
+            if causal:
                 if i > (cp_size-rank-1):
                     dq.add_(dq_)
                 elif i == (cp_size-rank-1):
@@ -1269,7 +1270,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
             if attn_dbias is not None:
                 idx = (rank+i+1)%cp_size
-                if i == (cp_size - 1) or not ctx.causal:
+                if i == (cp_size - 1) or not causal:
                     # [b, np, sq, sk//cp] -> [b, np, sq, 2, sk//(2*cp)]
                     dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1]//2)
                     attn_dbias[..., idx, :].copy_(dbias_[..., 0, :])
@@ -1290,7 +1291,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             dkv = p2p_comm_buffers[(i+1)%2][1]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
-            if ctx.causal and i >= (cp_size-rank-1) and i != (cp_size-1):
+            if causal and i >= (cp_size-rank-1) and i != (cp_size-1):
                 if ctx.qkv_format == "bshd":
                     # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
                     dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
@@ -1302,7 +1303,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
                 dkv_ = dkv_.view(*dkv.shape)
 
-            if ctx.causal:
+            if causal:
                 if i == (cp_size-1):
                     if rank == 0:
                         if ctx.qkv_format == "bshd":
@@ -1340,7 +1341,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 else:
                     dkv.add_(dkv_)
 
-        if ctx.causal:
+        if causal:
             if ctx.qkv_format == "bshd":
                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                 dq = dq.view(q.shape[0], -1, *q.shape[-2:])
@@ -1372,7 +1373,8 @@ def attn_forward_func_with_cp(
         ), f"QKV format of {qkv_format} is not supported with context parallelism!"
     assert(qkv_format != "sbhd" or use_fused_attention
         ), "FlashAttention does not support sbhd format!"
-    assert (attn_mask_type in ["causal", "no_mask"]
+    assert ((qkv_format != 'thd' and attn_mask_type in ["causal", "no_mask"]) or \
+            (qkv_format == 'thd' and attn_mask_type in ["padding", "padding_causal"])
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
     assert (attn_bias is None or use_fused_attention
         ), "Attention bias is only supported with FusedAttention!"
