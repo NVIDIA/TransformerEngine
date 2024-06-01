@@ -45,10 +45,13 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     assert(rank in cp_comm_ranks)
     cp_comm_group = dist.new_group(cp_comm_ranks, backend='nccl')
 
-    assert (qkv_format != 'thd' or \
-            kernel_backend == "FlashAttention" or \
-            config.attn_mask_type in ['padding', 'padding_causal']
-        ) f"{config.attn_mask_type} is an unsupported attention mask type!"
+    assert config.attn_mask_type in ['causal', 'no_mask'], f"{config.attn_mask_type} is an unsupported attention mask type!"
+
+    if kernel_backend == 'FusedAttention' and qkv_format == 'thd':
+        if 'causal' in config.attn_mask_type:
+            config.attn_mask_type = 'padding_causal'
+        else:
+            config.attn_mask_type = 'padding'
 
     # instantiate core attn module
     core_attn = DotProductAttention(config.num_heads,
