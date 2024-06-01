@@ -69,6 +69,17 @@ def apply_rotary_pos_emb_with_start_positions(
         This tensor argument allows that.
     """
 
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        """
+        change sign so the last dimension becomes [-odd, +even]
+        """
+        x = x.view(x.shape[:-1] + torch.Size((2, x.shape[-1] // 2)))
+        x1, x2 = x.unbind(dim=-2)
+        return torch.cat((-x2, x1), dim=-1)
+
+    if start_positions is None:
+        return apply_rotary_pos_emb(t, freqs, tensor_format=tensor_format)
+
     max_seq_len = freqs.shape[0]
     cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
 
@@ -77,8 +88,7 @@ def apply_rotary_pos_emb_with_start_positions(
     assert cur_seq_len <= max_seq_len, (
         f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
     )
-    if start_positions is None:
-        freqs = freqs[:cur_seq_len]
+
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
     # cos/sin first then dtype conversion for better precision
@@ -89,32 +99,30 @@ def apply_rotary_pos_emb_with_start_positions(
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    if start_positions is not None:
+    # sin_1, cos_2 are going to have the same shape as tensor t and contain rotation weights.
+
+    if tensor_format == "bshd":
+        sin_1 = sin_[:, :cur_seq_len, :, :].expand(t.shape).clone()
+        cos_1 = cos_[:, :cur_seq_len, :, :].expand(t.shape).clone()
+        sin_2 = sin_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
+        cos_2 = cos_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
+    else:
+        sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
+        cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
+        sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+        cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+
+    for b in range(start_positions.shape[0]):
+        assert max_seq_len >= start_positions[b]
+        shifted_freq = slice(start_positions[b],(start_positions[b] + cur_seq_len))
         if tensor_format == "bshd":
-            sin_1 = sin_[:, :cur_seq_len, :, :].expand(t.shape).clone()
-            cos_1 = cos_[:, :cur_seq_len, :, :].expand(t.shape).clone()
-            sin_2 = sin_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
-            cos_2 = cos_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
-
+            sin_1[b, :] = sin_2[b, shifted_freq, :]
+            cos_1[b, :] = cos_2[b, shifted_freq, :]
         else:
-            sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
-            cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
-            sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
-            cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
-        for b in range(start_positions.shape[0]):
-            assert max_seq_len >= start_positions[b]
-            if tensor_format == "bshd":
-                sin_1[b, :] = sin_2[b, start_positions[b]:(start_positions[b] + cur_seq_len), :]
-                cos_1[b, :] = cos_2[b, start_positions[b]:(start_positions[b] + cur_seq_len), :]
-            else:
-                sin_1[:, b, :] = sin_2[start_positions[b]:(start_positions[b] + cur_seq_len), b, :]
-                cos_1[:, b, :] = cos_2[start_positions[b]:(start_positions[b] + cur_seq_len), b, :]
-        t = (t * cos_1) + (_rotate_half(t) * sin_1)
-        return torch.cat((t, t_pass), dim=-1)
+            sin_1[:, b, :] = sin_2[shifted_freq, b, :]
+            cos_1[:, b, :] = cos_2[shifted_freq, b, :]
 
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * cos_) + (_rotate_half(t) * sin_)
+    t = (t * cos_1) + (_rotate_half(t) * sin_1)
     return torch.cat((t, t_pass), dim=-1)
 
 
@@ -169,11 +177,14 @@ def test_fused_rope(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    if margin == 0:
-        start_positions = False
-    start_positions = torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device) if start_positions else None
+    if margin == 0 and start_positions == True:
+        # If sequence to encode has the same length as length of encoding
+        # there is no space left for starting with positions >0.
+        pytest.skip("Skipping test with margin=0 and start_positions=True")
 
 
+    start_positions = torch.randint(
+        0, margin, (batch_size,), dtype=torch.int32, device=device) if start_positions else None
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(seq_length)
@@ -235,7 +246,9 @@ def test_fused_rope_thd(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    start_positions = torch.randint(0, 20, (cu_seqlens.shape[-1],), dtype=torch.int32, device=device) if start_positions else None
+    start_positions = torch.randint(
+        0, 20, (cu_seqlens.shape[-1],), dtype=torch.int32, device=device) \
+            if start_positions else None
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(cu_seqlens[-1])
@@ -249,7 +262,8 @@ def test_fused_rope_thd(
 
     # fused
     output_fused = apply_rotary_pos_emb(
-        t, emb, fused=True, tensor_format="thd", cu_seqlens=cu_seqlens, start_positions=start_positions
+        t, emb, fused=True, tensor_format="thd",
+        cu_seqlens=cu_seqlens, start_positions=start_positions
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()

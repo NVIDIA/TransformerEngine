@@ -312,7 +312,7 @@ class InferenceParams:
         b, s = self.max_batch_size, self.max_sequence_length
 
         def _allocate_memory(dims):
-            return torch.empty(
+            return torch.zeros(
                 *dims,
                 num_gqa_groups_per_partition,
                 hidden_size_per_attention_head,
@@ -4198,10 +4198,6 @@ class DotProductAttention(torch.nn.Module):
             if self.device_compute_capability == (9, 0):
                 use_flash_attention = False
 
-        if self.qkv_format == "thd":
-            use_flash_attention = False
-            use_fused_attention = True
-
         if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1]:
             # Flash attention does not support max_seqlen_q != max_seqlen_kv
             use_flash_attention = False
@@ -4259,7 +4255,7 @@ class DotProductAttention(torch.nn.Module):
                     cp_stream=self.cp_stream,
                     is_first_microbatch=is_first_microbatch)
 
-            out =  self.fused_attention(
+            return self.fused_attention(
                 query_layer,
                 key_layer,
                 value_layer,
@@ -4282,13 +4278,6 @@ class DotProductAttention(torch.nn.Module):
                 cp_global_ranks=self.cp_global_ranks,
                 cp_stream=self.cp_stream,
                 is_first_microbatch=is_first_microbatch)
-            if qkv_format == "thd":
-                out = out.unsqueeze(1)
-                if q_size > 1:
-                    out = out.view((batch_size, -1, out.shape[2])).contiguous()
-
-
-            return out
 
         assert (not context_parallel), \
             "Context parallelism is only implemented with Flash Attention and Fused Attention!"
@@ -5040,6 +5029,12 @@ class MultiheadAttention(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
         )
+
+        if self.qkv_format == "thd":
+            # [b * sq, h] -> [qs, b, h]
+            context_layer  = context_layer.view(
+                (inference_params.max_batch_size, -1, context_layer.shape[1])
+            ).contiguous()
 
         # ===================
         # Output. [sq, b, h]

@@ -8,13 +8,6 @@ import torch
 import transformer_engine.pytorch as te
 
 
-def get_tol(dtype: torch.dtype):
-    if dtype == torch.bfloat16:
-        return dict(atol=1e-2, rtol=1e-2)
-    elif dtype == torch.float16:
-        return dict(atol=1e-3, rtol=1e-3)
-    return dict(atol=1e-5, rtol=1.3e-6)
-
 class TestInferenceParams:
     def test_setup_before_new_input_bshd(self):
         inference_params = te.attention.InferenceParams(64, 128, qkv_format="bshd")
@@ -67,8 +60,8 @@ class TestInferenceParams:
         inference_params.allocate_memory_for_kv_cache_if_empty(1, h, d, dtype)
 
         t = batch_size * max_input_len
-        key_layer = torch.randn((t, h, d)).cuda().to(torch.bfloat16)
-        value_layer = torch.randn((t, h, d)).cuda().to(torch.bfloat16)
+        key_layer = torch.randn((t, h, d)).cuda().to(dtype)
+        value_layer = torch.randn((t, h, d)).cuda().to(dtype)
 
         sequence_lengths = [1, 2] * (batch_size // 2)
 
@@ -99,11 +92,11 @@ class TestInferenceParams:
         for b in range(0, batch_size, 2):
             check(key_memory, key_layer, b, 0, 0)
             check(key_memory, key_layer, b, 1, 0)
-            assert (key_memory[b * max_seq_len + 2:((b + 1) * batch_size)] == 0).all()
+            assert (key_memory[b * max_seq_len + 2:((b + 1) * max_seq_len)] == 0).all()
 
             check(value_memory, value_layer, b, 0, 0)
             check(value_memory, value_layer, b, 1, 0)
-            assert (value_memory[b * max_seq_len + 2:((b + 1) * batch_size)] == 0).all()
+            assert (value_memory[b * max_seq_len + 2:((b + 1) * max_seq_len)] == 0).all()
 
         # odd indices
         for b in range(1, batch_size, 2):
@@ -232,69 +225,82 @@ class TestInferenceParams:
 # Namely, whether key and value layers of the
 # sequences forwarded to the model once are remembered in the cache.
 class TestMemory:
-
-
-    @pytest.mark.parametrize("nr_chunks", [1, 2, 4, 8])
+    @pytest.mark.parametrize("gen_phase_length", [1, 2, 4])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-    def test_bshd_memory(self, nr_chunks, dtype):
+    def test_bshd_memory(self, gen_phase_length, dtype):
         """
-            The input is split into nr_chunks parts,
-            which are passed to the TransformerLayer one after another.
-            The result is compared with scenario when input is passed
-            as one part.
+            The test contains of:
+            - one context phase when sequences with length 64 are passed through the model,
+            - gen_phase_length phases when sequences with length 1 are passed through the model.
+
+            The output is compared with the case when all this sequences are passed at one.
         """
+        context_phase_length = 64
         batch_size = 64
-        max_seq_len = 128
+        max_seq_len = 256
         hidden_dim = 256
-        nr_heads = 16
+        nr_heads = 4
         torch.manual_seed(1234)
-        input = torch.randn((batch_size, max_seq_len, hidden_dim), dtype=dtype).cuda()
+        input = torch.randn(
+            (batch_size, context_phase_length + gen_phase_length, hidden_dim), dtype=dtype).cuda()
         model = te.TransformerLayer(
             hidden_dim, 256, nr_heads,
             layer_number=1,
             attn_input_format="bshd",
+            self_attn_mask_type="causal",
             attention_dropout=0,
-            hidden_dropout=0,
-            dtype=dtype)
+            hidden_dropout=0).to(dtype).cuda()
 
-        output_once = model(input)
-
+        output_split = torch.Tensor().cuda().to(dtype)
         inference_params = te.attention.InferenceParams(batch_size, max_seq_len, qkv_format="bshd")
 
-        per_chunk = max_seq_len // nr_chunks
-        output_multiple = torch.Tensor()
-        for i in range(nr_chunks):
-            chunk = input[:, i * per_chunk:(i + 1) * per_chunk, :]
-            inference_params.setup_before_new_input(length=per_chunk)
-            output_multiple = torch.concat(
-                output_multiple, model(chunk, inference_params=inference_params), dim=1)
+        # context phase
+        chunk = input[:, :context_phase_length, :]
+        inference_params.setup_before_new_input(length=context_phase_length)
+        output_split = torch.concat(
+            (
+                output_split,
+                model(chunk, inference_params=inference_params, self_attn_mask_type="causal")
+            ), dim=1)
+
+        # generation phase
+        for i in range(gen_phase_length):
+            chunk = input[:, (context_phase_length + i):(context_phase_length + i + 1), :]
+            inference_params.setup_before_new_input(length=1)
+            output_split = torch.concat(
+                (
+                    output_split,
+                    model(chunk, inference_params=inference_params, self_attn_mask_type="no_mask")
+                ), dim=1)
+
+        # ground truth - one pass input
+        output_no_split = model(input)
 
         torch.testing.assert_close(
-            output_once,
-            output_multiple,
-            **get_tol(dtype)
+            output_no_split,
+            output_split,
+            atol=1e-3,
+            rtol=0
         )
 
-
-    @pytest.mark.parametrize("nr_chunks", [1, 2, 4, 8])
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-    def test_thd_memory(
-        self,
-        nr_chunks: int,
-        dtype: str,
-        ):
+    # torch.float32 does not support thd
+    @pytest.mark.parametrize("gen_phase_length", [1, 8, 32])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_thd_memory(self,  gen_phase_length, dtype):
         """
             In thd attention sequences can have various lengths,
             different that 's' dimension of input to the Transformer Layer.
 
-            nr_chunks of sequences with random lengths are passed to the model.
-            Then final output are compared with scenario when concatenated sequences
-            from all the chunks are passed.
-        """
+            The test contains of:
+            - one context phase when sequences with various lengths(!) are passed through the model,
+            - gen_phase_length phases when sequences with length 1 are passed through the model.
 
+            The output is compared with the case when all this sequences are passed at one.
+        """
+        context_phase_len = 64
         batch_size = 64
-        max_seq_len = 1024
-        hid_dim = 1024
+        max_seq_len = 256
+        hid_dim = 256
         torch.manual_seed(1234)
 
         # Tensors have shapes [b, s, h, d] and the seqlens are the tensor of shapes [b]
@@ -313,7 +319,7 @@ class TestMemory:
             attn_input_format="thd",
             attention_dropout=0,
             hidden_dropout=0,
-            self_attn_mask_type="padding").to(dtype)
+            self_attn_mask_type="padding_causal").to(dtype)
         model.eval()
 
         inference_params = te.attention.InferenceParams(batch_size, max_seq_len, qkv_format="thd")
@@ -322,17 +328,26 @@ class TestMemory:
         total_tensor = torch.zeros((batch_size, max_seq_len, hid_dim)).cuda().to(dtype)
 
         # Sequences split into chunks.
-        per_chunk = max_seq_len // nr_chunks
         output_split = None
-        sequence_lengths = None
-        for _ in range(nr_chunks):
-            sequence_lengths = torch.randint(1, per_chunk, (batch_size,)).cuda().to(torch.int32)
-            chunk = torch.randn((batch_size, per_chunk, hid_dim)).cuda().to(dtype)
+
+        # context phase
+        sequence_lengths = torch.randint(1, context_phase_len, (batch_size,)).cuda().to(torch.int32)
+        chunk = torch.randn((batch_size, context_phase_len, hid_dim)).cuda().to(dtype)
+        inference_params.setup_before_new_input(
+                max_input_length=context_phase_len, lengths_tensor=sequence_lengths)
+        model(chunk, inference_params=inference_params)
+        _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
+
+        # generation phase
+        for _ in range(gen_phase_length):
+            sequence_lengths = torch.ones((batch_size,)).cuda().to(torch.int32)
+            chunk = torch.randn((batch_size, 1, hid_dim)).cuda().to(dtype)
             inference_params.setup_before_new_input(
-                max_input_length=per_chunk, lengths_tensor=sequence_lengths)
-            output_split = model(chunk, inference_params=inference_params)
+                    max_input_length=1, lengths_tensor=sequence_lengths)
+            output_split = model(
+                chunk, inference_params=inference_params, self_attn_mask_type="padding")
             _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
-        logits_split = output_split[torch.arange(0, batch_size), sequence_lengths - 1, :]
+        logits_split = output_split[:, - 1, :]
 
         # Sequences passed in one, concatenated chunk.
         inference_params.reset()
@@ -346,5 +361,6 @@ class TestMemory:
         torch.testing.assert_close(
             logits_no_split,
             logits_split,
-            atol=1e-1,
+            atol=1e-2,
+            rtol=1e-2
         )
