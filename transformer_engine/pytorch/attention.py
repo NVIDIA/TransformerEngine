@@ -619,7 +619,6 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     kv_inputs[i%2] = kv_inputs[i%2].view(
                                         2, -1, *k.shape[-3:])
                                 elif qkv_format == "thd":
-                                    # [t, np, hn]
                                     q_inputs[i%2] = q
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
@@ -667,7 +666,6 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     # [2, 2, sk//2, b, np, hn] -> [2, sk//2, b, np, hn]
                                     kv_inputs[i%2] = kv_inputs[i%2][:, 0, ...].contiguous()
                                 elif qkv_format == "thd":
-                                    # [t, np, hn]
                                     q_inputs[i%2] = q
                                     # [2, t, np, hn] -> [2, t/2, np, hn]
                                     kv_inputs[i%2] = tex.thd_read_half_tensor(
