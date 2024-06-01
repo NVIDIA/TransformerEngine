@@ -631,13 +631,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
-                                    cu_seqlens_k, seq_offsets_q, seq_offsets_k, seq_offsets_v,
-                                    seq_offsets_o, q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout=qkv_layout, attn_mask_type="causal",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
+                                    seq_offsets_q=seq_offsets_q, seq_offsets_k=seq_offsets_k,
+                                    seq_offsets_v=seq_offsets_v, seq_offsets_o=seq_offsets_o,
                                 )
                                 if len(rest) > 0:
                                     attn_biases[i] = rest[0]
@@ -677,15 +678,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q,
-                                    cu_seqlens_k//2, seq_offsets_q,
-                                    None if seq_offsets_k is None else seq_offsets_k//2,
-                                    None if seq_offsets_v is None else seq_offsets_v//2,
-                                    seq_offsets_o, q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout=qkv_layout, attn_mask_type="no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
+                                    seq_offsets_q=seq_offsets_q,
+                                    seq_offsets_k=None if seq_offsets_k is None else seq_offsets_k//2,
+                                    seq_offsets_v=None if seq_offsets_v is None else seq_offsets_v//2,
+                                    seq_offsets_o=seq_offsets_o,
                                 )
                                 if len(rest) > 0:
                                     attn_biases[i] = rest[0]
@@ -737,15 +739,15 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                                 fused_attn_fwd(
                                     is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2,
-                                    cu_seqlens_k, None if seq_offsets_q is None else seq_offsets_q//2,
-                                    seq_offsets_k, seq_offsets_v,
-                                    None if seq_offsets_o is None else seq_offsets_o//2,
-                                    q_inputs[i%2], kv_inputs[i%2][0],
+                                    cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout=qkv_layout, attn_mask_type="no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
+                                    seq_offsets_q=None if seq_offsets_q is None else seq_offsets_q//2,
+                                    seq_offsets_k=seq_offsets_k, seq_offsets_v=seq_offsets_v,
+                                    seq_offsets_o=None if seq_offsets_o is None else seq_offsets_o//2,
                                 )
                                 if len(rest) > 0:
                                     attn_biases[i] = rest[0]
@@ -779,13 +781,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                             out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = \
                             fused_attn_fwd(
                                 is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
-                                cu_seqlens_k, seq_offsets_q, seq_offsets_k, seq_offsets_v.
-                                seq_offsets_o, q, kv_inputs[i%2][0],
+                                cu_seqlens_k, q, kv_inputs[i%2][0],
                                 kv_inputs[i%2][1], TE_DType[q.dtype],
                                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                 attn_scale=softmax_scale, dropout=dropout_p,
                                 qkv_layout=qkv_layout, attn_mask_type="no_mask",
                                 attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
+                                seq_offsets_q=seq_offsets_q, seq_offsets_k=seq_offsets_k,
+                                seq_offsets_v=seq_offsets_v, seq_offsets_o=seq_offsets_o,
                             )
                             if len(rest) > 0:
                                 attn_biases[i] = rest[0]
