@@ -355,7 +355,7 @@ class TestMemory:
             max_input_length=max_seq_len, lengths_tensor=total_sequence_lengths)
         output_no_split = model(total_tensor, inference_params=inference_params)
         logits_no_split = output_no_split[
-            torch.arange(0, batch_size), total_sequence_lengths - 1, :]
+            torch.arange(0, batch_size), total_sequence_lengths - 1, :] # last element of each seq.
 
         # Final result should be close.
         torch.testing.assert_close(
