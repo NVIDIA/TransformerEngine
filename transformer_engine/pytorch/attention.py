@@ -4140,6 +4140,7 @@ class DotProductAttention(torch.nn.Module):
 
         if query_layer.shape[-1] == 256 and query_layer.requires_grad:
             # Fused attention is not supported for backward with head_dim = 256.
+            # TODO (cyang): move it to the tex.get_fused_attn_backend
             use_fused_attention = False
 
         if use_fused_attention:
