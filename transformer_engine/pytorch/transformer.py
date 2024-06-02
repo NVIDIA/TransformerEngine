@@ -176,8 +176,8 @@ class TransformerLayer(torch.nn.Module):
                          head size. Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
-                         Notion: experimental version of the 'thd' attention is
-                         supported when inference_params are passed to forward.
+                         Notion: The experimental version of the 'thd' attention is supported
+                         when :attr:`inference_params` is passed to the forward function.
 
 
 
