@@ -114,9 +114,6 @@ def apply_rotary_pos_emb_with_start_positions(
         sin_1[:, b, :] = sin_2[shifted_freq, b, :]
         cos_1[:, b, :] = cos_2[shifted_freq, b, :]
 
-    import pdb
-    pdb.set_trace()
-
     t = (t * cos_1) + (_rotate_half(t) * sin_1)
     out = torch.cat((t, t_pass), dim=-1)
 
