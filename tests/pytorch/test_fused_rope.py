@@ -90,7 +90,7 @@ def apply_rotary_pos_emb_with_start_positions(
     )
 
     if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+        t = t.transpose(0, 1)
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
@@ -99,31 +99,31 @@ def apply_rotary_pos_emb_with_start_positions(
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    # sin_1, cos_2 are going to have the same shape as tensor t and contain rotation weights.
+    # sin_2, cos_2 are going to have the same shape as tensor t and contain rotation weights,
+    # which are original rotation weights from sin_ and cos_ shifted by the starting position
+    # for each sequence.
 
-    if tensor_format == "bshd":
-        sin_1 = sin_[:, :cur_seq_len, :, :].expand(t.shape).clone()
-        cos_1 = cos_[:, :cur_seq_len, :, :].expand(t.shape).clone()
-        sin_2 = sin_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
-        cos_2 = cos_.expand((t.shape[0], -1, t.shape[2], t.shape[3])).clone()
-    else:
-        sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
-        cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
-        sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
-        cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+    sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
+    cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
+    sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+    cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
 
     for b in range(start_positions.shape[0]):
         assert max_seq_len >= start_positions[b]
         shifted_freq = slice(start_positions[b],(start_positions[b] + cur_seq_len))
-        if tensor_format == "bshd":
-            sin_1[b, :] = sin_2[b, shifted_freq, :]
-            cos_1[b, :] = cos_2[b, shifted_freq, :]
-        else:
-            sin_1[:, b, :] = sin_2[shifted_freq, b, :]
-            cos_1[:, b, :] = cos_2[shifted_freq, b, :]
+        sin_1[:, b, :] = sin_2[shifted_freq, b, :]
+        cos_1[:, b, :] = cos_2[shifted_freq, b, :]
+
+    import pdb
+    pdb.set_trace()
 
     t = (t * cos_1) + (_rotate_half(t) * sin_1)
-    return torch.cat((t, t_pass), dim=-1)
+    out = torch.cat((t, t_pass), dim=-1)
+
+    if tensor_format == "bshd":
+        out = out.transpose(0, 1).contiguous()
+
+    return out
 
 
 def get_tol(dtype: torch.dtype) -> Dict:
