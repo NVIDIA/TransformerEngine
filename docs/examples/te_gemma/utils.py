@@ -5,7 +5,7 @@
 import time
 import sys
 import IPython
-import random 
+import random
 import string
 
 from te_gemma_loading_weights import load_te_model
@@ -26,7 +26,7 @@ from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
-        self.model_name = None 
+        self.model_name = None
 
         self.fp8 = False
 
@@ -53,7 +53,7 @@ class HyperParameters:
         # QKV format.
         self.fuse_qkv_params=False
         self.qkv_format = "bshd"
-        
+
 hyperparams = HyperParameters()
 
 assert torch.backends.cudnn.version() >= 9100, \
@@ -179,8 +179,8 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     accelerator.end_training()
 
     print(f"""{hyperparams.num_training_steps} finetuning steps complete!\n
-          Average time taken per step: 
-          {(start.elapsed_time(end)/hyperparams.num_training_steps):.0f} 
+          Average time taken per step:
+          {(start.elapsed_time(end)/hyperparams.num_training_steps):.0f}
           milliseconds""")
 
 def restart_jupyter_notebook():
@@ -232,7 +232,8 @@ def run_forward_pass(model, hyperparams, num_iters):
 
 def print_sample_of_generated_texts(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
-    inputs = tokenizer(["Here are the two facts about GPUs:", "Some facts about NVIDIA:"] * 32, return_tensors="pt", padding=True)
+    prompts = ["Here are the two facts about GPUs:", "Some facts about NVIDIA:"]
+    inputs = tokenizer(prompts * 32, return_tensors="pt", padding=True)
 
     max_length = inputs['input_ids'].size(1)
     new_length = ((max_length + 63) // 64) * 128
@@ -246,9 +247,16 @@ def print_sample_of_generated_texts(model):
     generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
     print("=" * 30 + " Generation example 1 " + "=" * 30)
-    print(generated_texts[0])
+    print("Prompt:")
+    print(generated_texts[0][:len(prompts[0])])
+    print("Generated text:")
+    print(generated_texts[0][len(prompts[0]):])
     print("=" * 30 + " Generation example 2 " + "=" * 30)
-    print(generated_texts[1])
+    print("Prompt:")
+    print(generated_texts[1][:len(prompts[1])])
+    print("")
+    print("Generated text:")
+    print(generated_texts[1][len(prompts[1]):])
 
 
 def _generate_random_words(num_words, max_word_length):
@@ -267,7 +275,7 @@ def benchmark_generation(model):
     print(f"Benchmarking for batch_size = {batch_size} and max total tokens = {context_length + max_new_tokens}")
 
     input_str = _generate_random_words(batch_size, context_length)
-    
+
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     inputs = tokenizer(input_str, return_tensors="pt", padding=True)
 
@@ -275,12 +283,12 @@ def benchmark_generation(model):
     end = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
     start.record()
-    
+
     model.generate(
         inputs['input_ids'].cuda(),
         max_new_tokens=max_new_tokens
     )
     torch.cuda.synchronize()
     end.record()
-    
+
     print(f"Time: {start.elapsed_time(end)/1000:.2f} s.")

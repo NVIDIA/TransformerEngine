@@ -6,9 +6,6 @@ from contextlib import contextmanager
 
 from typing import Optional
 
-from transformers.generation import *
-from transformers.generation.utils import *
-
 import torch
 import transformer_engine as te
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
@@ -52,7 +49,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
         self.te_rope_emb = RotaryPositionEmbedding(256)(
             max_seq_len=config.max_position_embeddings).cuda()
 
-    def forward(self, *args, **kwargs): # We need to pass positional encoding.
+    def forward(self, *args, **kwargs): # We need to additionally pass positional encoding.
         # this args cannot be passed to TransformerLayer
         keys_to_remove = [
             "position_ids", "past_key_value", "output_attentions", "use_cache", "cache_position"
@@ -76,7 +73,7 @@ class StaticGemmaModel(torch.nn.Module):
         ):
         super().__init__()
         self.model = model
-        self.normalizer = torch.tensor(self.model.config.hidden_size**0.5, dtype=dtype)
+        self.normalizer = torch.tensor(self.model.config.hidden_size ** 0.5, dtype=dtype)
         self.mask = mask
         self.lm_head = lm_head
 
@@ -129,7 +126,7 @@ class GemmaGenerator(torch.nn.Module):
         # static copy for CUDA graphs
         hidden_states.copy_(self.model.embed_tokens(next_tokens).unsqueeze(1))
 
-        # self.inference_params contains for example kv_cache
+        # self.inference_params contains for example kv_cache.
         # This needs to be called before every pass,
         # to update the information of sequence lengths.
         # Here we increase sequence offsets by one,
@@ -247,9 +244,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         hidden_states = self._create_hidden_states_buffer(input_ids)
         hidden_states.data[:] = self.model.embed_tokens(input_ids)
 
-
         # We need to update offsets before every forward pass to make cache work properly.
-        inference_params.reset()
         lengths = input_ids.ne(0).sum(dim=1)
         if self.config.qkv_format == "thd":
             inference_params.setup_before_new_input(
@@ -423,6 +418,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         return self.hidden_states_buffer
 
     def _create_inference_params(self, *args, **kwargs):
+        self.inference_params.reset()
         return self.inference_params
 
     def _get_max_input_seq_len(self, _):

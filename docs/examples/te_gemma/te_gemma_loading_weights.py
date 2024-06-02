@@ -9,9 +9,6 @@ import torch
 
 from typing import List
 
-from transformers.generation import *
-from transformers.generation.utils import *
-
 from transformer_engine.pytorch.fp8 import fp8_model_init
 
 from transformers.modeling_utils import load_state_dict, _load_state_dict_into_model
@@ -23,7 +20,11 @@ from transformers.utils.hub import get_checkpoint_shard_files
     both with HF and with TE, we can copy parameters from the first to the second.
 """
 
-def _load_fp8_weights(vanilla_model, hyperparams):
+def _load_weights_for_fp8_model(vanilla_model, hyperparams):
+    # The weights are loaded from the file with state_dict
+    # of model with weights which contains also fp8 parameters.
+    # The weights are in BF16 precision, but they contain fp8 metadata
+    # computed by the calibration procedure.
     vanilla_model.load_state_dict(
         torch.load(hyperparams.fp8_model_weights_filename), strict=False
         # strict = false, because some parameters have
@@ -33,20 +34,21 @@ def _load_fp8_weights(vanilla_model, hyperparams):
     )
 
 
-def _load_standard_weights(vanilla_model, config):
+def _load_weights_for_standard_model(vanilla_model, config):
+    # The weights are loaded from the file with original weights.
     archive_file = os.path.join(config.model_name, "model.safetensors.index.json")
     resolved_archive_file, _ = get_checkpoint_shard_files(config.model_name, archive_file)
     total_dict = {}
     for shard_file in resolved_archive_file:
         state_dict = load_state_dict(shard_file)
-        total_dict = total_dict | state_dict
+        total_dict.update(state_dict)
 
     replace_params(total_dict, vanilla_model.state_dict(),
                    config, qkv_fused_and_interleaved=config.fuse_qkv_params)
     # Copy parameters like embedding:
     _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="")
 
-    # Force mem release. Taken from huggingface code
+    # Force mem release. Taken from huggingface code.
     del total_dict
     gc.collect()
 
@@ -64,10 +66,9 @@ def load_te_model(cls, config):
 
     # and now we copy the weights into it
     if config.fp8_model_weights_filename is not None:
-        if config.fp8_model_weights_filename is not None:
-            _load_fp8_weights(vanilla_model, config)
+        _load_weights_for_fp8_model(vanilla_model, config)
     else:
-        _load_standard_weights(vanilla_model, config)
+        _load_weights_for_standard_model(vanilla_model, config)
 
     return vanilla_model
 
@@ -98,12 +99,15 @@ def replace_params(hf_state_dict, te_state_dict, config, qkv_fused_and_interleav
                 hf_state_dict[layer_prefix + hf_name]
             )
 
-        copy_from_ht_to_te('self_attention.layernorm_qkv.layer_norm_weight', 'input_layernorm.weight')
+        copy_from_ht_to_te(
+            'self_attention.layernorm_qkv.layer_norm_weight', 'input_layernorm.weight')
         copy_from_ht_to_te('self_attention.proj.weight', 'self_attn.o_proj.weight')
         copy_from_ht_to_te('layernorm_mlp.layer_norm_weight', 'post_attention_layernorm.weight')
         copy_from_ht_to_te('layernorm_mlp.fc2_weight', 'mlp.down_proj.weight')
-        copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.gate_proj.weight', end=config.intermediate_size)
-        copy_from_ht_to_te('layernorm_mlp.fc1_weight', 'mlp.up_proj.weight', start=config.intermediate_size)
+        copy_from_ht_to_te(
+            'layernorm_mlp.fc1_weight', 'mlp.gate_proj.weight', end=config.intermediate_size)
+        copy_from_ht_to_te(
+            'layernorm_mlp.fc1_weight', 'mlp.up_proj.weight', start=config.intermediate_size)
 
         if qkv_fused_and_interleaved:
             """
@@ -119,14 +123,24 @@ def replace_params(hf_state_dict, te_state_dict, config, qkv_fused_and_interleav
                 src = hf_state_dict[layer_prefix + hf_name]
                 for head_nr in range(config.num_attention_heads):
                     dst_offset = head_nr * config.head_dim * 3
-                    te_qkv_layer[(dst_offset + idx * config.head_dim):(dst_offset + (idx + 1) * config.head_dim), :] = \
-                        src[(head_nr * config.head_dim):(head_nr * config.head_dim + config.head_dim), :]
+                    dst_slice = slice(
+                            dst_offset + idx * config.head_dim,
+                            dst_offset + (idx + 1) * config.head_dim
+                    )
+                    src_slice = slice(
+                        head_nr * config.head_dim,
+                        head_nr * config.head_dim + config.head_dim
+                    )
+                    te_qkv_layer[dst_slice, :] = src[src_slice, :]
             copy_interleave('self_attn.q_proj.weight', 0)
             copy_interleave('self_attn.k_proj.weight', 1)
             copy_interleave('self_attn.v_proj.weight', 2)
         else:
-            copy_from_ht_to_te('self_attention.layernorm_qkv.query_weight', 'self_attn.q_proj.weight')
-            copy_from_ht_to_te('self_attention.layernorm_qkv.key_weight', 'self_attn.k_proj.weight')
-            copy_from_ht_to_te('self_attention.layernorm_qkv.value_weight', 'self_attn.v_proj.weight')
+            copy_from_ht_to_te(
+                'self_attention.layernorm_qkv.query_weight', 'self_attn.q_proj.weight')
+            copy_from_ht_to_te(
+                'self_attention.layernorm_qkv.key_weight', 'self_attn.k_proj.weight')
+            copy_from_ht_to_te(
+                'self_attention.layernorm_qkv.value_weight', 'self_attn.v_proj.weight')
 
     return all_layer_prefixes
