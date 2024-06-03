@@ -7,7 +7,8 @@
 #include "extensions.h"
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const at::Tensor &start_positions, const bool transpose_output_memory) {
+                              const at::Tensor &start_positions,
+                              const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
@@ -58,8 +59,9 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   auto start_positions_cu = makeTransformerEngineTensor(start_positions);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), start_positions_cu.data(), output_cu.data(), s,
-                          b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
+  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), start_positions_cu.data(),
+                          output_cu.data(), s, b, h, d, d2,
+                          stride_s, stride_b, stride_h, stride_d,
                           o_stride_s, o_stride_b, o_stride_h, o_stride_d,
                           at::cuda::getCurrentCUDAStream());
 
@@ -67,7 +69,8 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 }
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const at::Tensor &start_positions, const bool transpose_output_memory) {
+                               const at::Tensor &start_positions,
+                               const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
@@ -118,8 +121,8 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   nvte_fused_rope_backward(
-      output_grads_cu.data(), freqs_cu.data(), start_positions_cu.data(), input_grads_cu.data(), s, b, h,
-      d, d2, stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
+      output_grads_cu.data(), freqs_cu.data(), start_positions_cu.data(), input_grads_cu.data(),
+      s, b, h, d, d2, stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
       o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
