@@ -403,24 +403,38 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
     }
 
+    // Allocate temporary handle since out of N bcast calls we will need to keep only the
+    // the one that is relevant for my tensor domain.
+    CUmemFabricHandle *tmp = reinterpret_cast<CUmemFabricHandle *>
+                                                  (malloc(sizeof(CUmemFabricHandle)));
+    if (tmp == NULL) {
+      UB_PRINT("Memory allocation failed %p\n", tmp); exit(1);
+    }
     CUmemFabricHandle *exphndl = reinterpret_cast<CUmemFabricHandle *>
                                                   (malloc(sizeof(CUmemFabricHandle)));
     if (exphndl == NULL) {
-      UB_PRINT("Memory allocation failed %p\n", exphndl);
-      exit(1);
+      UB_PRINT("Memory allocation failed %p\n", exphndl); exit(1);
     }
+    // local roots to export handles. We have numlocal/tensorgpus roots
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(exphndl), (*comm)->mc_handle,
                                             CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    } 
+    // Loop over all tensor groups to bcast the fabric handles.
+    // Ranks that withing the same tensor group will keep the handle and other will discard it.
+    for (int i = 0; i < numlocal; i+=tensorgpus) {
+      // tmp is through away handle
+      MPICHECK(MPI_Bcast(((*comm)->ar2_firstgpu == i * tensorgpus) ? exphndl : tmp,
+                         sizeof(CUmemFabricHandle), MPI_BYTE, i, (*comm)->comm_intra));
     }
-
-    MPICHECK(MPI_Bcast(exphndl, sizeof(CUmemFabricHandle), MPI_BYTE, 0, (*comm)->comm_intra));
-
+    // Non root ranks will import the fabric handle.
     if ((*comm)->ar2_nvrank != 0) {
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle,
                                               reinterpret_cast<void *>(exphndl),
                                               CU_MEM_HANDLE_TYPE_FABRIC));
     }
+
+    free(tmp);
     free(exphndl);
 #else
     int fd;
