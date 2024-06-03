@@ -99,22 +99,19 @@ def apply_rotary_pos_emb_with_start_positions(
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    # sin_2, cos_2 are going to have the same shape as tensor t and contain rotation weights,
-    # which are original rotation weights from sin_ and cos_ shifted by the starting position
-    # for each sequence.
+    # shifted_sin, shifted_cos will have the same shape as t. They will contain
+    # scaling factors shifted for each sequence by the corresponding start_positions offset.
 
-    sin_1 = sin_[:cur_seq_len].expand(t.shape).clone()
-    cos_1 = cos_[:cur_seq_len].expand(t.shape).clone()
-    sin_2 = sin_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
-    cos_2 = cos_.expand((-1, t.shape[1], t.shape[2], t.shape[3])).clone()
+    shifted_sin = sin_[:cur_seq_len].expand(t.shape).clone()
+    shifted_cos = cos_[:cur_seq_len].expand(t.shape).clone()
 
     for b in range(start_positions.shape[0]):
         assert max_seq_len >= start_positions[b]
         shifted_freq = slice(start_positions[b],(start_positions[b] + cur_seq_len))
-        sin_1[:, b, :] = sin_2[shifted_freq, b, :]
-        cos_1[:, b, :] = cos_2[shifted_freq, b, :]
+        shifted_sin[:, b, :] = sin_[shifted_freq, 0, ...]
+        shifted_cos[:, b, :] = cos_[shifted_freq, 0, ...]
 
-    t = (t * cos_1) + (_rotate_half(t) * sin_1)
+    t = (t * shifted_cos) + (_rotate_half(t) * shifted_sin)
     out = torch.cat((t, t_pass), dim=-1)
 
     if tensor_format == "bshd":
