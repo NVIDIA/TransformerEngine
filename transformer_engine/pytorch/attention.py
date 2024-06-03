@@ -1137,7 +1137,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                         elif ctx.qkv_format == "thd":
                             # [t, np, hn] -> [t/2, np, hn]
                             q_ = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
-                            kv_, out_, dout_ = kv, out, dout
+                            out_ = tex.thd_read_half_tensor(out, cu_seqlens_q, 1)
+                            dout_ = tex.thd_read_half_tensor(dout, cu_seqlens_q, 1)
+                            kv_ = kv
                         aux_ctx_tensors = [softmax_lse_, rng_states[cp_size-i-1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size-i-1]]
