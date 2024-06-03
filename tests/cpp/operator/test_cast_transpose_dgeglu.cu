@@ -110,14 +110,8 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {
-  {64, 400},
-  {4096, 2048},
-  {768, 2816},
-  {256, 5120},
-  {128, 10240},
-  {256, 256}
-};
+std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},   {4096, 2048}, {768, 2816},
+                                                     {256, 5120}, {128, 10240}, {256, 256}};
 
 }  // namespace
 
@@ -141,12 +135,9 @@ TEST_P(DGeGLUCTTestSuite, TestDGeGLUCT) {
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest, DGeGLUCTTestSuite,
-    ::testing::Combine(
-      // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-      // ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
-      ::testing::Values(DType::kFloat32, DType::kFloat16),
-      ::testing::Values(DType::kFloat8E4M3),
-      ::testing::ValuesIn(test_cases)),
+    ::testing::Combine(::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+                       ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
+                       ::testing::ValuesIn(test_cases)),
     [](const testing::TestParamInfo<DGeGLUCTTestSuite::ParamType> &info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                          test::typeName(std::get<1>(info.param)) + "X" +
