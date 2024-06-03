@@ -1702,7 +1702,8 @@ class FusedRoPEFunc(torch.autograd.Function):
                 grad_output.transpose(0, 1), freqs, start_positions, True
             ).transpose(0, 1)
         elif ctx.tensor_format == "thd":
-            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs, start_positions)
+            grad_input = tex.fused_rope_thd_backward(
+                grad_output, cu_seqlens, freqs, start_positions)
         else:
             raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
 
@@ -3893,7 +3894,6 @@ class DotProductAttention(torch.nn.Module):
                                produced)
         """
         batch_size = key_layer.shape[0]
-        q_size = query_layer.shape[1]
         key_layer = key_layer.contiguous()
         value_layer = value_layer.contiguous()
 
@@ -4141,7 +4141,7 @@ class DotProductAttention(torch.nn.Module):
 
         if query_layer.shape[-1] == 256 and query_layer.requires_grad:
             # Fused attention is not supported for backward with head_dim = 256.
-            # TODO (cyang): move it to the tex.get_fused_attn_backend
+            # to do (cyang): move it to the tex.get_fused_attn_backend
             use_fused_attention = False
 
         if use_fused_attention:
