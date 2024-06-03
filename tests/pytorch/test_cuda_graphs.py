@@ -230,7 +230,7 @@ def _test_cuda_graphs(
         optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
     # Launch.
-    for train_step in range(3):
+    for _ in range(3):
         if not dpa:
             optimizer.zero_grad(set_to_none=False)
         for grad_accumulation_step in range(2):
