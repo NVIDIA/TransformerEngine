@@ -1575,3 +1575,130 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model_key", model_configs_inference.keys())
+@pytest.mark.parametrize("use_RoPE", all_boolean)
+@pytest.mark.parametrize("module", module_inference)
+def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
+    """
+        In thd attention sequences can have various lengths,
+        different that 's' dimension of input to the Transformer Layer.
+
+        The test contains of:
+        - one context phase when sequences with various lengths(!) are passed through the model,
+        - 2 phases when sequences with length 1 are passed through the model.
+
+        The output is compared with the case when all this sequences are passed at one.
+    """
+    if dtype == torch.float32:
+        pytest.skip("torch.float32 does not support thd")
+
+    config = model_configs_inference[model_key]
+
+    S = config.seq_len
+    B = bs
+    H = config.num_attention_heads
+    D = config.hidden_size
+    G = 2 # generation phase length
+    S_max = S + G
+    head_size = config.embed
+
+    layer_number = 1
+    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
+
+    # Tensors have shapes [b, s, h, d] and the seqlens are the tensor of shapes [b]
+    # which indicate the length of sequences - sequences starts from the begining.
+    # This function copies sequences from tensor into dst_tensor.
+    # dst_tensor should be big enough to fit this sequences.
+    def _concat_thd(dst_tensor, dst_seqlens, tensor, seqlens):
+        for b in range(B):
+            dst_tensor[b, dst_seqlens[b]:(dst_seqlens[b] + seqlens[b]), :] = \
+                  tensor[b, :seqlens[b], :]
+        dst_seqlens.copy_(dst_seqlens + seqlens)
+
+    if module == "TransformerLayer":
+        model = (
+            TransformerLayer(
+                hidden_size=D,
+                ffn_hidden_size= 4 * D,
+                num_attention_heads=H,
+                attn_input_format="thd",
+                self_attn_mask_type="padding_causal",
+                layer_number=layer_number,
+                params_dtype=dtype,
+                device="cuda",
+            )
+            .eval()
+        )
+        attn_name = "self_attn_mask_type"
+    else:
+        model = (
+            MultiheadAttention(
+                hidden_size=D,
+                num_attention_heads=H,
+                qkv_format="thd",
+                layer_number=layer_number,
+                params_dtype=dtype,
+                attn_mask_type="padding_causal"
+            )
+            .cuda()
+            .eval()
+        )
+        attn_name = "attn_mask_type"
+
+    inference_params = InferenceParams(B, S_max, qkv_format="thd")
+
+    kwargs = {
+        "inference_params": inference_params,
+        "rotary_pos_emb": rotary_freqs if use_RoPE else None
+    }
+
+    total_sequence_lengths = torch.zeros((B,)).cuda().to(torch.int32)
+    total_tensor = torch.zeros((B, S_max, D)).cuda().to(dtype)
+
+    # Sequences split into chunks.
+
+    # context phase
+    sequence_lengths = torch.randint(1, S, (B,)).cuda().to(torch.int32)
+    chunk = torch.randn((B, S, D)).cuda().to(dtype)
+    inference_params.setup_before_new_input(
+            max_input_length=S, lengths_tensor=sequence_lengths)
+    model(chunk, inference_params=inference_params,
+        rotary_pos_emb=rotary_freqs if use_RoPE else None)
+    _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
+
+    # generation phase
+    for _ in range(G):
+        sequence_lengths = torch.ones((B,)).cuda().to(torch.int32)
+        chunk = torch.randn((B, 1, D)).cuda().to(dtype)
+        inference_params.setup_before_new_input(
+                max_input_length=1, lengths_tensor=sequence_lengths)
+        # we need to remove 'causal' from mask
+        # otherwise tokens we add will be considered as a first in the sequence,
+        # but they need to interact with all tokens from key-value cache.
+        # after removing this line, tests should fail
+        kwargs[attn_name] = "padding"
+        output = model(chunk, **kwargs)
+        _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
+    incremental_logits = output[:, - 1, :]  # last element of each seq.
+
+
+    # Sequences passed in one, concatenated chunk.
+
+    kwargs[attn_name] = 'padding_causal' # add 'causal' back to the mask
+    inference_params.reset()
+    inference_params.setup_before_new_input(
+        max_input_length=S_max, lengths_tensor=total_sequence_lengths)
+    full_output = model(total_tensor, **kwargs)
+    full_logits = full_output[
+        torch.arange(0, B), total_sequence_lengths - 1, :] # last element of each seq.
+
+    # Final result should be close.
+    torch.testing.assert_close(
+        full_logits,
+        incremental_logits,
+        atol=1e-2,
+        rtol=1e-2
+    )
