@@ -14,20 +14,29 @@ from tests.pytorch.fused_attn.test_fused_attn import (
 
 pd.set_option("display.precision", 4)
 
+# data type
 dtype = torch.bfloat16
+# number of iterations after 3 warmup iterations
 num_iters = 3
+# checkpointing
 ckpt_attn = False
+# workspace optimization path for cuDNN attention
 workspace_opt = True
+# QKV memory layout
 qkv_layout = 'bshd_bshd_bshd'
+# sliding window attention
 swa = False
+# padding between sequences for qkv_format=thd
 pad_between_seqs = False
+# training mode
 is_training = True
 
 model_configs = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "test_0": ModelConfig(1,  4,  4,  16,  128,  128, 0.0,  "causal", "no_bias"),
-    "test_1": ModelConfig(2, 16, 16,  64,   64,   64, 0.0, "no_mask", "no_bias"),
-    "test_2": ModelConfig(2,  4,  4,  16, 2048, 2048, 0.0,  "causal", "no_bias"),
+    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,              bias
+    "test_0": ModelConfig(2, 16, 16,  64,  512,  512, 0.0, "no_mask",         "no_bias"), # short seq
+    "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal",         "no_bias"), # longer seq, mask
+    "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "post_scale_bias"), # bias
+    "test_3": ModelConfig(2, 32,  8, 128, 8192, 8192, 0.0,  "causal",         "no_bias"), # GQA
 }
 
 def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supported):
@@ -81,7 +90,7 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 sum(flash_times)*1e3/num_iters, 0, 0, 0, 0]], columns=df.columns)],
             ignore_index=True
         )
-    df.to_csv('times.csv',index = False)
+    df.to_csv('times.csv',index=False)
     torch.cuda.cudart().cudaProfilerStop()
 
 def parse_results(per_cudnn, per_flash, model):
@@ -110,7 +119,7 @@ def parse_results(per_cudnn, per_flash, model):
         df_times.loc[row, 'Fused vs Flash Kernels Speedup (fwd+bwd)'] = \
                 df_times.loc[row, 'FlashAttention Kernels (fwd+bwd)'] / \
                 df_times.loc[row, 'FusedAttention Kernels (fwd+bwd)']
-    df_times.to_csv('times.csv',index = False)
+    df_times.to_csv('times.csv',index=False)
 
 def main():
     times = pd.DataFrame(
@@ -125,7 +134,7 @@ def main():
                 'FlashAttention Kernels (fwd+bwd)',
                 'Fused vs Flash Kernels Speedup (fwd+bwd)',
                 ])
-    times.to_csv('times.csv',index = False)
+    times.to_csv('times.csv',index=False)
 
     for model in model_configs.keys():
         config = model_configs[model]
@@ -152,7 +161,14 @@ def main():
                 --force-export=true \
                 --output=prof_{model} \
                 prof_{model}.nsys-rep"""
-        num_kernels_cudnn = 4 if fused_attn_supported else 0
+        if fused_attn_supported:
+            num_kernels_cudnn = 4
+            if config.attn_bias_type == 'post_scale_bias':
+                num_kernels_cudnn = num_kernels_cudnn+1 
+            if config.num_heads != config.num_gqa_groups:
+                num_kernels_cudnn = num_kernels_cudnn+2 
+        else:
+            num_kernels_cudnn = 0
         num_kernels_flash = 4 if flash_attn_supported else 0
         os.system(stats_cmd)
         parse_cmd = f"""python -c "import benchmark_attention; \
