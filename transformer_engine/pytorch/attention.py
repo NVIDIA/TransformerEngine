@@ -1379,8 +1379,8 @@ def attn_forward_func_with_cp(
             not use_fused_attention or \
             attn_mask_type in ["padding", "padding_causal"]
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
-    assert (attn_bias is None or use_fused_attention
-        ), "Attention bias is only supported with FusedAttention!"
+    assert (attn_bias is None or (use_fused_attention and qkv_format != "thd")
+        ), "Attention bias is only supported with FusedAttention + formats of [bshd, sbhd]!"
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,

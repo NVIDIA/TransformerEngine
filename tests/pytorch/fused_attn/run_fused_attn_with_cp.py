@@ -22,7 +22,7 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
-        if qkv_format == 'thd' and config.num_heads != config.num_gqa_groups:
+        if qkv_format == 'thd' and (config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"):
             return
 
     rank = int(os.getenv('RANK', '0'))
