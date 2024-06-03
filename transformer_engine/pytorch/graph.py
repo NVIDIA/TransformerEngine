@@ -536,11 +536,6 @@ def make_graphed_callables(
     else:
         torch.cuda.set_rng_state(original_rng_states)
 
-    # Reset FP8 gradients.
-    for module in modules:
-        for p in module.parameters():
-            p.grad = None
-
     # Restore FP8 state.
     restore_fp8_tensors(modules, saved_fp8_tensors)
 
