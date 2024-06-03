@@ -176,7 +176,7 @@ class InferenceParams:
     def setup_before_new_input(self, lengths_tensor=None, max_input_length=None, length=None):
         """
             Updates parameters representing incoming sequence lengths and lengths
-            of sequences in the cache. Should be called before every forward pass in inference.
+            of sequences in the cache. Should be called before every forward pass in the inference.
 
             Parameters
             ----------
@@ -184,12 +184,12 @@ class InferenceParams:
                 1d tensor with sequence lengths in new input.
                 Should be used only when self.qkv_format = "thd".
             max_input_length: int
-                If the incoming sequences tensor has shape [b, s, h, d],
-                this should be equal to s.
                 Should be used only when self.qkv_format = "thd".
+                If the incoming sequences tensor has shape [b * s, h, d],
+                this should be equal to s.
             length: int
-                Length of incoming sequences.
-                Should be used only when self.qkv_format in ["bshd", "thd"].
+                Length of the incoming sequences.
+                Should be used only when self.qkv_format in ["bshd", "sbhd"].
         """
         if self.qkv_format == "thd":
             assert lengths_tensor is not None and max_input_length is not None, \
@@ -208,10 +208,11 @@ class InferenceParams:
 
     def reset(self):
         """
-            Resets parameters to allow use of this object with new iteration of generation.
-            It does not reallocate buffers - it is more efficient than creating new InferenceParams
-            object. Moreover, reusing one object
-            with the same buffers helps is usage of CUDA Graphs.
+            Resets the parameters to allow the use of this object in a new generation iteration.
+            This method does not reallocate buffers,
+            making it more efficient than creating a new InferenceParams object.
+            Moreover, reusing the same object with the same buffers is compatible
+            with the CUDA Graphs.
         """
         if self.qkv_format == "thd":
             self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
@@ -230,18 +231,19 @@ class InferenceParams:
                 layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
             key_layer: torch.Tensor
-                Tensor of format corresponding to self.qkv_format with current key_layer.
-                Notice: if self.qkv_format in ["bshd", "sbhd"] both layers are in format sbhd
+                Tensor - of the format corresponding to the self.qkv_format -
+                representing key_layer.
+                Notice: if self.qkv_format in ["bshd", "sbhd"] then both layers are in format sbhd
                 Notice: if self.qkv_format = "thd", we assume that offsets of the sequences
                         are of the form k * self.max_incoming_seq_len for k = 0, ..., batch_size-1.
             value_layer: int
-                Tensor of format corresponding to self.qkv_format with current value_layer.
+                Tensor - of the format corresponding to the self.qkv_format -
+                representing value_layer.
                 Notice: if self.qkv_format in ["bshd", "sbhd"] both layers are in format sbhd
                 Notice: if self.qkv_format = "thd", we assume that offsets of the sequences
                         are of the form k * self.max_incoming_seq_len for k = 0, ..., batch_size-1.
         """
-        (inference_key_memory, inference_value_memory,
-            ) = self.key_value_memory_dict[layer_number]
+        inference_key_memory, inference_value_memory = self.key_value_memory_dict[layer_number]
         if self.qkv_format == "thd":
             channels = inference_key_memory.shape[1] * inference_key_memory.shape[2] # h * d
             # This kernels copies kernels from input layers into cache,
@@ -278,12 +280,12 @@ class InferenceParams:
             assert sequence_end <= inference_key_memory.size(0)
 
             # Copy keys and values into KV-cache
-            inference_key_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...] = key_layer
-            inference_value_memory[
-                sequence_start:sequence_end, batch_start:batch_end, ...] = value_layer
-            key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-            value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
+            seq_offsets = slice(sequence_start, sequence_end)
+            batch_offsets = slice(batch_start, batch_end)
+            inference_key_memory[seq_offsets, batch_offsets, ...] = key_layer
+            inference_value_memory[seq_offsets, batch_offsets, ...] = value_layer
+            key_layer = inference_key_memory[:sequence_end, batch_offsets, ...]
+            value_layer = inference_value_memory[:sequence_end, batch_offsets, ...]
         return key_layer, value_layer
 
     def allocate_memory_for_kv_cache_if_empty(
@@ -333,8 +335,9 @@ class InferenceParams:
 
     def set_params_to_thd_attention(self, buffers, channels):
         """
-            Fused attention with q/k/v of thd layout needs some parameters which give information
-            about sequence lengths. This method computes them and saves them into fiven buffers.
+            Fused attention with q/k/v of thd layout with offsets needs some parameters informing
+            about sequence lengths. This function computes them and
+            saves them into the provided buffers.
 
             Parameters
             ----------
@@ -3932,8 +3935,6 @@ class DotProductAttention(torch.nn.Module):
 
         if inference_params is not None:
             assert self.layer_number is not None, "Layer number must be set!"
-            assert self.qkv_format == inference_params.qkv_format, \
-                'self.qkv_format need to be equal to the inference_params.qkv_format'
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
@@ -4199,10 +4200,10 @@ class DotProductAttention(torch.nn.Module):
             if self.device_compute_capability == (9, 0):
                 use_flash_attention = False
 
-        if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1]:
+        if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1] or \
+           self.qkv_format == "sbhd" and query_layer.shape[0] != value_layer.shape[0]:
             # Flash attention does not support max_seqlen_q != max_seqlen_kv
             use_flash_attention = False
-
 
         if use_flash_attention:
             if _NVTE_DEBUG:
