@@ -3,14 +3,17 @@
 # See LICENSE for license information.
 
 import math
+import functools
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple, Optional
 import pytest
 import copy
 
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
+
+import transformer_engine.pytorch.cpp_extensions as ext
 
 from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
@@ -29,6 +32,19 @@ from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+@functools.cache
+def _cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = ext.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
+
+def get_device_compute_capability() -> Tuple[int, int]:
+    """CUDA compute capability of current GPU"""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return (props.major, props.minor)
 
 seed = 1234
 torch.manual_seed(seed)
@@ -1581,6 +1597,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 @pytest.mark.parametrize("model_key", model_configs_inference.keys())
 @pytest.mark.parametrize("use_RoPE", all_boolean)
 @pytest.mark.parametrize("module", module_inference)
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+.")
+@pytest.mark.skipif(_cudnn_version() < (9,0,0), reason="cuDNN 9.0.0+ is required.")
 def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     """
         In thd attention sequences can have various lengths,
@@ -1594,6 +1612,9 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     """
     if dtype == torch.float32:
         pytest.skip("torch.float32 does not support thd")
+
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs_inference[model_key]
 
