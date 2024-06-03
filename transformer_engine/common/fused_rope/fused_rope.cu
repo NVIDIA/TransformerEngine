@@ -246,8 +246,9 @@ void fused_rope_forward(const Tensor &input, const Tensor &freqs, const Tensor &
           o_stride_h, o_stride_d, stream););
 }
 
-void fused_rope_backward(const Tensor &output_grads, const Tensor &freqs, const Tensor &start_positions,
-                         Tensor *input_grads, const int s, const int b,
+void fused_rope_backward(const Tensor &output_grads, const Tensor &freqs,
+                         const Tensor &start_positions, Tensor *input_grads,
+                         const int s, const int b,
                          const int h, const int d, const int d2,
                          const int stride_s, const int stride_b,
                          const int stride_h, const int stride_d,
@@ -365,7 +366,8 @@ void nvte_fused_rope_thd_forward(const NVTETensor input,
 
 void nvte_fused_rope_thd_backward(
     const NVTETensor output_grads, const NVTETensor cu_seqlens,
-    const NVTETensor freqs, const NVTETensor start_positions, NVTETensor input_grads, const int max_s,
+    const NVTETensor freqs, const NVTETensor start_positions,
+    NVTETensor input_grads, const int max_s,
     const int b, const int h, const int d, const int d2, const int stride_t,
     const int stride_h, const int stride_d, const int o_stride_t,
     const int o_stride_h, const int o_stride_d, cudaStream_t stream) {
