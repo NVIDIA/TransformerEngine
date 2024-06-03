@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #include "extensions.h"
 
 // Kernel used to update KV chache when attention layout is "thd".
@@ -33,8 +39,7 @@ void attention_copy_launcher(torch::Tensor A, torch::Tensor seq_len, torch::Tens
             seq_len.data_ptr<int>(),
             incoming_seq_len.data_ptr<int>(),
             reinterpret_cast<scalar_t*>(B.data_ptr<scalar_t>()),
-            max_incoming_seq_len, max_seq_len, b, s
-        );
+            max_incoming_seq_len, max_seq_len, b, s);
 }
 
 void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len,
@@ -42,19 +47,16 @@ void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incomi
         if (A.scalar_type() == at::ScalarType::Half) {
             using dtype = at::Half;
             attention_copy_launcher<dtype>(
-                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s
-            );
+                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s);
 
         } else if (A.scalar_type() == at::ScalarType::BFloat16) {
             using dtype = at::BFloat16;
             attention_copy_launcher<dtype>(
-                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s
-            );
+                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s);
         } else if (A.scalar_type() == at::ScalarType::Float) {
             using dtype = float;
             attention_copy_launcher<dtype>(
-                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s
-            );
+                A, seq_len, incoming_seq_len, B, max_incoming_seq_len, max_seq_len, b, s);
         } else {
         NVTE_ERROR("Unsupported dtype of out\n");
         }
