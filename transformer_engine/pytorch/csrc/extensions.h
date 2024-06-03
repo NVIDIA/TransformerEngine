@@ -682,7 +682,6 @@ void placeholder();
  * Generation
  **************************************************************************************************/
 
-template <typename scalar_t>
 void attention_copy(torch::Tensor A, torch::Tensor seq_len, torch::Tensor incoming_seq_len,
                     torch::Tensor B, int max_incoming_seq_len, int max_seq_len, int b, int s);
 
