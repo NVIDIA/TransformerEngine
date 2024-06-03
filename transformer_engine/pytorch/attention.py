@@ -533,6 +533,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         causal = ("causal" in attn_mask_type)
+        padding = ("padding" in attn_mask_type)
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
@@ -680,7 +681,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
-                                    attn_mask_type="padding" if qkv_format == "thd" else "no_mask",
+                                    attn_mask_type="padding" if padding else "no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=seq_offsets_q,
                                     seq_offsets_k=None if seq_offsets_k is None else seq_offsets_k//2,
@@ -741,7 +742,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
-                                    attn_mask_type="padding" if qkv_format == "thd" else "no_mask",
+                                    attn_mask_type="padding" if padding else "no_mask",
                                     attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=None if seq_offsets_q is None else seq_offsets_q//2,
                                     seq_offsets_k=seq_offsets_k, seq_offsets_v=seq_offsets_v,
@@ -925,6 +926,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         causal = ("causal" in ctx.attn_mask_type)
+        padding = ("padding" in ctx.attn_mask_type)
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         if attn_biases[0] is not None:
@@ -1089,7 +1091,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type="padding" if ctx.qkv_format == "thd" else "no_mask",
+                            attn_mask_type="padding" if padding else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
                         )
                     else:
@@ -1154,7 +1156,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type="padding" if ctx.qkv_format == "thd" else "no_mask",
+                            attn_mask_type="padding" if padding else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
                         )
                     else:
