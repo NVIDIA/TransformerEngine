@@ -274,6 +274,7 @@ class TransformerLayer(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+
         if ub_tp_comm_overlap:
             assert (
                 tex.userbuf_comm_available()
