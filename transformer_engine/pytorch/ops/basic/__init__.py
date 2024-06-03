@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+"""Single tensor operations supported by the operation fuser."""
+
 from .all_gather import AllGather
 from .all_reduce import AllReduce
 from .basic_linear import BasicLinear

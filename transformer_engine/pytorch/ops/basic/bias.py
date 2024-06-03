@@ -2,11 +2,17 @@
 #
 # See LICENSE for license information.
 
+"""Fusable operation for bias."""
+
 from __future__ import annotations
+from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    OperationContext,
+)
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
@@ -85,6 +91,7 @@ class Bias(BasicOperation):
             dtype=dtype,
         )
         bias = torch.nn.Parameter(bias)
+        self.bias: torch.nn.Parameter
         self.register_parameter("bias", bias)
         if not defer_param_init:
             self.reset_parameters()
@@ -114,7 +121,7 @@ class Bias(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:

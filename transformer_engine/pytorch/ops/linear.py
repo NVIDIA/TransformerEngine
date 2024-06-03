@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Fusable operation for linear layer."""
 
-from collections.abc import Callable, Iterable
+from __future__ import annotations
+from collections.abc import Callable
 from typing import Optional
 
 import torch
@@ -15,6 +16,7 @@ from transformer_engine.pytorch.ops.basic import (
     Bias,
     ReduceScatter,
 )
+from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.ops.op import FusedOperation
 
 

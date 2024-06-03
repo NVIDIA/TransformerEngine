@@ -2,8 +2,9 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Manager class for a pipeline of fusable operations."""
 
+from __future__ import annotations
 from typing import Any, Optional
 
 import torch
@@ -18,7 +19,6 @@ from transformer_engine.pytorch.ops.op import (
 from transformer_engine.pytorch.ops.fused_forward import (
     fuse_forward_linear_bias_activation,
 )
-from transformer_engine.pytorch.utils import clear_tensor_data
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
     """Autograd function for a pipeline of operations
@@ -28,6 +28,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
     """
 
+    # pylint: disable=unused-argument
     @staticmethod
     def forward(
         func_ctx: torch.autograd.function.FunctionCtx,
@@ -136,6 +137,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             ctx._saved_tensors_range = None
 
         # Apply backward ops
+        # TODO: Clear tensor data
         dx = grad_output
         grad_params = [None for _ in range(len(basic_ops))]
         for op, basic_op_idxs in backward_ops:
@@ -201,7 +203,7 @@ class OperationFuser:
         self,
         ops: list[FusableOperation],
         fuse_ops: bool = True,
-    ):
+    ) -> None:
 
         # Get list of basic operations
         basic_ops = []
@@ -226,12 +228,20 @@ class OperationFuser:
         if fuse_ops:
             self.fuse_ops()
 
-    def _fuse_forward_ops(self, ops):
+    @classmethod
+    def _fuse_forward_ops(
+        cls,
+        ops: list[tuple[FusableOperation, list[int]]],
+    ) -> list[tuple[FusableOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
 
-    def _fuse_backward_ops(self, ops):
+    @classmethod
+    def _fuse_backward_ops(
+        cls,
+        ops: list[tuple[FusableOperation, list[int]]],
+    ) -> list[tuple[FusableOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
         return ops
 
@@ -242,7 +252,7 @@ class OperationFuser:
 
     def __call__(
         self,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
 
@@ -252,7 +262,7 @@ class OperationFuser:
 
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
-            basic_op_kwargs = [dict() for _ in range(len(self._basic_ops))]
+            basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
         params = []

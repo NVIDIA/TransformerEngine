@@ -2,14 +2,14 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Helper functions used in fusable operations."""
 
-import math
+from __future__ import annotations
+from typing import Any, Iterable, Optional
 
 import torch
 
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     """Canonicalize PyTorch device

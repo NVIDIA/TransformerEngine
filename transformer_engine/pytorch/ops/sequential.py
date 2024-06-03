@@ -2,9 +2,12 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Sequential container for fusable operations."""
 
+from __future__ import annotations
 from collections import OrderedDict
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 
@@ -53,24 +56,24 @@ class Sequential(torch.nn.Module):
     ) -> list[torch.nn.Module] | torch.nn.Module:
         if isinstance(idx, slice):
             return list(self._modules.values())[idx]
-        else:
-            size = len(self)
-            if not -size <= idx < size:
-                raise IndexError(
-                    f"Attempted to access index {idx}, "
-                    f"but there are {size} entries"
-                )
-            idx %= size
-            for i, op in enumerate(self._modules.values()):
-                if i == idx:
-                    break
-            return op
+        size = len(self)
+        if not -size <= idx < size:
+            raise IndexError(
+                f"Attempted to access index {idx}, "
+                f"but there are {size} entries"
+            )
+        idx %= size
+        for i, op in enumerate(self._modules.values()):
+            if i == idx:
+                return op
+        raise RuntimeError(f"Could not access index {idx}")
 
     def __len__(self) -> int:
         return len(self._modules)
 
+    @classmethod
     def _make_module_groups(
-        self,
+        cls,
         modules: Iterable[torch.nn.Module],
     ) -> list[OperationFuser | torch.nn.Module]:
         """Make list of modules, with fusable operations grouped together"""
@@ -90,7 +93,11 @@ class Sequential(torch.nn.Module):
         maybe_add_fuser()
         return module_groups
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
+    ) -> torch.Tensor:
+        """Forward pass"""
 
         # Create module groups if needed
         if self._module_groups is None:

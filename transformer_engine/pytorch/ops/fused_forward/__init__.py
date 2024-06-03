@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+"""Compound tensor operation supported by the operation fuser."""
+
 from .linear_bias_activation import (
     ForwardLinearBiasActivation,
     fuse_forward_linear_bias_activation,

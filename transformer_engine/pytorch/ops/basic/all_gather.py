@@ -2,11 +2,18 @@
 #
 # See LICENSE for license information.
 
+"""Fusable operation for all-gather."""
+
 from __future__ import annotations
+from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import BasicOperation
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    OperationContext,
+)
 from .._common import convert_tensor, is_float8_tensor
 
 
@@ -34,7 +41,7 @@ class AllGather(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
@@ -61,7 +68,7 @@ class AllGather(BasicOperation):
             y = Float8Tensor.make_like(
                 x,
                 data=torch.empty(
-                    output_shape,
+                    output_dims,
                     dtype=torch.uint8,
                     device=x.device,
                 ),

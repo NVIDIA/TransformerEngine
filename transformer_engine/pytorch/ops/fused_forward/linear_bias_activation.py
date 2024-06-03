@@ -2,35 +2,20 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Fused operation for GEMM, bias, activation in the forward pass."""
 
-from collections.abc import Callable, Iterable
-import contextlib
-import math
-from typing import Optional
+from __future__ import annotations
+from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.cpp_extensions import fp8_gemm, gemm
-from transformer_engine.pytorch.distributed import (
-    CudaRNGStatesTracker,
-    gather_along_first_dim,
-    reduce_scatter_along_first_dim,
-)
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    get_fp8_te_dtype,
-)
-from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
-from transformer_engine.pytorch.ops.op import FusedOperation
-from .._common import (
-    canonicalize_device,
-    canonicalize_dtype,
-    convert_tensor,
-    is_float8_tensor,
-    reshape,
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    FusableOperation,
+    FusedOperation,
+    OperationContext,
 )
 
 
@@ -74,7 +59,7 @@ class ForwardLinearBiasActivation(FusedOperation):
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
-        input: torch.Tensor,
+        input_: torch.Tensor,
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
@@ -84,7 +69,6 @@ class ForwardLinearBiasActivation(FusedOperation):
         idx = self._op_idxs["linear"]
         linear_op = self.basic_ops[idx]
         linear_op_ctx = basic_op_ctxs[idx]
-        linear_op_kwargs = basic_op_kwargs[idx]
         if self._op_idxs["bias"] is None:
             bias_op = None
             bias = None
@@ -97,7 +81,7 @@ class ForwardLinearBiasActivation(FusedOperation):
                     "Bias operation forward does not expect keyword arguments"
                 )
         if self._op_idxs["activation"] is None:
-            activation_op = None
+            activation_op = None  # pylint: disable=unused-variable
         else:
             raise NotImplementedError("Activations are not yet supported")  ### TODO Implement
 
@@ -121,7 +105,7 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Linear forward
         output, x_local, _ = BasicLinear._functional_forward(
-            input=input,
+            input=input_,
             weight=linear_op.weight,
             bias=bias,
             device=linear_op.device,
@@ -141,8 +125,8 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.weight_fp8_meta = weight_fp8_meta
         linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
         linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
-        linear_op_ctx.input_dims = input.size()
-        linear_op_ctx.input_requires_grad = input.requires_grad
+        linear_op_ctx.input_dims = input_.size()
+        linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
 
         return output

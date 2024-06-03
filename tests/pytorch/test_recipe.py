@@ -15,7 +15,7 @@ from transformer_engine.pytorch.fp8 import (
     _amax_and_scale_update,
     get_default_fp8_recipe,
 )
-import transformer_engine.pytorch.fuser
+import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_extensions as tex
 
 # Check if FP8 is supported
@@ -178,7 +178,7 @@ class TestFP8Recipe:
     ):
 
         # Construct linear op
-        op = te.fuser.ops.BasicLinear(in_shape[-1], in_shape[-1])
+        op = te_ops.BasicLinear(in_shape[-1], in_shape[-1])
 
         # Get FP8 meta tensors
         forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)

@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+"""Fusable operations."""
+
 from transformer_engine.pytorch.ops.basic import *
 from transformer_engine.pytorch.ops.linear import Linear
 from transformer_engine.pytorch.ops.op import FusableOperation

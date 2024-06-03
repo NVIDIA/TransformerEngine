@@ -2,21 +2,21 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Base classes for fusable operations."""
 
+from __future__ import annotations
 import abc
 from collections.abc import Iterable
 import dataclasses
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
+import transformer_engine_extensions as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
-from transformer_engine.pytorch.graph import is_graph_capturing
-import transformer_engine_extensions as tex
 from ._common import canonicalize_device, is_float8_tensor
 
 
@@ -59,11 +59,9 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
-        ...
 
     def pre_forward(self) -> None:
         """Preprocessing before forward pass"""
-        pass
 
     def fuser_forward(
         self,
@@ -170,7 +168,11 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
-    def num_fp8_scales(self, mode: str) -> int:
+    # pylint: disable=no-self-use
+    def num_fp8_scales(
+        self,
+        mode: str,  # pylint: disable=unused-argument
+    ) -> int:
         """Number of FP8 scaling factors
 
         Parameters
@@ -179,7 +181,6 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
             Type of FP8 scaling factor
 
         """
-
         return 0
 
     def _make_fp8_metas(self) -> dict[str, Optional[dict[str, Any]]]:
@@ -219,8 +220,8 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
             grad_output=_make_meta(self.num_fp8_scales("grad_output"), False),
         )
 
-    @torch.no_grad()
-    def _check_fp8_meta(self, fp8_meta: Optional[dict[str, Any]]) -> None:
+    @classmethod
+    def _check_fp8_meta(cls, fp8_meta: Optional[dict[str, Any]]) -> None:
         if fp8_meta is None:
             return
 
@@ -237,13 +238,16 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
                 continue
             meta = fp8_meta[key]
             curr_len = meta.amax_history.size(0)
-            if curr_len > amax_history_len:
-                meta.amax_history = meta.amax_history[:amax_history_len].clone()
-            elif curr_len < amax_history_len:
-                meta.amax_history = torch.nn.functional.pad(
-                    meta.amax_history,
-                    pad=(0, 0, 0, amax_history_len - curr_len),
-                )
+            if curr_len == amax_history_len:
+                continue
+            with torch.no_grad():
+                if curr_len > amax_history_len:
+                    meta.amax_history = meta.amax_history[:amax_history_len].clone()
+                else:
+                    meta.amax_history = torch.nn.functional.pad(
+                        meta.amax_history,
+                        pad=(0, 0, 0, amax_history_len - curr_len),
+                    )
 
     def get_fp8_meta(self, mode: str) -> Optional[dict[str, Any]]:
         """FP8 metadata
@@ -270,6 +274,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas = self._make_fp8_metas()
 
             # Make sure FP8 metadata matches FP8 autocast context
+            #if any(fp8_meta is not None for fp8_meta in self._fp8_metas):
             for fp8_meta in self._fp8_metas.values():
                 self._check_fp8_meta(fp8_meta)
 
@@ -294,7 +299,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
         **kwargs: Any,
@@ -314,7 +319,6 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
             Output tensor
 
         """
-        ...
 
     @abc.abstractmethod
     def op_backward(
@@ -339,7 +343,6 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
             Loss gradients w.r.t. parameters
 
         """
-        ...
 
     def fuser_forward(
         self,
@@ -365,7 +368,11 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         grad_input, grad_params = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [grad_params]
 
-    def forward(self, input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        **kwargs: Any,
+    ) -> torch.Tensor:
         """Apply operation"""
         from .fuser import OperationFuser
         return OperationFuser([self], fuse_ops=False)(input, [kwargs])
@@ -411,11 +418,11 @@ class FusedOperation(FusableOperation):
 
     def forward(
         self,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
         """Apply operation"""
         if basic_op_kwargs is None:
-            basic_op_kwargs = [dict() for _ in range(len(self.basic_ops))]
+            basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
         return OperationFuser([self], fuse_ops=False)(input, basic_op_kwargs)

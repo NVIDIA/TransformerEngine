@@ -2,13 +2,18 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Fusable operation for reshape."""
 
+from __future__ import annotations
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    OperationContext,
+)
 from .._common import reshape
 
 
@@ -32,7 +37,7 @@ class Reshape(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:

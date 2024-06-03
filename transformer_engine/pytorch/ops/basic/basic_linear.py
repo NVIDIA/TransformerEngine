@@ -2,12 +2,13 @@
 #
 # See LICENSE for license information.
 
-from __future__ import annotations
+"""Fusable operation for linear layer without bias."""
 
+from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -23,7 +24,10 @@ from transformer_engine.pytorch.fp8 import (
     get_fp8_te_dtype,
 )
 from transformer_engine.pytorch.module.base import get_workspace
-from transformer_engine.pytorch.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    OperationContext,
+)
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
@@ -147,6 +151,7 @@ class BasicLinear(BasicOperation):
             dtype=dtype,
         )
         weight = torch.nn.Parameter(weight)
+        self.weight: torch.nn.Parameter
         self.register_parameter("weight", weight)
         self._rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]]
         self._rng_state_tracker_function = rng_state_tracker_function
@@ -301,7 +306,7 @@ class BasicLinear(BasicOperation):
 
     @staticmethod
     def _functional_forward(
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         weight: torch.Tensor,
         *,
         bias: Optional[torch.Tensor] = None,
@@ -509,7 +514,8 @@ class BasicLinear(BasicOperation):
             )
 
         # Perform GEMM
-        x_async = _wait_async(x_async)
+        _wait_async(x_async)
+        x_async = None
         if with_fp8_compute:
             kwargs = dict(
                 out=y,
@@ -570,7 +576,7 @@ class BasicLinear(BasicOperation):
     @staticmethod
     def _functional_backward(
         grad_output: torch.Tensor,
-        input: Optional[torch.Tensor],
+        input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
         weight: Optional[torch.Tensor],
         input_dims: Iterable[int],
         weight_dims: Iterable[int],
@@ -846,7 +852,8 @@ class BasicLinear(BasicOperation):
                 )
 
             # Perform dgrad GEMM
-            dy_async = _wait_async(dy_async)
+            _wait_async(dy_async)
+            dy_async = None
             if with_fp8_compute:
                 kwargs = dict(out=dx)
                 if with_fp8_grad_input:
@@ -915,8 +922,10 @@ class BasicLinear(BasicOperation):
                     device=device,
                     memory_format=torch.contiguous_format,
                 )
-            dy_async = _wait_async(dy_async)
-            x_async = _wait_async(x_async)
+            _wait_async(dy_async)
+            _wait_async(x_async)
+            dy_async = None
+            x_async = None
             if with_fp8_compute:
                 fp8_gemm(
                     x.transpose_2d(),
@@ -955,7 +964,7 @@ class BasicLinear(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:

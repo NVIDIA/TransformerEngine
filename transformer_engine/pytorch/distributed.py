@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
-from typing import Any, Dict, Union, Optional, Callable, Tuple
-from typing import Any, Dict, List, Union, Optional, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
 import torch

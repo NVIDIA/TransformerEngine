@@ -2,23 +2,26 @@
 #
 # See LICENSE for license information.
 
+"""Fusable operation for identity."""
+
 from __future__ import annotations
+from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import BasicOperation
+from transformer_engine.pytorch.ops.op import (
+    BasicOperation,
+    OperationContext,
+)
 
 
 class Identity(BasicOperation):
     """Return input tensor"""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
