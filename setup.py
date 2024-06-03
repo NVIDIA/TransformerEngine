@@ -435,7 +435,11 @@ def setup_common_extension() -> CMakeExtension:
     )
 
 def _all_files_in_dir(path):
-    return list(path.iterdir())
+    all_files = []
+    for dirname, _, names in os.walk(path):
+        for name in names:
+            all_files.append(Path(dirname, name))
+    return all_files
 
 def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""

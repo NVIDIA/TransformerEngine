@@ -82,6 +82,7 @@ def init_baseline_model(hyperparams):
         config=config,
         torch_dtype=torch.bfloat16,
     )
+    model = model.cuda()
     # Needed for the cases when using TELlamaForCausalLM. So adding here for 1:1 comparison
     model.config.use_cache=False
 
@@ -97,6 +98,7 @@ def init_te_llama_model(hyperparams):
             config=config,
             torch_dtype=torch.bfloat16,
     )
+    model = model.cuda()
     # Needed for the cases when using TELlamaForCausalLM
     model.config.use_cache=False
 
@@ -117,7 +119,7 @@ def wrap_with_accelerator(model, hyperparams):
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate)
+    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
