@@ -4973,17 +4973,14 @@ class MultiheadAttention(torch.nn.Module):
                 # in first generation phase key_layer have shape [2, 1, d].
                 # key_layer[0, :] corresponds  to the token with position 3 = 2 + 1,
                 # and key_layer [1, :] corresponds  to the token with position 6 = 5 + 1.
-                key_layer = key_layer.contiguous().clone()
-                query_layer = query_layer.contiguous().clone()
-                key_layer.copy_(
-                    apply_rotary_pos_emb(key_layer, k_pos_emb, "bshd", fused=True,start_positions=inference_params.cached_sequence_lengths)
-                )
-                query_layer.copy_(
-                    apply_rotary_pos_emb(
+                key_layer = apply_rotary_pos_emb(
+                    key_layer, k_pos_emb, "bshd", fused=True,
+                    start_positions=inference_params.cached_sequence_lengths)
+
+                query_layer = apply_rotary_pos_emb(
                         query_layer, q_pos_emb, "bshd", fused=True,
                         start_positions=inference_params.cached_sequence_lengths
                     )
-                )
             else:
                 # adjust key and value for inference
                 if inference_params is not None:
