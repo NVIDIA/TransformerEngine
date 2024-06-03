@@ -54,7 +54,7 @@ inline __device__ void cast_and_transpose_regs(const IVec (&in)[nvec_out],
 
 template <int nvec_in, int nvec_out,
           typename CType, typename IType, typename OType, typename ParamOP,
-          CType (*OP1)(CType, const ParamOP&), 
+          CType (*OP1)(CType, const ParamOP&),
           CType (*OP2)(CType, const ParamOP&)>
 __global__ void
 __launch_bounds__(cast_transpose_num_threads)
@@ -82,7 +82,7 @@ dgated_act_cast_transpose_kernel(const IType * const input,
     if (tile_id >= num_tiles) {
         return;
     }
-  
+
     const size_t tile_id_x = tile_id % num_tiles_x;
     const size_t tile_id_y = tile_id / num_tiles_x;
 
@@ -144,11 +144,11 @@ dgated_act_cast_transpose_kernel(const IType * const input,
             #pragma unroll
             for (unsigned int j = 0; j < nvec_out; ++j) {
                 in[current_in][j].load_from(my_input_tile,
-                                            current_stride + my_place_in + stride * (nvec_out + j));
+                                        current_stride + my_place_in + stride * (nvec_out + j));
                 act_in[current_in][j].load_from(my_act_input_tile,
-                                            current_stride2 + my_place_in + stride2 * (nvec_out + j));
+                                        current_stride2 + my_place_in + stride2 * (nvec_out + j));
                 gate_in[current_in][j].load_from(my_gate_input_tile,
-                                            current_stride2 + my_place_in + stride2 * (nvec_out + j));
+                                        current_stride2 + my_place_in + stride2 * (nvec_out + j));
             }
         }
         CVec after_dact[nvec_out];  // NOLINT(*)
@@ -320,9 +320,12 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
     #pragma unroll
         for (unsigned int i = 0; i < nvec_out; ++i) {
             if (valid_load) {
-                in[0][i].load_from(my_input_tile, current_stride + my_place + stride * i);
-                act_in[0][i].load_from(my_act_input_tile, current_stride2 + my_place + stride2 * i);
-                gate_in[0][i].load_from(my_gate_input_tile, current_stride2 + my_place + stride2 * i);
+                in[0][i].load_from(my_input_tile,
+                                   current_stride + my_place + stride * i);
+                act_in[0][i].load_from(my_act_input_tile,
+                                       current_stride2 + my_place + stride2 * i);
+                gate_in[0][i].load_from(my_gate_input_tile,
+                                        current_stride2 + my_place + stride2 * i);
             } else {
                 in[0][i].clear();
                 act_in[0][i].clear();
@@ -343,11 +346,11 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
                 for (unsigned int j = 0; j < nvec_out; ++j) {
                     if (valid_load) {
                         in[current_in][j].load_from(my_input_tile,
-                                                    current_stride + my_place_in + stride * (nvec_out + j));
+                                        current_stride + my_place_in + stride * (nvec_out + j));
                         act_in[current_in][j].load_from(my_act_input_tile,
-                                                    current_stride2 + my_place_in + stride2 * (nvec_out + j));
+                                        current_stride2 + my_place_in + stride2 * (nvec_out + j));
                         gate_in[current_in][j].load_from(my_gate_input_tile,
-                                                    current_stride2 + my_place_in + stride2 * (nvec_out + j));
+                                        current_stride2 + my_place_in + stride2 * (nvec_out + j));
                     } else {
                         in[current_in][j].clear();
                         act_in[current_in][j].clear();
@@ -473,10 +476,14 @@ void dgated_act_cast_transpose(const Tensor &input,
 
     NVTE_CHECK(input.data.dtype == gated_act_input.data.dtype, "Types of both inputs must match.");
 
-    NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype, "C and T outputs need to have the same type.");
-    NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr, "C and T outputs need to share amax tensor.");
-    NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr, "C and T outputs need to share scale tensor.");
-    NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr, "C and T outputs need to share scale inverse tensor.");
+    NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
+               "C and T outputs need to have the same type.");
+    NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
+               "C and T outputs need to share amax tensor.");
+    NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
+               "C and T outputs need to share scale tensor.");
+    NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
+               "C and T outputs need to share scale inverse tensor.");
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
@@ -491,14 +498,15 @@ void dgated_act_cast_transpose(const Tensor &input,
 
             NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
             NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
-            const size_t n_tiles = DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
-                                    DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
+            const size_t n_tiles =
+                            DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
+                            DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
             const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
             const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
 
             const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
                                     num_rows % (nvec_out * THREADS_PER_WARP) == 0;
-            const size_t shmem_size = cast_transpose_num_threads / n_warps_per_tile * 
+            const size_t shmem_size = cast_transpose_num_threads / n_warps_per_tile *
                                        (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>);
             if (full_tile) {
                 cudaFuncSetAttribute(

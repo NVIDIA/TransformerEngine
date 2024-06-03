@@ -126,14 +126,12 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_dbias", dbias, ref_output_dbias.get(), atol_dbias, rtol_dbias);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {
-  {64, 400},
-  {2048, 12288},
-  {768, 1024},
-  {256, 65536},
-  {65536, 128},
-  {256, 256}
-};
+std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},
+                                                     {2048, 12288},
+                                                     {768, 1024},
+                                                     {256, 65536},
+                                                     {65536, 128},
+                                                     {256, 256}};
 
 }  // namespace;
 
@@ -161,10 +159,8 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     CTDBiasTestSuite,
     ::testing::Combine(
-      // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-      // ::testing::ValuesIn(test::all_fp_types),
-      ::testing::Values(DType::kFloat32, DType::kFloat16),
-      ::testing::Values(DType::kFloat16, DType::kFloat8E4M3),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::ValuesIn(test::all_fp_types),
         ::testing::ValuesIn(test_cases)),
     [](const testing::TestParamInfo<CTDBiasTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
