@@ -89,6 +89,7 @@ META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
@@ -3960,6 +3961,21 @@ class DotProductAttention(torch.nn.Module):
             if _NVTE_DEBUG:
                 print("[DotProductAttention]: using cuDNN fused attention (backend "
                     + str(int(fused_attention_backend)) + ")")
+                if _NVTE_DEBUG_LEVEL == 2:
+                    sm = get_device_compute_capability()
+                    print(f"""[DotProductAttention]: dtype={query_layer.dtype}, """
+                        f"""qkv_format={qkv_format}, """
+                        f"""q_shape={list(query_layer.shape)}, """
+                        f"""kv_shape={list(key_layer.shape)}, """
+                        f"""qkv_layout={qkv_layout}, """
+                        f"""mask_type={attn_mask_type}, """
+                        f"""bias_type={core_attention_bias_type}, """
+                        f"""bias_shape={core_attention_bias.shape if core_attention_bias is not None else None}, """
+                        f"""dropout={self.attention_dropout}, """
+                        f"""is_training={self.training}, """
+                        f"""context_parallel={context_parallel}, """
+                        f"""compute_capability=sm{(lambda x,y: x*10+y)(sm[0],sm[1])}, """
+                        f"""cudnn_version={tex.get_cudnn_version()}""")
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(
                     self.fused_attention,

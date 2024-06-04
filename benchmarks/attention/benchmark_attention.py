@@ -36,7 +36,7 @@ model_configs = {
     "test_0": ModelConfig(2, 16, 16,  64,  512,  512, 0.0, "no_mask",         "no_bias"), # short seq
     "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal",         "no_bias"), # longer seq, mask
     "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "post_scale_bias"), # bias
-    "test_3": ModelConfig(2, 32,  8, 128, 8192, 8192, 0.0,  "causal",         "no_bias"), # GQA
+    "test_3": ModelConfig(2, 32,  4, 128, 8192, 8192, 0.0,  "causal",         "no_bias"), # GQA
 }
 
 def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supported):
