@@ -680,12 +680,17 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                                    attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
+                                    attn_scale=softmax_scale,
+                                    dropout=dropout_p,
+                                    qkv_layout=qkv_layout,
                                     attn_mask_type="padding" if padding else "no_mask",
-                                    attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
+                                    attn_bias_type=attn_bias_type,
+                                    attn_bias=attn_bias_inputs[i%2],
                                     seq_offsets_q=seq_offsets_q,
-                                    seq_offsets_k=None if seq_offsets_k is None else seq_offsets_k//2,
-                                    seq_offsets_v=None if seq_offsets_v is None else seq_offsets_v//2,
+                                    seq_offsets_k=None if seq_offsets_k is None \
+                                        else seq_offsets_k//2,
+                                    seq_offsets_v=None if seq_offsets_v is None \
+                                        else seq_offsets_v//2,
                                     seq_offsets_o=seq_offsets_o,
                                 )
                                 if len(rest) > 0:
@@ -741,12 +746,18 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                                    attn_scale=softmax_scale, dropout=dropout_p, qkv_layout=qkv_layout,
+                                    attn_scale=softmax_scale,
+                                    dropout=dropout_p,
+                                    qkv_layout=qkv_layout,
                                     attn_mask_type="padding" if padding else "no_mask",
-                                    attn_bias_type=attn_bias_type, attn_bias=attn_bias_inputs[i%2],
-                                    seq_offsets_q=None if seq_offsets_q is None else seq_offsets_q//2,
-                                    seq_offsets_k=seq_offsets_k, seq_offsets_v=seq_offsets_v,
-                                    seq_offsets_o=None if seq_offsets_o is None else seq_offsets_o//2,
+                                    attn_bias_type=attn_bias_type,
+                                    attn_bias=attn_bias_inputs[i%2],
+                                    seq_offsets_q=None if seq_offsets_q is None \
+                                        else seq_offsets_q//2,
+                                    seq_offsets_k=seq_offsets_k,
+                                    seq_offsets_v=seq_offsets_v,
+                                    seq_offsets_o=None if seq_offsets_o is None \
+                                        else seq_offsets_o//2,
                                 )
                                 if len(rest) > 0:
                                     attn_biases[i] = rest[0]
@@ -1381,7 +1392,7 @@ def attn_forward_func_with_cp(
             not use_fused_attention or \
             attn_mask_type in ["padding", "padding_causal"]
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
-    assert (attn_bias is None or (use_fused_attention and not "padding" in attn_mask_type)
+    assert (attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type)
         ), "Attention bias is only supported with FusedAttention + no_padding!"
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
