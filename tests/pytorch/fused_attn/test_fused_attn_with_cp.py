@@ -14,10 +14,10 @@ from transformer_engine.pytorch.utils import get_device_compute_capability
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "cp_1_0": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0,  "causal", "no_bias"), # MHA
-    "cp_1_1": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"), # MHA
-    "cp_2_0": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0,  "causal", "no_bias"), # GQA
-    "cp_2_1": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"), # GQA
+    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0,  "causal", "no_bias"), # MHA
+    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"), # MHA
+    "cp_2_0": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0,  "causal", "no_bias"), # GQA
+    "cp_2_1": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"), # GQA
 }
 
 def get_bash_arguments(**kwargs):
@@ -47,14 +47,14 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
 
 model_configs_fused_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,              bias
-    "cp_1_0": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0,  "causal",         "no_bias"), # MHA
-    "cp_1_1": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0, "no_mask",         "no_bias"), # MHA
-    "cp_1_2": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0,  "causal", "post_scale_bias"), # MHA
-    "cp_1_3": ModelConfig(1, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"), # MHA
-    "cp_2_0": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0,  "causal",         "no_bias"), # GQA
-    "cp_2_1": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0, "no_mask",         "no_bias"), # GQA
-    "cp_2_2": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0,  "causal", "post_scale_bias"), # GQA
-    "cp_2_3": ModelConfig(1, 12,  1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"), # GQA
+    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0,  "causal",         "no_bias"), # MHA
+    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask",         "no_bias"), # MHA
+    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0,  "causal", "post_scale_bias"), # MHA
+    "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"), # MHA
+    "cp_2_0": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0,  "causal",         "no_bias"), # GQA
+    "cp_2_1": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0, "no_mask",         "no_bias"), # GQA
+    "cp_2_2": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0,  "causal", "post_scale_bias"), # GQA
+    "cp_2_3": ModelConfig(2, 12,  1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"), # GQA
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,7), reason="cuDNN 8.9.7+ is required.")

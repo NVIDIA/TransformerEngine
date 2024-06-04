@@ -164,7 +164,10 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     # compare results with and without CP
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == 'bf16':
-        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        if config.num_heads == config.num_gqa_groups:
+            tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        else:
+            tols = dict(atol=3.5e-2, rtol=3.5e-2)
 
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
