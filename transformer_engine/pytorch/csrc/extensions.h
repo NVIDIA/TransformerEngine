@@ -240,7 +240,8 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
                      std::vector<at::Tensor> workspace,
                      size_t workspaceSize,
                      bool accumulate,
-                     bool use_split_accumulator
+                     bool use_split_accumulator,
+                     int math_sm_count
 );
 
 /***************************************************************************************************

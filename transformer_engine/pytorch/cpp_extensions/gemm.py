@@ -305,7 +305,7 @@ def grouped_gemm(
     else:
         bias_dtype = output_dtype
 
-    tex.te_grouped_gemm(
+    torch.ops.tex_ts.te_grouped_gemm_ts(
         A,
         empty_tensor,
         0,  # A_offset
@@ -384,7 +384,7 @@ def fp8_grouped_gemm(
 
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
-    tex.te_grouped_gemm(
+    torch.ops.tex_ts.te_grouped_gemm_ts(
         A,
         A_scale_inv,
         A_fp8_tensor_offset,

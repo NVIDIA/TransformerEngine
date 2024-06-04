@@ -6,7 +6,6 @@
 
 #include "extensions.h"
 #include "common/util/cuda_runtime.h"
-#include "common/util/system.h"
 
 
 void te_gemm(at::Tensor A,
@@ -184,7 +183,8 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
                      std::vector<at::Tensor> workspace,
                      size_t workspaceSize,
                      bool accumulate,
-                     bool use_split_accumulator
+                     bool use_split_accumulator,
+                     int math_sm_count
 ) {
   using namespace transformer_engine;
   std::vector<NVTETensor> te_A, te_B, te_D, te_bias, te_pre_gelu_out, te_workspace;
@@ -239,11 +239,6 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
                                           {workspaceSize},
                                           DType::kByte, nullptr, nullptr, nullptr));
   }
-
-  // Set an external SM Margin to all the GEMMs.
-  // This comes in handy when DP is overlapped with GEMMs
-  const int sm_count = transformer_engine::cuda::sm_count();
-  int math_sm_count = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
   // For now, we only have multi-stream cublas backend.
   nvte_multi_stream_cublas_gemm(te_A,
