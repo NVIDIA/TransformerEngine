@@ -74,12 +74,11 @@ def cmake_bin() -> Path:
     # Search in CMake Python package
     _cmake_bin: Optional[Path] = None
     try:
-        import cmake
+        from cmake import CMAKE_BIN_DIR
     except ImportError:
         pass
     else:
-        cmake_dir = Path(cmake.__file__).resolve().parent
-        _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
+        _cmake_bin = Path(CMAKE_BIN_DIR).resolve() / "cmake"
         if not _cmake_bin.is_file():
             _cmake_bin = None
 
