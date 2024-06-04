@@ -4200,10 +4200,11 @@ class DotProductAttention(torch.nn.Module):
             if self.device_compute_capability == (9, 0):
                 use_flash_attention = False
 
-        if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1] or \
-           self.qkv_format == "sbhd" and query_layer.shape[0] != value_layer.shape[0]:
-            # Flash attention does not support max_seqlen_q != max_seqlen_kv
-            use_flash_attention = False
+        if self.attention_type == "self":
+            if self.qkv_format == "bshd" and query_layer.shape[1] != value_layer.shape[1] or \
+            self.qkv_format == "sbhd" and query_layer.shape[0] != value_layer.shape[0]:
+                # Flash attention does not self-support max_seqlen_q != max_seqlen_kv
+                use_flash_attention = False
 
         if use_flash_attention:
             if _NVTE_DEBUG:
@@ -4308,6 +4309,7 @@ class DotProductAttention(torch.nn.Module):
                     core_attention_bias_type = core_attention_bias_type,
                     core_attention_bias = core_attention_bias,
                     alibi_slopes = alibi_slopes)
+
             return self.unfused_attention(query_layer,
                     key_layer,
                     value_layer,

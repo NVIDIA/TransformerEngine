@@ -45,6 +45,7 @@ Transformer Engine documentation
    examples/fp8_primer.ipynb
    examples/advanced_optimizations.ipynb
    examples/te_llama/tutorial_accelerate_hf_llama_finetuning_with_te.ipynb
+   examples/te_gemma/tutorial_accelerate_hf_gemma_finetuning_with_te.ipynb
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
 
 .. toctree::
