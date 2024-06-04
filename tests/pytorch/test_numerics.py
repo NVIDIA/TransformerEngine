@@ -1260,9 +1260,6 @@ def _test_grouped_linear_accuracy(block, bs, dtype, config, fp8=False):
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_grouped_linear_accuracy(dtype, bs, model, fp8, fp8_model_params):
-    print(
-        f"test_grouped_linear_accuracy({dtype}, {bs}, {model}, {fp8}, {fp8_model_params})"
-    )
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
