@@ -635,7 +635,7 @@ void cast_transpose_fused(const Tensor &input,
                 }
             }
 
-            CheckInputTensor(input, "cast_transpose_dbias_dact_input");
+            CheckInputTensor(input, "cast_transpose_fused_input");
             CheckOutputTensor(*cast_output, "cast_output");
             CheckOutputTensor(*transposed_output, "transposed_output");
             if constexpr (IS_DBIAS) {
