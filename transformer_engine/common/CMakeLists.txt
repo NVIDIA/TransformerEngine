@@ -9,7 +9,6 @@ list(APPEND transformer_engine_SOURCES
      transpose/cast_transpose.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu
-     transpose/gated_act_cast_transpose.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
