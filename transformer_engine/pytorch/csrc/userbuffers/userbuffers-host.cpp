@@ -422,7 +422,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(exphndl), (*comm)->mc_handle,
                                             CU_MEM_HANDLE_TYPE_FABRIC, 0));
-    } 
+    }
     // Loop over all tensor groups to bcast the fabric handles.
     // Ranks that withing the same tensor group will keep the handle and other will discard it.
     for (int i = 0; i < numlocal; i+=tensorgpus) {
