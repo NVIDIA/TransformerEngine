@@ -252,6 +252,9 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
             sec_timeout, (*comm)->ub_timeout, device_clock);
   }
 
+  // CE deadlock detection is disabled by default since it may introduce 1-2% overhead
+  (*comm)->ce_deadlock_check = !!(getenv("NVTE_CE_DEADLOCK_CHECK"));
+
   int ret = 0;
   int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
   int rank = (*comm)->myrank, size = (*comm)->nranks;
