@@ -733,6 +733,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubufs_, B_copy_, workspace_,
       grad, accumulate, use_split_accumulator);
+    at::cuda::setCurrentCUDAStream(stream_main);
 
     return D;
   }  // UbufP2PCommOverlap::split_overlap_ag
@@ -909,11 +910,11 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       grad, accumulate, use_split_accumulator);
 
     // Reduce GEMM output chunks
-    void *reduce_buf_ptr = _ubufs[_tp_size - 1].data_ptr();
+    char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].data_ptr());
     if (_ubuf.element_size() == 1) {
       assert(rs_output.element_size() == 2);
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
-      void *rs_output_ptr = rs_output.data_ptr();
+      char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
     } else {

@@ -2629,7 +2629,7 @@ template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_inputs,
                             int input_size, cudaStream_t stream) {
   size_t num_threads = MAX_THREADS / 4;
-  size_t num_blocks = (input_size +num_threads - 1) / num_threads;
+  size_t num_blocks = (input_size + num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
   reduce_fp8_in_bf16_out_cuda<fp8type><<<grid, block, 0, stream>>>(

@@ -141,7 +141,8 @@ def fp8_gemm(
                 extra_output_tensor is not None
             ), 'ATOMIC_GEMM_RS_P2P requires extra output tensor'
             args = tuple(args + (extra_output_tensor,))
-    if ub_algo is not None and ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P:
+    if ub_algo is not None and ub_algo in [tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P,
+                                           tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P]:
         out = fn(*args)
     else:
         _ = fn(*args)
@@ -255,25 +256,9 @@ def gemm(
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS_P2P requires extra output tensor'
             args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P:
-            fn = ub.atomic_gemm_overlap_ag_p2p
-            extra_output_tensor = (
-                empty_tensor if extra_output_tensor is None else extra_output_tensor
-            )
-            args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS:
-            fn = ub.atomic_gemm_overlap_rs
-            assert (
-                extra_output_tensor is not None
-            ), 'ATOMIC_GEMM_RS requires extra output tensor'
-            args = tuple(args + (True, extra_output_tensor,))
-        elif ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P:
-            fn = ub.atomic_gemm_overlap_rs_p2p
-            assert (
-                extra_output_tensor is not None
-            ), 'ATOMIC_GEMM_RS_P2P requires extra output tensor'
-            args = tuple(args + (extra_output_tensor,))
-    if ub_algo is not None and ub_algo == tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P:
+        else:
+            raise TypeError("Unsupported comm+GEMM overlap algorithm!")
+    if ub_algo is not None and ub_algo == tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P:
         out = fn(*args)
     else:
         _ = fn(*args)
