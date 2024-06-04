@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Optional
 
 import torch
@@ -34,42 +34,114 @@ class Sequential(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        # List of modules, with fusable operations grouped together
+        self._module_groups: Optional[list[OperationFuser | torch.nn.Module]]
+        self._module_groups = None
+
         # Add modules
         if len(args) == 1 and isinstance(args[0], OrderedDict):
             for key, module in args[0].items():
                 self.add_module(key, module)
         else:
-            for idx, module in enumerate(args):
-                self.add_module(str(idx), module)
+            for module in args:
+                self.append(module)
 
-        # List of modules, with fusable operations grouped together
-        self._module_groups: Optional[list[OperationFuser | torch.nn.Module]]
+    def add_module(self, name: str, module: Optional[torch.nn.Module]) -> None:
         self._module_groups = None
+        super().add_module(name, module)
 
-    def add_module(self, *args, **kwargs) -> None:
-        super().add_module(*args, **kwargs)
-        self._module_groups = None
-
-    def __getitem__(
-        self,
-        idx: slice | int,
-    ) -> list[torch.nn.Module] | torch.nn.Module:
+    def _get_keys_by_idx(self, idx: int | slice) -> list[str]:
+        """Get module keys corresponding to indices"""
         if isinstance(idx, slice):
-            return list(self._modules.values())[idx]
-        size = len(self)
+            return list(self._modules.keys())[idx]
+        size = len(self._modules)
         if not -size <= idx < size:
             raise IndexError(
                 f"Attempted to access index {idx}, "
                 f"but there are {size} entries"
             )
-        idx %= size
-        for i, op in enumerate(self._modules.values()):
+        if idx < 0:
+            idx += size
+        for i, key in enumerate(self._modules.keys()):
             if i == idx:
-                return op
+                return [key]
         raise RuntimeError(f"Could not access index {idx}")
+
+    def _next_key(self) -> str:
+        """Key for a newly added module"""
+        idx = 0
+        for key in self._modules.keys():
+            try:
+                key_idx = int(key)
+            except (ValueError, TypeError):
+                pass
+            else:
+                idx = max(idx, key_idx + 1)
+        return str(idx)
+
+    def __getitem__(
+        self,
+        idx: slice | int,
+    ) -> Sequential | torch.nn.Module:
+        keys = self._get_keys_by_idx(idx)
+        if isinstance(idx, slice):
+            modules = OrderedDict(
+                (str(i), self._modules[key])
+                for i, key in enumerate(keys)
+            )
+            return self.__class__(modules)
+        return self._modules[keys[0]]
+
+    def __setitem__(self, idx: int, module: torch.nn.Module) -> None:
+        self._module_groups = None
+        key = self._get_keys_by_idx(idx)[0]
+        self._modules[key] = module
+
+    def __delitem__(self, idx: slice | int) -> None:
+        self._module_groups = None
+        for key in self._get_keys_by_idx(idx):
+            del self._modules[key]
 
     def __len__(self) -> int:
         return len(self._modules)
+
+    def __iter__(self) -> Iterator[torch.nn.Module]:
+        return iter(self._modules.values())
+
+    def append(self, module: torch.nn.Module) -> Sequential:
+        """Add module at the end of the container"""
+        self.add_module(self._next_key(), module)
+        return self
+
+    def extend(self, modules: Iterable[torch.nn.Module]) -> Sequential:
+        """Add modules at the end of the container"""
+        for module in modules:
+            self.append(module)
+        return self
+
+    def insert(self, idx: int, module: torch.nn.Module) -> Sequential:
+        """Add modules at a position in the container"""
+        self._module_groups = None
+        keys = self._get_keys_by_idx(slice(idx, None))
+        keys.append(self._next_key())
+        for i in reversed(range(1, len(keys))):
+            self._modules[keys[i]] = self._modules[keys[i-1]]
+        self._modules[keys[0]] = module
+        return self
+
+    def pop(self, idx: slice | int) -> torch.nn.Module:
+        """Remove module at a position in the container"""
+        out = self[idx]
+        del self[idx]
+        return out
+
+    def __iadd__(self, other: Sequential) -> Sequential:
+        return self.extend(other)
+
+    def __add__(self, modules: Iterable[torch.nn.Modules]) -> Sequential:
+        out = self.__class__(self._modules)
+        out.extend(modules)
+        return out
 
     @classmethod
     def _make_module_groups(
@@ -108,5 +180,3 @@ class Sequential(torch.nn.Module):
         for module_group in self._module_groups:
             x = module_group(x)
         return x
-
-    ### TODO Dunder functions

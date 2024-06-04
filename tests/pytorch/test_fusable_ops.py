@@ -97,6 +97,116 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
+class TestSequential:
+    """Tests for sequential container"""
+
+    def test_modules(self) -> None:
+        """Check that list of modules can be manipulated as expected"""
+
+        # Construct sequential container
+        modules = [
+            te_ops.Identity(),
+            te_ops.Identity(),
+            torch.nn.Identity(),
+            te_ops.Identity(),
+        ]
+        model = te_ops.Sequential(*modules)
+
+        # Length
+        assert len(model) == len(modules)
+
+        # Iterator
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Index by int
+        for i, module in enumerate(modules):
+            assert model[i] is module
+            assert model[i-len(modules)] is module
+
+        # Index by slice
+        model_subset = model[1:-1]
+        modules_subset = modules[1:-1]
+        assert isinstance(model_subset, te_ops.Sequential)
+        for module1, module2 in zip(model_subset, modules_subset):
+            assert module1 is module2
+
+        # Set element
+        new_module = torch.nn.Identity()
+        idx = 1
+        modules[idx] = new_module
+        model[idx] = new_module
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Delete element
+        idx = 1
+        del modules[idx]
+        del model[idx]
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Append
+        new_module = torch.nn.Identity()
+        modules.append(new_module)
+        model.append(new_module)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Extend
+        new_modules = [te_ops.Identity(), te_ops.Identity()]
+        modules.extend(new_modules)
+        model.extend(new_modules)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Insert
+        new_module = te_ops.Identity()
+        idx = 2
+        modules.insert(idx, new_module)
+        model.insert(idx, new_module)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Pop
+        idx = 2
+        assert model.pop(idx) is modules.pop(idx)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+        # Out-of-place add
+        new_modules = [torch.nn.Identity(), te_ops.Identity()]
+        added_modules = modules + new_modules
+        added_model = model + te_ops.Sequential(*new_modules)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+        for module1, module2 in zip(added_model, added_modules):
+            assert module1 is module2
+
+        # In-place add
+        new_modules = [te_ops.Identity(), torch.nn.Identity()]
+        modules += new_modules
+        model += te_ops.Sequential(*new_modules)
+        for module1, module2 in zip(model, modules):
+            assert module1 is module2
+
+    def test_module_groups(self) -> None:
+        """Check that modules are grouped together correctly"""
+        model = te_ops.Sequential(
+            te_ops.Identity(),
+            te_ops.Identity(),
+            torch.nn.Identity(),
+            torch.nn.Identity(),
+            te_ops.Identity(),
+            torch.nn.Identity(),
+            te_ops.Identity(),
+            te_ops.Identity(),
+            te_ops.Identity(),
+        )
+        model(torch.zeros(1))
+        assert len(model._module_groups) == 6
+
+
 class TestFuser:
     """Tests for operation fusion infrastructure"""
 
