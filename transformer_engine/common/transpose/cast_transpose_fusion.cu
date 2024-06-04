@@ -201,8 +201,6 @@ void reduce_dbias(const Tensor &workspace,
 
 
 
-// TODO Phuong: Change all the names in these generalized functions.
-// For now, I keep the old names so that it is easier to do code review
 template <bool IS_DBIAS, bool IS_DACT, typename ComputeType, typename ParamOP,
           int nvec_in, int nvec_out, typename Param,
           ComputeType (*OP)(ComputeType, const ParamOP&)>
