@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import os, sys, time
 import pandas as pd
 import numpy as np

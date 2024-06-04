@@ -104,7 +104,6 @@ def _run_dot_product_attention(
     return out, (q.grad, k.grad, v.grad)
 
 
-
 dtype = torch.bfloat16
 model_configs = {
     #      test:             b,  h, hg,  d,   sq,  skv,   p,        mask,             bias
@@ -112,19 +111,15 @@ model_configs = {
     "test_bias": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0,   "no_mask", "post_scale_bias"),
 }
 
+print('Run with post_scale_bias:')
 config = model_configs["test_bias"]
 fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(dtype, config, 'bs3hd')
 
+print('Run with arbitrary mask:')
 config = model_configs["test_mask"]
 unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(dtype, config, 'bs3hd')
 
 torch.testing.assert_close(unfused_attn_fwd, fused_attn_fwd, atol=2.5e-2, rtol=2.5e-2)
 for i in range(3):
     torch.testing.assert_close(unfused_attn_bwd[i], fused_attn_bwd[i], atol=2.5e-2, rtol=2.5e-2)
-
-print('test passed')
-
-#run
-#NVTE_DEBUG=1 python test_arbitrary_mask_to_bias.py 
-#[DotProductAttention]: using cuDNN fused attention (backend 1)
-#[DotProductAttention]: using unfused DPA
+print('Test passed!')
