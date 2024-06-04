@@ -32,6 +32,12 @@ void te_gemm(at::Tensor A,
              int math_sm_count
 ) {
   using namespace transformer_engine;
+  if (A.data_ptr() == nullptr || B.data_ptr() == nullptr) {
+    if (D.data_ptr() != nullptr && !accumulate) D.zero_();
+    if (bias.data_ptr() != nullptr) bias.zero_();
+    if (pre_gelu_out.data_ptr() != nullptr) pre_gelu_out.zero_();
+    return;
+  }
   auto te_A = makeTransformerEngineTensor(A.data_ptr(),
                                           {static_cast<size_t>(A.size(0)),
                                            static_cast<size_t>(A.size(1))},
@@ -197,6 +203,8 @@ void te_grouped_gemm(std::vector<at::Tensor> A,
   for (size_t i = 0; i < A.size(); i++) {
     if (A[i].data_ptr() == nullptr || B[i].data_ptr() == nullptr) {
       if (D[i].data_ptr() != nullptr && !accumulate) D[i].zero_();
+      if (bias[i].data_ptr() != nullptr) bias[i].zero_();
+      if (pre_gelu_out[i].data_ptr() != nullptr) pre_gelu_out[i].zero_();
       continue;
     }
     te_A.emplace_back(make_tensor(A[i].data_ptr(),

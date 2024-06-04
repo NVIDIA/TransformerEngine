@@ -24,7 +24,7 @@ from transformer_engine.pytorch import (
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import grouped_gemm, fp8_grouped_gemm, fp8_gemm
+from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 import transformer_engine_extensions as tex
 
@@ -1577,19 +1577,6 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     assert_allclose(full_output, incremental_output, atol[dtype])
 
 
-def _torch_grouped_gemm(A, B, C, layout, accumulate):
-    transa = layout[0] == "T"
-    transb = layout[1] == "T"
-    return [
-        torch.addmm(
-            c,
-            b.t() if transb else b,
-            a.t() if transa else a,
-            beta=1 if accumulate else 0,
-        ) for a, b, c in zip(A, B, C)
-    ]
-
-
 @pytest.mark.parametrize("shape", [(1, 127, 128, 512),
                                    (8, 15, 128, 512),
                                    (8, 1027, 128, 512),
@@ -1621,7 +1608,19 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
         grad = True
 
-    out_ref = _torch_grouped_gemm(A, B, out, layout, accumulate)
+    out_ref = [o.clone() for o in out]
+    for i in range(z):
+        gemm(
+            A[i],
+            B[i],
+            dtype,
+            get_workspace(),
+            grad=grad,
+            accumulate=accumulate,
+            layout=layout,
+            out=out_ref[i],
+        )
+
     grouped_gemm(
         A,
         B,
@@ -1632,8 +1631,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         accumulate=accumulate,
         layout=layout,
     )
+
+    # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
-        torch.testing.assert_close(o, o_ref)
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("shape", [(1, 128, 128, 512),
@@ -1707,5 +1708,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
             out=out_ref[i],
             accumulate=accumulate,
         )
+
+    # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
-        torch.testing.assert_close(o, o_ref)
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
