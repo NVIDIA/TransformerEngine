@@ -20,7 +20,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
-    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
+    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear, GroupedLinear,
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
@@ -1217,6 +1217,96 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+
+
+def _test_grouped_linear_accuracy(block, bs, dtype, config, fp8=False):
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    with fp8_autocast(enabled=fp8):
+        if isinstance(block, GroupedLinear):
+            m_splits = [config.seq_len * bs // 4] * 4
+            out = block(inp_hidden_states, m_splits)
+        else:
+            out = torch.cat(
+                [
+                    block[i](inp)
+                    for i, inp in enumerate(torch.chunk(inp_hidden_states, 4))
+                ]
+            )
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_grouped_linear_accuracy(dtype, bs, model, fp8, fp8_model_params):
+    print(
+        f"test_grouped_linear_accuracy({dtype}, {bs}, {model}, {fp8}, {fp8_model_params})"
+    )
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+    num_gemms = 4
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=True,
+                    params_dtype=dtype,
+                    device="cuda",
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(
+                getattr(grouped_linear, f"weight{i}").clone()
+            )
+            sequential_linear[i].bias = Parameter(
+                getattr(grouped_linear, f"bias{i}").clone()
+            )
+
+    outputs = _test_grouped_linear_accuracy(grouped_linear, bs, dtype, config, fp8)
+    outputs_ref = _test_grouped_linear_accuracy(sequential_linear, bs, dtype, config, fp8)
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref)
 
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
