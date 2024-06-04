@@ -2033,19 +2033,11 @@ __global__ void kuserbuffers_inc(int *id) {
   atomicAdd(id, 1);
 }
 
-#if CE_DEADLOCK_DETECTOR
-#define LAUNCH_CE_CHECK_INC(stream, id)                               \
-do {                                                                  \
-  kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(id)); \
+#define LAUNCH_CE_CHECK_INC(c, stream, id)                              \
+do {                                                                    \
+  if ((c)->ce_deadlock_check)                                           \
+    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(id)); \
 } while (0)
-#else
-#define LAUNCH_CE_CHECK_INC(stream, id)               \
-  do {                                                \
-    /* Telling compiler to ignore unused variables */ \
-    (void)stream;                                     \
-    (void)id;                                         \
-  } while (0)
-#endif
 
 __global__ void kuserbuffers_dummy(void) {}
 
@@ -2125,12 +2117,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }
 
-#if CE_DEADLOCK_DETECTOR
-#define CHECK_CE(ce_start, ce_end) ((ce_start) != nullptr && (ce_end) != nullptr && \
-                                    *(ce_start) != *(ce_end))
-#else
 #define CHECK_CE(ce_start, ce_end) (false)
-#endif
 
 __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id,
                                       int *flagptr, int adder, uint64_t ub_timeout,
@@ -2410,9 +2397,9 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
 
     if (comm->use_ce) {
-      LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+      LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
       CUDACHECK(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-      LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+      LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
     int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
@@ -2442,9 +2429,9 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                       + send_offset;
 
   if (comm->use_ce) {
-    LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2461,10 +2448,10 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   uint64_t arg11 = comm->ub_timeout;
   int arg12 = send_peerlocal;
   int arg13 = recv_peerlocal;
-  int *arg14 = reinterpret_cast<int *>(comm->use_ce ?
+  int *arg14 = reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                        GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1):
                                        nullptr);
-  int *arg15 = reinterpret_cast<int *>(comm->use_ce ?
+  int *arg15 = reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                        GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2):
                                        nullptr);
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
@@ -2497,9 +2484,9 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   void *send_dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal])
                       + send_offset;
   if (comm->use_ce) {
-    LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    LAUNCH_CE_CHECK_INC(stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2517,10 +2504,10 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   int arg12 = comm->ub_timeout;
   int arg13 = send_peerlocal;
   int arg14 = recv_peerlocal;
-  int *arg15 = reinterpret_cast<int *>(comm->use_ce ?
+  int *arg15 = reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                        GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1) :
                                        nullptr);
-  int *arg16 = reinterpret_cast<int *>(comm->use_ce ?
+  int *arg16 = reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                        GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2) :
                                        nullptr);
   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
@@ -2613,9 +2600,9 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
         &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
         reinterpret_cast<int *>(flagptr), signalonly || comm->sms,
         comm->ub_timeout,
-        reinterpret_cast<int *>(comm->use_ce ?
+        reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                 GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1) : nullptr),
-        reinterpret_cast<int *>(comm->use_ce ?
+        reinterpret_cast<int *>(comm->ce_deadlock_check && comm->use_ce ?
                                 GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2) : nullptr));
   }
 }
