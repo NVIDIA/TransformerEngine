@@ -1613,6 +1613,9 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     if dtype == torch.float32:
         pytest.skip("torch.float32 does not support thd")
 
+    fused_attn_env = os.environ["NVTE_FUSED_ATTN"]
+    os.environ["NVTE_FUSED_ATTN"] = "1" # Only fused attention supports thd.
+
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -1723,3 +1726,5 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
         atol=1e-2,
         rtol=1e-2
     )
+
+    os.environ["NVTE_FUSED_ATTN"] = fused_attn_env
