@@ -130,9 +130,9 @@ void ub_free(void *ptr) {
 struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverlap {
   torch::Tensor _counters;
   torch::Tensor _ubuf;
-  torch::Tensor _ubuf_scale_inv;
   int _ubuf_bytes;
   DType _ubuf_dtype;
+  void *_ubuf_scale_inv_ptr;
   bool _ubuf_scale_inv_initialized{false};
 
   UbufCommOverlap(
@@ -180,16 +180,14 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     int comm_type, at::Tensor rs_output
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
     if (_ubuf.element_size() == 1) {
       NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
     }
     auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
                                              {static_cast<size_t>(_ubuf.size(0)),
                                               static_cast<size_t>(_ubuf.size(1))},
                                              _ubuf_dtype, nullptr, nullptr,
-                                             ubuf_scale_inv_ptr);
+                                             _ubuf_scale_inv_ptr);
 
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
@@ -270,16 +268,14 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     bool gemm_overlap, at::Tensor rs_output
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
     if (_ubuf.element_size() == 1) {
       NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
     }
     auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
                                              {static_cast<size_t>(_ubuf.size(0)),
                                               static_cast<size_t>(_ubuf.size(1))},
                                              _ubuf_dtype, nullptr, nullptr,
-                                             ubuf_scale_inv_ptr);
+                                             _ubuf_scale_inv_ptr);
 
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
@@ -351,17 +347,6 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     bool gemm_overlap, at::Tensor rs_output
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
-    if (_ubuf.element_size() == 1) {
-      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
-    }
-    auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
-                                             {static_cast<size_t>(_ubuf.size(0)),
-                                              static_cast<size_t>(_ubuf.size(1))},
-                                             _ubuf_dtype, nullptr, nullptr,
-                                             ubuf_scale_inv_ptr);
-
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
     auto A_ = makeTransformerEngineTensor(A.data_ptr(),
@@ -398,6 +383,15 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                                                      gelu_shape,
                                                      GetTransformerEngineDType(
                                                        pre_gelu_out.scalar_type()));
+
+    if (_ubuf.element_size() == 1) {
+      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
+    }
+    auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
+                                             {static_cast<size_t>(_ubuf.size(0)),
+                                              static_cast<size_t>(_ubuf.size(1))},
+                                             _ubuf_dtype, D_amax_ptr, D_scale_ptr,
+                                             _ubuf_scale_inv_ptr);
 
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
@@ -464,7 +458,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
   ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
   */
   void set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
-    _ubuf_scale_inv = scale_inv;
+    _ubuf_scale_inv_ptr = scale_inv.data_ptr();
     _ubuf_scale_inv_initialized = true;
   }
 
@@ -473,12 +467,12 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
 
 struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOverlapP2P {
   torch::Tensor _counters;
-  torch::Tensor _ubuf_scale_inv;
   torch::Tensor _ubuf;
   std::vector<torch::Tensor> _ubufs;
   DType _ubuf_dtype;
 
-  bool _ubuf_scale_inv_initialized;
+  void *_ubuf_scale_inv_ptr;
+  bool _ubuf_scale_inv_initialized{false};
   int _ubuf_bytes, _ubuf_chunk_bytes;
 
   UbufP2PCommOverlap(torch::Tensor sample,
@@ -554,16 +548,14 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     at::Tensor B_copy
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
     if (_ubuf.element_size() == 1) {
       NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
     }
     auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
                                              {static_cast<size_t>(_ubuf.size(0)),
                                               static_cast<size_t>(_ubuf.size(1))},
                                              _ubuf_dtype, nullptr, nullptr,
-                                             ubuf_scale_inv_ptr);
+                                             _ubuf_scale_inv_ptr);
 
     std::vector<TensorWrapper> ubufs_;
     for (int i = 0; i < _num_ubuf_chunks; i++)
@@ -571,7 +563,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                    {static_cast<size_t>(_ubufs[i].size(0)),
                                                     static_cast<size_t>(_ubufs[i].size(1))},
                                                    _ubuf_dtype, nullptr, nullptr,
-                                                   ubuf_scale_inv_ptr));
+                                                   _ubuf_scale_inv_ptr));
 
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
@@ -665,10 +657,8 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     at::Tensor B_copy
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
     if (_ubuf.element_size() == 1) {
       NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
     }
     std::vector<TensorWrapper> ubufs_;
     for (int i = 0; i < _num_ubuf_chunks; i++)
@@ -676,7 +666,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                    {static_cast<size_t>(_ubufs[i].size(0)),
                                                     static_cast<size_t>(_ubufs[i].size(1))},
                                                    _ubuf_dtype, nullptr, nullptr,
-                                                   ubuf_scale_inv_ptr));
+                                                   _ubuf_scale_inv_ptr));
 
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
@@ -751,25 +741,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     at::Tensor rs_output
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
-    if (_ubuf.element_size() == 1) {
-      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
-    }
-    auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
-                                             {static_cast<size_t>(_ubuf.size(0)),
-                                              static_cast<size_t>(_ubuf.size(1))},
-                                             _ubuf_dtype, nullptr, nullptr,
-                                             ubuf_scale_inv_ptr);
-
-    std::vector<TensorWrapper> ubufs_;
-    for (int i = 0; i < _num_ubuf_chunks; i++)
-      ubufs_.push_back(makeTransformerEngineTensor(_ubufs[i].data_ptr(),
-                                                   {static_cast<size_t>(_ubufs[i].size(0)),
-                                                    static_cast<size_t>(_ubufs[i].size(1))},
-                                                   _ubuf_dtype, nullptr, nullptr,
-                                                   ubuf_scale_inv_ptr));
-
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
     auto A_ = makeTransformerEngineTensor(A.data_ptr(),
@@ -807,6 +778,23 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                      GetTransformerEngineDType(
                                                        pre_gelu_out.scalar_type()));
 
+    if (_ubuf.element_size() == 1) {
+      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
+    }
+    auto ubuf_ = makeTransformerEngineTensor(_ubuf.data_ptr(),
+                                             {static_cast<size_t>(_ubuf.size(0)),
+                                              static_cast<size_t>(_ubuf.size(1))},
+                                             _ubuf_dtype, D_amax_ptr, D_scale_ptr,
+                                             _ubuf_scale_inv_ptr);
+
+    std::vector<TensorWrapper> ubufs_;
+    for (int i = 0; i < _num_ubuf_chunks; i++)
+      ubufs_.push_back(makeTransformerEngineTensor(_ubufs[i].data_ptr(),
+                                                   {static_cast<size_t>(_ubufs[i].size(0)),
+                                                    static_cast<size_t>(_ubufs[i].size(1))},
+                                                   _ubuf_dtype, D_amax_ptr, D_scale_ptr,
+                                                   _ubuf_scale_inv_ptr));
+
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
                                                   DType::kByte);
@@ -825,7 +813,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].data_ptr());
     if (_ubuf.element_size() == 1) {
       assert(rs_output.element_size() == 2);
-      float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+      float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv_ptr);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
@@ -849,19 +837,6 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     at::Tensor rs_output
   ) {
-    void *ubuf_scale_inv_ptr = nullptr;
-    if (_ubuf.element_size() == 1) {
-      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
-      ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
-    }
-    std::vector<TensorWrapper> ubufs_;
-    for (int i = 0; i < _num_ubuf_chunks; i++)
-      ubufs_.push_back(makeTransformerEngineTensor(_ubufs[i].data_ptr(),
-                                                   {static_cast<size_t>(_ubufs[i].size(0)),
-                                                    static_cast<size_t>(_ubufs[i].size(1))},
-                                                   _ubuf_dtype, nullptr, nullptr,
-                                                   ubuf_scale_inv_ptr));
-
     void *A_scale_inv_ptr = nullptr;
     if (A_scale_inverse.numel()) A_scale_inv_ptr = A_scale_inverse[A_fp8_tensor].data_ptr();
     auto A_ = makeTransformerEngineTensor(A.data_ptr(),
@@ -899,6 +874,17 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                      GetTransformerEngineDType(
                                                        pre_gelu_out.scalar_type()));
 
+    if (_ubuf.element_size() == 1) {
+      NVTE_CHECK(_ubuf_scale_inv_initialized, "Missing userbuffers FP8 inverse scale!");
+    }
+    std::vector<TensorWrapper> ubufs_;
+    for (int i = 0; i < _num_ubuf_chunks; i++)
+      ubufs_.push_back(makeTransformerEngineTensor(_ubufs[i].data_ptr(),
+                                                   {static_cast<size_t>(_ubufs[i].size(0)),
+                                                    static_cast<size_t>(_ubufs[i].size(1))},
+                                                   _ubuf_dtype, D_amax_ptr, D_scale_ptr,
+                                                   _ubuf_scale_inv_ptr));
+
     auto workspace_ = makeTransformerEngineTensor(workspace.data_ptr(),
                                                   {workspaceSize},
                                                   DType::kByte);
@@ -913,7 +899,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].data_ptr());
     if (_ubuf.element_size() == 1) {
       assert(rs_output.element_size() == 2);
-      float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+      float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv_ptr);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
       reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
@@ -979,7 +965,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
   ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
   */
   void set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
-    _ubuf_scale_inv = scale_inv;
+    _ubuf_scale_inv_ptr = scale_inv.data_ptr();
     _ubuf_scale_inv_initialized = true;
   }
 

@@ -6,7 +6,6 @@
 
 import os
 import sys
-import faulthandler
 import warnings
 import subprocess
 import argparse
@@ -16,11 +15,8 @@ from functools import partial, reduce
 import torch
 import torch.distributed as dist
 
-
-import transformer_engine.common.recipe as recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.fp8 import _default_sf_compute
 
 torch_dtypes = {
     'fp32' : torch.float32,
@@ -41,8 +37,6 @@ def mapped_argtype(opt, typemap={}):
 def parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(
         description="Test comm+GEMM overlap with Userbuffers.")
-    parser.add_argument('-i', "--num-iters", type=int, default=5,
-                        help="Number of dummy 'training' iterations.")
     parser.add_argument('-b', "--batch-size", type=int, default=2,
                         help="Input batch size.")
     parser.add_argument('-s', "--seq-length", type=int, default=2048,
@@ -64,23 +58,21 @@ def parse_args(argv=None, namespace=None):
     parser.add_argument("--comm-type", type=partial(mapped_argtype, typemap=nvte_comm_types),
                         default=tex.NVTE_Comm_Overlap_Type.AG,
                         help="Comm type to overlap.")
-    parser.add_argument("--dtype", type=partial(mapped_argtype, typemap=torch_dtypes),
-                        default=torch.bfloat16,
-                        help="Data type for input tensor and Transformer Engine module parameters.")
     parser.add_argument("--check-numerics", action="store_true", default=False,
                         help="Test numerical result against torch.matmul(...)")
-    parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
-    return parser.parse_args(argv, namespace)
+    opts = parser.parse_args(argv, namespace)
+    if opts.atomic:
+        if not te.fp8.check_fp8_support():
+            assert not opts.fp8, "Atomic GEMM is only supported in FP8."
+        elif not opts.fp8:
+            warnings.warn("Switching to FP8 for Atomic GEMM.")
+            opts.fp8 = True
+    return opts
 
 def main(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
-
-    # Debug log
-    if opts.debug:
-        dbg_log = open(f'faulthandler_{WORLD_RANK}.log', 'w+')
-        faulthandler.enable(dbg_log)
 
     # Seed RNG
     torch.cuda.set_device(WORLD_RANK)
@@ -126,13 +118,7 @@ def main(opts):
         free_callback
     )
 
-    if opts.atomic and opts.check_numerics:
-        assert not opts.fp8, "Atomic GEMM is only available with FP8."
-        opts.comm_type = tex.NVTE_Comm_Overlap_Type.AG
-        ub_algo = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P
-        second_overlap_is_p2p = opts.p2p
-        opts.p2p = True
-    elif opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
+    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
         if opts.p2p:
             ub_algo = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P if opts.atomic else \
                       tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS_P2P
@@ -141,7 +127,7 @@ def main(opts):
                       tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS
     else:
         if not opts.p2p:
-            warnings.warn("All-Gather overlap is supported only via P2P ring-exchange.")
+            warnings.warn("Switching to P2P ring-exchange for all-Gather overlap.")
             opts.p2p = True
         ub_algo = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P if opts.atomic else \
                   tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P
@@ -153,7 +139,7 @@ def main(opts):
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
     sample_buffer = torch.empty((outer_size, hidden_size),
-                                dtype=torch.uint8 if opts.fp8 else opts.dtype, device='cuda')
+                                dtype=torch.uint8 if opts.fp8 else torch.bfloat16, device='cuda')
     ub_obj = tex.UbufP2PCommOverlap(
         sample_buffer,
         world_rank,
@@ -178,33 +164,6 @@ def main(opts):
         opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS,  # set_sm_margin
         opts.atomic,
     )
-    if opts.atomic and opts.check_numerics:
-        # For numerical checks on atomic GEMM, we need to do an AG-RS pair of GEMMs
-        # so set the first overla algo to all-gather overlap here and create two UB objects.
-        ub_obj_2 = tex.UbufP2PCommOverlap(  # reduce-scatter UB object
-            sample_buffer,
-            world_rank,
-            world_size,
-            local_rank,
-            local_size,
-            tex.NVTE_MAX_USERBUFFER_STREAMS,
-            True,  # set_sm_margin
-            True,  # atomic_gemm (2nd overlap always atomic)
-            opts.aggregate,
-            True   # is_reduce_scatter (2nd overlap always RS)
-        ) if second_overlap_is_p2p else tex.UbufCommOverlap(
-            sample_buffer,
-            world_rank,
-            world_size,
-            local_rank,
-            local_size,
-            4,      # num_splits
-            tex.NVTE_MAX_USERBUFFER_STREAMS,
-            2,      # cga_size
-            1,      # num_sms
-            False,  # set_sm_margin
-            True,   # atomic_gemm (2nd overlap always atomic)
-        )
 
     # Figure out problem sizing:
     # M = sequence * batch
@@ -213,75 +172,71 @@ def main(opts):
     # P = number of devices for sequence/tensor parallelism
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
     ffn_hidden_size = 4 * hidden_size
-    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-        # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
-        local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
-        local_inp_shape = (outer_size, ffn_hidden_size // local_size)
-    else:
+    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
         # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
         local_kernel_t_shape = (ffn_hidden_size // local_size, hidden_size)
         local_inp_shape = (outer_size // local_size, hidden_size)
-        if opts.atomic and opts.check_numerics:
-            # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
-            local_kernel_t_shape_2 = (hidden_size, ffn_hidden_size // local_size)
+    else:
+        # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
+        local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
+        local_inp_shape = (outer_size, ffn_hidden_size // local_size)
 
-    # Initialize input tensor and GEMM kernels
-    inp = torch.rand(local_inp_shape, dtype=opts.dtype, device='cuda')/100.
-    kernel_t = torch.rand(local_kernel_t_shape, dtype=opts.dtype, device='cuda')/100.
-    if opts.atomic and opts.check_numerics:
-        kernel_t_2 = torch.rand(local_kernel_t_shape_2, dtype=opts.dtype, device='cuda')/100.
+    # Initialize distributed input tensor and GEMM kernels
+    inp = torch.rand(local_inp_shape, dtype=torch.bfloat16, device='cuda')/100.
+    kernel_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda')/100.
 
-    # Gather global tensors
+    # Gather global tensors and calculate reference result (need these first for Fp8 scales)
     if opts.check_numerics:
         size_debug = \
             f"[rank:{world_rank}] input: {list(inp.shape)}  | kernel_1: {list(kernel_t.shape)}"
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-            # Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
+            ker_g = torch.transpose(
+                te.distributed.gather_along_first_dim(kernel_t, tp_group)[0],
+                0, 1)
+            # AG Input: (M/P, N) -> gather -> (M, N)
+            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
+        else:
+            # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
             ker_g = te.distributed.gather_along_first_dim(torch.transpose(kernel_t, 0, 1),
                                                                           tp_group)[0]
-            # Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+            # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
             inp_g = torch.transpose(
                 te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1),
                                                       tp_group)[0],
                 0, 1)
-        else:
-            # Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
-            ker_g = torch.transpose(
-                te.distributed.gather_along_first_dim(kernel_t,
-                                                      tp_group)[0],
-                0, 1)
-            # Input: (M/P, N) -> gather -> (M, N)
-            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
-            if opts.atomic:
-                size_debug += f" | kernel_2: {list(kernel_t_2.shape)}"
-                # Kernel 2: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
-                ker_g_2 = te.distributed.gather_along_first_dim(torch.transpose(kernel_t_2, 0, 1),
-                                                                tp_group)[0]
-
-        ref_g_1 = torch.matmul(inp_g, ker_g)
-        if opts.atomic:
-            ref_g_2 = torch.matmul(ref_g_1, ker_g_2)
+        ref_g = torch.matmul(inp_g, ker_g)
 
     inp_final = inp
     if opts.fp8:
+        from transformer_engine.common.recipe import Format
+        from transformer_engine.pytorch.fp8 import _default_sf_compute
+        fp8_formats = {
+            tex.DType.kFloat8E4M3 : Format.E4M3,
+            tex.DType.kFloat8E5M2 : Format.E5M2,
+        }
+
         # Structure to maintain amax and scale/scale_inv information for the kernel and input
         fp8_dtype = tex.DType.kFloat8E4M3
         fp8_meta = tex.FP8TensorMeta()
-        fp8_meta.amax_history = torch.zeros((1, 9), dtype=torch.float, device='cuda')
-        fp8_meta.scale = torch.ones(9, dtype=torch.float, device='cuda')
-        fp8_meta.scale_inv = torch.ones(9, dtype=torch.float, device='cuda')
-        # Compute amaxes and scales
-        fp8_meta.amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT].copy_(torch.max(torch.abs(inp_g)))
-        fp8_meta.amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT].copy_(torch.max(torch.abs(ker_g)))
-        fp8_meta.amax_history[0][tex.FP8FwdTensors.GEMM1_OUTPUT].copy_(torch.max(torch.abs(ref_g_1)))
-        if opts.atomic and opts.check_numerics:
-            fp8_meta.amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT].copy_(
-                torch.max(torch.abs(ker_g_2)))
-            fp8_meta.amax_history[0][tex.FP8FwdTensors.GEMM2_OUTPUT].copy_(
-                torch.max(torch.abs(ref_g_2)))
-        _default_sf_compute(fp8_meta.amax_history[0], fp8_meta.scale, 448, 1)
+        fp8_meta.amax_history = torch.zeros((2, 3), dtype=torch.float, device='cuda')
+        fp8_meta.scale = torch.ones(3, dtype=torch.float, device='cuda')
+        fp8_meta.scale_inv = torch.ones(3, dtype=torch.float, device='cuda')
+
+        # Compute initial amaxes and scales
+        fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_INPUT].copy_(
+            torch.max(torch.abs(inp_g)))
+        fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_WEIGHT].copy_(
+            torch.max(torch.abs(ker_g)))
+        fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_OUTPUT].copy_(
+            torch.max(torch.abs(ref_g)))
+        fp8_meta.scale = _default_sf_compute(
+            fp8_meta.amax_history[1],
+            fp8_meta.scale,
+            fp8_formats[fp8_dtype].value.max_fwd,
+            0)
         fp8_meta.scale_inv = 1./fp8_meta.scale
-        print(f"[rank:{local_rank}] GEMM1_OUTPUT scale={fp8_meta.scale[tex.FP8FwdTensors.GEMM1_OUTPUT].item()} scale_inv={fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_OUTPUT].item()}")
+
         # Cast input to Float8Tensor
         inp_fp8 = tex.cast_to_fp8(
             inp,
@@ -289,6 +244,7 @@ def main(opts):
             tex.FP8FwdTensors.GEMM1_INPUT,
             fp8_dtype
         )
+
         # Cast kernel to Float8Tensor
         kernel_t_fp8 = tex.cast_to_fp8(
             kernel_t,
@@ -296,13 +252,7 @@ def main(opts):
             tex.FP8FwdTensors.GEMM1_WEIGHT,
             fp8_dtype
         )
-        if opts.atomic and opts.check_numerics:
-            kernel_t_2_fp8 = tex.cast_to_fp8(
-                kernel_t_2,
-                fp8_meta,
-                tex.FP8FwdTensors.GEMM2_WEIGHT,
-                fp8_dtype
-            )
+
         # Make sure the inputs are cast correctly
         if opts.check_numerics:
             torch.allclose(
@@ -313,32 +263,29 @@ def main(opts):
                 kernel_t.to(dtype=torch.float),
                 kernel_t_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_WEIGHT],
                 rtol=0.125, atol=0.0675)
-            if opts.atomic:
-                torch.allclose(
-                    kernel_t_2.to(dtype=torch.float),
-                    kernel_t_2_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_WEIGHT],
-                    rtol=0.125, atol=0.0675)
+
+        # Set Fp8 scales for userbuffers
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            fp8_output = False
+            ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_INPUT])
+        else:
+            fp8_output = True
+            ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_OUTPUT])
 
     # Set up comm/compute buffers
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
         ub_obj.copy_input_to_ubuf(inp_fp8 if opts.fp8 else inp, 1)
         inp_final = ub_obj.get_ubuf_output(1)
         ubuf_out = None
-        extra_out = torch.empty_like(ub_obj.get_ubuf_output(0))
+        rs_out = torch.empty_like(ub_obj.get_ubuf_output(0))
     else:
         inp_final = inp_fp8 if opts.fp8 else inp
         ubuf_out = ub_obj.get_ubuf_output(1)
-        extra_out = torch.empty((inp.size(0) // local_size, kernel_t.size(0)),
-                                dtype=opts.dtype, device='cuda')
+        rs_out = torch.empty((inp.size(0) // local_size, kernel_t.size(0)),
+                                dtype=torch.bfloat16, device='cuda')
 
     # Trigger GEMM
     if opts.fp8:
-        fp8_output = opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or \
-                     (opts.atomic and opts.check_numerics)
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-            ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_INPUT])
-        else:
-            ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_OUTPUT])
         all_outputs = tex.fp8_gemm(
             kernel_t_fp8,
             fp8_meta.scale_inv,
@@ -348,7 +295,7 @@ def main(opts):
             fp8_meta.scale_inv,
             tex.FP8FwdTensors.GEMM1_INPUT,
             fp8_dtype,
-            torch.uint8 if fp8_output else opts.dtype,
+            torch.uint8 if fp8_output else torch.bfloat16,
             te.module.base.get_workspace(),
             bias=None,
             use_bias=False,
@@ -356,94 +303,51 @@ def main(opts):
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub_algo=ub_algo,
             ub=ub_obj,
-            extra_output_tensor=extra_out,
+            extra_output_tensor=rs_out,
             D_dtype=fp8_dtype if fp8_output else None,
             fp8_meta_tensor=fp8_meta if fp8_output else None,
             out_index=tex.FP8FwdTensors.GEMM1_OUTPUT if fp8_output else None,
             out=ubuf_out,
         )
-        if opts.atomic and opts.check_numerics:
-            ub_algo_2 = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P if second_overlap_is_p2p \
-                        else tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS
-            ub_obj_2.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT])
-            ubuf_out_2 = ub_obj_2.get_ubuf_output(1)
-            rs_out = torch.empty((all_outputs[0].size(0) // local_size, kernel_t_2.size(0)),
-                                 dtype=opts.dtype, device='cuda')
-            _ = tex.fp8_gemm(
-                kernel_t_2_fp8,
-                fp8_meta.scale_inv,
-                tex.FP8FwdTensors.GEMM2_WEIGHT,
-                fp8_dtype,
-                all_outputs[0],
-                fp8_meta.scale_inv,
-                tex.FP8FwdTensors.GEMM1_OUTPUT,
-                fp8_dtype,
-                torch.uint8,
-                te.module.base.get_workspace(),
-                bias=None,
-                use_bias=False,
-                gelu=False,
-                use_split_accumulator=te.module.base._2X_ACC_FPROP,
-                ub_algo=ub_algo_2,
-                ub=ub_obj_2,
-                extra_output_tensor=rs_out,
-                D_dtype=fp8_dtype,
-                fp8_meta_tensor=fp8_meta,
-                out_index=tex.FP8FwdTensors.GEMM2_OUTPUT,
-                out=ubuf_out_2,
-            )
-            output = rs_out
-        elif opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-            output = extra_out
-        else:
-            output = all_outputs[0]
+        fp8_scale_debug = f"[rank:{world_rank}] amax_hist: {fp8_meta.amax_history.tolist()}"
+        if world_rank == 0:
+            fp8_scale_debug += f"\n[GLOBAL] scale:     {fp8_meta.scale.tolist()}\n" + \
+                               f"[GLOBAL] scale_inv: {fp8_meta.scale_inv.tolist()}"
+        print(fp8_scale_debug)
+
     else:
         all_outputs = tex.gemm(
             kernel_t,
             inp_final,
-            opts.dtype,
+            torch.bfloat16,
             te.module.base.get_workspace(),
             bias=None,
             use_bias=False,
             gelu=False,
             ub_algo=ub_algo,
             ub=ub_obj,
-            extra_output_tensor=extra_out,
+            extra_output_tensor=rs_out,
             out=ubuf_out,
         )
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-            output = extra_out
-        else:
-            output = all_outputs[0]
 
     # Compare against standard GEMM
-    assert_failed = False
-    error_msg = ''
     if opts.check_numerics:
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-            # Output:(M/P, N) -> gather -> (M, N)
-            out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+            output = all_outputs[0]
+            out_g = torch.transpose(
+                te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1), tp_group)[0],
+                0, 1)
         else:
-            if opts.atomic:
-                out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
-            else:
-                # Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-                out_g = torch.transpose(
-                    te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1),
-                                                          tp_group)[0],
-                    0, 1)
+            # RS Output: (M/P, N) -> gather -> (M, N)
+            output = rs_out
+            out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
 
-        ref_g = ref_g_2 if opts.atomic else ref_g_1
         size_debug += f" | output: {list(output.shape)}"
-        print(size_debug)
-        dist.barrier()
         if world_rank == 0:
-            size_debug_g = f"[GLOBAL] inp_g: {list(inp_g.shape)}  | ker_g: {list(ker_g.shape)}"
-            if opts.atomic:
-                size_debug_g += f" | ker_g_2: {list(ker_g_2.shape)}"
-            size_debug_g += f" | out_g: {list(out_g.shape)} | ref_g: {list(ref_g.shape)}"
-            print(size_debug_g)
-        dist.barrier()
+            size_debug += f"\n[GLOBAL] inp_g: {list(inp_g.shape)}  | ker_g: {list(ker_g.shape)}" + \
+                          f" | out_g: {list(out_g.shape)} | ref_g: {list(ref_g.shape)}"
+        print(size_debug)
 
         error_below_tol = torch.allclose(out_g.to(dtype=torch.float32),
                                          ref_g.to(dtype=torch.float32),
@@ -452,18 +356,10 @@ def main(opts):
         if not error_below_tol:
             diff = torch.abs(out_g - ref_g).flatten()
             m = torch.argmax(diff)
-            error_msg = (
+            raise AssertionError(
                 f"Outputs not close enough at index {m.item()} "
                 f"with {out_g.flatten()[m].item()} vs {ref_g.flatten()[m].item()} "
-                f"(diff {diff[m].item()})."
-            )
-            assert_failed = True
-
-    if opts.debug:
-        dbg_log.close()
-
-    if assert_failed:
-        raise AssertionError(error_msg)
+                f"(diff {diff[m].item()}).")
 
     return 0
 
