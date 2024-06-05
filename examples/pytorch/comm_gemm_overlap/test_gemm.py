@@ -186,26 +186,23 @@ def main(opts):
     kernel_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda')/100.
 
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
-    if opts.check_numerics:
-        size_debug = \
-            f"[rank:{world_rank}] input: {list(inp.shape)}  | kernel_1: {list(kernel_t.shape)}"
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-            # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
-            ker_g = torch.transpose(
-                te.distributed.gather_along_first_dim(kernel_t, tp_group)[0],
-                0, 1)
-            # AG Input: (M/P, N) -> gather -> (M, N)
-            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
-        else:
-            # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
-            ker_g = te.distributed.gather_along_first_dim(torch.transpose(kernel_t, 0, 1),
-                                                                          tp_group)[0]
-            # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-            inp_g = torch.transpose(
-                te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1),
-                                                      tp_group)[0],
-                0, 1)
-        ref_g = torch.matmul(inp_g, ker_g)
+    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+        # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
+        ker_g = torch.transpose(
+            te.distributed.gather_along_first_dim(kernel_t, tp_group)[0],
+            0, 1)
+        # AG Input: (M/P, N) -> gather -> (M, N)
+        inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
+    else:
+        # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
+        ker_g = te.distributed.gather_along_first_dim(torch.transpose(kernel_t, 0, 1),
+                                                                        tp_group)[0]
+        # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+        inp_g = torch.transpose(
+            te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1),
+                                                    tp_group)[0],
+            0, 1)
+    ref_g = torch.matmul(inp_g, ker_g)
 
     inp_final = inp
     if opts.fp8:
@@ -285,6 +282,13 @@ def main(opts):
                                 dtype=torch.bfloat16, device='cuda')
 
     # Trigger GEMM
+    if not opts.check_numerics:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        dist.barrier()
+        torch.cuda.synchronize()
+        start.record()
+
     if opts.fp8:
         all_outputs = tex.fp8_gemm(
             kernel_t_fp8,
@@ -309,11 +313,6 @@ def main(opts):
             out_index=tex.FP8FwdTensors.GEMM1_OUTPUT if fp8_output else None,
             out=ubuf_out,
         )
-        fp8_scale_debug = f"[rank:{world_rank}] amax_hist: {fp8_meta.amax_history.tolist()}"
-        if world_rank == 0:
-            fp8_scale_debug += f"\n[GLOBAL] scale:     {fp8_meta.scale.tolist()}\n" + \
-                               f"[GLOBAL] scale_inv: {fp8_meta.scale_inv.tolist()}"
-        print(fp8_scale_debug)
 
     else:
         all_outputs = tex.gemm(
@@ -330,6 +329,11 @@ def main(opts):
             out=ubuf_out,
         )
 
+    if not opts.check_numerics:
+        end.record()
+        torch.cuda.synchronize()
+        dist.barrier()
+
     # Compare against standard GEMM
     if opts.check_numerics:
         if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
@@ -343,11 +347,18 @@ def main(opts):
             output = rs_out
             out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
 
-        size_debug += f" | output: {list(output.shape)}"
+        size_debug = f"[rank:{world_rank}] input: {list(inp.shape)} " + \
+                     f"| kernel_1: {list(kernel_t.shape)}" + \
+                     f"| output: {list(output.shape)}\n"
+        print(size_debug, end='')
+
+        dist.barrier()
         if world_rank == 0:
-            size_debug += f"\n[GLOBAL] inp_g: {list(inp_g.shape)}  | ker_g: {list(ker_g.shape)}" + \
-                          f" | out_g: {list(out_g.shape)} | ref_g: {list(ref_g.shape)}"
-        print(size_debug)
+            size_debug_g = f"[GLOBAL] inp_g: {list(inp_g.shape)} " + \
+                           f"| ker_g: {list(ker_g.shape)} " + \
+                           f"| out_g: {list(out_g.shape)} " + \
+                           f"| ref_g: {list(ref_g.shape)}\n"
+            print(size_debug_g, end='')
 
         error_below_tol = torch.allclose(out_g.to(dtype=torch.float32),
                                          ref_g.to(dtype=torch.float32),
@@ -360,6 +371,9 @@ def main(opts):
                 f"Outputs not close enough at index {m.item()} "
                 f"with {out_g.flatten()[m].item()} vs {ref_g.flatten()[m].item()} "
                 f"(diff {diff[m].item()}).")
+    else:
+        gemm_time = start.elapsed_time(end)/1000.
+        print(f"[rank:{world_rank}] GEMM Time = {gemm_time} sec\n", end='')
 
     return 0
 
