@@ -76,12 +76,6 @@ def _cudnn_version() -> Tuple[int, int, int]:
     return (major, minor, patch)
 
 
-def get_device_compute_capability() -> Tuple[int, int]:
-    """CUDA compute capability of current GPU"""
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return (props.major, props.minor)
-
-
 class ModelConfig:
     def __init__(
         self,
