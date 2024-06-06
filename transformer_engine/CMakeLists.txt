@@ -41,11 +41,3 @@ if(NVTE_WITH_USERBUFFERS)
     message(STATUS "userbuffers support enabled")
     add_subdirectory(pytorch/csrc/userbuffers)
 endif()
-
-
-option(ENABLE_JAX "Enable JAX in the building workflow." OFF)
-message(STATUS "JAX support: ${ENABLE_JAX}")
-if(ENABLE_JAX)
-  find_package(pybind11 CONFIG REQUIRED)
-  add_subdirectory(jax)
-endif()

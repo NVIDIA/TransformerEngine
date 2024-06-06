@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (

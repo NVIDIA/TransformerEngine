@@ -5,7 +5,7 @@
 """Python interface for transpose extensions"""
 from typing import Optional, Tuple, Union
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from ..constants import TE_DType
 
 
