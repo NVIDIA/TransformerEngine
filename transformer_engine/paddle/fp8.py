@@ -9,7 +9,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 import numpy as np
 
 import paddle
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type

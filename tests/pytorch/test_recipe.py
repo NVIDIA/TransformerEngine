@@ -9,7 +9,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     _amax_and_scale_update,

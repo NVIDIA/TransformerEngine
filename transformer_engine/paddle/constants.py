@@ -7,7 +7,7 @@ from enum import Enum
 
 import paddle
 
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 
 
 class FP8FwdTensors(Enum):

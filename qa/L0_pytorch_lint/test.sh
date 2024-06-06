@@ -14,7 +14,7 @@ then
   echo "Checking common API headers"
   cpplint --root transformer_engine/common/include --recursive transformer_engine/common/include
   echo "Checking C++ files"
-  cpplint --recursive --exclude=transformer_engine/common/include transformer_engine
+  cpplint --recursive --exclude=transformer_engine/common/include --exclude=transformer_engine/build_tools/build transformer_engine
   cpplint --recursive transformer_engine/pytorch
 fi
 if [ -z "${CPP_ONLY}" ]

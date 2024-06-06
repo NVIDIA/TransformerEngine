@@ -29,7 +29,7 @@ from transformer_engine.pytorch import (
     get_cpu_offload_context,
 )
 from transformer_engine.common import recipe
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import gemm, fp8_gemm, gelu, cast_to_fp8, cast_from_fp8
 from transformer_engine.pytorch.module.base import get_workspace
 from test_onnx_export import create_meta

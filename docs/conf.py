@@ -17,7 +17,7 @@ from datetime import date
 
 te_path = os.path.dirname(os.path.realpath(__file__))
 
-with open(te_path + "/../VERSION", "r") as f:
+with open(te_path + "/../build_tools/VERSION.txt", "r") as f:
     te_version = f.readline().strip()
 
 release_year = 2022
