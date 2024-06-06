@@ -194,8 +194,10 @@ class InferenceParams:
         if self.qkv_format == "thd":
             assert lengths_tensor is not None and max_input_length is not None, \
                 "lengths_tensor and max_input_length should not be none for qkv_format = \"thd\""
-            self.cached_sequence_lengths.copy_(
-                self.cached_sequence_lengths + self.input_sequence_lengths)
+            torch.add(
+                self.cached_sequence_lengths,
+                self.input_sequence_lengths,
+                out=self.cached_sequence_lengths)
             self.input_sequence_lengths.copy_(lengths_tensor)
             self.max_incoming_seq_len = max_input_length
 
@@ -215,8 +217,8 @@ class InferenceParams:
             with the CUDA Graphs.
         """
         if self.qkv_format == "thd":
-            self.cached_sequence_lengths.copy_(torch.zeros_like(self.cached_sequence_lengths))
-            self.input_sequence_lengths.copy_(torch.zeros_like(self.input_sequence_lengths))
+            self.cached_sequence_lengths.zero_()
+            self.input_sequence_lengths.zero_()
         else:
             self.input_sequence_length = None
             self.sequence_len_offset = 0
@@ -243,6 +245,8 @@ class InferenceParams:
                 Notice: if self.qkv_format = "thd", we assume that offsets of the sequences
                         are of the form k * self.max_incoming_seq_len for k = 0, ..., batch_size-1.
         """
+        # Current kernels work only with contiguous tensors, it can be made faster in the future.
+        key_layer, value_layer = key_layer.contiguous(), value_layer.contiguous()
         inference_key_memory, inference_value_memory = self.key_value_memory_dict[layer_number]
         if self.qkv_format == "thd":
             channels = inference_key_memory.shape[1] * inference_key_memory.shape[2] # h * d
@@ -363,13 +367,10 @@ class InferenceParams:
         cu_seqlens_q, cu_seqlens_kv, seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = \
             buffers
 
-        cu_seqlens_q[1:].copy_(torch.cumsum(self.input_sequence_lengths, dim=0))
-        cu_seqlens_kv[1:].copy_(
-            torch.cumsum(
-                self.cached_sequence_lengths + self.input_sequence_lengths, dim=0
-            )
-        )
-
+        torch.cumsum(self.input_sequence_lengths, dim=0, out=cu_seqlens_q[1:])
+        torch.cumsum(
+            self.cached_sequence_lengths + self.input_sequence_lengths,
+            dim=0, out=cu_seqlens_kv[1:])
         # If layer has shape [b * s_layer, h, d]
         # offsets are of the form [k * s_layer * h * d for k = 0, ..., batch_size]
         seq_offsets_q.copy_(
@@ -3894,8 +3895,6 @@ class DotProductAttention(torch.nn.Module):
                                produced)
         """
         batch_size = key_layer.shape[0]
-        key_layer = key_layer.contiguous()
-        value_layer = value_layer.contiguous()
 
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
@@ -3946,8 +3945,11 @@ class DotProductAttention(torch.nn.Module):
 
             if qkv_format == "thd":
                 # Allocation of buffers, it works correctly with CUDA Graphs.
+                NR_BUFFERS = 6
                 buffers = [
-                    self.alloc(batch_size + 1, dtype=torch.int32, device="cuda") for _ in range(6)]
+                    self.alloc(batch_size + 1, dtype=torch.int32, device="cuda")
+                    for _ in range(NR_BUFFERS)
+                ]
 
                 max_seqlen_q, max_seqlen_kv, buffers = \
                     inference_params.set_params_to_thd_attention(buffers, self.channels)
@@ -4257,7 +4259,6 @@ class DotProductAttention(torch.nn.Module):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     is_first_microbatch=is_first_microbatch)
-
             return self.fused_attention(
                 query_layer,
                 key_layer,
@@ -4975,14 +4976,13 @@ class MultiheadAttention(torch.nn.Module):
                 # in first generation phase key_layer have shape [2, 1, d].
                 # key_layer[0, :] corresponds  to the token with position 3 = 2 + 1,
                 # and key_layer [1, :] corresponds  to the token with position 6 = 5 + 1.
+                query_layer = apply_rotary_pos_emb(
+                        query_layer, q_pos_emb, "bshd", fused=True,
+                        start_positions=inference_params.cached_sequence_lengths)
                 key_layer = apply_rotary_pos_emb(
                     key_layer, k_pos_emb, "bshd", fused=True,
                     start_positions=inference_params.cached_sequence_lengths)
 
-                query_layer = apply_rotary_pos_emb(
-                        query_layer, q_pos_emb, "bshd", fused=True,
-                        start_positions=inference_params.cached_sequence_lengths
-                    )
             else:
                 # adjust key and value for inference
                 if inference_params is not None:
@@ -5001,8 +5001,6 @@ class MultiheadAttention(torch.nn.Module):
                     query_layer, q_pos_emb, self.qkv_format, fused=True)
                 key_layer = apply_rotary_pos_emb(
                     key_layer, k_pos_emb, self.qkv_format, fused=True)
-        query_layer = query_layer.contiguous()
-        key_layer = key_layer.contiguous()
 
 
         # ===========================
