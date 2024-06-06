@@ -17,7 +17,7 @@ from utils import (
     is_fused_attention_supported,
 )
 
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 from transformer_engine.paddle.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,

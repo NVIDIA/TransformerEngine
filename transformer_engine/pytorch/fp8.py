@@ -9,7 +9,7 @@ from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type

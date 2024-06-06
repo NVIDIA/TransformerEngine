@@ -5,7 +5,7 @@
 """Python interface for cast extensions"""
 from typing import Optional, Union
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 
 __all__ = ['cast_to_fp8',

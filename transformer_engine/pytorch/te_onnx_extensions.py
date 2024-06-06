@@ -30,7 +30,7 @@ import torch._C._onnx as _C_onnx
 # Monkey-patch graph manipulation methods on Graph, used for the ONNX symbolics
 from torch.onnx._internal import jit_utils
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.

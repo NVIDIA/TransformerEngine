@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/modules.h"
+#include "modules.h"
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -169,7 +169,9 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
     auto *input_cast = buffers[4];
     auto *input_cast_trans = buffers[5];
     float *amax_out = reinterpret_cast<float *>(buffers[6]);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -247,7 +249,7 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
 
     ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream,
              nullptr, nullptr, output, act_enum);
@@ -260,7 +262,9 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     float *amax_out = reinterpret_cast<float *>(buffers[5]);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -270,7 +274,7 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
 
     ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream,
              scale_inv, amax_out, output, act_enum);
@@ -284,7 +288,7 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
 
     auto act_len = get_activation_len(act_enum);
     auto input_shape = std::vector<size_t>{m, n};
@@ -381,7 +385,10 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     void *workspace_ptr = buffers[9];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -389,7 +396,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
     auto input_shape = std::vector<size_t>{m, n};
     auto act_input_shape = std::vector<size_t>{m, n};
     auto output_shape = std::vector<size_t>{m, n};
@@ -448,9 +455,11 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
     auto *output = buffers[5];
     auto *output_trans = buffers[6];
     float *amax_out = reinterpret_cast<float *>(buffers[7]);
-
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -458,7 +467,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
     }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
-    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);;
+    auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
     auto input_shape = desc.shape.to_vector();
     auto act_input_shape = std::vector<size_t>{m, n * 2};
     auto output_shape = std::vector<size_t>{m, n * 2};
@@ -538,7 +547,10 @@ void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
     void *workspace_ptr = buffers[8];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -773,7 +785,9 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto *amax_out = buffers[9];
     auto *workspace = buffers[10];
     auto *barrier = buffers[11];
-    assert(amax_out == amax);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
     auto batch_size = desc.batch_size;
@@ -786,7 +800,6 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
 
     auto out_dtype = DType::kFloat8E4M3;
 
@@ -822,7 +835,6 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto eps = desc.eps;
     auto out_dtype = in_dtype;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                          eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
@@ -847,7 +859,6 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dbeta_part_dtype = desc.dbeta_part_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
 
     auto *ograd = buffers[0];
     auto *mu = buffers[1];
@@ -880,7 +891,9 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *amax_out = buffers[7];
     auto *workspace = buffers[8];
     auto *barrier = buffers[9];
-    assert(amax_out == amax);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     void *bias = nullptr;
     void *mu = nullptr;
@@ -896,7 +909,6 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
     auto out_dtype = DType::kFloat8E4M3;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -930,7 +942,6 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    auto sm_margin = desc.sm_margin;
     auto out_dtype = in_dtype;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -985,7 +996,9 @@ void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     auto *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     auto *amax_out = reinterpret_cast<float *>(buffers[5]);
-    assert(amax == amax_out);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto shape = desc.shape.to_vector();

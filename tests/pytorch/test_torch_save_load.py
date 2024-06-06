@@ -18,7 +18,7 @@ from typing import Iterable, Union
 import pytest
 import torch
 import transformer_engine.pytorch as te
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.module.base import get_workspace

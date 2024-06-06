@@ -19,7 +19,7 @@ from transformer_engine.paddle.constants import (
     FusedAttnBackend,
 )
 from transformer_engine.paddle.fp8 import FP8TensorMeta
-import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
+from transformer_engine import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
 
 
 def create_fp8_meta(num_gemms=1, amax_history_len=10):
