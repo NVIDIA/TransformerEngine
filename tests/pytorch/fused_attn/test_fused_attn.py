@@ -38,8 +38,8 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     is_bf16_compatible,
 )
-import transformer_engine_extensions as tex
-from transformer_engine_extensions import NVTE_Fused_Attn_Backend
+import transformer_engine_torch as tex
+from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()

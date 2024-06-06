@@ -5,7 +5,7 @@
 """Python interface for normalization extensions"""
 from typing import Optional, Tuple, Union
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 
 __all__ = ['layernorm_fwd_fp8',

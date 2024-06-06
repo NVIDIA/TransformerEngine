@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Union
 
 import numpy as np
 import paddle
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 
 from .constants import dist_group_type, RecomputeFunctionNames
 

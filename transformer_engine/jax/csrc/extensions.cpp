@@ -11,8 +11,8 @@
 #include "common/include/transformer_engine/fused_attn.h"
 #include "common/include/transformer_engine/activation.h"
 #include "common/include/transformer_engine/transformer_engine.h"
-#include "jax/csrc/modules.h"
-#include "jax/csrc/utils.h"
+#include "modules.h"
+#include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
