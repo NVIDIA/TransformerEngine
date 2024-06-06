@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.optimizers import MultiTensorApply
 
 input_size_pairs = [
