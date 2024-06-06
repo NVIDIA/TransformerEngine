@@ -17,7 +17,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,
