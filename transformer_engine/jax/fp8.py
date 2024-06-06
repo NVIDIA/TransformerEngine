@@ -13,9 +13,12 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+from transformer_engine.transformer_engine_jax import DType
+from transformer_engine.transformer_engine_jax import get_cublasLt_version
+from transformer_engine.transformer_engine_jax import (
+    get_cuda_version,
+    get_device_compute_capability,
+)
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import MeshResource
