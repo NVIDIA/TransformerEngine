@@ -148,6 +148,7 @@ def main():
     times.to_csv('times.csv',index=False)
 
     for model in model_configs.keys():
+        print(f'Running {model}...')
         config = model_configs[model]
         fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
             config, dtype, qkv_layout=qkv_layout,
