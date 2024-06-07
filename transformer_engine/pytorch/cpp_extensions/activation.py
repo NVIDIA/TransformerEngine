@@ -5,7 +5,7 @@
 """Python interface for activation extensions"""
 from typing import Union
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 
 __all__ = ['gelu', 'relu', 'reglu', 'geglu', 'swiglu', 'qgelu', 'srelu']

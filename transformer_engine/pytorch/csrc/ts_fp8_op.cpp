@@ -400,7 +400,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                     at::Tensor scale_inv,
                                     int64_t fp8_tensor,
                                     int64_t otype,
-                                    const int8_t sm_margin,
+                                    const int64_t sm_margin,
                                     const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -427,7 +427,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                 const at::Tensor &weight,
                                 const at::Tensor &bias,
                                 double eps,
-                                const int8_t sm_margin,
+                                const int64_t sm_margin,
                                 const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 
@@ -450,7 +450,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                   at::Tensor scale_inv,
                                   int64_t fp8_tensor,
                                   int64_t otype,
-                                  const int8_t sm_margin,
+                                  const int64_t sm_margin,
                                   const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -475,7 +475,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
                               const at::Tensor &weight,
                               double eps,
-                              const int8_t sm_margin,
+                              const int64_t sm_margin,
                               const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 

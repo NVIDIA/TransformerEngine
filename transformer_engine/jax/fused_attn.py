@@ -9,9 +9,9 @@ from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
 
-from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
 
 from .cpp_extensions import FusedAttnHelper
 from .cpp_extensions import fused_attn_fwd_kvpacked, fused_attn_bwd_kvpacked

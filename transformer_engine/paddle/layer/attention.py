@@ -14,7 +14,7 @@ try:
     from paddle.incubate.nn.functional import fused_rotary_position_embedding
 except ImportError:
     fused_rotary_position_embedding = None
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear

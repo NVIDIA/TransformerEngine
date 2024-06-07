@@ -4,6 +4,7 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
+import warnings
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
 from pydantic.dataclasses import dataclass
@@ -52,17 +53,13 @@ class _OverrideLinearPrecision(NamedTuple):
 @dataclass()
 class DelayedScaling:
     """
-    Use the delayed scaling factor strategy.
-    Use scale factor from previous iteration,
-    recompute once every `interval`, and record
-    amax history of `amax_history_len` steps.
+    Use the delayed scaling factor strategy. Use scale factor from previous
+    iteration and record amax history of `amax_history_len` steps.
 
     Parameters
     ----------
     margin : int, default = 0
             Margin for the scaling factor computation.
-    interval : int, default = 1
-              Controls how often the scaling factor is recomputed.
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
@@ -136,7 +133,7 @@ class DelayedScaling:
     """
 
     margin: int = 0
-    interval: int = 1
+    interval: int = -1
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
@@ -152,11 +149,16 @@ class DelayedScaling:
             (False, False, False),
             (False, False, True),
         ), "Only wgrad GEMM override is currently supported."
+        if self.interval >= 0:
+            warnings.warn(
+                "`interval` argument is deprecated and unused. "
+                "It will be removed in an upcoming release.",
+                DeprecationWarning,
+            )
 
     def __repr__(self) -> str:
         return (
             f"margin={self.margin}, "
-            f"interval={self.interval}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
             f"wgrad_override={self.override_linear_precision.wgrad}, "
