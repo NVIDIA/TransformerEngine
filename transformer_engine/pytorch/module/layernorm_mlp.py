@@ -44,6 +44,8 @@ from ..distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
     use_reentrant_activation_recompute,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 
 from .. import cpp_extensions as tex
@@ -119,6 +121,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         gemm_gelu_fusion: bool,
+        fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -220,6 +223,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight_fp8 = fc1_weight
             if fc2_weight_fp8 is None:
                 fc2_weight_fp8 = fc2_weight
+
             assert isinstance(fc1_weight_fp8, Float8Tensor)
             assert isinstance(fc2_weight_fp8, Float8Tensor)
 
@@ -440,6 +444,21 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out.activation_offloading = True
                 gelu_out.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
+            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+            #       shards/unshards the base weights so we don't do it ourselves
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_fp8 if fp8 and not isinstance(fc1_weight, Float8Tensor) else None,
+                fc2_weight_fp8 if fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
+            )
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
@@ -457,6 +476,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
+
             ctx.activation_dtype = activation_dtype
             ctx.activation = activation
             ctx.fp8 = fp8
@@ -531,6 +551,21 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Gather saved autograd context tensors when running with FSDP
+            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+            #       shards/unshards the base weights so we don't do it ourselves
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_fp8 if ctx.fp8 and not isinstance(fc1_weight, Float8Tensor) else None,
+                fc2_weight_fp8 if ctx.fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 fc1_weight = Parameter(fc1_weight, False)
@@ -1006,6 +1041,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
+            clear_tensor_data(mu)
+            clear_tensor_data(rsigma)
 
         if fc1_weight.requires_grad:
             # Handle custom DDP from mcore.
@@ -1052,6 +1089,14 @@ class _LayerNormMLP(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        # Scatter Fp8 tranposed-weight buffers
+        if ctx.fp8:
+            _fsdp_scatter_tensors(
+                ctx.fsdp_group,
+                fc1_weight_fp8 if not isinstance(fc1_weight, Float8Tensor) else None,
+                fc2_weight_fp8 if not isinstance(fc2_weight, Float8Tensor) else None
+            )
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -1092,6 +1137,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # ub_overlap_rs
             None,  # ub_overlap_ag
             None,  # gemm_gelu_fusion
+            None,  # fsdp_group
         )
 
 
@@ -1542,6 +1588,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.gemm_gelu_fusion,
+                self.fsdp_group,
             )
             out = fwd_fn(*args)
 

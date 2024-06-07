@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine as te
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.common.utils import get_cudnn_version
 from transformer_engine.pytorch.cpp_extensions import (
     cast_to_fp8,

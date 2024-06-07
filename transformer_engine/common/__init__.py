@@ -3,61 +3,56 @@
 # See LICENSE for license information.
 
 """FW agnostic user-end APIs"""
+
 import ctypes
 import os
 import platform
-import subprocess
-import sys
+from pathlib import Path
+
+import transformer_engine
 
 
 def get_te_path():
     """Find Transformer Engine install path using pip"""
+    return Path(transformer_engine.__path__[0]).parent
 
-    command = [sys.executable, "-m", "pip", "show", "transformer_engine"]
-    result = subprocess.run(command, capture_output=True, check=True, text=True)
-    result = result.stdout.replace("\n", ":").split(":")
-    return result[result.index("Location") + 1].strip()
+
+def _get_sys_extension():
+    system = platform.system()
+    if system == "Linux":
+        extension = "so"
+    elif system == "Darwin":
+        extension = "dylib"
+    elif system == "Windows":
+        extension = "dll"
+    else:
+        raise RuntimeError(f"Unsupported operating system ({system})")
+
+    return extension
 
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
 
-    system = platform.system()
-    if system == "Linux":
-        extension = "so"
-    elif system == "Darwin":
-        extension = "dylib"
-    elif system == "Windows":
-        extension = "dll"
-    else:
-        raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libtransformer_engine." + extension
-    dll_path = get_te_path()
-    dll_path = os.path.join(dll_path, lib_name)
+    so_path = get_te_path() / "transformer_engine" / f"libtransformer_engine.{_get_sys_extension()}"
+    if not so_path.exists():
+        so_path = get_te_path() / f"libtransformer_engine.{_get_sys_extension()}"
+    assert so_path.exists(), f"Could not find libtransformer_engine.{_get_sys_extension()}"
 
-    return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
 
 
 def _load_userbuffers():
     """Load shared library with userbuffers"""
 
-    system = platform.system()
-    if system == "Linux":
-        extension = "so"
-    elif system == "Darwin":
-        extension = "dylib"
-    elif system == "Windows":
-        extension = "dll"
-    else:
-        raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libtransformer_engine_userbuffers." + extension
-    dll_path = get_te_path()
-    dll_path = os.path.join(dll_path, lib_name)
+    so_dir = get_te_path() / "transformer_engine"
+    so_file = so_dir / f"libtransformer_engine_userbuffers.{_get_sys_extension()}"
 
-    if os.path.exists(dll_path):
-        return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    if so_file.exists():
+        return ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
     return None
 
 
-_TE_LIB_CTYPES = _load_library()
-_UB_LIB_CTYPES = _load_userbuffers()
+if "NVTE_PROJECT_BUILDING" not in os.environ:
+    _TE_LIB_CTYPES = _load_library()
+    _UB_LIB_CTYPES = _load_userbuffers()

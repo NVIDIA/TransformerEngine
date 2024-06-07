@@ -4,6 +4,7 @@
 
 set -xe
 
+pip install pytest==8.2.1
 : ${TE_PATH:=/opt/transformerengine}
 
 pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax -k 'not distributed'
