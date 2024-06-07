@@ -1336,7 +1336,7 @@ def attn_forward_func_with_cp(
         ), f"Mask type of {attn_mask_type} is not supported with context parallelism!"
     assert (attn_bias is None or use_fused_attention
         ), "Attention bias is only supported with FusedAttention!"
-    assert (window_size is None or not use_fused_attention
+    assert (window_size is None or (not use_fused_attention and qkv_format != "thd")
         ), "Sliding window attention is only supported with FlashAttention!"
     out = AttnFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
