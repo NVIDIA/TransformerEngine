@@ -4,6 +4,7 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
+import warnings
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
 from pydantic.dataclasses import dataclass
@@ -132,6 +133,7 @@ class DelayedScaling:
     """
 
     margin: int = 0
+    interval: int = -1
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
@@ -147,6 +149,12 @@ class DelayedScaling:
             (False, False, False),
             (False, False, True),
         ), "Only wgrad GEMM override is currently supported."
+        if self.interval >= 0:
+            warnings.warn(
+                "`interval` argument is deprecated and unused. "
+                "It will be removed in an upcoming release.",
+                DeprecationWarning,
+            )
 
     def __repr__(self) -> str:
         return (
