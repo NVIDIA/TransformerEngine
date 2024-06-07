@@ -3859,7 +3859,9 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
             if (not _flash_attn_2_3_plus) or context_parallel:
                 if use_flash_attention:
-                    self.logger.debug("Disabling FusedAttention as SWA requires flash-attn 2.3+")
+                    self.logger.debug(
+                        "Disabling FusedAttention as it requires flash-attn 2.3+ "
+                        "and no context parallelism")
                 use_flash_attention = False
 
         # Filter: Attention mask type.
