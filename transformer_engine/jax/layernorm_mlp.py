@@ -10,11 +10,7 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
-from .cpp_extensions import cast_fp8, transpose, cast_transpose, dbias_cast_transpose
-from .cpp_extensions import act_lu, act_lu_fp8, dact_lu
-from .cpp_extensions import dact_lu_dbias_cast_transpose, dgated_act_lu_cast_transpose
-from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
-from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
+from . import cpp_extensions as tex
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
@@ -40,7 +36,7 @@ def _activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable
 
 
 def _activation_lu_fwd_rule(x, activation_type):
-    fwd_output = act_lu(x, activation_type)
+    fwd_output = tex.act_lu(x, activation_type)
     return fwd_output, (x,)
 
 
@@ -48,7 +44,7 @@ def _activation_lu_bwd_rule(activation_type, ctx, g):
     x, = ctx
     assert x.dtype == g.dtype
 
-    dx = dact_lu(g, x, activation_type)
+    dx = tex.dact_lu(g, x, activation_type)
     dx = jnp.reshape(dx, x.shape)
     return (dx,)
 
@@ -186,7 +182,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
-        ln_out, mu, rsigma, updated_x_amax = layernorm_fwd_fp8(
+        ln_out, mu, rsigma, updated_x_amax = tex.layernorm_fwd_fp8(
             x,
             gamma,
             beta,
@@ -199,7 +195,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        ln_out, rsigma, updated_x_amax = rmsnorm_fwd_fp8(x,
+        ln_out, rsigma, updated_x_amax = tex.rmsnorm_fwd_fp8(x,
                                                          gamma,
                                                          x_amax,
                                                          x_scale,
@@ -217,7 +213,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
     casted_kernel_1, updated_kernel_1_amax = \
-        cast_fp8(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
+        tex.cast_fp8(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
 
     ln_out = with_sharding_constraint_by_logical_axes(ln_out, dot_1_input_axes)
 
@@ -239,7 +235,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     # (batch..., hidden_in) -> (batch..., hidden)
     casted_activation_lu_out, updated_activation_lu_amax = \
-    act_lu_fp8(dot_1_output, activation_lu_out_amax, activation_lu_out_scale,
+    tex.act_lu_fp8(dot_1_output, activation_lu_out_amax, activation_lu_out_scale,
                activation_lu_out_scale_inv, fwd_dtype, activation_type)
 
     casted_activation_lu_out = with_sharding_constraint_by_logical_axes(
@@ -304,20 +300,20 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
     if use_bias:
         casted_grad, casted_grad_t, dbias_2, updated_grad_amax = \
-        dbias_cast_transpose(grad, grad_amax, grad_scale,
+        tex.dbias_cast_transpose(grad, grad_amax, grad_scale,
                              grad_scale_inv, bwd_dtype,
                              static_axis_boundary=-1,
                              transpose_axis_boundary=-1)
         dbias_2 = jnp.reshape(dbias_2, bias_2_shape)
     else:
         casted_grad, casted_grad_t, updated_grad_amax = \
-        cast_transpose(grad, grad_amax, grad_scale,
+        tex.cast_transpose(grad, grad_amax, grad_scale,
                        grad_scale_inv, bwd_dtype,
                        static_axis_boundary=-1,
                        transpose_axis_boundary=-1)
         dbias_2 = None
 
-    casted_activation_lu_out_t = transpose(casted_activation_lu_out,
+    casted_activation_lu_out_t = tex.transpose(casted_activation_lu_out,
                                            static_axis_boundary=-1,
                                            transpose_axis_boundary=-1)
 
@@ -341,9 +337,9 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
     if len(activation_type) > 1:    # if gated
         if use_bias:
-            dactivation_lu = dact_lu(dgrad_2, dot_1_output, activation_type)
+            dactivation_lu = tex.dact_lu(dgrad_2, dot_1_output, activation_type)
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
-            dbias_cast_transpose(
+            tex.dbias_cast_transpose(
                 dactivation_lu,
                 dactivation_lu_amax,
                 dactivation_lu_scale,
@@ -354,7 +350,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
         else:
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
-            dgated_act_lu_cast_transpose(
+            tex.dgated_act_lu_cast_transpose(
                 dgrad_2,
                 dot_1_output,
                 dactivation_lu_amax,
@@ -367,7 +363,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     else:
         if use_bias:
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax=\
-            dact_lu_dbias_cast_transpose(
+            tex.dact_lu_dbias_cast_transpose(
                 dgrad_2,
                 dot_1_output,
                 dactivation_lu_amax,
@@ -379,9 +375,9 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 activation_type=activation_type)
             dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
         else:
-            dactivation_lu = dact_lu(dgrad_2, dot_1_output, activation_type)
+            dactivation_lu = tex.dact_lu(dgrad_2, dot_1_output, activation_type)
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
-            cast_transpose(
+            tex.cast_transpose(
                 dactivation_lu,
                 dactivation_lu_amax,
                 dactivation_lu_scale,
@@ -391,7 +387,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 transpose_axis_boundary=-2)
             dbias_1 = None
 
-    ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
+    ln_out_t = tex.transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     # (hidden, batch...) x (hidden, batch...)
     gemm1_x_scale_inv = scale_inv_list_1[FP8MetaPackage.INPUT_IDX]
@@ -410,7 +406,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
-        dx, dgamma, dbeta = layernorm_bwd(dgrad_1,
+        dx, dgamma, dbeta = tex.layernorm_bwd(dgrad_1,
                                           x,
                                           mu,
                                           rsigma,
@@ -420,7 +416,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        dx, dgamma = rmsnorm_bwd(dgrad_1, x, rsigma, gamma, epsilon=epsilon)
+        dx, dgamma = tex.rmsnorm_bwd(dgrad_1, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
 
     amax_list_1[FP8MetaPackage.INPUT_IDX] = \

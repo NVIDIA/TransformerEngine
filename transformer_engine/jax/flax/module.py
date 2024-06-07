@@ -21,10 +21,10 @@ from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import fused_layernorm_fp8_mlp, activation_lu
-from ..softmax import is_softmax_kernel_available
+from ..layernorm_mlp import fused_layernorm_fp8_mlp, activation_lu
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
+from ..cpp_extensions import is_softmax_kernel_available
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
