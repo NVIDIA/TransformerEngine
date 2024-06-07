@@ -163,7 +163,7 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
+    float *amax = reinterpret_cast<float *>(buffers[1]);
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *input_cast = buffers[4];
@@ -257,7 +257,7 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
+    float *amax = reinterpret_cast<float *>(buffers[1]);
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
@@ -375,7 +375,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
                              size_t opaque_len) {
     auto *input = buffers[0];
     auto *act_input = buffers[1];
-    // float *amax = reinterpret_cast<float *>(buffers[2]);  --  unused but equal to amax_out
+    float *amax = reinterpret_cast<float *>(buffers[2]);
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
@@ -449,7 +449,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
                              size_t opaque_len) {
     auto *input = buffers[0];
     auto *act_input = buffers[1];
-    // float *amax = reinterpret_cast<float *>(buffers[2]);  # bound to amax_out in JAX primitive
+    float *amax = reinterpret_cast<float *>(buffers[2]);  # bound to amax_out in JAX primitive
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
@@ -537,7 +537,7 @@ pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hi
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len) {
     auto *input = buffers[0];
-    // float *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
+    float *amax = reinterpret_cast<float *>(buffers[1]);
     float *scale = reinterpret_cast<float *>(buffers[2]);
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
@@ -782,7 +782,7 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto *output = buffers[6];
     auto *mu = buffers[7];
     auto *rsigma = buffers[8];
-    // auto *amax_out = buffers[9];  --  unused but equal to amax
+    auto *amax_out = buffers[9];  --  unused but equal to amax
     auto *workspace = buffers[10];
     auto *barrier = buffers[11];
     NVTE_CHECK(
@@ -888,7 +888,7 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
     auto *rsigma = buffers[6];
-    // auto *amax_out = buffers[7];  --  unused but equal to amax_out
+    auto *amax_out = buffers[7];
     auto *workspace = buffers[8];
     auto *barrier = buffers[9];
     NVTE_CHECK(
@@ -991,7 +991,7 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     auto *input = buffers[0];
-    // auto *amax = reinterpret_cast<float *>(buffers[1]);  --  unused but equal to amax_out
+    auto *amax = reinterpret_cast<float *>(buffers[1]);
     auto *scale = reinterpret_cast<float *>(buffers[2]);
     auto *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];

@@ -6,14 +6,11 @@
 
 import os
 import sys
-import uuid
-import faulthandler
+import subprocess
 import argparse
 
 import torch
 import torch.distributed as dist
-from torch.distributed.run import get_args_parser, config_from_args, elastic_launch
-from torch.distributed.launch import parse_args as parse_torch_args
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Format, DelayedScaling
@@ -31,7 +28,7 @@ def torch_dtype(opt):
         raise TypeError
     return typemap[str(opt).lower()]
 
-def parse_train_args(argv=None, namespace=None):
+def parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(
         description="Test a te.LayerNormMLP module with GEMM+comm overlap via Userbuffers.")
     parser.add_argument('-i', "--num-iters", type=int, default=5,
@@ -52,25 +49,15 @@ def parse_train_args(argv=None, namespace=None):
                         help="Enables the te.fp8_autocast() context.")
     parser.add_argument("--no-comm-overlap", action="store_true", default=False,
                         help="Disable the comm+GEMM overlap.")
-    parser.add_argument("--dtype", type=torch_dtype, default=torch.bfloat16,
-                        help="Data type for input tensor and Transformer Engine module parameters.")
-    parser.add_argument("--debug", action="store_true")
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
     return parser.parse_args(argv, namespace)
 
-def train(argv=None):
-    opts = parse_train_args(argv)
-
+def train(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
     def dist_print(msg, end='\n', all_ranks=False):
         if WORLD_RANK == 0 or all_ranks:
             print(f"[RANK-{WORLD_RANK}] {msg}", end=end)
-
-    # Debug log
-    if opts.debug:
-        with open(f'faulthandler_{WORLD_RANK}.log', 'w+') as dbg_log:
-            faulthandler.enable(dbg_log)
 
     # Seed RNG
     torch.cuda.set_device(WORLD_RANK)
@@ -99,12 +86,13 @@ def train(argv=None):
         'set_sm_margin' : True,
     }
     hidden_size = opts.num_heads * opts.head_dim
+    batched_size = opts.seq_length * opts.batch_size
     if not opts.no_comm_overlap:
         te.initialize_ub(
-            [opts.seq_length * opts.batch_size, hidden_size],
+            [batched_size, hidden_size],
             tp_group,
             use_fp8 = opts.fp8,
-            dtype = opts.dtype,
+            dtype = torch.bfloat16,
             ub_cfgs = {
                 'fc1_fprop': ag_cfg,
                 'fc1_dgrad': rs_cfg,
@@ -116,7 +104,7 @@ def train(argv=None):
     #
     model = te.LayerNormMLP(
         hidden_size, opts.mlp_expansion_factor * hidden_size,
-        params_dtype = opts.dtype,
+        params_dtype = torch.bfloat16,
         device = 'cuda',
         tp_group = tp_group,
         tp_size = tp_size,
@@ -138,14 +126,12 @@ def train(argv=None):
                                 amax_compute_algo="max")
 
     # Start dummy "training" iterations
-    torch.cuda.synchronize()
-    dist.barrier()
     for i in range(opts.num_iters):
         dist_print(f"Iter {i+1}", all_ranks=opts.verbose)
 
         dist_print("|-- Generate random input batch", all_ranks=opts.verbose)
         x = torch.rand((opts.seq_length // tp_size, opts.batch_size, hidden_size),
-                       dtype=opts.dtype, device='cuda', requires_grad=True)
+                       dtype=torch.bfloat16, device='cuda', requires_grad=True)
 
         dist_print("|-- Forward pass", all_ranks=opts.verbose)
         with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
@@ -162,39 +148,17 @@ def train(argv=None):
     te.destroy_ub()
     dist.destroy_process_group()
 
-def dist_launch(func) -> None:
-    torch_parser = get_args_parser()
-    torch_argv = []
-    func_argv = []
-    for argv in sys.argv:
-        is_torch_argv = False
-        for action in torch_parser._actions:
-            if any(option in argv for option in action.option_strings):
-                is_torch_argv = True
-                break
-        if is_torch_argv:
-            torch_argv.append(argv)
-        else:
-            func_argv.append(argv)
-    del torch_parser
-
-    fake_sys_argv = [ torch.distributed.run.__file__ ] + torch_argv + func_argv
-    torch_args = parse_torch_args(fake_sys_argv)
-    setattr(torch_args, "standalone", "True")
-    setattr(torch_args, "rdzv_backend", "c10d")
-    setattr(torch_args, "rdzv_endpoint", "localhost:0")
-    setattr(torch_args, "rdzv_id", str(uuid.uuid4()))
-    setattr(torch_args, "nnodes", "1:1")
-    setattr(torch_args, "nproc_per_node", torch.cuda.device_count())
-    setattr(torch_args, "use_env", True)
-
-    torch_config, *_ = config_from_args(torch_args)
-    elastic_launch(config=torch_config, entrypoint=func)(*func_argv[1:])
-
-
 if __name__ == "__main__":
     if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-        train()
+        args = parse_args()
+        train(args)
     else:
-        dist_launch(train)
+        subprocess.run(
+            [
+                'torchrun', f'--nproc-per-node={torch.cuda.device_count()}',
+                *sys.argv
+            ],
+            env=os.environ,
+            check=True
+        )
     os._exit(0)

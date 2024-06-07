@@ -408,6 +408,8 @@ def main(opts):
     avg_gpu_time = sum(gpu_times[opts.warmup_iters:]) / opts.timing_iters
     print(f"[rank:{world_rank}] Avg. GPU time : {avg_gpu_time} ms\n", end='')
 
+    dist.destroy_process_group()
+
     return 0
 
 
