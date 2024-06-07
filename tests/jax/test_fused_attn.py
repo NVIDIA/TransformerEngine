@@ -22,7 +22,7 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLay
 from transformer_engine.jax.fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from utils import assert_allclose
 

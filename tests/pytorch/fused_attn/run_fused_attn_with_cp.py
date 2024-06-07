@@ -6,7 +6,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}

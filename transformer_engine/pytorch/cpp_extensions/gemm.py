@@ -5,7 +5,7 @@
 """Python interface for GEMM extensions"""
 from typing import Optional, Tuple, Union, List
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
