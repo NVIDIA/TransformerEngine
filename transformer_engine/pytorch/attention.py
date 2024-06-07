@@ -522,7 +522,7 @@ class AttnFuncWithCP(torch.autograd.Function):
     def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                 seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
                 cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
-                attn_bias_type, attn_bias, deterministic, use_fused_attention, window_size):
+                attn_bias_type, attn_bias, deterministic, use_fused_attention):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -1373,7 +1373,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, \
-                None, None, None, None, None, None, None, None, attn_dbias, None, None, None
+                None, None, None, None, None, None, None, None, attn_dbias, None, None
 
 
 class SWAFuncWithCP(torch.autograd.Function):
@@ -1415,7 +1415,7 @@ def attn_forward_func_with_cp(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
         cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
-        attn_bias_type, attn_bias, deterministic, use_fused_attention, window_size
+        attn_bias_type, attn_bias, deterministic, use_fused_attention
     )
     return out
 
