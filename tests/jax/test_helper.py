@@ -25,12 +25,10 @@ class TestFP8Helper(unittest.TestCase):
     def test_initialize(self):
         margin = 5.0
         fp8_format = FP8Format.E4M3
-        update_fp8meta_interval = 10
         amax_history_len = 10
 
         FP8Helper.initialize(margin=margin,
                              fp8_format=fp8_format,
-                             update_fp8meta_interval=update_fp8meta_interval,
                              amax_history_len=amax_history_len)
 
         self.assertEqual(
@@ -40,10 +38,6 @@ class TestFP8Helper(unittest.TestCase):
             FP8Helper.FP8_FORMAT, fp8_format,
             f"FP8Helper.FP8_FORMAT initialization failed, should be {fp8_format}"
             f" but got {FP8Helper.FP8_FORMAT}.")
-        self.assertEqual(
-            FP8Helper.UPDATE_FP8META_INTERVAL, update_fp8meta_interval,
-            "FP8Helper.UPDATE_FP8META_INTERVAL initialization failed, should be"
-            f"{update_fp8meta_interval} but got {FP8Helper.UPDATE_FP8META_INTERVAL}.")
         self.assertEqual(
             FP8Helper.AMAX_HISTORY_LEN, amax_history_len,
             f"FP8Helper.AMAX_HISTORY_LEN initialization failed, should be {amax_history_len}"
@@ -161,7 +155,6 @@ class TestFP8Functions(unittest.TestCase):
 
     def _compare_delay_scaling(self, ref, test):
         self.assertTrue(ref.margin == test.margin)
-        self.assertTrue(ref.interval == test.interval)
         self.assertTrue(ref.fp8_format == test.fp8_format)
         self.assertTrue(ref.amax_history_len == test.amax_history_len)
         self.assertTrue(ref.amax_compute_algo == test.amax_compute_algo)
@@ -177,14 +170,14 @@ class TestFP8Functions(unittest.TestCase):
 
         self._check_defult_state()
 
-        ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)
+        ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             self.assertTrue(FP8Helper.is_fp8_enabled())
             self._compare_delay_scaling(get_delayed_scaling(), ds)
 
         self._check_defult_state()
 
-        ds = DelayedScaling(margin=3.0, interval=1, fp8_format=FP8Format.HYBRID, amax_history_len=1)
+        ds = DelayedScaling(margin=3.0, fp8_format=FP8Format.HYBRID, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             self.assertTrue(FP8Helper.is_fp8_enabled())
             self._compare_delay_scaling(get_delayed_scaling(), ds)
@@ -196,7 +189,7 @@ class TestFP8Functions(unittest.TestCase):
         FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
         self._check_defult_state()
 
-        ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)
+        ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
 
         mesh_s = (
             (MeshResource(None, None)),

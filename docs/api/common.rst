@@ -8,4 +8,4 @@ Common API
 
 .. autoapiclass:: transformer_engine.common.recipe.Format
 
-.. autoapiclass:: transformer_engine.common.recipe.DelayedScaling(margin=0, interval=1, fp8_format=Format.HYBRID, amax_history_len=1024, amax_compute_algo="max", scaling_factor_compute_algo=None, override_linear_precision=(False, False, False))
+.. autoapiclass:: transformer_engine.common.recipe.DelayedScaling(margin=0, fp8_format=Format.HYBRID, amax_history_len=1024, amax_compute_algo="max", scaling_factor_compute_algo=None, override_linear_precision=(False, False, False))

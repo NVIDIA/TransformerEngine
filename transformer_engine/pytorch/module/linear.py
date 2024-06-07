@@ -36,6 +36,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -83,6 +85,7 @@ class _Linear(torch.autograd.Function):
         ub_overlap_ag: bool,
         ub_name: str,
         is_first_module_in_mha: bool,
+        fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
         if is_input_fp8:
@@ -157,6 +160,7 @@ class _Linear(torch.autograd.Function):
             # Use FP8 weights
             if weight_fp8 is None:
                 weight_fp8 = weight
+
             assert isinstance(weight_fp8, Float8Tensor)
 
             if is_first_module_in_mha:
@@ -299,6 +303,16 @@ class _Linear(torch.autograd.Function):
                     if saved_inputmat is not None:
                         saved_inputmat.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
+            # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                saved_inputmat,     # None if fp8 == False
+                saved_inputmat_t,   # None if fp8 == False AND not is_grad_enabled
+                weight_fp8 if fp8 and not isinstance(weight, Float8Tensor) else None,
+            )
+
             ctx.save_for_backward(
                 saved_inputmat,
                 saved_inputmat_t,
@@ -307,6 +321,7 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
+
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
@@ -359,6 +374,16 @@ class _Linear(torch.autograd.Function):
                 main_grad,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Gather intermediate/activation tensors if needed
+            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+            #       shards/unshards the base weights so we don't do it ourselves
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                inputmat,
+                inputmat_t,
+                weight_fp8 if ctx.fp8 and not isinstance(weight, Float8Tensor) else None)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -569,6 +594,10 @@ class _Linear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        # Scatter fp8 weight buffers
+        if ctx.fp8 and not isinstance(weight, Float8Tensor):
+            _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
+
         return (
             wgrad,
             None,  # weight_fp8
@@ -592,6 +621,7 @@ class _Linear(torch.autograd.Function):
             None,  # ub_overlap_ag
             None,  # ub_name
             None,  # is_first_module_in_mha
+            None,  # fsdp_group
         )
 
 
@@ -967,6 +997,7 @@ class Linear(TransformerEngineBaseModule):
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
                         with_transpose=with_transpose,
+                        fsdp_group=self.fsdp_group,
                     )
 
             from ..cpu_offload import CPUOffloadEnabled
@@ -1000,6 +1031,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_ag,
                 self.ub_name,
                 is_first_module_in_mha,
+                self.fsdp_group,
             )
             out = linear_fn(*args)
 
