@@ -124,7 +124,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 # Load libtransformer_engine.so to avoid linker errors
                 if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
                     # Source compilation from top-level (--editable)
-                    search_paths = list(Path(__file__).resolve().parent.parent.parent.iterdir())
+                    search_paths = list(Path(__file__).resolve().parent.parent.iterdir())
                     # Source compilation from top-level
                     search_paths.extend(list(Path(self.build_lib).iterdir()))
                 else:

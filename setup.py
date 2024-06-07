@@ -72,7 +72,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         "importlib-metadata>=1.0; python_version<'3.8'",
         "packaging",
     ]
-    test_reqs: List[str] = ["pytest"]
+    test_reqs: List[str] = ["pytest>=8.2.1"]
 
     # Requirements that may be installed outside of Python
     if not found_cmake():

@@ -34,9 +34,7 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 
 def get_default_fp8_recipe() -> DelayedScaling:
-    """FP8 recipe if not provided by user
-    Margin = 0, interval = 1, E4M3
-    """
+    """FP8 recipe with default args."""
     return DelayedScaling()
 
 

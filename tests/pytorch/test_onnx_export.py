@@ -93,7 +93,7 @@ def reset_global_fp8_state():
 
 
 def create_fp8_recipe():
-    return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
+    return recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
 
 def do_export(
