@@ -27,6 +27,10 @@ set_source_files_properties(userbuffers.cu
                             COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=64>")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+if(NVTE_WITH_MNNVL)
+	message(STATUS "Multi-node NVLink support enabled")
+	set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DNVTE_WITH_MNNVL")
+endif()
 
 # Install library
 install(TARGETS transformer_engine_userbuffers DESTINATION .)
