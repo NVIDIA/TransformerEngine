@@ -5,7 +5,7 @@
 """Enums for e2e transformer"""
 import torch
 import torch.distributed
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 
 """

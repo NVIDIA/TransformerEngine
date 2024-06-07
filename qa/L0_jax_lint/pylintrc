@@ -1,6 +1,8 @@
 [MASTER]
 extension-pkg-whitelist=transformer_engine_jax
 
+extension-pkg-allow-list=transformer_engine.transformer_engine_jax
+
 disable=too-many-locals,
         invalid-name,
         too-many-arguments,

@@ -285,6 +285,41 @@ at::Tensor qgelu_ts(at::Tensor input,
   return output;
 }
 
+at::Tensor srelu_ts(at::Tensor input,
+                     at::Tensor scale,
+                     at::Tensor amax,
+                     at::Tensor scale_inv,
+                     int64_t fp8_tensor,
+                     int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  } else {
+      s = scale;
+  }
+
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  } else {
+      a = amax;
+  }
+
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  } else {
+      s_inv = scale_inv;
+  }
+
+  at::Tensor output = srelu(input,
+                            s,
+                            a,
+                            s_inv,
+                            otype_arg);
+  return output;
+}
+
 at::Tensor te_gemm_ts(at::Tensor A,
                       at::Tensor A_scale_inverse,
                       int64_t A_fp8_tensor,
@@ -365,7 +400,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                     at::Tensor scale_inv,
                                     int64_t fp8_tensor,
                                     int64_t otype,
-                                    const int8_t sm_margin,
+                                    const int64_t sm_margin,
                                     const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -389,7 +424,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                 const at::Tensor &weight,
                                 const at::Tensor &bias,
                                 double eps,
-                                const int8_t sm_margin,
+                                const int64_t sm_margin,
                                 const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 
@@ -412,7 +447,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                   at::Tensor scale_inv,
                                   int64_t fp8_tensor,
                                   int64_t otype,
-                                  const int8_t sm_margin,
+                                  const int64_t sm_margin,
                                   const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -434,7 +469,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
                               const at::Tensor &weight,
                               double eps,
-                              const int8_t sm_margin,
+                              const int64_t sm_margin,
                               const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 
@@ -458,6 +493,7 @@ TORCH_LIBRARY(tex_ts, m) {
   m.def("reglu_ts", &reglu_ts);
   m.def("swiglu_ts", &swiglu_ts);
   m.def("qgelu_ts", &qgelu_ts);
+  m.def("srelu_ts", &srelu_ts);
   m.def("te_gemm_ts", &te_gemm_ts);
   m.def("layernorm_fwd_fp8_inf_ts", &layernorm_fwd_fp8_inf_ts);
   m.def("layernorm_fwd_inf_ts", &layernorm_fwd_inf_ts);

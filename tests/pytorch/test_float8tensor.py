@@ -13,7 +13,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -294,7 +294,7 @@ class TestFloat8Tensor:
         assert x_fp8._transpose_invalid, "Transpose cache must be invalid when not caching."
         x_fp8 += 0.5
         x = x_fp8.from_float8()
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d(cache=True))
+        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d(fill_cache=True))
         x_t = x.transpose(0, 1)
         torch.testing.assert_close(x_fp8_t, x_t, **tols)
         assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."
@@ -303,7 +303,7 @@ class TestFloat8Tensor:
         x_fp8 += 0.5
         assert x_fp8._transpose_invalid, "Transpose cache not invalidated properly."
         x = x_fp8.from_float8()
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d(cache=True))
+        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d(fill_cache=True))
         x_t = x.transpose(0, 1)
         torch.testing.assert_close(x_fp8_t, x_t, **tols)
         assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."

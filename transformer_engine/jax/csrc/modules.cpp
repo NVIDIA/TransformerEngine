@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/modules.h"
+#include "modules.h"
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -37,12 +37,18 @@ std::vector<size_t> MakeShapeVector(NVTEShape shape) {
     return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-size_t get_activation_len(NVTE_Activation_Type act_enum) {
-  switch (act_enum) {
+size_t get_activation_len(NVTE_Activation_Type activation_enum) {
+  switch (activation_enum) {
     case NVTE_Activation_Type::GELU: return 1;
     case NVTE_Activation_Type::GEGLU: return 2;
     case NVTE_Activation_Type::SILU: return 1;
     case NVTE_Activation_Type::SWIGLU: return 2;
+    case NVTE_Activation_Type::RELU: return 1;
+    case NVTE_Activation_Type::REGLU: return 2;
+    case NVTE_Activation_Type::QGELU: return 1;
+    case NVTE_Activation_Type::QGEGLU: return 2;
+    case NVTE_Activation_Type::SRELU: return 1;
+    case NVTE_Activation_Type::SREGLU: return 2;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
       break;
@@ -163,6 +169,9 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
     auto *input_cast = buffers[4];
     auto *input_cast_trans = buffers[5];
     float *amax_out = reinterpret_cast<float *>(buffers[6]);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -204,10 +213,28 @@ void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype,
         nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
         break;
     case NVTE_Activation_Type::SILU:
-        nvte_swish(input_tensor.data(), output_tensor.data(), stream);
+        nvte_silu(input_tensor.data(), output_tensor.data(), stream);
         break;
     case NVTE_Activation_Type::SWIGLU:
         nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::RELU:
+        nvte_relu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::REGLU:
+        nvte_reglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::QGELU:
+        nvte_qgelu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::QGEGLU:
+        nvte_qgeglu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::SRELU:
+        nvte_srelu(input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::SREGLU:
+        nvte_sreglu(input_tensor.data(), output_tensor.data(), stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");
@@ -235,6 +262,9 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     float *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     float *amax_out = reinterpret_cast<float *>(buffers[5]);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     if (!use_fp8(desc.out_dtype)) {
@@ -279,12 +309,36 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
                     output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::SILU:
-        nvte_dswish(input_tensor.data(), act_input_tensor.data(),
+        nvte_dsilu(input_tensor.data(), act_input_tensor.data(),
                     output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::SWIGLU:
         nvte_dswiglu(input_tensor.data(), act_input_tensor.data(),
                      output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::RELU:
+        nvte_drelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::REGLU:
+        nvte_dreglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::QGELU:
+        nvte_dqgelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::QGEGLU:
+        nvte_dqgeglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::SRELU:
+        nvte_dsrelu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::SREGLU:
+        nvte_dsreglu(input_tensor.data(), act_input_tensor.data(),
+                    output_tensor.data(), stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");
@@ -331,6 +385,10 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
     void *workspace_ptr = buffers[9];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -362,12 +420,27 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
                                         dbias_tensor.data(), workspace.data(), stream);
         break;
       case NVTE_Activation_Type::SILU:
-        nvte_cast_transpose_dbias_dswish(input_tensor.data(), act_input_tensor.data(),
+        nvte_cast_transpose_dbias_dsilu(input_tensor.data(), act_input_tensor.data(),
                                          output_tensor.data(), output_trans_tensor.data(),
                                          dbias_tensor.data(), workspace.data(), stream);
         break;
+      case NVTE_Activation_Type::RELU:
+        nvte_cast_transpose_dbias_drelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
+        break;
+      case NVTE_Activation_Type::QGELU:
+        nvte_cast_transpose_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
+        break;
+      case NVTE_Activation_Type::SRELU:
+        nvte_cast_transpose_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(),
+                                        output_tensor.data(), output_trans_tensor.data(),
+                                        dbias_tensor.data(), workspace.data(), stream);
+        break;
       default:
-        throw std::runtime_error("Activation Type is not Implemented in DActLuDBiasCastTranspose");
+        NVTE_ERROR("Unsupported ActivationEnum");
         break;
     }
 }
@@ -382,8 +455,11 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
     auto *output = buffers[5];
     auto *output_trans = buffers[6];
     float *amax_out = reinterpret_cast<float *>(buffers[7]);
-
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -412,6 +488,21 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
         break;
       case NVTE_Activation_Type::SWIGLU:
         nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case NVTE_Activation_Type::REGLU:
+        nvte_dreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case NVTE_Activation_Type::QGEGLU:
+        nvte_dqgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
+                                   output_tensor.data(), output_trans_tensor.data(),
+                                   stream);
+        break;
+      case NVTE_Activation_Type::SREGLU:
+        nvte_dsreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
                                    output_tensor.data(), output_trans_tensor.data(),
                                    stream);
         break;
@@ -456,6 +547,10 @@ void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
     void *workspace_ptr = buffers[8];
 
     const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
+
     if (!use_fp8(desc.out_dtype)) {
         scale = nullptr;
         scale_inv = nullptr;
@@ -690,6 +785,9 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     // auto *amax_out = buffers[9];  --  unused but equal to amax
     auto *workspace = buffers[10];
     auto *barrier = buffers[11];
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
     auto batch_size = desc.batch_size;
@@ -702,7 +800,6 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     auto out_dtype = DType::kFloat8E4M3;
 
@@ -738,7 +835,6 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto eps = desc.eps;
     auto out_dtype = in_dtype;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                          eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
@@ -763,7 +859,6 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dbeta_part_dtype = desc.dbeta_part_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
 
     auto *ograd = buffers[0];
     auto *mu = buffers[1];
@@ -796,6 +891,9 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     // auto *amax_out = buffers[7];  --  unused but equal to amax_out
     auto *workspace = buffers[8];
     auto *barrier = buffers[9];
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     void *bias = nullptr;
     void *mu = nullptr;
@@ -811,7 +909,6 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
     auto out_dtype = DType::kFloat8E4M3;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -845,7 +942,6 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
     auto barrier_dtype = desc.barrier_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
-    // auto sm_margin = desc.sm_margin;  --  FIXME: Unused variable?
     auto out_dtype = in_dtype;
 
     LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -900,6 +996,9 @@ void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t op
     auto *scale_inv = reinterpret_cast<float *>(buffers[3]);
     auto *output = buffers[4];
     auto *amax_out = reinterpret_cast<float *>(buffers[5]);
+    NVTE_CHECK(
+        amax == amax_out,
+        "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
     const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
     auto shape = desc.shape.to_vector();
@@ -1153,27 +1252,37 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
+    auto dummy_ragged_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{input_batch + 1}, DType::kInt32);
     TensorWrapper query_workspace_tensor;
     if (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) {
         assert(q_max_seqlen == kv_max_seqlen);
         nvte_fused_attn_fwd_qkvpacked(
             qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
-            &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_rng_state_tensor.data(),
-            q_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout, bias_type,
-            mask_type, query_workspace_tensor.data(), nullptr);
+            &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_rng_state_tensor.data(),
+            q_max_seqlen, is_training, scaling_factor,
+            dropout_probability, qkv_layout, bias_type, mask_type, query_workspace_tensor.data(),
+            nullptr);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
-        nvte_fused_attn_fwd_kvpacked(q_tensor.data(), kv_tensor.data(), bias_tensor.data(),
-                                     s_tensor.data(), o_tensor.data(), &aux_output_tensors,
-                                     q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                                     dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                                     is_training, scaling_factor, dropout_probability, qkv_layout,
-                                     bias_type, mask_type, query_workspace_tensor.data(), nullptr);
+        nvte_fused_attn_fwd_kvpacked(
+            q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+            &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_rng_state_tensor.data(), q_max_seqlen,
+            kv_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout, bias_type,
+            mask_type, query_workspace_tensor.data(), nullptr);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
         nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
                             s_tensor.data(), o_tensor.data(), &aux_output_tensors,
                             q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                            dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training,
-                            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            dummy_rng_state_tensor.data(),
+                            q_max_seqlen, kv_max_seqlen, is_training, scaling_factor,
+                            dropout_probability, qkv_layout, bias_type, mask_type,
                             query_workspace_tensor.data(), nullptr);
     } else {
         NVTE_ERROR("Unsupported QKVLayout.");
@@ -1208,6 +1317,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
     TensorWrapper query_workspace_tensor;
 
+    auto dummy_ragged_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
     if (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) {
         assert(q_max_seqlen == kv_max_seqlen);
         auto qkv_shape = std::vector<size_t>{batch_size * q_max_seqlen, 3, attn_heads, head_dim};
@@ -1218,8 +1329,10 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
             s_tensor.data(),  // not used for F16
             s_tensor.data(),  // not used for F16
             &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-            q_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-            query_workspace_tensor.data(), nullptr);
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            q_max_seqlen, scaling_factor, dropout_probability,
+            qkv_layout, bias_type, mask_type, query_workspace_tensor.data(), nullptr);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
         auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, attn_heads, head_dim};
         auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
@@ -1233,9 +1346,12 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
             s_tensor.data(),  // not used for F16
             s_tensor.data(),  // not used for F16
             &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
-            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-            query_workspace_tensor.data(), nullptr);
+            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            q_max_seqlen, kv_max_seqlen, scaling_factor,
+            dropout_probability, qkv_layout, bias_type, mask_type, query_workspace_tensor.data(),
+            nullptr);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
         auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, attn_heads, head_dim};
         auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
@@ -1250,11 +1366,15 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                             doutput_tensor.data(),
                             s_tensor.data(),  // not used for F16
                             s_tensor.data(),  // not used for F16
-                            &aux_input_tensors, dq_tensor.data(), dk_tensor.data(),
-                            dv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-                            kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-                            query_workspace_tensor.data(), nullptr);
+                            &aux_input_tensors,
+                            dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+                            dbias_tensor.data(),
+                            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
+                            qkv_layout, bias_type, mask_type, query_workspace_tensor.data(),
+                            nullptr);
     } else {
         NVTE_ERROR("Unsupported QKVLayout.");
     }
@@ -1330,6 +1450,8 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto workspace_tensor = TensorWrapper(workspace, std::vector<size_t>{descriptor.wkspace_size},
                                           descriptor.wkspace_dtype);
 
+    auto dummy_ragged_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{input_batch + 1}, DType::kInt32);
     /* Call the underly NVTE API */
     if (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) {
         auto qkv = buffers[0];
@@ -1337,9 +1459,12 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
         auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
         nvte_fused_attn_fwd_qkvpacked(
             qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
-            &aux_output_tensors, q_cu_seqlens_tensor.data(), rng_state_tensor.data(), q_max_seqlen,
-            descriptor.is_training, descriptor.scaling_factor, dropout_probability, qkv_layout,
-            bias_type, mask_type, workspace_tensor.data(), stream);
+            &aux_output_tensors, q_cu_seqlens_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
+            descriptor.scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+            workspace_tensor.data(), stream);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
         auto q = buffers[0];
         auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -1351,9 +1476,11 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
         nvte_fused_attn_fwd_kvpacked(
             q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
             &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-            rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
-            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-            workspace_tensor.data(), stream);
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
+            descriptor.is_training, scaling_factor, dropout_probability, qkv_layout, bias_type,
+            mask_type, workspace_tensor.data(), stream);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
         auto q = buffers[0];
         auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -1367,9 +1494,12 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
         nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
                             s_tensor.data(), o_tensor.data(), &aux_output_tensors,
                             q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                             rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                            descriptor.is_training, scaling_factor, dropout_probability, qkv_layout,
-                            bias_type, mask_type, workspace_tensor.data(), stream);
+                            descriptor.is_training, scaling_factor,
+                            dropout_probability, qkv_layout, bias_type, mask_type,
+                            workspace_tensor.data(), stream);
     } else {
         NVTE_ERROR("Unsupported qkv_layout.");
     }
@@ -1410,15 +1540,20 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     nvte_tensor_pack_create(&aux_input_tensors);
 
     TensorWrapper query_workspace_tensor;
+    auto dummy_ragged_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{input_batch + 1}, DType::kInt32);
     nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
                         doutput_tensor.data(),
                         s_tensor.data(),  // not used for F16
                         s_tensor.data(),  // not used for F16
-                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-                        kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
-                        dropout_probability, qkv_layout, bias_type, mask_type,
-                        query_workspace_tensor.data(), nullptr);
+                        &aux_input_tensors,
+                        dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+                        dbias_tensor.data(),
+                        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                        q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
+                        qkv_layout, bias_type, mask_type, query_workspace_tensor.data(), nullptr);
 
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
@@ -1488,6 +1623,8 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto wkspace_dtype = descriptor.wkspace_dtype;
     auto workspace_tensor = TensorWrapper(workspace, wkspace_size, wkspace_dtype);
 
+    auto dummy_ragged_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{input_batch + 1}, DType::kInt32);
     /* Call the underly NVTE API */
     if (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) {
         auto qkv = buffers[0];
@@ -1500,8 +1637,10 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
             s_tensor.data(),  // not used for F16
             s_tensor.data(),  // not used for F16
             &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-            q_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-            workspace_tensor.data(), stream);
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            q_max_seqlen, scaling_factor, dropout_probability,
+            qkv_layout, bias_type, mask_type, workspace_tensor.data(), stream);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
         auto q = buffers[0];
         auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -1519,9 +1658,11 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
             s_tensor.data(),  // not used for F16
             s_tensor.data(),  // not used for F16
             &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
-            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-            workspace_tensor.data(), stream);
+            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+            q_max_seqlen, kv_max_seqlen, scaling_factor,
+            dropout_probability, qkv_layout, bias_type, mask_type, workspace_tensor.data(), stream);
     } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
         auto q = buffers[0];
         auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -1543,10 +1684,12 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
                             s_tensor.data(),  // not used for F16
                             s_tensor.data(),  // not used for F16
                             &aux_input_tensors, dq_tensor.data(), dk_tensor.data(),
-                            dv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-                            kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                            scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
-                            workspace_tensor.data(), stream);
+                            dv_tensor.data(), dbias_tensor.data(),
+                            q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
+                            q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
+                            qkv_layout, bias_type, mask_type, workspace_tensor.data(), stream);
     } else {
         NVTE_ERROR("Unsupported qkv_layout.");
     }

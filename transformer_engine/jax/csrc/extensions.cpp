@@ -8,8 +8,8 @@
 
 #include <cublasLt.h>
 
-#include "jax/csrc/modules.h"
-#include "jax/csrc/utils.h"
+#include "modules.h"
+#include "utils.h"
 
 #include "common/util/pybind_helper.h"
 
@@ -55,8 +55,10 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
-    // Load te_common = py::module_::import("transformer_engine_pybind") into TE/JAX
-    NVTE_ADD_PYBIND11_BINDINGS(m);
+    // Load nvte = py::module_::import("transformer_engine_common") into TE/JAX. This makes
+    // essential NVTE enums available through `import transformer_engine_jax` without requiring an
+    // additional `import transformer_engine_common`.
+    NVTE_ADD_COMMON_PYBIND11_BINDINGS(m);
 
     m.def("registrations", &Registrations);
     m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,

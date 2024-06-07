@@ -17,7 +17,7 @@ from utils import (
     is_fused_attention_supported,
 )
 
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 from transformer_engine.paddle.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,
@@ -417,9 +417,9 @@ class TestGemm:
         workspace = paddle.zeros(shape=[33_554_432], dtype='uint8')
 
         ref_out = paddle.matmul(a, b.T)
-        actual_out = fp8_gemm(b_casted, fp8_meta.scale_inv, FP8FwdTensors.GEMM1_WEIGHT, fp8_dtype,
-                              a_casted, fp8_meta.scale_inv, FP8FwdTensors.GEMM1_INPUT, fp8_dtype,
-                              out_dtype, workspace)
+        actual_out, _ = fp8_gemm(b_casted, fp8_meta.scale_inv, FP8FwdTensors.GEMM1_WEIGHT,
+                                 fp8_dtype, a_casted, fp8_meta.scale_inv, FP8FwdTensors.GEMM1_INPUT,
+                                 fp8_dtype, out_dtype, workspace)
 
         assert_allclose(actual_out, ref_out)
 

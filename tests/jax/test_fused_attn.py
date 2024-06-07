@@ -22,7 +22,7 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLay
 from transformer_engine.jax.fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from utils import assert_allclose
 
@@ -66,7 +66,7 @@ def general_dot_product_attention(query: ArrayLike, key: ArrayLike, value: Array
     if mask is not None:
         if mask.ndim != logits.ndim:
             mask = jnp.expand_dims(mask, axis=-3)
-        logits = jnp.where(mask, logits, jnp.finfo(dtype).min)
+        logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
     softmax_out = jax.nn.softmax(logits).astype(dtype)
 
@@ -90,24 +90,34 @@ def is_causal_mask(mask: AttnMaskType):
 
 def make_decoder_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
     """
-    Create padded causal mask
+    Create inverse padded causal mask where `True` means allowing the corresponding
+    position to participate in attention and `False` means masking out that position.
     """
     q_idxs = jnp.broadcast_to(jnp.arange(q_tokens.shape[-1], dtype=jnp.int32), q_tokens.shape)
     kv_idxs = jnp.broadcast_to(jnp.arange(kv_tokens.shape[-1], dtype=jnp.int32), kv_tokens.shape)
-    causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
-    padding_mask = make_attention_mask(q_tokens > 0, kv_tokens > 0)
-    return combine_masks(causal_mask, padding_mask)
+    inv_causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
+    inv_padding_mask = make_attention_mask(q_tokens > 0, kv_tokens > 0)
+    return combine_masks(inv_causal_mask, inv_padding_mask)
 
+def make_mask(q_token: ArrayLike, kv_token: ArrayLike, attn_mask_type: AttnMaskType) -> Array:
+    """
+    Create attention mask based on mask type. A `True` value in the mask means
+    masking out the corresponding position and a `False` value means allowing
+    that position to participate in attention.
+    """
+    if is_causal_mask(attn_mask_type):
+        inv_mask = make_decoder_mask(q_token, kv_token)
+    else:
+        inv_mask = make_attention_mask(q_token > 0, kv_token > 0)
+    mask = jnp.logical_not(inv_mask)
+    return mask
 
 def jax_dpa(query, key, value, bias, q_token, kv_token, dropout_rng, **kwargs):
     """
     JAX native dot product attention implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if is_causal_mask(attn_mask_type):
-        mask = make_decoder_mask(q_token, kv_token)
-    else:
-        mask = make_attention_mask(q_token > 0, kv_token > 0)
+    mask = make_mask(q_token, kv_token, attn_mask_type)
 
     output = general_dot_product_attention(query,
                                            key,
@@ -127,13 +137,7 @@ def customcall_fused_dpa(query, key, value, bias, q_token, kv_token, dropout_rng
     TE customcall dot product attention implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if is_causal_mask(attn_mask_type):
-        mask = make_decoder_mask(q_token, kv_token)
-    else:
-        mask = make_attention_mask(q_token > 0, kv_token > 0)
-
-    # mask invert
-    mask = jnp.logical_not(mask)
+    mask = make_mask(q_token, kv_token, attn_mask_type)
 
     qkv_layout = kwargs.pop('qkv_layout')
     match qkv_layout:
@@ -298,6 +302,8 @@ class FusedAttnRunner:
         """
 
         self._setup_inputs()
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape != BiasShape.BIAS_1HSS:
+            pytest.skip("Bias gradient calculation is only supported for 1HSS bias shape.")
 
         def grad_func(func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient

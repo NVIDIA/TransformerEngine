@@ -68,7 +68,7 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu"]
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -333,12 +333,17 @@ class TorchQuickGELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return input * torch.sigmoid(1.702 * input)
 
+class TorchSquaredRELU(nn.Module):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return (input > 0) * input * input
+
 _supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
                   'gelu'  : nn.GELU(approximate="tanh"),
                   'reglu'  : nn.ReLU(),
                   'relu'  : nn.ReLU(),
                   'swiglu' : nn.SiLU(),
-                  'qgelu'  : TorchQuickGELU()}
+                  'qgelu'  : TorchQuickGELU(),
+                  'srelu'  : TorchSquaredRELU()}
 
 
 class TorchGLU(nn.Module):

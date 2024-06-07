@@ -8,13 +8,14 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Generator, Union, Optional, Tuple, List
+from typing import Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
 
-import transformer_engine_extensions as tex  #pylint: disable=import-error
+import transformer_engine_torch as tex
+
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
@@ -26,6 +27,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _fsdp_gather_tensors,
 )
 from ..cpp_extensions import (
     fp8_cast_transpose_fused,
@@ -294,9 +296,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False
-        self.fp8_weight_shapes = []
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.fsdp_wrapped = False
+        self.fsdp_group = None
+        self._fp8_workspaces: Dict[str, Float8Tensor] = {}
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -494,60 +498,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
         self.activation_dtype = dtype
 
-    def set_fp8_weights(self) -> None:
-        """Construct workspace buffers for FP8 weights, if needed
-
-        These workspace buffers are used for FP8 training when the
-        module parameters are not natively in FP8 and there are
-        multiple microbatches per training step. The buffers, with
-        names like `weight1_fp8` and `weight1_t_fp8`, cache the FP8
-        values and transposed FP8 values in between microbatches. They
-        are not registered as module parameters or buffers since we
-        don't want them to be affected by `.to` and since they aren't
-        needed for checkpointing.
-
-        """
-        if not self.fp8 or self.primary_weights_in_fp8:
-            return
-
-        for i, shape in enumerate(self.fp8_weight_shapes, start=1):
-            weight_cast_attr = f"weight{i}_fp8"
-            weight_transpose_attr = f"weight{i}_t_fp8"
-
-            if (
-                hasattr(self, weight_cast_attr)
-                and getattr(self, weight_cast_attr).shape == shape
-            ):
-                return
-
-            setattr(
-                self,
-                weight_cast_attr,
-                Float8Tensor(
-                    data=torch.empty(
-                        shape,
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-            setattr(
-                self,
-                weight_transpose_attr,
-                Float8Tensor(
-                    data=torch.empty(
-                        shape[1],
-                        shape[0],
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
         Set the tensor parallel group for the given
@@ -564,7 +514,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:
         """returns the FP8 weights."""
         fp8_params = []
-        for param in self.parameters():
+        for param in self.parameters(recurse=False):
             if isinstance(param, Float8Tensor) and param.requires_grad:
                 fp8_params.append(param)
         if len(fp8_params) == 0:
@@ -611,7 +561,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def prepare_forward(
         self,
         inp: torch.Tensor,
-        is_first_microbatch: Union[bool, None],
+        is_first_microbatch: Union[bool, None],  # pylint: disable=unused-argument
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
@@ -632,11 +582,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
-
-            # Create persistent tensors for fp8 weights and their transposes
-            # only when fp8 weight caching is used and weights are not in fp8
-            if is_first_microbatch is not None and not self.primary_weights_in_fp8:
-                self.set_fp8_weights()
 
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, \
@@ -796,49 +741,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def get_fp8_weights_empty_tensors(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[Float8Tensor]:
-        """
-        Returns empty tensors to be later used to store fp8 version of weights
-        and their transposes (for the bwd pass) for this batch (or microbatch).
-        When `is_first_microbatch` is `None`, this is especially useful since
-        we then don't need to store the fp8 weights that are needed for one time
-        only in the forward pass. Note that we still need to store the tensor
-        for the fp8 weight transpose which is at least needed in the backward
-        pass but that's taken care of by storing the transpose tensor in
-        `ctx.save_for_backward`.
-        """
-        assert is_first_microbatch is None, "Should only be here when "\
-                                            "`is_first_microbatch` is None!"
-        fp8_weight_tensors = []
-        for shape in self.fp8_weight_shapes:
-            fp8_weight_tensors.append(
-                Float8Tensor(
-                    data=torch.empty(
-                        shape,
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-            fp8_weight_tensors.append(
-                Float8Tensor(
-                    data=torch.empty(
-                        shape[1],
-                        shape[0],
-                        device=torch.cuda.current_device(),
-                        dtype=torch.uint8,
-                    ),
-                    fp8_dtype=tex.DType.kFloat8E4M3,
-                    fp8_scale_inv=1,
-                )
-            )
-        return fp8_weight_tensors
-
     def register_parameter(self, name, param, **kwargs):
         """
         Thin wrapper around PyTorch parameter registration to stash additional parameter
@@ -894,9 +796,145 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def forward(self):
         """Needs override."""
 
-    @abstractmethod
-    def get_fp8_weights_scratchpad(
+    def get_fp8_workspace(
         self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
-        """Needs override."""
+        *,
+        tensor: Optional[torch.Tensor] = None,
+        fp8_meta_forward: Optional[bool] = None,
+        fp8_meta_index: Optional[int] = None,
+        cache_name: Optional[str] = None,
+        update_workspace: bool = True,
+        skip_update_flag: Optional[torch.Tensor] = None,
+        with_transpose: bool = False,
+        fsdp_group: dist_group_type = None,
+    ) -> Float8Tensor:
+        """Get FP8 workspace buffer and maybe update its values
+
+        The workspace buffer may be cached for future function calls.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor, optional
+            Values to copy into workspace. Required if the workspace
+            is being constructed or updated.
+        fp8_meta_forward: bool, optional
+            Whether to access FP8 meta tensors for the forward pass or
+            backward pass. Required if the workspace is being
+            constructed.
+        fp8_meta_index: int, optional
+            Index to access in FP8 meta tensors. Required if the
+            workspace is being constructed.
+        cache_name: str, optional
+            Key for caching.
+        update_workspace: bool, default = `True`
+            Update workspace with values from `tensor`.
+        skip_update_flag: torch.Tensor, optional
+            GPU flag to skip updating the workspace. Take precedence
+            over `update_workspace` if provided.
+        with_transpose: bool, default = `False`
+            Whether to initialize cached transpose in workspace.
+        fsdp_group: bool, default = None
+            FSDP process group that the weights are distributed over.
+        """
+
+        # Construct workspace if needed
+        out = None
+        if cache_name is not None:
+            out = self._fp8_workspaces.get(cache_name, None)
+            # Gather cached Fp8 workspace if it's distributed
+            # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
+            #       for models initialized with Fp8 primary weights.
+            if (not isinstance(out, Float8Tensor) and
+                fsdp_group is not None and
+                out._data.shape != tensor.data.shape):
+                _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        if out is None:
+            if (
+                tensor is None
+                or fp8_meta_forward is None
+                or fp8_meta_index is None
+            ):
+                raise ValueError(
+                    "tensor, fp8_meta_forward, and fp8_meta_index kwargs "
+                    "must be provided to construct FP8 workspace"
+                )
+            fp8_dtype = get_fp8_te_dtype(
+                self.fp8_meta["recipe"],
+                fprop_tensor=fp8_meta_forward,
+            )
+            scale_inv = torch.empty(
+                [1],
+                dtype=torch.float32,
+                device=tensor.device
+            )
+            out = Float8Tensor(
+                data=torch.empty_like(tensor, dtype=torch.uint8),
+                fp8_meta=self.fp8_meta,
+                fp8_meta_forward=fp8_meta_forward,
+                fp8_meta_index=fp8_meta_index,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=scale_inv,
+                dtype=tensor.dtype,
+            )
+            if cache_name is not None:
+                self._fp8_workspaces[cache_name] = out
+            update_workspace = True
+            skip_update_flag = None
+
+        # Update workspace if needed
+        if skip_update_flag is not None:
+            update_workspace = True
+        if update_workspace:
+            if tensor is None:
+                raise ValueError(
+                    "tensor kwarg must be provided to update FP8 workspace"
+                )
+            if with_transpose:
+                out.cast_transpose_(
+                    tensor,
+                    noop_flag=skip_update_flag,
+                )
+            else:
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                    forward=out._fp8_meta_forward,
+                )
+                fp8_meta = out._fp8_meta[fp8_meta_key]
+                fp8_meta_index = out._fp8_meta_index
+                cast_to_fp8(
+                    tensor,
+                    fp8_meta,
+                    fp8_meta_index,
+                    out._fp8_dtype,
+                    out=out._data,
+                )
+                if is_in_onnx_export_mode():
+                    # ONNX export expects FP8 scales can be
+                    # represented with constant ops. However, copying
+                    # into a buffer involves an expand op for array
+                    # broadcasting. We work around this by filling the
+                    # buffer instead.
+                    out._scale_inv.fill_(fp8_meta.scale_inv[fp8_meta_index].item())
+                else:
+                    out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
+
+        return out
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                            missing_keys, unexpected_keys, error_msgs):
+        """
+        This function loads tensors and extra state including fp8 metadata.
+        This metadata is essential for copying fp8 tensors, as the copy_ function
+        uses the scale_inv parameter from fp8_meta to set the correct scaling factor
+        for the new tensor.
+        Hence, this extra state must be loaded before the tensor copying process,
+        not after, as is typically done in _load_from_state_dict.
+        Tensors are copied into fp8 tensors only when self.primary_weights_in_fp8=True,
+        otherwise, this behavior is not required.
+        """
+        if self.primary_weights_in_fp8:
+            extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
+            if extra_state_key in state_dict:
+                self.set_extra_state(state_dict[extra_state_key])
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                            missing_keys, unexpected_keys, error_msgs)

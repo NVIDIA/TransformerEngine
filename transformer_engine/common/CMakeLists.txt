@@ -43,31 +43,21 @@ list(APPEND transformer_engine_SOURCES
      userbuffers/userbuffers.cu
      userbuffers/userbuffers-host.cpp)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(transformer_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # Start configuring dependencies
-find_package(CUDAToolkit REQUIRED cuda_driver cudart cublas nvrtc nvToolsExt)
-find_package(CUDNN REQUIRED cudnn)
+find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
 set(transformer_engine_LIBS)
 list(APPEND transformer_engine_LIBS
+     CUDA::cublas
      CUDA::cuda_driver
      CUDA::cudart
-     CUDA::cublas
      CUDA::nvrtc
      CUDA::nvToolsExt
      CUDNN::cudnn)
-target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-
-# Check for cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-    message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
-endif()
-target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+                           ${CUDNN_FRONTEND_INCLUDE_DIR})
 
 # Check for MPI (optional)
 option(UB_MPI_BOOTSTRAP "Bootstrap userbuffers with MPI." OFF)
@@ -107,13 +97,10 @@ target_include_directories(transformer_engine PRIVATE
 
 # Compiler options
 set(USERBUFFERS_CUDA_SUPPRESS
-    # -Xcudafe --diag_suppress=39      # possible division by zero
     -Xcudafe --diag_suppress=177     # variable declared but never referenced
-    # -Xcudafe --diag_suppress=179     # right operand of "%" is zero
     -Xcudafe --diag_suppress=550     # variable set but never used
     -Xcudafe --diag_suppress=949     # nonstandard default argument on declaration
-    -Xcudafe --diag_suppress=1143    # arithmetic on pointer to void or function type
-    -Xcudafe --diag_suppress=2464)   # deprecated conversion from a string literal to "char *"
+    -Xcudafe --diag_suppress=1143)   # arithmetic on pointer to void or function type
 set(USERBUFFERS_CXX_SUPPRESS
     -Wno-pointer-arith
     -Wno-return-local-addr)
@@ -131,17 +118,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
-# Compile core library with the same ABI as PyTorch (if applicable)
-option(USE_CXX11_ABI "Compile with C++11 ABI" ON)
-message(STATUS "Use C++11 ABI: ${USE_CXX11_ABI}")
-if (USE_CXX11_ABI)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
-endif()
-
 # Install core library
 install(TARGETS transformer_engine DESTINATION .)
 
@@ -149,12 +125,12 @@ install(TARGETS transformer_engine DESTINATION .)
 # PyBind11 Extensions
 #######################################################################################
 find_package(pybind11 CONFIG REQUIRED)
-pybind11_add_module(transformer_engine_pybind pybind.cpp)
-target_include_directories(transformer_engine_pybind PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(transformer_engine_pybind PUBLIC transformer_engine)
+pybind11_add_module(transformer_engine_common pybind.cpp)
+target_include_directories(transformer_engine_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(transformer_engine_common PUBLIC transformer_engine)
 
 # Install
 set_source_files_properties(pybind.cpp
                             PROPERTIES
                             COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
-install(TARGETS transformer_engine_pybind DESTINATION .)
+install(TARGETS transformer_engine_common DESTINATION .)

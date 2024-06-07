@@ -18,7 +18,7 @@ namespace transformer_engine {
 
 namespace ub = userbuffers;
 
-PYBIND11_MODULE(transformer_engine_pybind, m) {
+PYBIND11_MODULE(transformer_engine_common, m) {
   py::enum_<DType>(m, "DType", py::module_local())
     .value("kByte", DType::kByte)
     .value("kInt32", DType::kInt32)

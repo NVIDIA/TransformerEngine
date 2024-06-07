@@ -23,10 +23,10 @@ namespace te = transformer_engine;
 namespace te_ub = te::userbuffers;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  // Load nvte = py::module_::import("transformer_engine_pybind") into TE/PyTorch.
-  // This makes available essential NVTE enums without needing requiring
-  // `import transformer_engine_pybind` in Python.
-  NVTE_ADD_PYBIND11_BINDINGS(m)
+  // Load nvte = py::module_::import("transformer_engine_common") into TE/PyTorch. This makes
+  // essential NVTE enums available through `import transformer_engine_torch` without requiring an
+  // additional `import transformer_engine_common`.
+  NVTE_ADD_COMMON_PYBIND11_BINDINGS(m)
 
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
@@ -96,12 +96,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
   m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
+  m.def("srelu", &srelu, "Squared ReLU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
+  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
@@ -118,6 +120,40 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
+
+  // Support THD format for Context Parallel
+  m.def("thd_read_half_tensor", &thd_read_half_tensor,
+        "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
+        "tensor");
+  m.def("thd_second_half_lse_correction", &thd_second_half_lse_correction,
+        "Correct the second half of the softmax_lse");
+  m.def("thd_read_second_half_lse", &thd_read_second_half_lse,
+        "Read the second half of the softmax_lse");
+  m.def("thd_out_correction", &thd_out_correction,
+        "Correct the THD format output of context parallelism in forward pass");
+  m.def("thd_grad_correction", &thd_grad_correction,
+        "Correct the THD format gradients of context parallelism in backward pass");
+  m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
+        "Generate partitioned indices for inputs in THD format");
+
+  // multi-tensor functions
+  m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
+        "Fused overflow check + scale for a list of contiguous tensors");
+  m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors");
+  m.def("multi_tensor_unscale_l2norm", &multi_tensor_unscale_l2norm_cuda,
+        "Computes L2 norm for a list of contiguous tensors after unscaling (unscaling is only "
+        "performed for L2 norm computation, and tensors are not updated)");
+  m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer");
+  m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support and LR scheduling");
+  m.def("multi_tensor_adam_capturable_master", &multi_tensor_adam_capturable_master_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
+        "support, LR scheduling and FP32 master weights");
+  m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
+        "Fused SGD optimizer for list of contiguous tensors");
 
   // Data structures
   py::class_<te::FP8TensorMeta>(m, "FP8TensorMeta", py::module_local())

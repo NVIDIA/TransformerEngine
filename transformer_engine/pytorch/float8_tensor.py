@@ -5,14 +5,15 @@
 """Tensor class with FP8 data"""
 from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple, Union
+import warnings
 
 import torch
 from torch.utils._pytree import tree_map
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 from .constants import TE_DType
+from .cpp_extensions import fp8_cast_transpose_fused
 from .fp8 import FP8GlobalStateManager
-
 
 aten = torch.ops.aten
 c10d = torch.ops.c10d
@@ -345,7 +346,7 @@ class Float8Tensor(torch.Tensor):
     fp8_meta_index: int, optional
                     Index to access in FP8 meta tensors. Required if
                     fp8_meta is provided and otherwise ignored.
-    fp8_dtype: transformer_engine_extensions.DType, tex.DType.kFloat8E4M3
+    fp8_dtype: transformer_engine_torch.DType, tex.DType.kFloat8E4M3
                FP8 format.
     fp8_scale_inv: torch.Tensor
                    Reciprocal of the scaling factor applied when
@@ -381,7 +382,8 @@ class Float8Tensor(torch.Tensor):
             raise ValueError(
                 "Float8Tensor requires non-differentiable data buffer"
             )
-        data = data.cuda()
+        if not data.is_cuda:
+            data = data.cuda()
 
         # Initialize tensor object
         self = torch.Tensor._make_wrapper_subclass(
@@ -426,32 +428,38 @@ class Float8Tensor(torch.Tensor):
         self._transpose_invalid: bool = True
 
         # FP8 scale-inverse
-        self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
-        if self._scale_inv is None and self._fp8_meta is not None:
+        if fp8_scale_inv is None and self._fp8_meta is not None:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                 forward=self._fp8_meta_forward,
             )
-            scale_inv = self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index]
-            self._scale_inv = scale_inv.detach().view(1).clone()
-        if self._scale_inv is None:
+            fp8_scale_inv = self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index]
+            fp8_scale_inv = fp8_scale_inv.detach().view(1).clone()
+        if fp8_scale_inv is None:
             raise ValueError(
                 "Attempted to initialize Float8Tensor without specifying scale-inverse"
             )
-        if not isinstance(self._scale_inv, torch.Tensor):
-            self._scale_inv = torch.full(
+        if not isinstance(fp8_scale_inv, torch.Tensor):
+            fp8_scale_inv = torch.full(
                 [1],
-                self._scale_inv,
+                fp8_scale_inv,
                 dtype=torch.float32,
                 device=self._data.device,
             )
-        if self._scale_inv.numel() != 1:
+        if fp8_scale_inv.numel() != 1:
             raise ValueError(
                 "Attempted to initialize Float8Tensor with invalid scale-inverse tensor"
             )
-        self._scale_inv = self._scale_inv.to(
-            device=self._data.device,
-            dtype=torch.float32,
-        )
+        if fp8_scale_inv.dim() != 1:
+            fp8_scale_inv = fp8_scale_inv.reshape(1)
+        if (
+            fp8_scale_inv.device != self._data.device
+            or fp8_scale_inv.dtype != torch.float32
+        ):
+            fp8_scale_inv = fp8_scale_inv.to(
+                device=self._data.device,
+                dtype=torch.float32,
+            )
+        self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
 
         return self
 
@@ -559,48 +567,177 @@ class Float8Tensor(torch.Tensor):
     def transpose_2d(
         self,
         *,
-        cache: bool = False,
+        force_compute: bool = False,
+        fill_cache: bool = False,
         noop_flag: Optional[torch.Tensor] = None,
+        cache: Optional[bool] = None,
     ) -> torch.Tensor:
         """
         2D transpose with caching support.
 
         Parameters
         ----------
-        cache: bool, default = `False`
-               Whether or not to cache the transpose.
-        noop_flag: Optional[torch.Tensor], default = `None`
-                   Only used if argument `cache` is `True`, ignored otherwise.
-                   A single element fp32 tensor with a value of 1.0 or 0.0
-                   which is treated as a boolean. `1.0` forces recompute
-                   and `0.0` executes a noop using the same kernel.
+        force_compute: bool, default = `False`
+                       Force computation of transpose. Otherwise use
+                       cached values, if possible.
+        fill_cache: bool, default = `False`
+                    Cache output tensor for future function calls.
+        noop_flag: torch.Tensor, optional
+                   float32 flag indicating whether to avoid updating
+                   cached values, if possible.
+        cache: bool, deprecated
+
         """
         assert self.dim() == 2, f"{self.dim()}-D transpose not supported."
 
-        # Case: no caching.
-        if not cache:
-            return tex.fp8_transpose(self._data, self._fp8_dtype)
+        # Handle deprecated cache kwarg
+        if cache is not None:
+            msg = (
+                "cache kwarg for Float8Tensor.transpose_2d is deprecated, "
+                "please use force_compute and fill_cache instead"
+            )
+            warnings.warn(msg, DeprecationWarning)
+            if cache:
+                force_compute = False
+                fill_cache = True
+            else:
+                force_compute = True
+                fill_cache = False
 
-        # Case: reuse cache without calling a kernel.
-        if not self._transpose_invalid and noop_flag is None:
-            assert self._transpose is not None, "Tranpose cache is empty."
+        # Need to compute transpose if cache is invalid
+        need_compute = force_compute
+        if self._transpose is None:
+            need_compute = True
+        elif self._transpose_invalid:
+            need_compute = True
+
+        # Need to apply transpose kernel if noop flag is applied
+        if noop_flag is not None:
+            need_compute = True
+
+        # Return cached transpose if possible
+        if not need_compute:
             return self._transpose
 
-        # Allocate transpose if needed.
-        data_2d = self._data.reshape(-1, self._data.shape[-1])
-        if self._transpose is None:
-            shape = (data_2d.shape[1], data_2d.shape[0])
-            self._transpose = torch.empty(shape, dtype=torch.uint8, device=self._data.device)
-
-        # Case: recompute transpose and store cache.
-        if noop_flag is None:
-            tex.fp8_transpose_noalloc(data_2d, self._transpose, self._fp8_dtype)
+        # Allocate output if needed
+        data = self._data.contiguous().reshape(-1, self.size(-1))
+        out = self._transpose
+        if out is None:
+            out = torch.empty(
+                (data.size(1), data.size(0)),
+                dtype=torch.uint8,
+                device=data.device,
+            )
+            noop_flag = None
         else:
-            # Case: cuda graph capture.
-            tex.fp8_transpose_noalloc_noop(data_2d, self._transpose, noop_flag, self._fp8_dtype)
+            self._transpose_invalid = False
 
+        # Apply transpose kernel
+        fp8_dtype = self._fp8_dtype
+        if noop_flag is None:
+            tex.fp8_transpose_noalloc(data, out, fp8_dtype)
+        else:
+            noop_flag = noop_flag.to(dtype=torch.float32, device=data.device)
+            tex.fp8_transpose_noalloc_noop(data, out, noop_flag, fp8_dtype)
+
+        # Fill cache if needed
+        if fill_cache:
+            self._transpose = out
+            self._transpose_invalid = False
+
+        return out
+
+    @torch.no_grad()
+    def cast_transpose_(
+        self,
+        tensor: torch.Tensor,
+        noop_flag: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Cast from tensor and populate transpose cache
+
+        Only supported for 2D tensors.
+
+        Parameters
+        ----------
+        tensor: torch.Tensor
+                Tensor to copy from. Must have same dimensions as
+                destination tensor.
+        noop_flag: torch.Tensor, optional
+                   float32 flag indicating whether to avoid updating
+                   destination tensor.
+
+        """
+
+        # Make sure tensor is in expected format
+        data = self._data
+        if (
+            tensor.device != data.device
+            or tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16)
+            or not tensor.is_contiguous()
+
+        ):
+            dtype = tensor.dtype
+            if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                dtype = torch.float32
+            tensor = tensor.to(
+                device=self.device,
+                dtype=dtype,
+                memory_format=torch.contiguous_format,
+            )
+        if tensor.size() != data.size() or data.dim() != 2:
+            raise ValueError(
+                "Invalid tensor dimensions for FP8 cast-transpose "
+                f"(src={tuple(tensor.size())}, dst={tuple(data.size())})"
+            )
+        if not data.is_contiguous():
+            raise ValueError(
+                "FP8 cast-transpose is only supported for "
+                "`Float8Tensor`s with contiguous data"
+            )
+        if self._fp8_meta is None:
+            raise ValueError(
+                "FP8 cast-transpose is only supported for "
+                "`Float8Tensor`s with FP8 metadata "
+            )
+
+        # Construct transpose cache if needed
+        transpose = self._transpose
+        if transpose is None or not transpose.is_contiguous():
+            transpose = torch.empty(
+                (data.size(1), data.size(0)),
+                dtype=torch.uint8,
+                device=data.device,
+            )
+            self._transpose = transpose
+            noop_flag = None
+
+        # Launch cast-transpose kernel
+        fp8_meta_index = int(self._fp8_meta_index)
+        fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+            forward=self._fp8_meta_forward,
+        )
+        fp8_meta = self._fp8_meta[fp8_meta_key]
+        fp8_cast_transpose_fused(
+            tensor,
+            fp8_meta,
+            fp8_meta_index,
+            self._fp8_dtype,
+            cast_out=data,
+            transpose_out=transpose,
+            noop_flag=noop_flag,
+        )
+        scale = fp8_meta.scale[fp8_meta_index:fp8_meta_index+1]
+        scale_inv = self._scale_inv
+        if noop_flag is None:
+            torch.reciprocal(scale, out=scale_inv)
+        else:
+            torch.where(
+                noop_flag.bool(),
+                scale_inv,
+                scale.reciprocal(),
+                out=scale_inv,
+            )
         self._transpose_invalid = False
-        return self._transpose
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
