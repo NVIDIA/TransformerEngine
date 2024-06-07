@@ -31,10 +31,7 @@ repos:
         files: ^transformer_engine/
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: eb7205de69febb10d8d455ed9cc0a9fa6ac3a17a
+    rev: v18.1.6
     hooks:
       - id: clang-format
-        name: Format c/c++/cuda code
-        language: system
-        files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
 
