@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import torch
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,

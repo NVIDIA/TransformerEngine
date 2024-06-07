@@ -19,7 +19,7 @@ from transformer_engine.pytorch.ops.fused_forward import (
     ForwardLinearBiasActivation,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
