@@ -1319,6 +1319,19 @@ class AttnFuncWithCP(torch.autograd.Function):
                 None, None, None, None, None, None, attn_dbias, None, None, None
 
 
+class SWAFuncWithCP(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+                cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
+                deterministic, use_fused_attention, window_size):
+        return
+
+    @staticmethod
+    def backward(ctx, dout):
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, \
+                None, None, None
+
+
 def attn_forward_func_with_cp(
     is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
     dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, qkv_format="bshd",
