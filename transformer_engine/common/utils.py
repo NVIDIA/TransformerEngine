@@ -4,7 +4,10 @@
 """The utilities for Transformer Engine"""
 import inspect
 import warnings
+import functools
+import transformer_engine.pytorch.cpp_extensions as ext
 from enum import Enum
+from typing import Tuple
 
 warnings.filterwarnings(
     "module", category=DeprecationWarning, module="transformer_engine.common.utils")
@@ -52,3 +55,13 @@ def deprecate_wrapper(obj, msg):
 
     raise NotImplementedError(
         f"deprecate_cls_wrapper only support Class and Function, but got {type(obj)}.")
+
+
+@functools.cache
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = ext.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)

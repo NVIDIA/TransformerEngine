@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Tuple, Union
 from pkg_resources import packaging
 import pytest
 import torch
+import logging
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
@@ -38,6 +39,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     is_bf16_compatible,
 )
+from transformer_engine.common.utils import get_cudnn_version
 import transformer_engine_extensions as tex
 from transformer_engine_extensions import NVTE_Fused_Attn_Backend
 
@@ -51,8 +53,6 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-
 
 def reset_rng_states() -> None:
     """Revert back to initial RNG state"""
@@ -64,16 +64,6 @@ def reset_rng_states() -> None:
 def reset_global_fp8_state():
     yield
     fp8.FP8GlobalStateManager.reset()
-
-
-@functools.cache
-def _cudnn_version() -> Tuple[int, int, int]:
-    """Runtime cuDNN version (major, minor, patch)"""
-    encoded_version = ext.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
 
 
 class ModelConfig:
@@ -237,7 +227,7 @@ def get_swa(seq_q, seq_kv, w=None):
     return w, ml
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -322,32 +312,28 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn,
         )
 
     if unfused_attn_supported and fused_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_dot_product_attention]: unfused attn vs fused attn")
+        logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if unfused_attn_supported and flash_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_dot_product_attention]: unfused attn vs flash attn")
+        logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_dot_product_attention]: fused attn vs flash attn")
+        logging.info("[test_dot_product_attention]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backend) == 2:
-        if _NVTE_DEBUG:
-            print("[test_dot_product_attention]: fused attn backend 0 vs 1")
+        logging.info("[test_dot_product_attention]: fused attn backend 0 vs 1")
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
@@ -373,7 +359,7 @@ model_configs_mask = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
 @pytest.mark.parametrize("model", model_configs_mask.keys())
@@ -411,7 +397,7 @@ model_configs_bias = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
 @pytest.mark.parametrize("model", model_configs_bias.keys())
@@ -438,7 +424,7 @@ model_configs_bias_shapes = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
@@ -504,7 +490,7 @@ model_configs_layout = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
@@ -532,7 +518,7 @@ model_configs_layout_thd = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (9,0,0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9,0,0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
@@ -848,7 +834,7 @@ model_configs_te_layer = {
 }
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
@@ -917,23 +903,20 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         )
 
     if unfused_attn_supported and fused_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_transformer_layer]: unfused attn vs fused attn")
+        logging.info("[test_transformer_layer]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
     if unfused_attn_supported and flash_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_transformer_layer]: unfused attn vs flash attn")
+        logging.info("[test_transformer_layer]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
     if fused_attn_supported and flash_attn_supported:
-        if _NVTE_DEBUG:
-            print("[test_transformer_layer]: fused attn vs flash attn")
+        logging.info("[test_transformer_layer]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
@@ -947,7 +930,7 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
             ckpt_attn, qkv_format, fused_qkv_params, RoPE)
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
@@ -1118,9 +1101,8 @@ def _rmse(a, b):
     return math.sqrt((torch.pow((a-b), 2)/a.numel()).sum())
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
@@ -1132,14 +1114,12 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     config = model_configs_fp8_vs_f16[model]
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    if _NVTE_DEBUG:
-        print()
-        print("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+
+    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
     fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
         dtype, config, True, qkv_format, input_layernorm)
-    if _NVTE_DEBUG:
-        print()
-        print("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+
+    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
     fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
         dtype, config, False, qkv_format, input_layernorm)
 
@@ -1149,19 +1129,18 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     fwd_range = max(fused_attn_fwd_fp8.max().item(),
         fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
         fused_attn_fwd_f16.min().item())
-    if _NVTE_DEBUG:
-        print()
-        print('========== {:^25s} =========='.format('forward output'))
-        print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
+
+    logging.debug('========== {:^25s} =========='.format('forward output'))
+    logging.debug('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
-        print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
+    logging.debug('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
-        try:
-            torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
-        except Exception as e:
-            print(e)
-            print()
+    logging.debug('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
+    try:
+        torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+    except Exception as e:
+        logging.debug(e)
+
     assert(fwd_rmse < rmse_tol * fwd_range
         ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
         fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
@@ -1170,19 +1149,18 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
         bwd_range = max(fused_attn_bwd_fp8[i].max().item(),
             fused_attn_bwd_f16[i].max().item()) - min(fused_attn_bwd_fp8[i].min().item(),
             fused_attn_bwd_f16[i].min().item())
-        if _NVTE_DEBUG:
-            print()
-            print('========== {:^25s} =========='.format(param_names[i]))
-            print('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
+
+        logging.debug('========== {:^25s} =========='.format(param_names[i]))
+        logging.debug('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
-            print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
+        logging.debug('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
-            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
-            try:
-                torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
-            except Exception as e:
-                print(e)
-                print()
+        logging.debug('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+        except Exception as e:
+            logging.debug(e)
+
         assert(bwd_rmse < rmse_tol * bwd_range
             ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
             bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
@@ -1276,9 +1254,8 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
     return out, param_names, tuple(x.grad for x in params)
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
@@ -1290,13 +1267,13 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         pytest.skip("qkv_layout not applicable for MQA/GQA");
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    if _NVTE_DEBUG:
-        print()
-        print("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
+
+
+    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
         dtype, config, True, qkv_layout)
-    if _NVTE_DEBUG:
-        print("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
+
+    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
     fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
         dtype, config, False, qkv_layout)
 
@@ -1307,19 +1284,18 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
     fwd_range = max(fused_attn_fwd_fp8.max().item(),
         fused_attn_fwd_f16.max().item()) - min(fused_attn_fwd_fp8.min().item(),
         fused_attn_fwd_f16.min().item())
-    if _NVTE_DEBUG:
-        print()
-        print('========== {:^25s} =========='.format('forward output'))
-        print('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
+
+    logging.debug('========== {:^25s} =========='.format('forward output'))
+    logging.debug('fused_attn_fwd_fp8 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
-        print('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
+    logging.debug('fused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
-        try:
-            torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
-        except Exception as e:
-            print(e)
-            print()
+    logging.debug('fused_attn_fwd RMSE: {:.6f}'.format(fwd_rmse))
+    try:
+        torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
+    except Exception as e:
+        logging.debug(e)
+
     assert(fwd_rmse < rmse_tol * fwd_range
         ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
         fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
@@ -1328,19 +1304,18 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         bwd_range = max(fused_attn_bwd_fp8[i].max().item(),
             fused_attn_bwd_f16[i].max().item()) - min(fused_attn_bwd_fp8[i].min().item(),
             fused_attn_bwd_f16[i].min().item())
-        if _NVTE_DEBUG:
-            print()
-            print('========== {:^25s} =========='.format(bwd_names[i]))
-            print('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
+
+        logging.debug('========== {:^25s} =========='.format(bwd_names[i]))
+        logging.debug('fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()))
-            print('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
+        logging.debug('fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}'.format(i,
                 fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()))
-            print('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
-            try:
-                torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
-            except Exception as e:
-                print(e)
-                print()
+        logging.debug('fused_attn_bwd RMSE[{}]: {:.6f}'.format(i, bwd_rmse))
+        try:
+            torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
+        except Exception as e:
+            logging.debug(e)
+
         assert(bwd_rmse < rmse_tol * bwd_range
             ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
             bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range)
@@ -1471,9 +1446,8 @@ models_v0 = ['fp8_1', 'fp8_2', 'fp8_5', 'fp8_6']
 models_v1 = ['fp8_3', 'fp8_4', 'fp8_7', 'fp8_8']
 
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", models_v1 if cudnn_frontend_version == 1 else models_v0)
 def test_custom_mha_fp8_vs_f16(dtype, model):
@@ -1500,29 +1474,29 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     bwd_range = max(fused_attn_bwd_fp8.max().item(),
         unfused_attn_bwd_f16.max().item()) - min(fused_attn_bwd_fp8.min().item(),
         unfused_attn_bwd_f16.min().item())
-    if _NVTE_DEBUG:
-        print('fused_attn_fwd_fp8   min {:.6f} max {:.6f}'.format(
+
+    logging.debug('fused_attn_fwd_fp8   min {:.6f} max {:.6f}'.format(
             fused_attn_fwd_fp8.min().item(),fused_attn_fwd_fp8.max().item()))
-        print('unfused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
+    logging.debug('unfused_attn_fwd_f16 min {:.6f} max {:.6f}'.format(
             unfused_attn_fwd_f16.min().item(), unfused_attn_fwd_f16.max().item()))
-        print('fused_attn_fwd_fp8 vs unfused_attn_fwd_f16 RMSE: {:.6f}'.format(
+    logging.debug('fused_attn_fwd_fp8 vs unfused_attn_fwd_f16 RMSE: {:.6f}'.format(
             fwd_rmse))
-        try:
-            torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
-        except Exception as e:
-            print(e)
-            print()
-        print('fused_attn_bwd_fp8   min {:.6f} max {:.6f}'.format(
+    try:
+        torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
+    except Exception as e:
+        logging.debug(e)
+
+    logging.debug('fused_attn_bwd_fp8   min {:.6f} max {:.6f}'.format(
             fused_attn_bwd_fp8.min().item(), fused_attn_bwd_fp8.max().item()))
-        print('unfused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
+    logging.debug('unfused_attn_bwd_f16 min {:.6f} max {:.6f}'.format(
             unfused_attn_bwd_f16.min().item(), unfused_attn_bwd_f16.max().item()))
-        print('fused_attn_bwd_fp8 vs unfused_attn_bwd_f16 RMSE: {:.6f}'.format(
+    logging.debug('fused_attn_bwd_fp8 vs unfused_attn_bwd_f16 RMSE: {:.6f}'.format(
             bwd_rmse))
-        try:
-            torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
-        except Exception as e:
-            print(e)
-            print()
+    try:
+        torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
+    except Exception as e:
+        logging.debug(e)
+
     assert(fwd_rmse < rmse_tol * fwd_range
         ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
         fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range)
