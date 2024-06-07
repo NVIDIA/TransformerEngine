@@ -2249,7 +2249,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8, fp8_meta):
         logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
-            logger.info("Running FP8 forward")
+            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(qkv, Float8Tensor)), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
@@ -2306,7 +2306,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            logger.info("Running non-FP8 forward")
+            logger.debug(f"Running forward in {qkv.dtype}")
             out_ret, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
                 fused_attention_backend, attn_bias,
@@ -2369,7 +2369,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_qkvpacked"):
                 if ctx.fp8:
-                    logger.info("Running FP8 backward")
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2415,7 +2415,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                             ctx.fp8_meta["scaling_bwd"], META_DQKV,
                             fp8_dtype_backward, ctx.qkv_dtype).view(dqkv_fp8.shape)
                 else:
-                    logger.info("Running non-FP8 backward")
+                    logger.debug(f"Running backward in {qkv.dtype}")
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
@@ -2449,7 +2449,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 use_FAv2_bwd, fp8, fp8_meta):
         logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
-            logger.info("Running FP8 forward")
+            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(q, Float8Tensor)
                     and isinstance(kv, Float8Tensor)), "q/kv must be Float8Tensors for FP8 MHA."
@@ -2513,7 +2513,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            logger.info("Running non-FP8 forward")
+            logger.debug(f"Running forward in {q.dtype}")
             out_ret, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2579,7 +2579,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_kvpacked"):
                 if ctx.fp8:
-                    logger.info("Running FP8 backward")
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2636,7 +2636,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                             ctx.fp8_meta["scaling_bwd"], META_DQKV,
                             fp8_dtype_backward, ctx.qkv_dtype).view(dkv_fp8.shape)
                 else:
-                    logger.info("Running non-FP8 backward")
+                    logger.debug(f"Running backward in {q.dtype}")
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
@@ -2670,7 +2670,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 use_FAv2_bwd, fp8, fp8_meta):
         logger = logging.getLogger("FusedAttnFunc")
         if fp8:
-            logger.info("Running FP8 forward")
+            logger.debug("Running forward in FP8")
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
@@ -2783,7 +2783,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            logger.info("Running non-FP8 forward")
+            logger.debug(f"Running forward in {q.dtype}")
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2859,7 +2859,7 @@ class FusedAttnFunc(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn"):
                 if ctx.fp8:
-                    logger.info("Running FP8 backward")
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -2951,7 +2951,7 @@ class FusedAttnFunc(torch.autograd.Function):
                                 ctx.fp8_meta["scaling_bwd"], META_DQKV,
                                 fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                 else:
-                    logger.info("Running non-FP8 backward")
+                    logger.debug(f"Running backward in {q.dtype}")
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dk, dv, *rest = fused_attn_bwd(
@@ -3209,11 +3209,12 @@ class FusedAttention(TransformerEngineBaseModule):
                         if not self.fp8_meta["recipe"].fp8_dpa:
                             self.fp8_meta["recipe"].fp8_dpa = True
                             forced_fp8_dpa = " (forced)"
-                    self.logger.info(
-                        f"""Running with fp8_recipe.fp8_mha={self.fp8_meta["recipe"].fp8_mha}, """
-                        f"""fp8_recipe.fp8_dpa={self.fp8_meta["recipe"].fp8_dpa}"""
-                        f"""{forced_fp8_dpa} and """
-                        f"""NVTE_FP8_DPA_BWD={int(os.getenv("NVTE_FP8_DPA_BWD", "1"))}""")
+                    if fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8:
+                        self.logger.debug(
+                            f"""Running with fp8_recipe.fp8_mha={self.fp8_meta["recipe"].fp8_mha}, """
+                            f"""fp8_recipe.fp8_dpa={self.fp8_meta["recipe"].fp8_dpa}"""
+                            f"""{forced_fp8_dpa} and """
+                            f"""NVTE_FP8_DPA_BWD={int(os.getenv("NVTE_FP8_DPA_BWD", "1"))}""")
                     output = FusedAttnFunc.apply(
                         self.training,
                         max_seqlen_q, max_seqlen_kv,
@@ -3995,25 +3996,30 @@ class DotProductAttention(torch.nn.Module):
                     "for performance reasons")
                 use_flash_attention = False
 
-        self.logger.debug(
-            "Config: "
-            f"""compute_capability=sm{(lambda x,y: x*10+y)(
-                self.device_compute_capability[0],self.device_compute_capability[1])}, """
-            f"q_dtype={query_layer.dtype}, k_dtype={key_layer.dtype}, v_dtype={value_layer.dtype}, "
-            f"q_shape={list(query_layer.shape)}, k_shape={list(key_layer.shape)}, "
-            f"v_shape={list(value_layer.shape)}, qkv_format={qkv_format}, "
-            f"qkv_layout={qkv_layout}, mask_type={attn_mask_type}, "
-            f"bias_type={core_attention_bias_type}, "
-            f"bias_shape={core_attention_bias.shape if core_attention_bias is not None else None}, "
-            f"dropout={self.attention_dropout}, "
-            f"context_parallel={context_parallel}, "
-            f"is_training={self.training}, "
-            f"transformer_engine_version={te.__version__}, "
-            f"flash_attn_version={_flash_attn_version}, "
-            f"cudnn_version={'.'.join([str(i) for i in get_cudnn_version()])}")
+        run_config = {
+            "compute_capability":"sm"+str((lambda x,y: x*10+y)(
+                self.device_compute_capability[0],self.device_compute_capability[1])),
+            "q_dtype":query_layer.dtype,
+            "k_dtype":key_layer.dtype,
+            "v_dtype":value_layer.dtype,
+            "q_shape":list(query_layer.shape),
+            "k_shape":list(key_layer.shape),
+            "v_shape":list(value_layer.shape),
+            "qkv_format":qkv_format,
+            "qkv_layout":qkv_layout,
+            "mask_type":attn_mask_type,
+            "bias_type":core_attention_bias_type,
+            "bias_shape":core_attention_bias.shape if core_attention_bias is not None else None,
+            "dropout":self.attention_dropout,
+            "context_parallel":context_parallel,
+            "is_training":self.training,
+            "transformer_engine_version":te.__version__,
+            "flash_attn_version":_flash_attn_version,
+            "cudnn_version":'.'.join([str(i) for i in get_cudnn_version()])}
+
         if use_flash_attention:
-            self.logger.info(f"Running with FlashAttention backend "
-                f"(flash-attn {_flash_attn_version})")
+            self.logger.info("Running with FlashAttention backend ")
+            self.logger.debug(f"Running with {run_config}")
             if core_attention_bias_type == "alibi":
                 alibi_slopes, _ = get_alibi(
                     query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes)
@@ -4035,8 +4041,8 @@ class DotProductAttention(torch.nn.Module):
 
         if use_fused_attention:
             self.logger.info(
-                f"Running with FusedAttention backend (sub-backend {int(fused_attention_backend)}, "
-                f"cudnn_version={'.'.join([str(i) for i in get_cudnn_version()])}")
+                f"Running with FusedAttention backend (sub-backend {int(fused_attention_backend)})")
+            self.logger.debug(f"Running with {run_config}")
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(
                     self.fused_attention,
@@ -4096,8 +4102,9 @@ class DotProductAttention(torch.nn.Module):
                            "with Flash Attention and Fused Attention!"
                          )
 
-        self.logger.info("Running with UnfusedDotProductAttention backend")
         if use_unfused_attention:
+            self.logger.info("Running with UnfusedDotProductAttention backend")
+            self.logger.debug(f"Running with config={run_config}")
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(
                     self.unfused_attention,
