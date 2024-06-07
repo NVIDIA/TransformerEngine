@@ -35,7 +35,6 @@ repos:
     hooks:
       - id: clang-format
         name: Format c/c++/cuda code
-        entry: clang-format -i
         language: system
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
 
