@@ -1,0 +1,57 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+default_language_version:
+  python: python3
+
+ci:
+  autofix_prs: false
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit suggestions'
+  autoupdate_schedule: quarterly
+  submodules: false
+  skip: []
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        name: Format python code
+        args: [--line-length=100]
+        types: [python]
+        files: ^transformer_engine/
+
+  - repo: local
+    hooks:
+      - id: pylint
+        name: Check python code style
+        entry: python -m pylint
+        language: system
+        types: [python]
+        files: ^transformer_engine/
+        args: ["--rcfile=./pylintrc"]
+
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: Format c/c++/cuda code
+        entry: clang-format -i
+        language: system
+        files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
+
+  - repo: local
+    hooks:
+      - id: cpplint
+        name: Check c/c++/cuda code style
+        entry: cpplint
+        language: system
+        files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
