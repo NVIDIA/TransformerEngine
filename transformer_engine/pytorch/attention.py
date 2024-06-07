@@ -3957,7 +3957,8 @@ class DotProductAttention(torch.nn.Module):
                     seq_offsets_k, seq_offsets_v, seq_offsets_o = buffers
 
                 # query_layer is reshaped to the format [t, h, d]
-                query_layer = query_layer.view(-1, *query_layer.shape[2:])
+                # and make contiguous - needed by the THD attention
+                query_layer = query_layer.view(-1, *query_layer.shape[2:]).contiguous()
 
             if qkv_format == "bshd":
                 key_layer = key_layer.transpose(0, 1)
@@ -4976,6 +4977,7 @@ class MultiheadAttention(torch.nn.Module):
                 # in first generation phase key_layer have shape [2, 1, d].
                 # key_layer[0, :] corresponds  to the token with position 3 = 2 + 1,
                 # and key_layer [1, :] corresponds  to the token with position 6 = 5 + 1.
+
                 query_layer = apply_rotary_pos_emb(
                         query_layer, q_pos_emb, "bshd", fused=True,
                         start_positions=inference_params.cached_sequence_lengths)
