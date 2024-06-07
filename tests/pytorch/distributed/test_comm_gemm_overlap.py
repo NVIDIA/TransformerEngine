@@ -36,8 +36,8 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
      (True,  False, 'RS', False), (True,  True, 'RS', False)],
     ids=['BF16 RING-EXCHANGE ALL-GATHER', 'BF16 AGGREGATED RING-EXCHANGE ALL-GATHER',
          'FP8 RING-EXCHANGE ALL-GATHER',  'FP8 AGGREGATED RING-EXCHANGE ALL-GATHER',
-         'BF16 PIPELINED REDUCE-SCATTER', 'BF16 RING-EXCHANGE REDUCE-SCATTER',
-         'FP8 PIPELINED REDUCE-SCATTER',  'FP8 RING-ECHANGE REDUCE-SCATTER'])
+         'BF16 COLLECTIVE REDUCE-SCATTER', 'BF16 RING-EXCHANGE REDUCE-SCATTER',
+         'FP8 COLLECTIVE REDUCE-SCATTER',  'FP8 RING-ECHANGE REDUCE-SCATTER'])
 def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
     """Test communication overlap with split GEMM."""
     if fp8 and not fp8_available:
@@ -58,7 +58,7 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize(
     "p2p", [False, True],
-    ids=['RING-EXCHANGE ALL-GATHER + PIPELINED REDUCE-SCATTER',
+    ids=['RING-EXCHANGE ALL-GATHER + COLLECTIVE REDUCE-SCATTER',
          'RING-EXCHANGE ALL-GATHER + RING-EXHCANGE REDUCE-SCATTER'])
 def test_paired_atomic_gemm_overlap_fp8(p2p):
     """Test communication overlap with atomic GEMM."""

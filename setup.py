@@ -58,7 +58,7 @@ def setup_common_extension() -> CMakeExtension:
     root_path = Path(__file__).resolve().parent
     return CMakeExtension(
         name="transformer_engine",
-        cmake_path=root_path / Path("transformer_engine"),
+        cmake_path=root_path / Path("transformer_engine/common"),
         cmake_flags=cmake_flags,
     )
 

@@ -449,7 +449,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
                              size_t opaque_len) {
     auto *input = buffers[0];
     auto *act_input = buffers[1];
-    float *amax = reinterpret_cast<float *>(buffers[2]);  # bound to amax_out in JAX primitive
+    float *amax = reinterpret_cast<float *>(buffers[2]);
     float *scale = reinterpret_cast<float *>(buffers[3]);
     float *scale_inv = reinterpret_cast<float *>(buffers[4]);
     auto *output = buffers[5];
@@ -460,11 +460,6 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
         amax == amax_out,
         "Internal TE/JAX error: amax_out should be bound to amax in the JAX primitive.");
 
-    if (!use_fp8(desc.out_dtype)) {
-        scale = nullptr;
-        scale_inv = nullptr;
-        amax_out = nullptr;
-    }
     auto m = desc.shape.dims[0];
     auto n = desc.shape.dims[1];
     auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
@@ -782,7 +777,7 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto *output = buffers[6];
     auto *mu = buffers[7];
     auto *rsigma = buffers[8];
-    auto *amax_out = buffers[9];  --  unused but equal to amax
+    auto *amax_out = buffers[9];
     auto *workspace = buffers[10];
     auto *barrier = buffers[11];
     NVTE_CHECK(
