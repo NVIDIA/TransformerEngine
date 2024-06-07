@@ -3301,6 +3301,9 @@ class DotProductAttention(torch.nn.Module):
                have different lengths. Please note that these formats do not reflect how
                tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
                For that, please use `_get_qkv_layout` to gain the layout information.
+    norm_factor: Optional[float], default = `None`
+                normalization factor for the attention scores. If `None`, defaults to
+                `math.sqrt(kv_channels)`.
 
     Parallelism parameters
     ----------------------
@@ -3339,6 +3342,7 @@ class DotProductAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        norm_factor: Optional[float] = None,
     ) -> None:
         super().__init__()
 
@@ -3376,7 +3380,8 @@ class DotProductAttention(torch.nn.Module):
             set_all_rng_states(self.rng_states_tracker.get_states())
             attention_dropout_ctx = self.rng_states_tracker.fork
 
-        norm_factor = math.sqrt(kv_channels)
+        if norm_factor is None:
+            norm_factor = math.sqrt(kv_channels)
 
         self.device_compute_capability = get_device_compute_capability()
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))) \
