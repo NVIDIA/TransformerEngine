@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import os, sys, time
+import subprocess
 import pandas as pd
 import numpy as np
 import torch
@@ -39,8 +40,8 @@ model_configs = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,              bias
     "test_0": ModelConfig(2, 16, 16,  64,  512,  512, 0.0, "no_mask",         "no_bias"), # short seq
     "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal",         "no_bias"), # longer seq, mask
-    "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "post_scale_bias"), # bias
-    "test_3": ModelConfig(2, 32,  4, 128, 8192, 8192, 0.0,  "causal",         "no_bias"), # GQA
+    #"test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0,  "causal", "post_scale_bias"), # bias
+    #"test_3": ModelConfig(2, 32,  4, 128, 8192, 8192, 0.0,  "causal",         "no_bias"), # GQA
 }
 
 def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supported):
@@ -53,47 +54,55 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
     cudnn_times = []
     flash_times = []
     warmup_iters = 3
-    for i in range(num_iters+warmup_iters):
-        if i == warmup_iters:
-            torch.cuda.cudart().cudaProfilerStart()
-
+    for i in range(warmup_iters):
         if fused_attn_supported:
-            torch.cuda.synchronize()
-            fused_attn_start = time.time()
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype, config, "FusedAttention",
                 ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
-            torch.cuda.synchronize()
-            fused_attn_end = time.time()
-            if i >= warmup_iters:
-                cudnn_times.append(fused_attn_end - fused_attn_start)
-
         if flash_attn_supported:
-            torch.cuda.synchronize()
-            flash_attn_start = time.time()
             flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
                 dtype, config, "FlashAttention",
                 ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
             )
-            torch.cuda.synchronize()
-            flash_attn_end = time.time()
-            if i >= warmup_iters:
-                flash_times.append(flash_attn_end - flash_attn_start)
-
         if fused_attn_supported and flash_attn_supported:
             torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
             for i,_ in enumerate(flash_attn_bwd):
                 torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
 
+    torch.cuda.cudart().cudaProfilerStart()
+    torch.cuda.synchronize()
+    fused_attn_start = time.time()
+    if fused_attn_supported:
+        for i in range(num_iters):
+            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype, config, "FusedAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
+            )
+    torch.cuda.synchronize()
+    fused_attn_time = time.time() - fused_attn_start if fused_attn_supported else 0
+
+    torch.cuda.synchronize()
+    flash_attn_start = time.time()
+    if flash_attn_supported:
+        for i in range(num_iters):
+            flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+                dtype, config, "FlashAttention",
+                ckpt_attn, qkv_layout, workspace_opt, swa, pad_between_seqs, is_training,
+            )
+    torch.cuda.synchronize()
+    flash_attn_time = time.time() - flash_attn_start if flash_attn_supported else 0
+
     df = pd.read_csv('times.csv')
     df = pd.concat([
         df,
         pd.DataFrame(
-            [[sum(cudnn_times)*1e3/num_iters, 0, 0, 0,
-                sum(flash_times)*1e3/num_iters, 0, 0, 0, 0]], columns=df.columns)],
+            [[fused_attn_time*1e3/num_iters, 0, 0, 0,
+                flash_attn_time*1e3/num_iters, 0, 0, 0, 0]], columns=df.columns)],
             ignore_index=True
         )
+    print('----- df --- ')
+    print(df)
     df.to_csv('times.csv',index=False)
     torch.cuda.cudart().cudaProfilerStop()
 
@@ -123,6 +132,7 @@ def parse_results(per_cudnn, per_flash, model):
         df_times.loc[row, 'Fused vs Flash Kernels Speedup (fwd+bwd)'] = \
                 df_times.loc[row, 'FlashAttention Kernels (fwd+bwd)'] / \
                 df_times.loc[row, 'FusedAttention Kernels (fwd+bwd)']
+    print(df_times)
     df_times.to_csv('times.csv',index=False)
 
 def main():
@@ -148,23 +158,53 @@ def main():
         fused_attn_supported = fused_attn_supported and not swa
         flash_attn_supported = _is_flash_attention_supported(config)
 
-        prof_cmd = f"""nsys profile \
-                --capture-range=cudaProfilerApi \
-                --capture-range-end=stop-shutdown \
-                --force-overwrite=true \
-                --output=prof_{model} \
-                python -c "import benchmark_attention; \
-                benchmark_attention.benchmark_dot_product_attention(\
-                '{model}', {fused_attn_supported}, {flash_attn_supported})" """
-        os.system(prof_cmd)
-        stats_cmd = f"""nsys stats \
-                -q \
-                -r cuda_gpu_trace \
-                --format csv,column \
-                --force-overwrite=true \
-                --force-export=true \
-                --output=prof_{model} \
-                prof_{model}.nsys-rep"""
+        #cmds = []
+        #prof_cmd = f"""nsys profile \
+        #        --capture-range=cudaProfilerApi \
+        #        --capture-range-end=stop-shutdown \
+        #        --force-overwrite=true \
+        #        --output=prof_{model} \
+        #        python -c "import benchmark_attention; \
+        #        benchmark_attention.benchmark_dot_product_attention(\
+        #        '{model}', {fused_attn_supported}, {flash_attn_supported})" """
+        prof_cmd = ["nsys",
+                "profile",
+                "--capture-range=cudaProfilerApi",
+                "--capture-range-end=stop-shutdown",
+                "--force-overwrite=true",
+                f"--output=prof_{model}",
+                "python",
+                "-c",
+                f""" "import benchmark_attention;""",
+                f"""benchmark_attention.benchmark_dot_product_attention("""
+                f"""'{model}', {fused_attn_supported}, {flash_attn_supported})" """,
+                ]
+        #cmds.append(prof_cmd)
+        #subprocess.run(prof_cmd, check=True, shell=True)
+        prof_cmd = ' '.join(prof_cmd)
+        print()
+        print('================== prof ===========')
+        print(prof_cmd)
+        subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+        #stats_cmd = f"""nsys stats \
+        #        -q \
+        #        -r cuda_gpu_trace \
+        #        --format csv,column \
+        #        --force-overwrite=true \
+        #        --force-export=true \
+        #        --output=prof_{model} \
+        #        prof_{model}.nsys-rep"""
+        stats_cmd = ["nsys",
+                "stats",
+                "-q",
+                "-r",
+                "cuda_gpu_trace",
+                "--format",
+                "csv,column",
+                "--force-overwrite=true",
+                "--force-export=true",
+                f"--output=prof_{model}",
+                f"prof_{model}.nsys-rep"]
         if fused_attn_supported:
             num_kernels_cudnn = 4
             if config.attn_bias_type == 'post_scale_bias':
@@ -174,15 +214,34 @@ def main():
         else:
             num_kernels_cudnn = 0
         num_kernels_flash = 4 if flash_attn_supported else 0
-        os.system(stats_cmd)
-        parse_cmd = f"""python -c "import benchmark_attention; \
-                benchmark_attention.parse_results(\
-                {num_kernels_cudnn}, {num_kernels_flash}, '{model}')" """
-        os.system(parse_cmd)
+        stats_cmd = ' '.join(stats_cmd)
+        print()
+        print('================== stats ===========')
+        print(stats_cmd)
+        #cmds.append(stats_cmd)
+        #os.system(stats_cmd)
+        subprocess.call(stats_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+        #subprocess.run(stats_cmd, check=True)
+        #parse_cmd = f"""python -c "import benchmark_attention; \
+        #        benchmark_attention.parse_results(\
+        #        {num_kernels_cudnn}, {num_kernels_flash}, '{model}')" """
+        parse_cmd = ["python", "-c", f""" "import benchmark_attention;""",
+            f"""benchmark_attention.parse_results("""
+            f"""{num_kernels_cudnn}, {num_kernels_flash}, '{model}')" """]
+        parse_cmd = ' '.join(parse_cmd)
+        print()
+        print('================== parse ===========')
+        print(parse_cmd)
+        #cmds.append(parse_cmd)
+        #os.system(parse_cmd)
+        subprocess.call(parse_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+        #subprocess.call(cmds, shell=True)
+        #subprocess.run(parse_cmd, check=True)
 
     df_times = pd.read_csv('times.csv')
     df_times.index = list(model_configs.keys())
-    #print(df_times)
+    print('----- df_times --- ')
+    print(df_times)
     a=df_times[['FusedAttention Kernels (fwd+bwd)',
                 'FlashAttention Kernels (fwd+bwd)',
                 'Fused vs Flash Kernels Speedup (fwd+bwd)']]
