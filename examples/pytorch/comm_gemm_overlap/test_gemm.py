@@ -60,6 +60,13 @@ def parse_args(argv=None, namespace=None):
                         help="Comm type to overlap.")
     parser.add_argument("--check-numerics", action="store_true", default=False,
                         help="Test numerical result against torch.matmul(...)")
+    parser.add_argument("--warmup-iters", type=int, default=0,
+                        help="Run some warmup iterations of the comm+GEMM overlap before " + \
+                             "the timing runs.")
+    parser.add_argument("--timing-iters", type=int, default=1,
+                        help="Benchmark the comm+GEMM overlap as an average of many iterations.")
+    parser.add_argument("--clock-speed", type=int, default=-1,
+                        help="Set device clock speed to a fixed value via `nvidia-smi`.")
     parser.add_argument('-v', "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
     if opts.atomic:
@@ -74,10 +81,18 @@ def main(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
 
-    # Seed RNG
+    # Fix clock speed
     torch.cuda.set_device(WORLD_RANK)
-    torch.manual_seed(opts.seed+WORLD_RANK)
-    torch.cuda.manual_seed(opts.seed+WORLD_RANK)
+    if opts.clock_speed > 0:
+        subprocess.run(
+            ["nvidia-smi", "-pm", "ENABLED", "-i", str(WORLD_RANK) ],
+            env=os.environ, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["nvidia-smi", "-lgc", str(opts.clock_speed), "-i", str(WORLD_RANK)],
+            env=os.environ, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        msg = result.stdout.decode('utf-8').splitlines()[0]
+        print(f"[rank:{WORLD_RANK}] {msg}\n", end='')
+
 
     # Initialize torch.distributed global process group and get TP group
     dist.init_process_group(backend="nccl",
@@ -182,6 +197,8 @@ def main(opts):
         local_inp_shape = (outer_size, ffn_hidden_size // local_size)
 
     # Initialize distributed input tensor and GEMM kernels
+    torch.manual_seed(opts.seed+WORLD_RANK)
+    torch.cuda.manual_seed(opts.seed+WORLD_RANK)
     inp = torch.rand(local_inp_shape, dtype=torch.bfloat16, device='cuda')/100.
     kernel_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda')/100.
 
@@ -282,57 +299,71 @@ def main(opts):
                                 dtype=torch.bfloat16, device='cuda')
 
     # Trigger GEMM
-    if not opts.check_numerics:
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        dist.barrier()
-        torch.cuda.synchronize()
-        start.record()
+    total_iters = opts.warmup_iters + opts.timing_iters
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
+    torch.cuda.synchronize()
 
     if opts.fp8:
-        all_outputs = tex.fp8_gemm(
-            kernel_t_fp8,
-            fp8_meta.scale_inv,
-            tex.FP8FwdTensors.GEMM1_WEIGHT,
-            fp8_dtype,
-            inp_final,
-            fp8_meta.scale_inv,
-            tex.FP8FwdTensors.GEMM1_INPUT,
-            fp8_dtype,
-            torch.uint8 if fp8_output else torch.bfloat16,
-            te.module.base.get_workspace(),
-            bias=None,
-            use_bias=False,
-            gelu=False,
-            use_split_accumulator=te.module.base._2X_ACC_FPROP,
-            ub_algo=ub_algo,
-            ub=ub_obj,
-            extra_output_tensor=rs_out,
-            D_dtype=fp8_dtype if fp8_output else None,
-            fp8_meta_tensor=fp8_meta if fp8_output else None,
-            out_index=tex.FP8FwdTensors.GEMM1_OUTPUT if fp8_output else None,
-            out=ubuf_out,
-        )
+        for i in range(total_iters):
+            start_events[i].record()
+            all_outputs = tex.fp8_gemm(
+                kernel_t_fp8,
+                fp8_meta.scale_inv,
+                tex.FP8FwdTensors.GEMM1_WEIGHT,
+                fp8_dtype,
+                inp_final,
+                fp8_meta.scale_inv,
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fp8_dtype,
+                torch.uint8 if fp8_output else torch.bfloat16,
+                te.module.base.get_workspace(),
+                bias=None,
+                use_bias=False,
+                gelu=False,
+                use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                ub_algo=ub_algo,
+                ub=ub_obj,
+                extra_output_tensor=rs_out,
+                D_dtype=fp8_dtype if fp8_output else None,
+                fp8_meta_tensor=fp8_meta if fp8_output else None,
+                out_index=tex.FP8FwdTensors.GEMM1_OUTPUT if fp8_output else None,
+                out=ubuf_out,
+            )
+            end_events[i].record()
 
     else:
-        all_outputs = tex.gemm(
-            kernel_t,
-            inp_final,
-            torch.bfloat16,
-            te.module.base.get_workspace(),
-            bias=None,
-            use_bias=False,
-            gelu=False,
-            ub_algo=ub_algo,
-            ub=ub_obj,
-            extra_output_tensor=rs_out,
-            out=ubuf_out,
-        )
+        for i in range(total_iters):
+            start_events[i].record()
+            all_outputs = tex.gemm(
+                kernel_t,
+                inp_final,
+                torch.bfloat16,
+                te.module.base.get_workspace(),
+                bias=None,
+                use_bias=False,
+                gelu=False,
+                ub_algo=ub_algo,
+                ub=ub_obj,
+                extra_output_tensor=rs_out,
+                out=ubuf_out,
+            )
+            end_events[i].record()
 
-    if not opts.check_numerics:
-        end.record()
-        torch.cuda.synchronize()
-        dist.barrier()
+    torch.cuda.synchronize()
+    gpu_times = [
+        s.elapsed_time(e) for s, e in zip(start_events[opts.warmup_iters:],
+                                          end_events[opts.warmup_iters:])
+    ]
+
+    # Reset clock speeds
+    if opts.clock_speed > 0:
+        subprocess.run(
+            ["nvidia-smi", "-pm", "ENABLED", "-i", str(WORLD_RANK) ],
+            env=os.environ, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["nvidia-smi", "-rgc", "-i", str(WORLD_RANK)],
+            env=os.environ, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Compare against standard GEMM
     if opts.check_numerics:
@@ -371,9 +402,11 @@ def main(opts):
                 f"Outputs not close enough at index {m.item()} "
                 f"with {out_g.flatten()[m].item()} vs {ref_g.flatten()[m].item()} "
                 f"(diff {diff[m].item()}).")
-    else:
-        gemm_time = start.elapsed_time(end)/1000.
-        print(f"[rank:{world_rank}] GEMM Time = {gemm_time} sec\n", end='')
+        elif world_rank == 0:
+            print("[GLOBAL] PASSED\n", end='')
+
+    avg_gpu_time = sum(gpu_times[opts.warmup_iters:]) / opts.timing_iters
+    print(f"[rank:{world_rank}] Avg. GPU time : {avg_gpu_time} ms\n", end='')
 
     return 0
 
