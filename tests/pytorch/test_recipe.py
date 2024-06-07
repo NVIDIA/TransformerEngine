@@ -44,7 +44,6 @@ class TestFP8Recipe:
         fp8_format = transformer_engine.common.recipe.Format.HYBRID
         recipe = transformer_engine.common.recipe.DelayedScaling(
             margin=margin,
-            interval=1,
             fp8_format=fp8_format,
             amax_history_len=amax_history_len,
             amax_compute_algo=amax_compute_algo,

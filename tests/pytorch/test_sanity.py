@@ -83,28 +83,34 @@ model_configs = {
 
 fp8_recipes = [
     None, # Handles non-FP8 case
-    recipe.DelayedScaling(0, 1, recipe.Format.E4M3),
-    recipe.DelayedScaling(0, 1, recipe.Format.HYBRID),
+    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3),
+    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID),
     recipe.DelayedScaling(
-        0, 1, recipe.Format.E4M3, override_linear_precision=(False, False, True)
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
+        override_linear_precision=(False, False, True),
     ),
     recipe.DelayedScaling(
-        0, 1, recipe.Format.E4M3, amax_history_len=16, amax_compute_algo="most_recent"
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
+        amax_history_len=16,
+        amax_compute_algo="most_recent",
     ),
     recipe.DelayedScaling(
-        0, 1, recipe.Format.E4M3, amax_history_len=16, amax_compute_algo="max"
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
+        amax_history_len=16,
+        amax_compute_algo="max",
     ),
     recipe.DelayedScaling(
-        0,
-        1,
-        recipe.Format.E4M3,
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
         amax_history_len=16,
         amax_compute_algo=custom_amax_compute,
     ),
     recipe.DelayedScaling(
-        0,
-        1,
-        recipe.Format.E4M3,
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
         amax_history_len=16,
         scaling_factor_compute_algo=custom_amax_to_scale,
     ),
@@ -594,9 +600,8 @@ def test_sanity_gpt_126m():
     fp8_recipe = None
     if fp8_available:
         fp8_recipe = recipe.DelayedScaling(
-            0,
-            1,
-            recipe.Format.E4M3,
+            margin=0,
+            fp8_format=recipe.Format.E4M3,
             amax_history_len=16,
             amax_compute_algo="most_recent",
         )
@@ -657,9 +662,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
 
 def test_sanity_bert_126m():
     fp8_recipe = recipe.DelayedScaling(
-        0,
-        1,
-        recipe.Format.E4M3,
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
         amax_history_len=1,
         amax_compute_algo="most_recent",
     )
@@ -716,9 +720,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
 
 def test_sanity_T5_126m():
     fp8_recipe = recipe.DelayedScaling(
-        0,
-        1,
-        recipe.Format.E4M3,
+        margin=0,
+        fp8_format=recipe.Format.E4M3,
         amax_history_len=1,
         amax_compute_algo="most_recent",
     )
