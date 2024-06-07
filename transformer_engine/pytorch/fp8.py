@@ -9,7 +9,7 @@ from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
@@ -34,9 +34,7 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 
 def get_default_fp8_recipe() -> DelayedScaling:
-    """FP8 recipe if not provided by user
-    Margin = 0, interval = 1, E4M3
-    """
+    """FP8 recipe with default args."""
     return DelayedScaling()
 
 

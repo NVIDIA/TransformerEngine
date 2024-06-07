@@ -9,7 +9,7 @@ import warnings
 
 import torch
 from torch.utils._pytree import tree_map
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 from .constants import TE_DType
 from .cpp_extensions import fp8_cast_transpose_fused
@@ -346,7 +346,7 @@ class Float8Tensor(torch.Tensor):
     fp8_meta_index: int, optional
                     Index to access in FP8 meta tensors. Required if
                     fp8_meta is provided and otherwise ignored.
-    fp8_dtype: transformer_engine_extensions.DType, tex.DType.kFloat8E4M3
+    fp8_dtype: transformer_engine_torch.DType, tex.DType.kFloat8E4M3
                FP8 format.
     fp8_scale_inv: torch.Tensor
                    Reciprocal of the scaling factor applied when

@@ -7,7 +7,7 @@ import math
 from typing import Optional, Tuple, Union
 import paddle
 import paddle.nn.functional as F
-import transformer_engine_paddle as tex
+from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
 from .fp8 import FP8TensorMeta
 

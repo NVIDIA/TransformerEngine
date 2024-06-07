@@ -85,7 +85,7 @@ PyTorch
   inp = torch.randn(hidden_size, in_features, device="cuda")
 
   # Create an FP8 recipe. Note: All input args are optional.
-  fp8_recipe = recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
+  fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
   # Enable autocasting for the forward pass
   with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
@@ -120,7 +120,7 @@ Flax
   inp = jax.random.normal(data_rng, [BATCH, SEQLEN, HIDDEN], jnp.float32)
 
   # Create an FP8 recipe. Note: All input args are optional.
-  fp8_recipe = recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.HYBRID)
+  fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID)
 
   # Enable autocasting for the forward pass
   with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):

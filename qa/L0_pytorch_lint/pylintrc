@@ -1,6 +1,6 @@
 [MASTER]
 extension-pkg-whitelist=torch,
-                        transformer_engine_extensions
+                        transformer_engine_torch
 
 disable=too-many-locals,
         too-many-public-methods,
