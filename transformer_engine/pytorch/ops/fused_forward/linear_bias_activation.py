@@ -83,7 +83,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         if self._op_idxs["activation"] is None:
             activation_op = None  # pylint: disable=unused-variable
         else:
-            raise NotImplementedError("Activations are not yet supported")  ### TODO Implement
+            raise NotImplementedError("Activations are not yet supported")
 
         # FP8 metadata
         with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
