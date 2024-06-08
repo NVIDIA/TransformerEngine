@@ -5,9 +5,9 @@
 import inspect
 import warnings
 import functools
-import transformer_engine.pytorch.cpp_extensions as ext
 from enum import Enum
 from typing import Tuple
+import transformer_engine.pytorch.cpp_extensions as ext
 
 warnings.filterwarnings(
     "module", category=DeprecationWarning, module="transformer_engine.common.utils")
