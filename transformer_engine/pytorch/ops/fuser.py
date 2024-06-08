@@ -135,9 +135,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for ctx in basic_op_ctxs:
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
+        del saved_tensors
 
         # Apply backward ops
-        # TODO: Clear tensor data
         dx = grad_output
         grad_params = [None for _ in range(len(basic_ops))]
         for op, basic_op_idxs in backward_ops:

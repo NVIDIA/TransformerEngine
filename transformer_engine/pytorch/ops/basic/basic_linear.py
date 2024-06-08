@@ -35,6 +35,7 @@ from .._common import (
     is_float8_tensor,
     reshape,
 )
+from ...utils import clear_tensor_data
 
 def _wait_async(handle: Optional[Any]) -> None:
     """Wait for asynchronous communication to finish, if needed"""
@@ -1009,6 +1010,7 @@ class BasicLinear(BasicOperation):
         ctx.input_dims = input.size()
         ctx.input_requires_grad = input.requires_grad
         ctx.weight_requires_grad = self.weight.requires_grad
+        ctx.has_prev_op = prev_op is not None
 
         return output
 
@@ -1056,6 +1058,10 @@ class BasicLinear(BasicOperation):
             accumulate_into_grad_weight=accumulate_into_main_grad,
             grad_weight=grad_weight,
         )
+
+        # Clear input tensor if possible
+        if ctx.has_prev_op:
+            clear_tensor_data(x_local)
 
         if accumulate_into_main_grad:
             grad_weight = None

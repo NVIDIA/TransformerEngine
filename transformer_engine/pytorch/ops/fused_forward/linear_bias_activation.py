@@ -128,6 +128,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
+        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
 
         return output
 
