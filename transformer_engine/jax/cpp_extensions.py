@@ -21,13 +21,13 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax._src.interpreters import batching
 from jax._src import dispatch
 
-import transformer_engine_jax
-from transformer_engine_jax import DType as TEDType
-from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
-from transformer_engine_jax import NVTE_Activation_Type
+from transformer_engine import transformer_engine_jax
+from transformer_engine.transformer_engine_jax import DType as TEDType
+from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
 
 from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp

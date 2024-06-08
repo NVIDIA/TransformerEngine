@@ -38,6 +38,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
@@ -89,6 +91,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
+        fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -196,6 +199,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Use FP8 weights
             if weight_fp8 is None:
                 weight_fp8 = weight
+
             assert isinstance(weight_fp8, Float8Tensor)
 
             if fp8_meta["recipe"].fp8_mha:
@@ -281,6 +285,18 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
+            # Scatter intermediate/activation tensors saved for the backward pass
+            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+            #       shards/unshards the base weights so we don't do it ourselves
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                mu,
+                rsigma,
+                weight_fp8 if fp8 and not isinstance(weight, Float8Tensor) else None,
+                ln_out if weight.requires_grad else None,
+            )
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
@@ -331,6 +347,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
+
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp.shape)
@@ -360,6 +377,18 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Gather intermediate/activation tensors if needed
+            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+            #       shards/unshards the base weights so we don't do it ourselves
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                mu,
+                rsigma,
+                weight_fp8 if ctx.fp8 and not isinstance(weight, Float8Tensor) else None,
+                ln_out,
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -630,6 +659,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
+            clear_tensor_data(mu)
+            clear_tensor_data(rsigma)
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -657,6 +688,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
+        # Scatter fp8 weight buffers
+        if ctx.fp8 and not isinstance(weight, Float8Tensor):
+            _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
 
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
@@ -691,6 +726,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_overlap_rs_dgrad
             None,  # ub_overlap_ag
             None,  # ub_name
+            None,  # fsdp_group
         )
 
 
@@ -1175,6 +1211,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
+                self.fsdp_group,
             )
             out = fwd_fn(*args)
 

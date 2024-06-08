@@ -4,7 +4,7 @@
 
 """Fused Adam optimizer."""
 import torch
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from .multi_tensor_apply import multi_tensor_applier
 
 
