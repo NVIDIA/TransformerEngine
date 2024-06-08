@@ -1381,10 +1381,180 @@ class SWAFuncWithCP(torch.autograd.Function):
     def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
                 cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
                 deterministic, use_fused_attention, window_size):
-        return
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+
+        cp_size = get_distributed_world_size(cp_group)
+        rank = get_distributed_rank(cp_group)
+        send_dst = cp_global_ranks[(rank + 1) % cp_size]
+        recv_src = cp_global_ranks[(rank - 1) % cp_size]
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+
+        causal = ("causal" in attn_mask_type)
+        padding = ("padding" in attn_mask_type)
+        assert(not padding), f"{attn_mask_type} mask type is not supported!"
+
+        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+
+        seq_dim = qkv_format.index("s")
+        window_size_left = window_size[0]
+        assert(window_size_left > 0 and q.shape[seq_dim] % window_size_left == 0)
+        seqlen_window_size_ratio_q = q.shape[seq_dim] // window_size_left
+        assert(window_size_left > 0 and k.shape[seq_dim] % window_size_left == 0)
+        seqlen_window_size_ratio_k = k.shape[seq_dim] // window_size_left
+        if causal:
+            # [b, s, np, hn] -> [b, s//w, w, np, hn] or [s, b, np, hn] -> [s//w, w, b, np, hn]
+            q, k, v = [x.view(*x.shape[:seq_dim],
+                              x.shape[seq_dim]//window_size_left,
+                              window_size_left,
+                              *x.shape[(seq_dim+1):]) for x in [q, k, v]]
+        else:
+            assert False, "Only causal masking is supported now!"
+
+        kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+        if qkv_format == "bshd":
+            p2p_comm_buffer_send = kv[:, :, -1].contiguous()
+        elif qkv_format == "sbhd":
+            p2p_comm_buffer_send = kv[:, -1].contiguous()
+        else:
+            assert False, f"{qkv_format} format is not supported!"
+        p2p_comm_buffer_recv = torch.empty_like(p2p_comm_buffer_send)
+        # create two streams to resolve wave quantization issue of Flash Attn in each step
+        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
+        send_recv_reqs = []
+
+        # Flash Attn inputs
+        kv_inputs = [kv, None]
+        # Flash Attn outputs
+        out_per_step = [None, None]
+        softmax_lse_per_step = [None, None]
+        rng_states = [None, None]
+
+        fa_optional_backward_kwargs = {}
+        if _flash_attn_2_4_plus:
+            fa_optional_backward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_4_1_plus:
+            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+
+        for i in range(3):
+            if i < 2:
+                with torch.cuda.stream(flash_attn_streams[i]):
+                    for req in send_recv_reqs:
+                        req.wait()
+
+                    send_recv_reqs = flash_attn_p2p_communicate(rank,
+                                                                p2p_comm_buffer_send,
+                                                                send_dst,
+                                                                p2p_comm_buffer_recv,
+                                                                recv_src,
+                                                                cp_group,
+                                                                batch_p2p_comm)
+
+                    if i > 0:
+                        kv_inputs[i%2] = p2p_comm_buffer_recv
+
+                    if causal:
+                        if i == 0:
+                            if use_fused_attention:
+                                assert False, "Only FlashAttention is supported!"
+                            else:
+                                # [b, sq//w, w, np, hn] -> [b*sq, np, hn]
+                                q_ = q.view(-1, *q.shape[-2:])
+                                # [2, b, sk//w, w, np, hn] -> [2, b*sk, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_, kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q, cu_seqlens_k,
+                                    max_seqlen_q, max_seqlen_k,
+                                    dropout_p, softmax_scale,
+                                    causal=True, return_softmax=False,
+                                    window_size = window_size,
+                                    **fa_optional_forward_kwargs
+                                )
+                        else:
+                            if use_fused_attention:
+                                assert False, "Only FlashAttention is supported!"
+                            else:
+                                # [b, sq//w, w, np, hn] -> [b*w, np, hn]
+                                q_ = q[:, -1].contiguous().view(-1, *q.shape[-2:])
+                                # [2, b, w, np, hn] -> [2, b*w, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_, kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q//seqlen_window_size_ratio_q,
+                                    cu_seqlens_k//seqlen_window_size_ratio_k,
+                                    window_size_left, window_size_left,
+                                    dropout_p, softmax_scale,
+                                    causal=True, return_softmax=False,
+                                    window_size=[0, -1],
+                                    **fa_optional_forward_kwargs
+                                )
+                    else:
+                        assert False, f"Only causal masking is supported now!"
+
+            if i > 0:
+                with torch.cuda.stream(flash_attn_streams[i-1]):
+                    if i == 1:
+                        out = torch.zeros_like(q)
+                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        softmax_lse_ = softmax_lse.view(
+                            *softmax_lse.shape[:-1],
+                            softmax_lse.shape[-1]//window_size_left,
+                            window_size_left
+                        )
+                    else:
+                        flash_attn_fwd_softmax_lse_corretion(softmax_lse_[..., -1, :],
+                                                             softmax_lse_per_step[1])
+
+        softmax_lse = softmax_lse.to(torch.float)
+        for i in range(2):
+            if qkv_format == "bshd":
+                out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
+                out_ = out[:, -1]
+            elif qkv_format == "sbhd":
+                out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
+                out_ = out[-1]
+            else:
+                assert False, f"{qkv_format} format is not supported!"
+
+            if i == 0:
+                flash_attn_fwd_out_correction(out.view(*out_per_step[i].shape),
+                                              out_per_step[i],
+                                              seq_dim,
+                                              softmax_lse,
+                                              softmax_lse_per_step[i])
+            else:
+                flash_attn_fwd_out_correction(out_,
+                                              out_per_step[i],
+                                              seq_dim,
+                                              softmax_lse_[..., -1, :],
+                                              softmax_lse_per_step[i])
+
+        if use_fused_attention:
+            assert False, "Only FlashAttention is supported!"
+        else:
+            out = out.view(-1, *out.shape[-2:])
+
+        ctx.save_for_backward(
+            q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, *rng_states
+        )
+        ctx.cp_group = cp_group
+        ctx.cp_global_ranks = cp_global_ranks
+        ctx.dropout_p = dropout_p
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.softmax_scale = softmax_scale
+        ctx.qkv_format = qkv_format
+        ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
+        ctx.use_fused_attention = use_fused_attention
+        return out
 
     @staticmethod
     def backward(ctx, dout):
+        dq, dk, dv = None, None, None
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, \
                 None, None, None
 
