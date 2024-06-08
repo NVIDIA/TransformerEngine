@@ -1,17 +1,14 @@
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
 import pytest
+from typing import Callable, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from typing import Callable, Sequence, Union
-
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-""" from distributed_test_base import compare_ops """
+
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax import fp8_autocast
@@ -21,19 +18,19 @@ from transformer_engine.jax.sharding import HIDDEN_AXES, HIDDEN_TP_AXES, \
     BATCH_AXES, SEQLEN_TP_AXES, SEQLEN_AXES, \
     W_NO_SHARD_AXES, W_FSDP_AXES, W_TP_AXES, W_JOINED_AXES
 from transformer_engine.jax.sharding import MeshResource
-from utils import assert_allclose, is_devices_enough
+from utils import assert_allclose, assert_tree_like_allclose, is_devices_enough
 
 
 is_fp8_supported, reason = is_fp8_available()
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[64, 64, 32]]    # [seqlen, batch, hidden_in]
+INPUT_SHAPE = [[64, 128, 32]]    # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
 DOT_2_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_TP_AXES)
 INTERMEDIATE = 16
 
-
+# Only test with FSDP and TP as DP is not used
 def generate_fsdp_and_tp_configs():
     configs = []
     if is_devices_enough(2):
@@ -51,7 +48,6 @@ def generate_fsdp_and_tp_configs():
 class TestDistributedLayernormMLP:
 
     def generate_inputs(self, input_shape, activation_type, use_bias, dtype):
-        # m, n, k = shape
         batch, seqlen, hidden_in = input_shape
         hidden_out = hidden_in
 
@@ -88,7 +84,7 @@ class TestDistributedLayernormMLP:
         fp8_meta_pkg = FP8MetaPackage(2, fp8_max, fp8_metas_amax, fp8_metas_scale,
                                       fp8_metas_scale_inv)
 
-        if (multi_gpus):
+        if multi_gpus:
             layernorm_input_axes = LAYERNORM_INPUT_AXES
             dot_1_input_axes = DOT_1_INPUT_AXES
             dot_2_input_axes = DOT_2_INPUT_AXES
@@ -120,7 +116,6 @@ class TestDistributedLayernormMLP:
     def test_layernorm_fp8_mlp_primitive(self, mesh_config,
                                      activation_type, use_bias,
                                      input_shape, dtype):
-        # Only test with tp = 2 as dp is not used
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = 'rmsnorm'
 
@@ -181,7 +176,8 @@ class TestDistributedLayernormMLP:
         assert_allclose(multi_fwd, single_fwd, dtype=dtype)
         for i in range(len(inputs)):
             if multi_grads[i] is not None:
-                assert_allclose(multi_grads[i], single_grads[i], dtype=dtype)
+                assert_allclose(multi_grads[i], single_grads[i], dtype=dtype,
+                                err_msg=f'multi_grads[{i}] is not close')
 
     def _test_layernorm_mlp(self, mesh_config, activation_type, use_bias,
                             input_shape, dtype, use_fp8):
@@ -205,7 +201,8 @@ class TestDistributedLayernormMLP:
                 use_bias=use_bias,
             )
             params_single = ln_mlp_single.init(init_rngs, x)
-            mlp_out_single, ln_out_single = ln_mlp_single.apply(params_single, x, deterministic=True)
+            mlp_out_single, ln_out_single = ln_mlp_single.apply(params_single, x,
+                                                                deterministic=True)
 
         # Multi GPUs
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
@@ -235,9 +232,8 @@ class TestDistributedLayernormMLP:
                                                                    deterministic=True)
 
         # Make sure params values are the same
-        jax.tree_util.tree_map(lambda x, y: assert_allclose(x, y, dtype=dtype), \
-                               params_sharded['params'], params_single['params'])
-        assert_allclose(ln_out_sharded, ln_out_sharded, dtype=dtype)
+        assert_tree_like_allclose(params_sharded['params'], params_single['params'])
+        assert_allclose(ln_out_sharded, ln_out_single, dtype=dtype)
         assert_allclose(mlp_out_sharded, mlp_out_single, dtype=dtype)
 
     @pytest.mark.parametrize('input_shape', INPUT_SHAPE)
