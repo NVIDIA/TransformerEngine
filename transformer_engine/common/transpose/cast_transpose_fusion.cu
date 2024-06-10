@@ -213,25 +213,16 @@ reduce_dbias_kernel(OutputType*  const dbias_output,
                     const int num_rows) {
     using ComputeVec = Vec<ComputeType, nvec>;
     using OutputVec  = Vec<OutputType,  nvec>;
-    using ComputeVec = Vec<ComputeType, nvec>;
-    using OutputVec  = Vec<OutputType,  nvec>;
 
     const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (thread_id * nvec >= row_length) {
-        return;
-    }
     if (thread_id * nvec >= row_length) {
         return;
     }
 
     const ComputeType* const thread_in_base  = dbias_partial + thread_id * nvec;
     OutputType* const thread_out_base = dbias_output  + thread_id * nvec;
-    const ComputeType* const thread_in_base  = dbias_partial + thread_id * nvec;
-    OutputType* const thread_out_base = dbias_output  + thread_id * nvec;
 
-    const int stride_in_vec = row_length / nvec;
     const int stride_in_vec = row_length / nvec;
 
     ComputeVec ldg_vec;
@@ -243,22 +234,7 @@ reduce_dbias_kernel(OutputType*  const dbias_output,
             acc_vec.data.elt[e] += ldg_vec.data.elt[e];
         }
     }
-    ComputeVec ldg_vec;
-    ComputeVec acc_vec; acc_vec.clear();
-    for (int i = 0; i < num_rows; ++i) {
-        ldg_vec.load_from(thread_in_base, i * stride_in_vec);
-        #pragma unroll
-        for (int e = 0; e < nvec; ++e) {
-            acc_vec.data.elt[e] += ldg_vec.data.elt[e];
-        }
-    }
 
-    OutputVec  stg_vec;
-    #pragma unroll
-    for (int e = 0; e < nvec; ++e) {
-        stg_vec.data.elt[e] = OutputType(acc_vec.data.elt[e]);
-    }
-    stg_vec.store_to(thread_out_base, 0);
     OutputVec  stg_vec;
     #pragma unroll
     for (int e = 0; e < nvec; ++e) {
@@ -273,25 +249,12 @@ void reduce_dbias(const Tensor &workspace,
                   const size_t row_length,
                   const size_t num_rows,
                   const int nvec_out,
-void reduce_dbias(const Tensor &workspace,
-                  Tensor *dbias,
-                  const size_t row_length,
-                  const size_t num_rows,
-                  const int nvec_out,
                   cudaStream_t stream) {
     constexpr int reduce_dbias_store_bytes  = 8;  // stg.64
     constexpr int reduce_dbias_nvec         = reduce_dbias_store_bytes / sizeof(InputType);
-    constexpr int reduce_dbias_store_bytes  = 8;  // stg.64
-    constexpr int reduce_dbias_nvec         = reduce_dbias_store_bytes / sizeof(InputType);
 
     NVTE_CHECK(row_length % reduce_dbias_nvec == 0, "Unsupported shape.");
-    NVTE_CHECK(row_length % reduce_dbias_nvec == 0, "Unsupported shape.");
 
-    const size_t reduce_dbias_row_length = row_length;
-    const size_t reduce_dbias_num_rows = DIVUP(num_rows,
-                                               static_cast<size_t>(nvec_out * THREADS_PER_WARP));
-    const size_t reduce_dbias_num_blocks = DIVUP(row_length,
-                                                 reduce_dbias_num_threads * reduce_dbias_nvec);
     const size_t reduce_dbias_row_length = row_length;
     const size_t reduce_dbias_num_rows = DIVUP(num_rows,
                                                static_cast<size_t>(nvec_out * THREADS_PER_WARP));
@@ -326,20 +289,7 @@ cast_transpose_fused_kernel(const Param param,
     using IVec2 = Vec<IType2, nvec_in>;
     using OVec = Vec<OType, nvec_out>;
     using CVec = Vec<CType, nvec_in>;
-cast_transpose_fused_kernel(const Param param,
-                            const size_t row_length,
-                            const size_t num_rows,
-                            const size_t num_tiles) {
-    using IType = typename Param::InputType;
-    using IType2 = typename Param::InputType2;
-    using OType = typename Param::OutputType;
-    using CType = typename Param::ComputeType;
-    using IVec = Vec<IType, nvec_in>;
-    using IVec2 = Vec<IType2, nvec_in>;
-    using OVec = Vec<OType, nvec_out>;
-    using CVec = Vec<CType, nvec_in>;
 
-    extern __shared__ char scratch[];
     extern __shared__ char scratch[];
 
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -369,7 +319,6 @@ cast_transpose_fused_kernel(const Param param,
                               + (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP)
                                 * (THREADS_PER_WARP + 1);
 
-    CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
     CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
 
     IVec in[2][nvec_out];
@@ -507,20 +456,7 @@ cast_transpose_fused_kernel_notaligned(const Param param,
     using IVec2 = Vec<IType2, nvec_in>;
     using OVec = Vec<OType, nvec_out>;
     using CVec = Vec<CType, nvec_in>;
-cast_transpose_fused_kernel_notaligned(const Param param,
-                                       const size_t row_length,
-                                       const size_t num_rows,
-                                       const size_t num_tiles) {
-    using IType = typename Param::InputType;
-    using IType2 = typename Param::InputType2;
-    using OType = typename Param::OutputType;
-    using CType = typename Param::ComputeType;
-    using IVec = Vec<IType, nvec_in>;
-    using IVec2 = Vec<IType2, nvec_in>;
-    using OVec = Vec<OType, nvec_out>;
-    using CVec = Vec<CType, nvec_in>;
 
-    extern __shared__ char scratch[];
     extern __shared__ char scratch[];
 
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -557,20 +493,11 @@ cast_transpose_fused_kernel_notaligned(const Param param,
                                                                         : row_length_rest;
     const unsigned int tile_height = row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP
                                                                         : row_height_rest;
-    const size_t stride = row_length / nvec_in;
-    const size_t output_stride = num_rows / nvec_out;
-    const size_t row_length_rest = stride - tile_id_x * THREADS_PER_WARP;
-    const size_t row_height_rest = output_stride - tile_id_y * THREADS_PER_WARP;
-    const unsigned int tile_length = row_length_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                        : row_length_rest;
-    const unsigned int tile_height = row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                        : row_height_rest;
 
     OVec * const my_scratch = reinterpret_cast<OVec *>(scratch)
                               + (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP)
                               * (THREADS_PER_WARP + 1);
 
-    CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
     CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
 
     IVec in[2][nvec_out];
@@ -956,9 +883,6 @@ template <int nvec_in, int nvec_out,
           typename CType, typename IType, typename OType, typename ParamOP,
           CType (*OP1)(CType, const ParamOP&),
           CType (*OP2)(CType, const ParamOP&)>
-          typename CType, typename IType, typename OType, typename ParamOP,
-          CType (*OP1)(CType, const ParamOP&),
-          CType (*OP2)(CType, const ParamOP&)>
 __global__ void
 __launch_bounds__(cast_transpose_num_threads)
 dgated_act_cast_transpose_kernel(const IType * const input,
@@ -974,20 +898,7 @@ dgated_act_cast_transpose_kernel(const IType * const input,
     using IVec = Vec<IType, nvec_in>;
     using OVec = Vec<OType, nvec_out>;
     using CVec = Vec<CType, nvec_in>;
-                                 const IType * const act_input,
-                                 OType * const output_c,
-                                 OType * const output_t,
-                                 const CType * const scale_ptr,
-                                 CType * const amax,
-                                 CType * const scale_inv,
-                                 const size_t row_length,
-                                 const size_t num_rows,
-                                 const size_t num_tiles) {
-    using IVec = Vec<IType, nvec_in>;
-    using OVec = Vec<OType, nvec_out>;
-    using CVec = Vec<CType, nvec_in>;
 
-    extern __shared__ char scratch[];
     extern __shared__ char scratch[];
 
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -1026,38 +937,7 @@ dgated_act_cast_transpose_kernel(const IType * const input,
     OVec * const my_scratch = reinterpret_cast<OVec*>(scratch) +
                                 (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
                                 (THREADS_PER_WARP + 1);
-    const IType * const my_input_tile = input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * nvec_out) *
-                                                THREADS_PER_WARP;
-    const IType * const my_act_input_tile = act_input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP;
-    const IType * const my_gate_input_tile = act_input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP + row_length;
-    OType * const my_output_c_tile_0 = output_c + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP;
-    OType * const my_output_c_tile_1 = output_c + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP + row_length;
-    OType * const my_output_t_tile_0 = output_t + (tile_id_y * nvec_out +
-                                                tile_id_x * num_rows * nvec_in) *
-                                                THREADS_PER_WARP;
-    OType * const my_output_t_tile_1 = output_t + (tile_id_y * nvec_out +
-                                                tile_id_x * num_rows * nvec_in) *
-                                                THREADS_PER_WARP + row_length * num_rows;
-    OVec * const my_scratch = reinterpret_cast<OVec*>(scratch) +
-                                (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
-                                (THREADS_PER_WARP + 1);
 
-    IVec in[2][nvec_out];
-    IVec act_in[2][nvec_out];
-    IVec gate_in[2][nvec_out];
-    const unsigned int warp_id_in_tile = warp_id % n_warps_per_tile;
-    constexpr unsigned int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
-    OVec out_space_0[n_iterations][nvec_in];
-    OVec out_space_1[n_iterations][nvec_in];
     IVec in[2][nvec_out];
     IVec act_in[2][nvec_out];
     IVec gate_in[2][nvec_out];
@@ -1176,57 +1056,10 @@ dgated_act_cast_transpose_kernel(const IType * const input,
         }
         __syncthreads();
     }
-    for (unsigned int i = 0; i < nvec_in; ++i) {
-        #pragma unroll
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                    j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space_0[j][i];
-        }
-        __syncthreads();
-        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                THREADS_PER_WARP;
-        current_stride = i * output_stride +
-                        warp_id_in_tile * n_iterations * output_stride * nvec_in;
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile_0,
-                                                                    current_stride + my_place);
-            my_place = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
-            current_stride += output_stride * nvec_in;
-        }
-        __syncthreads();
-        #pragma unroll
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                    j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space_1[j][i];
-        }
-        __syncthreads();
-        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                THREADS_PER_WARP;
-        current_stride = i * output_stride +
-                        warp_id_in_tile * n_iterations * output_stride * nvec_in;
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile_1,
-                                                                    current_stride + my_place);
-            my_place = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
-            current_stride += output_stride * nvec_in;
-        }
-        __syncthreads();
-    }
 
     /* warp tile amax reduce*/
     max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
-    /* warp tile amax reduce*/
-    max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
 
-    if (threadIdx.x == 0) {
-        static_assert(std::is_same<CType, float>::value);
-        if (amax != nullptr) {
-            atomicMaxFloat(amax, max);
-        }
-        if (scale_inv != nullptr) {
-            reciprocal<float>(scale_inv, scale);
-        }
-    }
     if (threadIdx.x == 0) {
         static_assert(std::is_same<CType, float>::value);
         if (amax != nullptr) {
@@ -1260,17 +1093,7 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
     using CVec = Vec<CType, nvec_in>;
 
     extern __shared__ char scratch[];
-    extern __shared__ char scratch[];
 
-    const int warp_id = threadIdx.x / THREADS_PER_WARP;
-    const int my_id_in_warp = threadIdx.x % THREADS_PER_WARP;
-    const size_t num_tiles_x = (row_length + nvec_in * THREADS_PER_WARP - 1) /
-                                (nvec_in * THREADS_PER_WARP);
-    const size_t tile_id = blockIdx.x * blockDim.x / (THREADS_PER_WARP * n_warps_per_tile) +
-                            warp_id / n_warps_per_tile;
-    if (tile_id >= num_tiles) return;
-    const size_t tile_id_x = tile_id % num_tiles_x;
-    const size_t tile_id_y = tile_id / num_tiles_x;
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
     const int my_id_in_warp = threadIdx.x % THREADS_PER_WARP;
     const size_t num_tiles_x = (row_length + nvec_in * THREADS_PER_WARP - 1) /
@@ -1311,51 +1134,11 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
                                                                         : row_length_rest;
     const unsigned int tile_height = row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP
                                                                         : row_height_rest;
-    const IType * const my_input_tile = input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * nvec_out) *
-                                                THREADS_PER_WARP;
-    const IType * const my_act_input_tile = act_input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP;
-    const IType * const my_gate_input_tile = act_input + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP + row_length;
-    OType * const my_output_c_tile_0 = output_c + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP;
-    OType * const my_output_c_tile_1 = output_c + (tile_id_x * nvec_in +
-                                                tile_id_y * row_length * 2 * nvec_out) *
-                                                THREADS_PER_WARP + row_length;
-    OType * const my_output_t_tile_0 = output_t + (tile_id_y * nvec_out +
-                                                tile_id_x * num_rows * nvec_in) *
-                                                THREADS_PER_WARP;
-    OType * const my_output_t_tile_1 = output_t + (tile_id_y * nvec_out +
-                                                tile_id_x * num_rows * nvec_in) *
-                                                THREADS_PER_WARP + row_length * num_rows;
-    const size_t stride = row_length / nvec_in;
-    const size_t stride2 = 2 * row_length / nvec_in;
-    const size_t output_stride = num_rows / nvec_out;
-    const size_t row_length_rest = stride - tile_id_x * THREADS_PER_WARP;
-    const size_t row_height_rest = output_stride - tile_id_y * THREADS_PER_WARP;
-    const unsigned int tile_length = row_length_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                        : row_length_rest;
-    const unsigned int tile_height = row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                        : row_height_rest;
 
     OVec * const my_scratch = reinterpret_cast<OVec*>(scratch) +
                                 (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
                                 (THREADS_PER_WARP + 1);
-    OVec * const my_scratch = reinterpret_cast<OVec*>(scratch) +
-                                (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
-                                (THREADS_PER_WARP + 1);
 
-    IVec in[2][nvec_out];
-    IVec act_in[2][nvec_out];
-    IVec gate_in[2][nvec_out];
-    const unsigned int warp_id_in_tile = warp_id % n_warps_per_tile;
-    constexpr unsigned int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
-    OVec out_space_0[n_iterations][nvec_in];
-    OVec out_space_1[n_iterations][nvec_in];
     IVec in[2][nvec_out];
     IVec act_in[2][nvec_out];
     IVec gate_in[2][nvec_out];
@@ -1408,9 +1191,7 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
                         in[current_in][j].load_from(my_input_tile,
                                         current_stride + my_place_in + stride * (nvec_out + j));
                         act_in[current_in][j].load_from(my_act_input_tile,
-                        act_in[current_in][j].load_from(my_act_input_tile,
                                         current_stride2 + my_place_in + stride2 * (nvec_out + j));
-                        gate_in[current_in][j].load_from(my_gate_input_tile,
                         gate_in[current_in][j].load_from(my_gate_input_tile,
                                         current_stride2 + my_place_in + stride2 * (nvec_out + j));
                     } else {
@@ -1502,63 +1283,10 @@ dgated_act_cast_transpose_kernel_notaligned(const IType * const input,
         }
         __syncthreads();
     }
-    for (unsigned int i = 0; i < nvec_in; ++i) {
-        #pragma unroll
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                        j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space_0[j][i];
-        }
-        __syncthreads();
-        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                THREADS_PER_WARP;
-        current_stride = i * output_stride +
-                        warp_id_in_tile * n_iterations * output_stride * nvec_in;
-        for (unsigned int j = 0; warp_id_in_tile * n_iterations + j < tile_length; ++j) {
-            const bool valid_store = my_place < tile_height;
-            if (valid_store) {
-                my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile_0,
-                                                                        current_stride + my_place);
-            }
-            my_place = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
-            current_stride += output_stride * nvec_in;
-        }
-        __syncthreads();
-        #pragma unroll
-        for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                        j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space_1[j][i];
-        }
-        __syncthreads();
-        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                THREADS_PER_WARP;
-        current_stride = i * output_stride +
-                        warp_id_in_tile * n_iterations * output_stride * nvec_in;
-        for (unsigned int j = 0; warp_id_in_tile * n_iterations + j < tile_length; ++j) {
-            const bool valid_store = my_place < tile_height;
-            if (valid_store) {
-                my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile_1,
-                                                                        current_stride + my_place);
-            }
-            my_place = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
-            current_stride += output_stride * nvec_in;
-        }
-        __syncthreads();
-    }
 
     /* warp tile amax reduce*/
     max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
-    /* warp tile amax reduce*/
-    max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
 
-    if (threadIdx.x == 0) {
-        static_assert(std::is_same<CType, float>::value);
-        if (amax != nullptr)  {
-            atomicMaxFloat(amax, max);
-        }
-        if (scale_inv != nullptr) {
-            reciprocal<float>(scale_inv, scale);
-        }
-    }
     if (threadIdx.x == 0) {
         static_assert(std::is_same<CType, float>::value);
         if (amax != nullptr)  {
@@ -1582,17 +1310,7 @@ void dgated_act_cast_transpose(const Tensor &input,
     CheckInputTensor(gated_act_input, "dgated_act_cast_transpose_gated_act_input");
     CheckOutputTensor(*cast_output, "dgated_act_cast_transpose_cast_output");
     CheckOutputTensor(*transposed_output, "dgated_act_cast_transpose_transposed_output");
-    CheckInputTensor(input, "dgated_act_cast_transpose_input");
-    CheckInputTensor(gated_act_input, "dgated_act_cast_transpose_gated_act_input");
-    CheckOutputTensor(*cast_output, "dgated_act_cast_transpose_cast_output");
-    CheckOutputTensor(*transposed_output, "dgated_act_cast_transpose_transposed_output");
 
-    NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
-    NVTE_CHECK(gated_act_input.data.shape.size() == 2, "Input must have 2 dimensions.");
-    NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
-    NVTE_CHECK(transposed_output->data.shape.size() == 2, "T output must have 2 dimensions.");
-    const size_t row_length = input.data.shape[1];
-    const size_t num_rows = input.data.shape[0];
     NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
     NVTE_CHECK(gated_act_input.data.shape.size() == 2, "Input must have 2 dimensions.");
     NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
@@ -1606,24 +1324,9 @@ void dgated_act_cast_transpose(const Tensor &input,
     NVTE_CHECK(cast_output->data.shape[1] == row_length * 2, "Wrong dimension of output.");
     NVTE_CHECK(transposed_output->data.shape[0] == row_length * 2, "Wrong dimension of T output.");
     NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
-    NVTE_CHECK(gated_act_input.data.shape[0] == num_rows, "Wrong dimension of output.");
-    NVTE_CHECK(gated_act_input.data.shape[1] == row_length * 2, "Wrong dimension of output.");
-    NVTE_CHECK(cast_output->data.shape[0] == num_rows, "Wrong dimension of output.");
-    NVTE_CHECK(cast_output->data.shape[1] == row_length * 2, "Wrong dimension of output.");
-    NVTE_CHECK(transposed_output->data.shape[0] == row_length * 2, "Wrong dimension of T output.");
-    NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
     NVTE_CHECK(input.data.dtype == gated_act_input.data.dtype, "Types of both inputs must match.");
-    NVTE_CHECK(input.data.dtype == gated_act_input.data.dtype, "Types of both inputs must match.");
 
-    NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
-               "C and T outputs need to have the same type.");
-    NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
-               "C and T outputs need to share amax tensor.");
-    NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
-               "C and T outputs need to share scale tensor.");
-    NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
-               "C and T outputs need to share scale inverse tensor.");
     NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
                "C and T outputs need to have the same type.");
     NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
@@ -1643,16 +1346,6 @@ void dgated_act_cast_transpose(const Tensor &input,
             constexpr int otype_size = sizeof(OutputType);
             constexpr int nvec_in = desired_load_size_dact / itype_size;
             constexpr int nvec_out = desired_store_size_dact / otype_size;
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
-            using InputType2 = InputType;
-            /* dact fusion kernel uses more registers */
-            constexpr int desired_load_size_dact = 4;
-            constexpr int desired_store_size_dact = 4;
-            constexpr int itype_size = sizeof(InputType);
-            constexpr int otype_size = sizeof(OutputType);
-            constexpr int nvec_in = desired_load_size_dact / itype_size;
-            constexpr int nvec_out = desired_store_size_dact / otype_size;
 
             NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
             NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
@@ -1661,56 +1354,7 @@ void dgated_act_cast_transpose(const Tensor &input,
                             DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
             const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
             const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
-            NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
-            NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
-            const size_t n_tiles =
-                            DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
-                            DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
-            const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
-            const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
 
-            const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
-                                    num_rows % (nvec_out * THREADS_PER_WARP) == 0;
-            const size_t shmem_size = cast_transpose_num_threads / n_warps_per_tile *
-                                       (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>);
-            if (full_tile) {
-                cudaFuncSetAttribute(
-                    dgated_act_cast_transpose_kernel
-                        <nvec_in, nvec_out, ComputeType, InputType, OutputType, Empty, OP1, OP2>,
-                    cudaFuncAttributePreferredSharedMemoryCarveout,
-                    100);
-
-                dgated_act_cast_transpose_kernel
-                    <nvec_in, nvec_out, ComputeType, InputType, OutputType, Empty, OP1, OP2>
-                    <<<n_blocks, cast_transpose_num_threads, shmem_size, stream>>>(
-                        reinterpret_cast<const InputType *>(input.data.dptr),
-                        reinterpret_cast<const InputType *>(gated_act_input.data.dptr),
-                        reinterpret_cast<OutputType *>(cast_output->data.dptr),
-                        reinterpret_cast<OutputType *>(transposed_output->data.dptr),
-                        reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
-                        reinterpret_cast<fp32 *>(cast_output->amax.dptr),
-                        reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
-                        row_length, num_rows, n_tiles);
-            } else {
-                cudaFuncSetAttribute(
-                    dgated_act_cast_transpose_kernel_notaligned
-                        <nvec_in, nvec_out, ComputeType, InputType, OutputType, Empty, OP1, OP2>,
-                    cudaFuncAttributePreferredSharedMemoryCarveout,
-                    100);
-                dgated_act_cast_transpose_kernel_notaligned
-                    <nvec_in, nvec_out, ComputeType, InputType, OutputType, Empty, OP1, OP2>
-                    <<<n_blocks, cast_transpose_num_threads, shmem_size, stream>>>(
-                        reinterpret_cast<const InputType *>(input.data.dptr),
-                        reinterpret_cast<const InputType *>(gated_act_input.data.dptr),
-                        reinterpret_cast<OutputType *>(cast_output->data.dptr),
-                        reinterpret_cast<OutputType *>(transposed_output->data.dptr),
-                        reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
-                        reinterpret_cast<fp32 *>(cast_output->amax.dptr),
-                        reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
-                        row_length, num_rows, n_tiles);
-            }
-        ); // NOLINT(*)
-    );  // NOLINT(*)
             const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
                                     num_rows % (nvec_out * THREADS_PER_WARP) == 0;
             const size_t shmem_size = cast_transpose_num_threads / n_warps_per_tile *
@@ -1837,8 +1481,6 @@ void nvte_cast_transpose_dbias_dsilu(const NVTETensor input,
 
 void nvte_cast_transpose_dbias_drelu(const NVTETensor input,
                                      const NVTETensor relu_input,
-void nvte_cast_transpose_dbias_drelu(const NVTETensor input,
-                                     const NVTETensor relu_input,
                                      NVTETensor cast_output,
                                      NVTETensor transposed_output,
                                      NVTETensor dbias,
@@ -1913,7 +1555,6 @@ void nvte_cast_transpose_dbias_dqgelu(const NVTETensor input,
 }
 
 void nvte_dgeglu_cast_transpose(const NVTETensor input,
-void nvte_dgeglu_cast_transpose(const NVTETensor input,
                                 const NVTETensor gated_act_input,
                                 NVTETensor cast_output,
                                 NVTETensor transposed_output,
@@ -1951,7 +1592,6 @@ void nvte_dswiglu_cast_transpose(const NVTETensor input,
         stream);
 }
 
-void nvte_dreglu_cast_transpose(const NVTETensor input,
 void nvte_dreglu_cast_transpose(const NVTETensor input,
                                 const NVTETensor gated_act_input,
                                 NVTETensor cast_output,
