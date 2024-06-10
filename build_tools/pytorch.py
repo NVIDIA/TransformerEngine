@@ -11,7 +11,6 @@ import setuptools
 from .utils import (
     all_files_in_dir,
     cuda_version,
-    userbuffers_enabled,
 )
 
 
@@ -28,6 +27,9 @@ def setup_pytorch_extension(
     sources = [
         csrc_source_files / "common.cu",
         csrc_source_files / "ts_fp8_op.cpp",
+        csrc_source_files / "userbuffers" / "ipcsocket.cc",
+        csrc_source_files / "userbuffers" / "userbuffers.cu",
+        csrc_source_files / "userbuffers" / "userbuffers-host.cpp",
     ] + all_files_in_dir(extensions_dir)
 
     # Header files
@@ -37,6 +39,7 @@ def setup_pytorch_extension(
         common_header_files / "common" / "include",
         csrc_header_files,
     ]
+
     # Compiler flags
     cxx_flags = ["-O3"]
     nvcc_flags = [
@@ -68,12 +71,17 @@ def setup_pytorch_extension(
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
     # userbuffers support
-    if userbuffers_enabled():
-        if os.getenv("MPI_HOME"):
-            mpi_home = Path(os.getenv("MPI_HOME"))
-            include_dirs.append(mpi_home / "include")
-        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
-        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
+    libraries = []
+    library_dirs = []
+    if os.getenv("UB_MPI_BOOTSTRAP"):
+        assert os.getenv("MPI_HOME") is not None, \
+            "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
+        mpi_home = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_home / "include")
+        cxx_flags.append("-DUB_MPI_BOOTSTRAP")
+        nvcc_flags.append("-DUB_MPI_BOOTSTRAP")
+        libraries.append("mpi")
+        library_dirs.append(mpi_home / "lib")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -88,4 +96,6 @@ def setup_pytorch_extension(
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        libraries=libraries,
+        library_dirs=library_dirs,
     )

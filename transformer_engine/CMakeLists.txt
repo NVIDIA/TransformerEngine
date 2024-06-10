@@ -37,7 +37,3 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_subdirectory(common)
-if(NVTE_WITH_USERBUFFERS)
-    message(STATUS "userbuffers support enabled")
-    add_subdirectory(pytorch/csrc/userbuffers)
-endif()
