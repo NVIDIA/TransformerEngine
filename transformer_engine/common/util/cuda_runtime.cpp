@@ -98,7 +98,7 @@ const std::string &include_directory(bool required) {
       {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
       if (p.empty()) {
-        p = getenv<Path>(env);
+        p = getenv<Path>(env.c_str());
       }
       if (!p.empty()) {
         if (file_exists(p / "cuda_runtime.h")) {
