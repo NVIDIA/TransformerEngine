@@ -16,7 +16,7 @@ from transformer_engine.pytorch.fp8 import (
     get_default_fp8_recipe,
 )
 import transformer_engine.pytorch.ops as te_ops
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
