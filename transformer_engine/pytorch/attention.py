@@ -1403,7 +1403,8 @@ class SWAFuncWithCP(torch.autograd.Function):
         assert(window_size_left > 0 and k.shape[seq_dim] % window_size_left == 0)
         seqlen_window_size_ratio_k = k.shape[seq_dim] // window_size_left
         if causal:
-            # [b, s, np, hn] -> [b, s//w, w, np, hn] or [s, b, np, hn] -> [s//w, w, b, np, hn]
+            # [b, s, np, hn] -> [b, s//w, w, np, hn] or \
+            # [s, b, np, hn] -> [s//w, w, b, np, hn]
             q, k, v = [x.view(*x.shape[:seq_dim],
                               x.shape[seq_dim]//window_size_left,
                               window_size_left,
