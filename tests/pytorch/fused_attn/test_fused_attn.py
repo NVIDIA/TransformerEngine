@@ -38,8 +38,8 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     is_bf16_compatible,
 )
-import transformer_engine_extensions as tex
-from transformer_engine_extensions import NVTE_Fused_Attn_Backend
+import transformer_engine_torch as tex
+from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
@@ -1197,7 +1197,6 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
 
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
-        interval=1,
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
@@ -1357,7 +1356,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
 
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
-        interval=1,
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
@@ -1557,7 +1555,6 @@ def _run_custom_mha_fp8(dtype, config, backend):
 
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
-        interval=1,
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",

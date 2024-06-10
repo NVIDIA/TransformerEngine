@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 
+
 def te_version() -> str:
     """Transformer Engine version string
 
@@ -15,9 +16,10 @@ def te_version() -> str:
 
     """
     root_path = Path(__file__).resolve().parent
-    with open(root_path / "VERSION", "r") as f:
+    with open(root_path / "VERSION.txt", "r") as f:
         version = f.readline().strip()
-    if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")):
+    if (not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0"))
+        and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
         try:
             output = subprocess.run(
                 ["git", "rev-parse" , "--short", "HEAD"],

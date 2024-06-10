@@ -13,9 +13,12 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+from transformer_engine.transformer_engine_jax import DType
+from transformer_engine.transformer_engine_jax import get_cublasLt_version
+from transformer_engine.transformer_engine_jax import (
+    get_cuda_version,
+    get_device_compute_capability,
+)
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import MeshResource
@@ -168,7 +171,6 @@ class FP8Helper:
     FP8_FORMAT: Format = Format.HYBRID
     FWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[0]
     BWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[1]
-    UPDATE_FP8META_INTERVAL: int = 1
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
     NUM_META_PER_GEMM: int = 3
@@ -194,7 +196,6 @@ class FP8Helper:
     @staticmethod
     def initialize(margin: float = 0.0,
                    fp8_format: Format = Format.HYBRID,
-                   update_fp8meta_interval: int = 1,
                    amax_history_len: int = 1,
                    amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX) -> None:
         """
@@ -205,7 +206,6 @@ class FP8Helper:
         FP8Helper.FP8_FORMAT = fp8_format
         FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = \
             _format2dtypes(FP8Helper.FP8_FORMAT)
-        FP8Helper.UPDATE_FP8META_INTERVAL = update_fp8meta_interval
         FP8Helper.AMAX_HISTORY_LEN = amax_history_len
         FP8Helper.AMAX_COMPUTE_ALGO = amax_compute_algo
         FP8Helper.FP8_2X_ACC_FPROP = False
@@ -222,7 +222,6 @@ class FP8Helper:
         FP8Helper.FP8_FORMAT = Format.HYBRID
         FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = \
             _format2dtypes(FP8Helper.FP8_FORMAT)
-        FP8Helper.UPDATE_FP8META_INTERVAL = 1
         FP8Helper.AMAX_HISTORY_LEN = 1024
         FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
 
@@ -404,11 +403,10 @@ def fp8_autocast(enabled: bool = False,
                     pjit(transformer.init, ...)(...)
 
     .. note::
-        We only support :attr:`margin`, :attr:`fp8_format`,
-        :attr:`interval`, :attr:`amax_history_len` and
-        :attr:`amax_compute_algo`(with value 'max' and 'most_recent')
-        in recipe.DelayedScaling currently. Other parameters in
-        recipe.DelayedScaling will trigger an assertion.
+        We only support :attr:`margin`, :attr:`fp8_format`, :attr:`amax_history_len`
+        , and :attr:`amax_compute_algo`(with value 'max' and 'most_recent') in
+        recipe.DelayedScaling currently. Other parameters in recipe.DelayedScaling
+        will trigger an assertion.
 
     Parameters
     ----------
@@ -448,7 +446,6 @@ def fp8_autocast(enabled: bool = False,
 
                 FP8Helper.initialize(margin=fp8_recipe.margin,
                                      fp8_format=fp8_recipe.fp8_format,
-                                     update_fp8meta_interval=fp8_recipe.interval,
                                      amax_history_len=fp8_recipe.amax_history_len,
                                      amax_compute_algo=amax_compute_algo)
             yield
@@ -509,10 +506,9 @@ def get_delayed_scaling():
     Obtain an instance of  DelayedScaling which is set via fp8_autocast.
 
     .. note::
-        We only store :attr:`margin`, :attr:`fp8_format`, :attr:`interval`,
-        :attr:`amax_history_len` and :attr:`amax_compute_algo` via fp8_autocast.
-        Other parameters in recipe.DelayedScaling would be returned as the default
-        values.
+        We only store :attr:`margin`, :attr:`fp8_format`, :attr:`amax_history_len`
+        , and :attr:`amax_compute_algo` via fp8_autocast. Other parameters in
+        recipe.DelayedScaling would be returned as the default values.
 
     Returns
     -------
@@ -522,7 +518,6 @@ def get_delayed_scaling():
     amax_compute_algo = "max" if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX \
                         else "most_recent"
     return DelayedScaling(margin=int(FP8Helper.MARGIN),
-                          interval=FP8Helper.UPDATE_FP8META_INTERVAL,
                           fp8_format=FP8Helper.FP8_FORMAT,
                           amax_history_len=FP8Helper.AMAX_HISTORY_LEN,
                           amax_compute_algo=amax_compute_algo)
