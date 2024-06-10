@@ -4068,7 +4068,7 @@ class DotProductAttention(torch.nn.Module):
         # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
         if window_size not in ((-1, -1), (-1, 0)):
             use_fused_attention = False
-            if (not _flash_attn_2_3_plus) or context_parallel:
+            if not _flash_attn_2_3_plus:
                 use_flash_attention = False
 
         # Filter: Attention mask type.
