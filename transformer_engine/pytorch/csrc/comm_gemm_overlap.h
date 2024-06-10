@@ -69,9 +69,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
   std::vector<at::cuda::CUDAStream> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
-  int comm_sms;
-  int cga_size;
-  int use_ce;
+  int _num_comm_sm;
+  int _cga_size;
+  int _use_ce;
   bool _atomic_gemm;
 
   UbufCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm, int comm_cga_size,
@@ -85,9 +85,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
       comm_created = true;
     }
-    use_ce = 0;
-    comm_sms = num_comm_sm;
-    cga_size = comm_cga_size;
+    _use_ce = 0;
+    _num_comm_sm = num_comm_sm;
+    _cga_size = comm_cga_size;
     _empty_tensor = empty_tensor;
 
     // Allocate and register extra userbuffers
@@ -145,9 +145,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
                at::Tensor D_amax, at::Tensor bias, transformer_engine::DType bias_type,
                at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize,
                bool accumulate, bool use_split_accumulator, int comm_type, at::Tensor rs_output) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = comm_sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     // Get the current userbuf offset
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
@@ -219,9 +219,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                               at::Tensor rs_output) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = comm_sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     // Get GEMM dimensions
     int m = A.size(0);
     int k = A.size(1);
@@ -327,9 +327,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output) {
     // Get GEMM dimensions
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = comm_sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     int m = A.size(0);
     int k = A.size(1);
     int n = B.size(0);
@@ -547,14 +547,14 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   at::cuda::CUDAStream _stream_recv = at::cuda::getStreamFromPool(true);
   std::vector<at::cuda::CUDAStream> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_send, _stop_recv;
-  int use_ce;
-  int sms;
-  int cga_size;
+  int _use_ce;
+  int _num_comm_sm;
+  int _cga_size;
   bool _atomic_gemm;
 
   UbufP2PCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm,
                      int comm_cga_size, bool set_sm_margin, bool aggregate2, int num_max_streams,
-                     bool is_reduce_scatter, bool atomic_gemm, torch::Tensor empty_tensor) {
+                     bool is_reduce_scatter, bool atomic_gemm, bool use_ce, torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (rank == 0) {
@@ -563,9 +563,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
       comm_created = true;
     }
-    use_ce = 1;
-    sms = 1;
-    cga_size = 1;
+    _use_ce = use_ce;
+    _num_comm_sm = num_comm_sm;
+    _cga_size = comm_cga_size;
 
     _empty_tensor = empty_tensor;
     // Create workspace tensor with userbuffer
@@ -661,9 +661,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
       size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     // Get GEMM dimensions between TN and NN input layouts
     const int m = (transa) ? A.size(0) : A.size(1);
     const int k = (transa) ? A.size(1) : A.size(0);
@@ -775,9 +775,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
                                  bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     // Get GEMM dimensions between TN and NN input layouts
     const int m = (transa) ? A.size(0) : A.size(1);
     const int k = (transa) ? A.size(1) : A.size(0);
@@ -950,9 +950,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     int k = A.size(1);
     int n = B.size(0);
 
@@ -1032,9 +1032,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
-    _ub_comm->use_ce = use_ce;
-    _ub_comm->sms = sms;
-    _ub_comm->cga_size = cga_size;
+    _ub_comm->use_ce = _use_ce;
+    _ub_comm->sms = _num_comm_sm;
+    _ub_comm->cga_size = _cga_size;
     int k = A.size(1);
     int n = B.size(0);
 

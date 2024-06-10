@@ -114,6 +114,7 @@ def initialize_ub(
         num_splits: int = 0,
         aggregate: int = 0,
         atomic_gemm: int = 0,
+        use_ce: int = 1,
         fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
@@ -166,6 +167,7 @@ def initialize_ub(
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
                     is_reduce_scatter,      # overlap with reduce scatter
                     atomic_gemm,            # use a single GEMM with atomic-counters
+                    use_ce,                 # use copy engine for P2P communications
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:
@@ -195,12 +197,13 @@ def initialize_ub(
         if ub_cfgs is not None and name in ub_cfgs:
             ub_cfg = ub_cfgs[name]
             method = ub_cfg.get("method", get_method(name))
-            num_sm = ub_cfg.get("num_sm", 16)
-            cga_size = ub_cfg.get("cga_size", 2)
+            num_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
+            cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
             num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
             set_sm_margin = ub_cfg.get("set_sm_margin", 0)
             aggregate = ub_cfg.get("aggregate", 0)
             atomic_gemm = ub_cfg.get("atomic_gemm", 0)
+            use_ce = ub_cfg.get("use_ce", 1)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = ((name in layers_all_gather_overlap) or
@@ -215,6 +218,7 @@ def initialize_ub(
                 num_splits,
                 aggregate,
                 atomic_gemm,
+                use_ce,
                 fp8_buf,
             )
         else:
