@@ -74,14 +74,18 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
                                           const int sm_margin,
-                                          const bool zero_centered_gamma
+                                          const bool zero_centered_gamma,
+                                          const int scale_offset,
+                                          const int amax_offset,
+                                          const int scale_inv_offset
 ) {
     using namespace transformer_engine;
 
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(otype)));
     return layernorm_fwd_fp8_noalloc(input, weight, bias, eps,
                                      scale, ln_out, amax, scale_inv,
-                                     otype, sm_margin, zero_centered_gamma);
+                                     otype, sm_margin, zero_centered_gamma,
+                                     scale_offset, amax_offset, scale_inv_offset);
 }
 
 
@@ -95,35 +99,49 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                   at::Tensor scale_inv,
                                                   transformer_engine::DType otype,
                                                   const int sm_margin,
-                                                  const bool zero_centered_gamma
+                                                  const bool zero_centered_gamma,
+                                                  const int scale_offset,
+                                                  const int amax_offset,
+                                                  const int scale_inv_offset
 ) {
     using namespace transformer_engine;
 
+    // Choose kernel implementation
+    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+
+    // Tensor dimensions
     size_t N = static_cast<size_t>(input.size(0));
     size_t H = static_cast<size_t>(input.size(1));
 
-    DType itype = GetTransformerEngineDType(input.scalar_type());
+    // Get pointers for FP8 scale, amax, scale-inverse
+    void* scale_dptr = getDataPtr(scale, scale_offset);
+    void* amax_dptr = getDataPtr(amax, amax_offset);
+    void* scale_inv_dptr = getDataPtr(scale_inv, scale_inv_offset);
 
+    // Construct Transformer Engine tensors
+    DType itype = GetTransformerEngineDType(input.scalar_type());
     auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
     auto gamma_cu     = makeTransformerEngineTensor(weight);
     auto beta_cu      = makeTransformerEngineTensor(bias);
-    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
-                                                    getDataPtr(amax), getDataPtr(scale),
-                                                    getDataPtr(scale_inv));
+    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(),
+                                                    {N, H},
+                                                    otype,
+                                                    amax_dptr,
+                                                    scale_dptr,
+                                                    scale_inv_dptr);
     auto mu_cu        = makeTransformerEngineTensor(mu);
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
-    transformer_engine::TensorWrapper workspace, barrier;
 
-    // This call populates workspace and barrier tensors with the required config
-    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    // Query workspace sizes
+    transformer_engine::TensorWrapper workspace, barrier;
     func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
          mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
          workspace.data(), barrier.data());
 
-    // Fill workspace and barrier
+    // Allocate workspaces
     auto workspace_data = allocateSpace(workspace.shape(),
                                         workspace.dtype());
     auto barrier_data = allocateSpace(barrier.shape(),
@@ -136,7 +154,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                             barrier.shape(),
                                             barrier.dtype());
 
-    // Actual call to fwd kernel
+    // Launch kernel
     func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
          mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
@@ -155,12 +173,19 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor scale_inv,
                                  transformer_engine::DType otype,
                                  const int sm_margin,
-                                 const bool zero_centered_gamma
+                                 const bool zero_centered_gamma,
+                                 const int scale_offset,
+                                 const int amax_offset,
+                                 const int scale_inv_offset
+
 ) {
     // This is a specialized version of layernorm_fwd_fp8, optimized for inference,
     // which only returns the normalized output.
     std::vector<at::Tensor> out = layernorm_fwd_fp8(
-      input, weight, bias, eps, scale, amax, scale_inv, otype, sm_margin, zero_centered_gamma);
+      input, weight, bias, eps,
+      scale, amax, scale_inv,
+      otype, sm_margin, zero_centered_gamma,
+      scale_offset, amax_offset, scale_inv_offset);
     return out[0];
 }
 
@@ -273,14 +298,18 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
                                         at::Tensor scale_inv,
                                         transformer_engine::DType otype,
                                         const int sm_margin,
-                                        const bool zero_centered_gamma
+                                        const bool zero_centered_gamma,
+                                        const int scale_offset,
+                                        const int amax_offset,
+                                        const int scale_inv_offset
 ) {
     using namespace transformer_engine;
 
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(otype)));
     return rmsnorm_fwd_fp8_noalloc(input, weight, eps,
                                    scale, ln_out, amax, scale_inv,
-                                   otype, sm_margin, zero_centered_gamma);
+                                   otype, sm_margin, zero_centered_gamma,
+                                   scale_offset, amax_offset, scale_inv_offset);
 }
 
 
@@ -293,32 +322,46 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 at::Tensor scale_inv,
                                                 transformer_engine::DType otype,
                                                 const int sm_margin,
-                                                const bool zero_centered_gamma
+                                                const bool zero_centered_gamma,
+                                                const int scale_offset,
+                                                const int amax_offset,
+                                                const int scale_inv_offset
 ) {
     using namespace transformer_engine;
 
+    // Choose kernel implementation
+    const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
+
+    // Tensor dimensions
     size_t N = static_cast<size_t>(input.size(0));
     size_t H = static_cast<size_t>(input.size(1));
 
-    DType itype = GetTransformerEngineDType(input.scalar_type());
+    // Get pointers for FP8 scale, amax, scale-inverse
+    void* scale_dptr = getDataPtr(scale, scale_offset);
+    void* amax_dptr = getDataPtr(amax, amax_offset);
+    void* scale_inv_dptr = getDataPtr(scale_inv, scale_inv_offset);
 
+    // Construct Transformer Engine tensors
+    DType itype = GetTransformerEngineDType(input.scalar_type());
     auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
     auto gamma_cu     = makeTransformerEngineTensor(weight);
-    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
-                                                    getDataPtr(amax), getDataPtr(scale),
-                                                    getDataPtr(scale_inv));
+    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(),
+                                                    {N, H},
+                                                    otype,
+                                                    amax_dptr,
+                                                    scale_dptr,
+                                                    scale_inv_dptr);
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
-    transformer_engine::TensorWrapper workspace, barrier;
 
-    // This call populates workspace and barrier tensors with the required config
-    const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
+    // Query workspace sizes
+    transformer_engine::TensorWrapper workspace, barrier;
     func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(),
          rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
          workspace.data(), barrier.data());
 
-    // Fill workspace and barrier
+    // Allocate workspaces
     auto workspace_data = allocateSpace(workspace.shape(),
                                         workspace.dtype());
     auto barrier_data = allocateSpace(barrier.shape(),
@@ -331,7 +374,7 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                             barrier.shape(),
                                             barrier.dtype());
 
-    // Actual call to fwd kernel
+    // Launch kernel
     func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(),
          rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
@@ -349,12 +392,18 @@ at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
                                at::Tensor scale_inv,
                                transformer_engine::DType otype,
                                const int sm_margin,
-                               const bool zero_centered_gamma
+                               const bool zero_centered_gamma,
+                               const int scale_offset,
+                               const int amax_offset,
+                               const int scale_inv_offset
 ) {
     // This is a specialized version of rmsnorm_fwd_fp8, optimized for inference,
     // which only returns the normalized output.
     std::vector<at::Tensor> out = rmsnorm_fwd_fp8(
-      input, weight, eps, scale, amax, scale_inv, otype, sm_margin, zero_centered_gamma);
+      input, weight, eps,
+      scale, amax, scale_inv,
+      otype, sm_margin, zero_centered_gamma,
+      scale_offset, amax_offset, scale_inv_offset);
     return out[0];
 }
 
