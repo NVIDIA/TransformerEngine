@@ -1582,12 +1582,19 @@ def attn_forward_func_with_cp(
            """or "no_mask" mask types!"""
     assert (window_size is None or (not use_fused_attention and qkv_format != "thd")
         ), "Sliding window attention is only supported with FlashAttention!"
-    out = AttnFuncWithCP.apply(
-        is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-        seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
-        cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
-        attn_bias_type, attn_bias, deterministic, use_fused_attention
-    )
+    if window_size is None:
+        out = AttnFuncWithCP.apply(
+            is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o, dropout_p,
+            cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
+            attn_bias_type, attn_bias, deterministic, use_fused_attention
+        )
+    else:
+        out = SWAFuncWithCP.apply(
+            q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+            cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
+            deterministic, use_fused_attention, window_size
+        )
     return out
 
 
