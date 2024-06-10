@@ -88,7 +88,11 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
 }
 
 /*
-** Python callback for torch.distributed.broadcast(datatensor, tp_group).
+** Python callback for torch.distributed.broadcast(data, src, tp_group).
+** If broadcast is via NCCL, casting the datatensor to CUDA device and back to host CPU will
+** create a new tensor and leave the original data pointer dangling. In this case, we copy the
+** broadcasted data from the new tensor into the original data pointer and leave the new tensor
+** to be garbage collected in Python.
 */
 void ub_bcast(void *data, size_t bytes, int src, char *group) {
   assert(torch_callbacks.initialized);
@@ -96,12 +100,6 @@ void ub_bcast(void *data, size_t bytes, int src, char *group) {
     data, {static_cast<int64_t>(bytes / sizeof(uint8_t))},
     at::device(torch::kCPU).dtype(torch::kUInt8));
   datatensor = torch_callbacks.bcast(datatensor, src, group);
-  // A torch.distributed.broadcast() callback with NCCL backend would require a host-to-device copy
-  // before broadcast on device, and a device-to-host copy after. This causes PyTorch to create a
-  // new tensor on the host-to-device copy, leaving the original torch::from_blob() to be gargabe
-  // collected, and the original data pointer dangling without a Torch tensor. To guard against
-  // this, we need to memcpy from the new tensor into the original data pointer. The same broadcast
-  // with GLOO or MPI backend would be done in-place, in which case we skip the memcpy.
   if (datatensor.data_ptr() != data)
     memcpy(data, datatensor.data_ptr(), bytes);
 }
@@ -161,8 +159,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
 
     if (_atomic_gemm) {
       auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-      _counters = torch::zeros({num_splits * 2}, counter_options);
-      _counters.index_put_({Slice(None, num_splits)}, 1);
+      _counters = torch::zeros({_num_splits * 2}, counter_options);
     }
   }
 
@@ -318,6 +315,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                                                   {workspaceSize},
                                                   DType::kByte);
 
+    // reset counter values
+    _counters.zero_();
+    _counters.index_put_({Slice(None, _num_splits)}, 1);
     auto counters_ = makeTransformerEngineTensor(_counters.data_ptr(),
                                                  {static_cast<size_t>(_counters.size(0))},
                                                  DType::kInt32);
@@ -482,11 +482,11 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                        num_max_streams, set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter,
                        &ub_alloc_copy_allgather, &ub_bcast, &ub_barrier, &ub_free) {
     _ubuf_bytes = sample.numel() * sample.element_size();
-    _ubuf_chunk_bytes = _ubuf_bytes / tp_size;
+    _ubuf_chunk_bytes = _ubuf_bytes / _tp_size;
     if (is_reduce_scatter) {
       // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
       // outputs for reduction at the end of the pipelining.
-      _ubuf_bytes = static_cast<int>((_ubuf_bytes / tp_size) * (tp_size * 2 - 1));
+      _ubuf_bytes = static_cast<int>((_ubuf_bytes / _tp_size) * (_tp_size * 2 - 1));
     }
     _ubuf_dtype = (sample.element_size() == 1) ? DType::kFloat8E4M3
                                                : GetTransformerEngineDType(sample.scalar_type());
@@ -494,7 +494,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     void *ubuf_ptr;
     if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
       // Multicast is disabled so we have to pre-allocate the buffer here.
-      _ubuf = torch::empty({(sample.size(0) / tp_size) * _num_ubuf_chunks, sample.size(1)},
+      _ubuf = torch::empty({(sample.size(0) / _tp_size) * _num_ubuf_chunks, sample.size(1)},
                            sample.options());
       ubuf_ptr = _ubuf.data_ptr();
       this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, false);
@@ -503,7 +503,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
       // that PyTorch allocator does not support.
       this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, true);
       _ubuf = torch::from_blob(ubuf_ptr,
-                               {(sample.size(0) / tp_size) * _num_ubuf_chunks, sample.size(1)},
+                               {(sample.size(0) / _tp_size) * _num_ubuf_chunks, sample.size(1)},
                                sample.options());
     }
 
@@ -511,23 +511,16 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     char *ubuf_byte_ptr = reinterpret_cast<char *>(ubuf_ptr);
     for (int i = 0; i < _num_ubuf_chunks; i++) {
       torch::Tensor ubuf_chunk = torch::from_blob(
-          ubuf_byte_ptr, {sample.size(0) / tp_size, sample.size(1)}, sample.options());
+          ubuf_byte_ptr, {sample.size(0) / _tp_size, sample.size(1)}, sample.options());
       _ubufs.push_back(ubuf_chunk);
       ubuf_byte_ptr += _ubuf_chunk_bytes;
     }
 
     if (_atomic_gemm) {
       auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-      _counters = torch::zeros({tp_size * 2}, counter_options);
-      _counters.index_put_({Slice(None, tp_size)}, 1);
-
+      _counters = torch::zeros({_tp_size * 2}, counter_options);
+      _counters.index_put_({Slice(None, _tp_size)}, 1);
       if (!is_reduce_scatter) {
-        const char *env_p = std::getenv("NVTE_AG_P2P_MULTI_ATOMIC");
-        if (world_rank == 0 && env_p != nullptr) {
-          if (env_p[0] == '1') {
-            printf("!!userbuffers_sendrecv_multi_atomic_shuffle\n");
-          }
-        }
         _counters.index_put_({_self_chunk_id}, 0);
       }
     }
@@ -614,6 +607,10 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                   {workspaceSize},
                                                   DType::kByte);
 
+    // reset counter values
+    _counters.zero_();
+    _counters.index_put_({Slice(None, _tp_size)}, 1);  // mark all chunks as *not* ready
+    _counters.index_put_({_self_chunk_id}, 0);  // mark first chunk as ready
     auto counters_ = makeTransformerEngineTensor(_counters.data_ptr(),
                                                  {static_cast<size_t>(_counters.size(0))},
                                                  DType::kInt32);
@@ -799,6 +796,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                   {workspaceSize},
                                                   DType::kByte);
 
+    // reset counter values
+    _counters.zero_();
+    _counters.index_put_({Slice(None, _tp_size)}, 1);
     auto counters_ = makeTransformerEngineTensor(_counters.data_ptr(),
                                                  {static_cast<size_t>(_counters.size(0))},
                                                  DType::kInt32);

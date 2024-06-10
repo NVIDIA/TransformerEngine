@@ -10,8 +10,7 @@ import setuptools
 
 from .utils import (
     all_files_in_dir,
-    cuda_version,
-    userbuffers_enabled,
+    cuda_version
 )
 
 

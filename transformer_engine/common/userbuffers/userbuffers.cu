@@ -2275,7 +2275,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     if (blockIdx.x == 0 && threadIdx.x == 0) {
       // Decrement atomic val to signal current output tile finish
       if (counters) {
-        ((unsigned int *)counters)[recv_chunk_id /*chunk_i+1*/] = 0;
+        ((unsigned int *)counters)[recv_chunk_id /* chunk_i + 1 */] = 0;
         asm volatile("fence.sc.gpu;\n");
       }
     }
