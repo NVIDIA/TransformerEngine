@@ -2386,9 +2386,6 @@ class FlashAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                window_size in ((-1, -1), (-1, 0))
-                ), "Sliding window attention is not supported with context parallelism."
-            assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
             with self.attention_dropout_ctx():
