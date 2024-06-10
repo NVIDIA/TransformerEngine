@@ -35,13 +35,16 @@ def layernorm_fwd_fp8(
             weight,
             bias,
             eps,
-            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.scale,
             ln_out,
-            fp8_meta_tensor.amax_history[0][fp8_tensor],
-            fp8_meta_tensor.scale_inv[fp8_tensor],
+            fp8_meta_tensor.amax_history,
+            fp8_meta_tensor.scale_inv,
             otype,
             sm_margin,
-            zero_centered_gamma
+            zero_centered_gamma,
+            scale_offset=int(fp8_tensor),
+            amax_offset=int(fp8_tensor),
+            scale_inv_offset=int(fp8_tensor),
         )
 
     return tex.layernorm_fwd_fp8(
@@ -49,12 +52,15 @@ def layernorm_fwd_fp8(
         weight,
         bias,
         eps,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
         otype,
         sm_margin,
-        zero_centered_gamma
+        zero_centered_gamma,
+        scale_offset=int(fp8_tensor),
+        amax_offset=int(fp8_tensor),
+        scale_inv_offset=int(fp8_tensor),
     )
 
 
@@ -124,25 +130,31 @@ def rmsnorm_fwd_fp8(
             inp,
             weight,
             eps,
-            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.scale,
             rmsnorm_out,
-            fp8_meta_tensor.amax_history[0][fp8_tensor],
-            fp8_meta_tensor.scale_inv[fp8_tensor],
+            fp8_meta_tensor.amax_history,
+            fp8_meta_tensor.scale_inv,
             otype,
             sm_margin,
-            zero_centered_gamma
+            zero_centered_gamma,
+            scale_offset=int(fp8_tensor),
+            amax_offset=int(fp8_tensor),
+            scale_inv_offset=int(fp8_tensor),
         )
 
     return tex.rmsnorm_fwd_fp8(
         inp,
         weight,
         eps,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
         otype,
         sm_margin,
-        zero_centered_gamma
+        zero_centered_gamma,
+        scale_offset=int(fp8_tensor),
+        amax_offset=int(fp8_tensor),
+        scale_inv_offset=int(fp8_tensor),
     )
 
 
