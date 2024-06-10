@@ -11,6 +11,7 @@ import setuptools
 from .utils import (
     all_files_in_dir,
     cuda_version,
+    cuda_path,
 )
 
 
@@ -41,7 +42,10 @@ def setup_pytorch_extension(
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = [
+        "-O3",
+        "-fvisibility=hidden",
+    ]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -70,9 +74,10 @@ def setup_pytorch_extension(
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-    # userbuffers support
-    libraries = []
-    library_dirs = []
+    # Libraries -- PyTorch CUDAExtension links to libcudart.so but not to libcuda.so
+    cuda_home, _ = cuda_path()
+    library_dirs = [ cuda_home / "compat" / "lib" ]
+    libraries = [ "cuda" ]
     if os.getenv("UB_MPI_BOOTSTRAP"):
         assert os.getenv("MPI_HOME") is not None, \
             "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
@@ -80,8 +85,8 @@ def setup_pytorch_extension(
         include_dirs.append(mpi_home / "include")
         cxx_flags.append("-DUB_MPI_BOOTSTRAP")
         nvcc_flags.append("-DUB_MPI_BOOTSTRAP")
-        libraries.append("mpi")
         library_dirs.append(mpi_home / "lib")
+        libraries.append("mpi")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -90,12 +95,12 @@ def setup_pytorch_extension(
 
     return CUDAExtension(
         name="transformer_engine_torch",
-        sources=sources,
-        include_dirs=include_dirs,
+        sources=[ str(src) for src in sources ],
+        include_dirs=[ str(inc) for inc in include_dirs ],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
-        libraries=libraries,
-        library_dirs=library_dirs,
+        libraries=[ str(lib) for lib in libraries ],
+        library_dirs=[ str(lib_dir) for lib_dir in library_dirs ],
     )

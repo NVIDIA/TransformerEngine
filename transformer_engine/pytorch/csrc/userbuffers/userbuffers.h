@@ -238,8 +238,7 @@ int pipe_rank(communicator *comm,
                           // data-parallel and tensor-parallel position within data and tensor
                           // groups would be preserved
 
-int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm,
-                                    bool alloc = false);
+int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
 /*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
    dont mix buffers for different operations returns -1 if cant register (too many preregistered
    regions already) if alloc==true will allocate memory and fill the pointers (required for NVL

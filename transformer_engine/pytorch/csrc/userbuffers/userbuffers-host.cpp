@@ -286,12 +286,10 @@ int create_communicator_grouped2(communicator **comm,
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
-  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs,
-                       LOCALSIZE));  // flags and pointers, no block data yet
+  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs, LOCALSIZE));  // flags and pointers, no block data yet
   CUDACHECK(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
   CUDACHECK(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE,
-                                  *comm);  // will use handler 0
+  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, false);
   CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
@@ -583,21 +581,20 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
   } else {
     assert(comm->nvsize <= 8);
-    cudaIpcMemHandle_t *memhndl =
-        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize)));
-
-    CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
+    cudaIpcMemHandle_t memhndl;
+    CUDACHECK(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    comm->_alloc_copy_allgather(reinterpret_cast<void**>(&tmp),
-                                reinterpret_cast<void*>(memhndl),
-                                sizeof(cudaIpcMemHandle_t) * (comm->nvsize),
-                                comm->comm_intra);
+    comm->_alloc_copy_allgather(
+      reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
+      sizeof(cudaIpcMemHandle_t), comm->comm_intra);
 
-    for (int i = 0; i < comm->nvsize; i++)
-      if (i != comm->nvrank)
-        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
-                                       memhndl[i], cudaIpcMemLazyEnablePeerAccess));
+    for (int i = 0; i < comm->nvsize; i++) {
+      if (i != comm->nvrank) {
+        CUDACHECK(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],   // NOLINT(*)
+                                       cudaIpcMemLazyEnablePeerAccess));
+      }
+    }
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
     CUDACHECK(cudaDeviceSynchronize());
 
@@ -606,7 +603,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     CUDACHECK(cudaDeviceSynchronize());
-    free(memhndl);
     comm->_free(tmp);
   }
   comm->mem_size[hndl] = aligned_size;

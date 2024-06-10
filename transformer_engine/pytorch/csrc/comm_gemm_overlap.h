@@ -1026,11 +1026,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     _ub_comm->use_ce = use_ce;
     _ub_comm->sms = sms;
     _ub_comm->cga_size = cga_size;
-    int k = A.size(1);
-    int n = B.size(0);
 
     // Get communication and GEMM input chunk sizes
-    int n_chunk = n / _tp_size;
     const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
 
     // Get input and workspace data pointers

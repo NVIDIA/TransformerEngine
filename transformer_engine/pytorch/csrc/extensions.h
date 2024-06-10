@@ -670,8 +670,6 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
-bool userbuf_comm_available();
-
 void placeholder();
 
 
