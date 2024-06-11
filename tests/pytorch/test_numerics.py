@@ -1219,7 +1219,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
-def _test_grouped_linear_accuracy(block, bs, dtype, config, fp8=False):
+def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
@@ -1232,15 +1232,23 @@ def _test_grouped_linear_accuracy(block, bs, dtype, config, fp8=False):
     )
     inp_hidden_states.retain_grad()
 
+    m = config.seq_len // 16
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    m_splits = m_splits * 16
+    assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+
     with fp8_autocast(enabled=fp8):
         if isinstance(block, GroupedLinear):
-            m_splits = [config.seq_len * bs // 4] * 4
-            out = block(inp_hidden_states, m_splits)
+            m_splits = m_splits * bs
+            out = block(inp_hidden_states, m_splits.tolist())
         else:
             out = torch.cat(
                 [
                     block[i](inp)
-                    for i, inp in enumerate(torch.chunk(inp_hidden_states, 4))
+                    for i, inp in enumerate(
+                        torch.split(inp_hidden_states, m_splits.tolist())
+                    )
                 ]
             )
     loss = out.sum()
@@ -1255,16 +1263,18 @@ def _test_grouped_linear_accuracy(block, bs, dtype, config, fp8=False):
 
 
 @pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_grouped_linear_accuracy(dtype, bs, model, fp8, fp8_model_params):
+def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
-    num_gemms = 4
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         grouped_linear = GroupedLinear(
@@ -1298,8 +1308,12 @@ def test_grouped_linear_accuracy(dtype, bs, model, fp8, fp8_model_params):
                 getattr(grouped_linear, f"bias{i}").clone()
             )
 
-    outputs = _test_grouped_linear_accuracy(grouped_linear, bs, dtype, config, fp8)
-    outputs_ref = _test_grouped_linear_accuracy(sequential_linear, bs, dtype, config, fp8)
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, fp8
+    )
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear, num_gemms, bs, dtype, config, fp8
+    )
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
