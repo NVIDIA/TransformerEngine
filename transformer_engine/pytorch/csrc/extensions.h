@@ -289,7 +289,10 @@ void fused_cast_transpose_noop(at::Tensor input,
                                at::Tensor scale_inv,
                                at::Tensor input_cast,
                                at::Tensor input_transpose,
-                               transformer_engine::DType otype
+                               transformer_engine::DType otype,
+                               int scale_offset = 0,
+                               int amax_offset = 0,
+                               int scale_inv_offset = 0
 );
 
 
@@ -297,16 +300,22 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,
                                                    at::Tensor scale_inv,
-                                                   transformer_engine::DType otype
+                                                   transformer_engine::DType otype,
+                                                   int scale_offset = 0,
+                                                   int amax_offset = 0,
+                                                   int scale_inv_offset = 0
 );
 
 
 std::vector<at::Tensor> fused_fp8_transpose_bgrad(at::Tensor grad_output,
-                                              at::Tensor scale,
-                                              at::Tensor amax,
-                                              at::Tensor scale_inv,
-                                              transformer_engine::DType otype,
-                                              transformer_engine::DType grad_bias_type
+                                                  at::Tensor scale,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  transformer_engine::DType grad_bias_type,
+                                                  int scale_offset = 0,
+                                                  int amax_offset = 0,
+                                                  int scale_inv_offset = 0
 );
 
 
@@ -315,7 +324,10 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                                          at::Tensor scale,
                                                          at::Tensor amax,
                                                          at::Tensor scale_inv,
-                                                         transformer_engine::DType otype
+                                                         transformer_engine::DType otype,
+                                                         int scale_offset = 0,
+                                                         int amax_offset = 0,
+                                                         int scale_inv_offset = 0
 );
 
 
@@ -455,7 +467,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
                                           const int sm_margin,
-                                          const bool zero_centered_gamma
+                                          const bool zero_centered_gamma,
+                                          const int scale_offset = 0,
+                                          const int amax_offset = 0,
+                                          const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -468,7 +483,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                   at::Tensor scale_inv,
                                                   transformer_engine::DType otype,
                                                   const int sm_margin,
-                                                  const bool zero_centered_gamma
+                                                  const bool zero_centered_gamma,
+                                                  const int scale_offset = 0,
+                                                  const int amax_offset = 0,
+                                                  const int scale_inv_offset = 0
 );
 
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
@@ -480,7 +498,10 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor scale_inv,
                                  transformer_engine::DType otype,
                                  const int sm_margin,
-                                 const bool zero_centered_gamma
+                                 const bool zero_centered_gamma,
+                                 const int scale_offset = 0,
+                                 const int amax_offset = 0,
+                                 const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
@@ -529,7 +550,10 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
                                         at::Tensor scale_inv,
                                         transformer_engine::DType otype,
                                         const int sm_margin,
-                                        const bool zero_centered_gamma
+                                        const bool zero_centered_gamma,
+                                        const int scale_offset = 0,
+                                        const int amax_offset = 0,
+                                        const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -541,7 +565,10 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 at::Tensor scale_inv,
                                                 transformer_engine::DType otype,
                                                 const int sm_margin,
-                                                const bool zero_centered_gamma
+                                                const bool zero_centered_gamma,
+                                                const int scale_offset = 0,
+                                                const int amax_offset = 0,
+                                                const int scale_inv_offset = 0
 );
 
 at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
@@ -552,7 +579,10 @@ at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
                                at::Tensor scale_inv,
                                transformer_engine::DType otype,
                                const int sm_margin,
-                               const bool zero_centered_gamma
+                               const bool zero_centered_gamma,
+                               const int scale_offset = 0,
+                               const int amax_offset = 0,
+                               const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input,

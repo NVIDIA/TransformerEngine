@@ -80,9 +80,7 @@ class FP8State:
 
     @staticmethod
     def get_default_fp8_recipe() -> DelayedScaling:
-        """FP8 recipe if not provided by user
-        Margin = 0, interval = 1, E4M3
-        """
+        """FP8 recipe with default args."""
         return DelayedScaling()
 
     def get_autocast_id(self) -> int:
