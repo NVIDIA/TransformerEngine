@@ -36,4 +36,5 @@ repos:
     hooks:
       - id: clang-format
         entry: clang-format -i
+        args: ["-style=file"]
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
