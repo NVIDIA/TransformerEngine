@@ -2660,7 +2660,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta):
-        print('FusedAttnFunc fwd 0', fp8_meta["scaling_fwd"].scale)
+        #print('FusedAttnFunc fwd 0', fp8_meta["scaling_fwd"].scale)
         if fp8:
             if _NVTE_DEBUG:
                 print('[DotProductAttention]: using FP8 forward')
@@ -2796,7 +2796,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 if tensor is not None:
                     tensor.activation_offloading = True
 
-        print('FusedAttnFunc fwd 1', fp8_meta["scaling_fwd"].scale)
+        #print('FusedAttnFunc fwd 1', fp8_meta["scaling_fwd"].scale)
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv,
@@ -2826,6 +2826,9 @@ class FusedAttnFunc(torch.autograd.Function):
             d_out_f8tensor = d_out
             d_out = d_out._data
 
+        print('FusedAttnFunc bwd 0', ctx.fp8_meta["scaling_bwd"].scale)
+        print('FusedAttnFunc bwd 0', ctx.fp8_meta["scaling_bwd"].scale_inv)
+        print('FusedAttnFunc bwd 0', ctx.fp8_meta["scaling_bwd"].amax_history)
         d_out = d_out.contiguous()
         (q, k, v, out, cu_seqlens_q, cu_seqlens_kv,
             seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
@@ -2866,6 +2869,9 @@ class FusedAttnFunc(torch.autograd.Function):
                             d_out.view(-1, d_out.shape[-2] * d_out.shape[-1]),
                             ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                             ).view(d_out.shape)
+                    print('amax_history[0][META_DQKV]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV])
+                    print('amax_history[0][META_DP]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP])
+                    print('amax_history[0][META_DO]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DO])
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                         q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
@@ -2884,6 +2890,38 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
                         ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
                         ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+                    #print(ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill, ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+                    print('fwd_scales',fwd_scales)
+                    print('fwd_scale_invs',fwd_scale_invs)
+                    print('amax_history[0][META_DQKV]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV])
+                    print('amax_history[0][META_DP]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP])
+                    print('amax_history[0][META_DO]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DO])
+                    #ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP] = 0.0
+                    #ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV] = 0.0
+                    #dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
+                    #    ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                    #    q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8,
+                    #    fp8_dtype_forward, fp8_dtype_backward, aux_ctx_tensors,
+                    #    ctx.fused_attention_backend,
+                    #    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
+                    #    fwd_scale_invs[META_QKV], # d_scale_qkv,
+                    #    fwd_scale_invs[META_S], # d_scale_s,
+                    #    fwd_scale_invs[META_O], # d_scale_o,
+                    #    ctx.fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    #    ctx.fp8_meta['scaling_bwd'].scale_inv[META_DP], # d_scale_dp
+                    #    fwd_scales[META_S], # q_scale_s
+                    #    ctx.fp8_meta['scaling_bwd'].scale[META_DP], # q_scale_dp
+                    #    ctx.fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                    #    ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP], # amax_dp
+                    #    ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                    #    ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                    #    ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+                    ##print(ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill, ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+                    #print('fwd_scales',fwd_scales)
+                    #print('fwd_scale_invs',fwd_scale_invs)
+                    #print('amax_history[0][META_DQKV]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DQKV])
+                    #print('amax_history[0][META_DP]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DP])
+                    #print('amax_history[0][META_DO]',ctx.fp8_meta['scaling_bwd'].amax_history[0][META_DO])
                     if ctx.fp8_meta["recipe"].fp8_mha:
                         dq = Float8Tensor(data=dq_fp8,
                             fp8_meta=ctx.fp8_meta,
@@ -2960,6 +2998,9 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
                         ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
+        print('FusedAttnFunc bwd 1', ctx.fp8_meta["scaling_bwd"].scale)
+        print('FusedAttnFunc bwd 1', ctx.fp8_meta["scaling_bwd"].scale_inv)
+        print('FusedAttnFunc bwd 1', ctx.fp8_meta["scaling_bwd"].amax_history)
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
             return (None, None, None, None, None, None,

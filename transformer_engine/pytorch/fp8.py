@@ -325,7 +325,7 @@ class FP8GlobalStateManager:
         fp8_weights: bool = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        print('------------ reduce_and_update_fp8_tensors ----------') 
+        print(f'------------ reduce_and_update_fp8_tensors {forward=} {fp8_weights=} ----------') 
         #traceback.print_stack()
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             #print()
@@ -370,7 +370,12 @@ class FP8GlobalStateManager:
                     get_fp8_te_dtype(recipe, forward),
                     recipe.margin,
                 )
-                print('d:',cls.global_scale_buffer)
+                #print('d:',cls.global_scale_buffer)
+                for k,v in cls.global_scale_buffer.items():
+                    print(f'{"forward" if "forward" in k else "backward"}:')
+                    for vi in v:
+                        print(vi)
+                    print()
             else:
                 split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
 
