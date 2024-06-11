@@ -129,7 +129,7 @@ def main(opts):
     def free_callback(data: torch.Tensor):
         del data
 
-    tex.set_collective_callbacks(
+    tex.set_bootstrap_callbacks(
         alloc_copy_allgather_callback,
         bcast_callback,
         barrier_callback,
@@ -169,22 +169,22 @@ def main(opts):
         world_size,
         local_rank,
         local_size,
-        tex.NVTE_MAX_USERBUFFER_STREAMS,
-        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS,  # set_sm_margin
+        tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or opts.atomic,  # set_sm_margin
         opts.atomic,
         opts.aggregate,
-        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS   # is_reduce_scatter
+        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS                  # is_reduce_scatter
     ) if opts.p2p else tex.UbufCommOverlap(
         sample_buffer,
         world_rank,
         world_size,
         local_rank,
         local_size,
-        4 if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS else 8,  # num_splits
-        tex.NVTE_MAX_USERBUFFER_STREAMS,
-        2,  # cga_size
-        1,  # num_sms
-        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS,  # set_sm_margin
+        4 if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS else 8,     # num_splits
+        tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+        2,                                                               # cga_size
+        1,                                                               # num_sms
+        opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or opts.atomic,  # set_sm_margin
         opts.atomic,
     )
     if opts.atomic and opts.check_numerics:
@@ -194,9 +194,9 @@ def main(opts):
             world_size,
             local_rank,
             local_size,
-            tex.NVTE_MAX_USERBUFFER_STREAMS,
+            tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             True,  # set_sm_margin
-            True,
+            True,  # atomic GEMM
             opts.aggregate,
             True   # is_reduce_scatter
         ) if opts.p2p else tex.UbufCommOverlap(
@@ -205,12 +205,12 @@ def main(opts):
             world_size,
             local_rank,
             local_size,
-            4,  # num_splits
-            tex.NVTE_MAX_USERBUFFER_STREAMS,
-            2,  # cga_size
-            1,  # num_sms
+            4,     # num_splits
+            tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+            2,     # cga_size
+            1,     # num_sms
             True,  # set_sm_margin
-            True,
+            True,  # atomic GEMM
         )
 
     # Figure out problem sizing:
@@ -354,17 +354,17 @@ def main(opts):
 
     # Set up comm/compute buffers
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-        ub_obj.copy_input_to_ubuf(inp_fp8 if opts.fp8 else inp, 1)
-        inp_final = ub_obj.get_ubuf_output(1)
+        ub_obj.copy_input_to_ubuf(inp_fp8 if opts.fp8 else inp, True)
+        inp_final = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         ubuf_out = None
-        rs_out = torch.empty_like(ub_obj.get_ubuf_output(0))
+        rs_out = torch.empty_like(ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS))
         if opts.atomic and opts.check_numerics:
-            ubuf2_out = ub2_obj.get_ubuf_output(1)
+            ubuf2_out = ub2_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             rs2_out = torch.empty((outer_size // local_size, hidden_size),
                                   dtype=torch.bfloat16, device='cuda')
     else:
         inp_final = inp_fp8 if opts.fp8 else inp
-        ubuf_out = ub_obj.get_ubuf_output(1)
+        ubuf_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         rs_out = torch.empty((outer_size // local_size, hidden_size),
                              dtype=torch.bfloat16, device='cuda')
 
@@ -518,7 +518,7 @@ def main(opts):
     avg_gpu_time = sum(gpu_times) / opts.timing_iters
     gemm1_name = " ".join([
         "p2p all-gather +" if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG else "",
-        "atomic " if opts.atomic else "",
+        "atomic" if opts.atomic else "",
         "GEMM",
         f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
             if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS else ""
@@ -528,7 +528,7 @@ def main(opts):
         avg_gpu_time2 = sum(gpu_times2) / opts.timing_iters
         gemm2_name = " ".join([
             "atomic GEMM +",
-            "p2p" if opts.p2p else "",
+            "p2p" if opts.p2p else "collective",
             "reduce-scatter"
         ])
         print(f"[rank:{world_rank}] Avg. GPU time for {gemm2_name}: {avg_gpu_time2} ms\n", end='')

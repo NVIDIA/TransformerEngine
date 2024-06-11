@@ -146,7 +146,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_overlap_ag = False
         if ub_overlap_ag:
             ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out = ub_obj_lnout.get_ubuf_output(0)
+            ln_out = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
@@ -280,7 +280,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 None, None, None, activation_dtype)
             if ub_overlap_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
-                fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+                fc2_out = ub_obj_fc2out.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 dim_size = list(gelu_out.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = fc2_weight_fp8.size(0)
@@ -395,7 +395,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if ub_overlap_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
-                fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+                fc2_out = ub_obj_fc2out.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 dim_size = list(gelu_out.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = fc2_weight.size(0)
@@ -591,7 +591,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub("fc1_dgrad")
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, True)
             if ctx.ub_overlap_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
@@ -761,10 +761,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Get/alloc fc1_dgrad
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
                     ub_obj_dgrad = get_ub("fc1_wgrad")
-                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 elif ctx.ub_overlap_rs_dgrad:
                     ub_obj_dgrad = get_ub("fc1_dgrad")
-                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 else:
                     fc1_dgrad = torch.empty(
                         fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
@@ -874,10 +874,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_dgrad_size[1] = fc1_weight.size(1)
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
                     ub_obj_dgrad = get_ub("fc1_wgrad")
-                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 elif ctx.ub_overlap_rs_dgrad:
                     ub_obj_dgrad = get_ub("fc1_dgrad")
-                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 else:
                     fc1_dgrad = torch.empty(
                         fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
@@ -915,7 +915,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
 
             if ctx.ub_bulk_dgrad:
-                ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+                ln_out_total = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             # Overlap dgrad-RS/AR with wgrad
             if ctx.set_parallel_mode and ctx.sequence_parallel:
                 if not ctx.ub_bulk_dgrad and handle is not None:
@@ -935,12 +935,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     extra_output_tensor = None
                     if ctx.ub_bulk_wgrad:
                         if ub_obj_dgrad.is_fp8_ubuf():
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # RS output
+                            dim_size = list(
+                                ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS).size())
                             extra_output_tensor = torch.empty(
                                 dim_size, dtype=ctx.activation_dtype, device=fc1_dgrad.device)
                             fc1_dgrad = extra_output_tensor
                         else:
-                            fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
+                            fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         fc1_wgrad, _ = tex.fp8_gemm(
@@ -1013,7 +1014,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     else:
                         fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
                     if ctx.ub_bulk_wgrad:
-                        fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
+                        fc1_dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
 
             # Column Parallel Linear
             if ((not ctx.ub_bulk_wgrad)

@@ -16,8 +16,6 @@
 
 namespace transformer_engine {
 
-namespace ub = userbuffers;
-
 PYBIND11_MODULE(transformer_engine_common, m) {
   py::enum_<DType>(m, "DType", py::module_local())
     .value("kByte", DType::kByte)
@@ -76,7 +74,7 @@ PYBIND11_MODULE(transformer_engine_common, m) {
     .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
     .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
 
-  m.attr("NVTE_MAX_USERBUFFER_STREAMS") = py::int_(NVTE_MAX_USERBUFFER_STREAMS);
+  m.attr("NVTE_COMM_OVERLAP_MAX_STREAMS") = py::int_(NVTE_COMM_OVERLAP_MAX_STREAMS);
 
   py::enum_<NVTE_Comm_Overlap_Type>(m, "NVTE_Comm_Overlap_Type", py::module_local())
     .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
@@ -89,11 +87,9 @@ PYBIND11_MODULE(transformer_engine_common, m) {
     .value("SPLIT_PIPELINED_RS_P2P", NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_RS_P2P)
     .value("SPLIT_PIPELINED_AG_P2P", NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_AG_P2P)
     .value("ATOMIC_GEMM_RS", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS)
-    .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P)
+    .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS_P2P)
     .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P);
 
-  m.def("overlapped_comm_type", &nvte_overlapped_comm_type);
-  m.def("comm_overlap_is_p2p", &nvte_comm_overlap_is_p2p);
 }  // PYBIND11_MODULE
 
 }  // namespace transformer_engine

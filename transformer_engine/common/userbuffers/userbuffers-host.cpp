@@ -431,7 +431,7 @@ void destroy_communicator(communicator *comm) {
     if (comm->mem_dealloc[hndl]) {
       cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
                        comm->mem_size[hndl] * comm->nvsize);
-      for (int rank = 0; rank < comm->nvsize; rank++){
+      for (int rank = 0; rank < comm->nvsize; rank++) {
         cuMemRelease(comm->uchandles[hndl][rank]);
       }
       free(reinterpret_cast<void *>(comm->uchandles[hndl]));

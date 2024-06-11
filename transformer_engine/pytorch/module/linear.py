@@ -175,7 +175,7 @@ class _Linear(torch.autograd.Function):
 
             if ub_overlap_rs:
                 ub_obj_projout = get_ub(ub_name+"_fprop")
-                out = ub_obj_projout.get_ubuf_output(1)
+                out = ub_obj_projout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight_fp8.size(0)
@@ -252,7 +252,7 @@ class _Linear(torch.autograd.Function):
 
             if ub_overlap_rs:
                 ub_obj_projout = get_ub(ub_name+"_fprop")
-                out = ub_obj_projout.get_ubuf_output(1)
+                out = ub_obj_projout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // get_distributed_world_size(tp_group)
                 dim_size[1] = weight.size(0)

@@ -98,13 +98,13 @@ def fp8_gemm(
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (1, extra_output_tensor,))
+            args = tuple(args + (tex.NVTE_Comm_Overlap_Type.AG, extra_output_tensor,))
         elif ub_algo == tex.NVTE_Comm_Overlap_Algo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (0, extra_output_tensor,))
+            args = tuple(args + (tex.NVTE_Comm_Overlap_Type.RS, extra_output_tensor,))
         elif ub_algo == tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P:
             fn = ub.split_overlap_ag_p2p
             extra_output_tensor = (

@@ -80,7 +80,7 @@ def initialize_ub(
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(tex.NVTE_MAX_USERBUFFER_STREAMS)
+    _cublas_workspace = get_workspace().repeat(tex.NVTE_COMM_OVERLAP_MAX_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -164,7 +164,7 @@ def initialize_ub(
                     world_size,             # Global number of processes
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
-                    tex.NVTE_MAX_USERBUFFER_STREAMS,
+                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
                     set_sm_margin,          # Set SM margin
                     atomic_gemm,            # use a single GEMM with atomic-counters
                     aggregate,              # Aggregate 2X GEMM chunks
@@ -178,7 +178,7 @@ def initialize_ub(
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
                     num_splits,
-                    tex.NVTE_MAX_USERBUFFER_STREAMS,
+                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
                     cga_size,               # CGA cluster size
                     num_sm,                 # Number of communication SMs
                     set_sm_margin,          # Set SM margin
@@ -213,9 +213,9 @@ def initialize_ub(
         torch.distributed.barrier(group=pg)
 
     def free_callback(data: torch.Tensor):
-        del data
+        data.data = torch.Tensor()
 
-    tex.set_collective_callbacks(
+    tex.set_bootstrap_callbacks(
         alloc_copy_allgather_callback,
         bcast_int_callback,
         barrier_callback,

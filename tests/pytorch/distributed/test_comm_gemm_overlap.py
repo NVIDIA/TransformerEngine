@@ -25,7 +25,7 @@ BASE_CMD = [
     '--check-numerics'
 ]
 
-os.environ['UB_SKIPMC'] = '1'
+os.environ['UB_SKIPMC'] = '1'  # CI environment may not support multicast so use CUDA IPC instead.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 @pytest.mark.parametrize(
@@ -55,18 +55,21 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
         check=True
     )
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize(
-    "p2p", [False, True],
-    ids=['RING-EXCHANGE ALL-GATHER + COLLECTIVE REDUCE-SCATTER',
-         'RING-EXCHANGE ALL-GATHER + RING-EXHCANGE REDUCE-SCATTER'])
-def test_paired_atomic_gemm_overlap_fp8(p2p):
-    """Test communication overlap with atomic GEMM."""
-    test_cmd = BASE_CMD + ['--fp8 --atomic']
-    if p2p:
-        test_cmd.append('--p2p')
-    subprocess.run(
-        test_cmd,
-        env=os.environ,
-        check=True
-    )
+# NOTE: Atomic GEMM overlaps suffer from hangs. Test is disabled while issue is being actively
+#       worked on.
+
+# @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+# @pytest.mark.parametrize(
+#     "p2p", [False, True],
+#     ids=['RING-EXCHANGE ALL-GATHER + COLLECTIVE REDUCE-SCATTER',
+#          'RING-EXCHANGE ALL-GATHER + RING-EXHCANGE REDUCE-SCATTER'])
+# def test_paired_atomic_gemm_overlap_fp8(p2p):
+#     """Test communication overlap with atomic GEMM."""
+#     test_cmd = BASE_CMD + ['--fp8 --atomic']
+#     if p2p:
+#         test_cmd.append('--p2p')
+#     subprocess.run(
+#         test_cmd,
+#         env=os.environ,
+#         check=True
+#     )

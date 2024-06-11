@@ -120,7 +120,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # which will be later copied to a FP8 UB
                 ln_out = torch.empty_like(inputmat)
             else:
-                ln_out = ub_obj_lnout.get_ubuf_output(0)
+                ln_out = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
@@ -142,7 +142,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Column Parallel Linear
         ln_out_gathered = False
         if ub_overlap_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out_total = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             if not return_layernorm_output:
                 ln_out = torch.empty_like(ln_out)
             if ub_obj_lnout.is_atomic_gemm():
@@ -409,7 +409,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub(ctx.ub_name+"_dgrad")
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, True)
             (
                 grad_output,
                 grad_output_c,
@@ -449,10 +449,10 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_size[1] = weight.size(1)
             if ctx.ub_bulk_wgrad: # allocate dgrad output
                 ub_obj_dgrad = get_ub(ctx.ub_name+"_wgrad")
-                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             elif ctx.ub_overlap_rs_dgrad:
                 ub_obj_dgrad = get_ub(ctx.ub_name+"_dgrad")
-                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
@@ -540,7 +540,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                 )
             if ctx.ub_bulk_dgrad:
-                ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+                ln_out_total = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
 
             # Overlap dgrad-RS/AR with wgrad
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
@@ -561,12 +561,13 @@ class _LayerNormLinear(torch.autograd.Function):
                     extra_output_tensor = None
                     if ctx.ub_bulk_wgrad:
                         if ub_obj_dgrad.is_fp8_ubuf():
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # RS output
+                            dim_size = list(
+                                ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS).size()) # RS output
                             extra_output_tensor = torch.empty(
                                 dim_size, dtype=ctx.activation_dtype, device=dgrad.device)
                             dgrad = extra_output_tensor
                         else:
-                            dgrad = ub_obj_dgrad.get_ubuf_output(0)
+                            dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         wgrad, _ = tex.fp8_gemm(
@@ -630,7 +631,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
                     clear_tensor_data(ln_out_total)
                     if ctx.ub_bulk_wgrad:
-                        dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
+                        dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
 
             # Column Parallel Linear
             if ((not ctx.ub_bulk_wgrad)
