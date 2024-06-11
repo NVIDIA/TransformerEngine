@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention."""
+import io
 import collections
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
@@ -2659,6 +2660,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta):
+        print('FusedAttnFunc fwd 0', fp8_meta["scaling_fwd"].scale)
         if fp8:
             if _NVTE_DEBUG:
                 print('[DotProductAttention]: using FP8 forward')
@@ -2794,6 +2796,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 if tensor is not None:
                     tensor.activation_offloading = True
 
+        print('FusedAttnFunc fwd 1', fp8_meta["scaling_fwd"].scale)
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(*qkvo_tensors, cu_seqlens_q, cu_seqlens_kv,
@@ -3043,6 +3046,24 @@ class FusedAttention(TransformerEngineBaseModule):
                     incompatible_keys.missing_keys.remove(key)
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        """
+        Override to save to core_attention._extra_state.
+        """
+        super()._save_to_state_dict(destination, prefix.replace('fused_attention.',''), keep_vars)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+        missing_keys, unexpected_keys, error_msgs):
+        """
+        Override to load from core_attention._extra_state.
+        """
+        print('loading nothing')
+        print(self.fp8_meta['scaling_fwd'].scale)
+        print(self.fp8_meta['scaling_fwd'].amax_history)
+        #super()._load_from_state_dict(self.state_dict, prefix.replace('fused_attention.',''),
+        #    local_metadata, strict,
+        #    missing_keys, unexpected_keys, error_msgs)
+
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -3232,7 +3253,8 @@ class FusedAttention(TransformerEngineBaseModule):
         return output.view(*output.shape[:-2], -1)
 
 
-class DotProductAttention(torch.nn.Module):
+#class DotProductAttention(torch.nn.Module):
+class DotProductAttention(TransformerEngineBaseModule):
     """Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
@@ -3430,6 +3452,21 @@ class DotProductAttention(torch.nn.Module):
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
+        self.fp8_meta_dpa = {}
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+        missing_keys, unexpected_keys, error_msgs):
+        """
+        Override to load from core_attention._extra_state.
+        """
+#        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+#            missing_keys, unexpected_keys, error_msgs)
+        if self.use_fused_attention: # and self.fp8_meta is not None:
+            #self.fp8_meta_dpa = self.fp8_meta
+            print('loading to FU')
+            self.fused_attention.set_extra_state(state_dict['self_attention.core_attention._extra_state'])
+
+
     def _checkpointed_attention_forward(
         self,
         attention_func: Callable,
@@ -3474,6 +3511,72 @@ class DotProductAttention(torch.nn.Module):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+
+    def get_extra_state(self) -> torch.Tensor:
+        """Save before checkpointing."""
+        #state = {}
+        state = None
+
+        fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
+        print("DPA get_extra_state",fp8_checkpoint,self.fp8)
+
+        #if fp8_checkpoint:
+        #    state = {}
+        #    state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+        #    print('DPA scale fwd',state["scale_fwd"])
+        #    state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
+        #    state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+        #    state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+        #    state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
+        #    state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
+
+        #    # Store other pickelable values.
+        #    extra = {}
+        #    for k, v in self.fp8_meta.items():
+        #        if isinstance(v, (bool, int, float, str, tuple, list)):
+        #            extra[k] = v
+        #    state["extra_fp8_variables"] = extra
+
+        if is_in_onnx_export_mode():
+            state_serialized = torch.frombuffer(pickle.dumps(state), dtype=torch.uint8)
+        else:
+            state_serialized = io.BytesIO()
+            torch.save(state, state_serialized)
+
+        return state_serialized
+
+    def set_extra_state(self, state: torch.Tensor) -> None:
+        """Load previous state."""
+        print("DPA set_extra_state")
+        if state is None:
+            return
+
+        if isinstance(state, torch.Tensor):
+            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+        elif isinstance(state, io.BytesIO):
+            state.seek(0)
+            state = torch.load(state, map_location='cuda')
+        else:
+            raise RuntimeError("Unsupported checkpoint format.")
+        print(state["scale_fwd"])
+
+        if state is None:
+            return
+
+        # Load extra items.
+        self.fp8_meta.update(state["extra_fp8_variables"])
+        self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+        if "global_fp8_buffer_pos_fwd_recompute" in self.fp8_meta:
+            del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
+
+        # Initialize before loading.
+        self.init_fp8_meta_tensors()
+        self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
+        self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
+        self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
+        self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
+        self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
+        self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -3633,6 +3736,11 @@ class DotProductAttention(torch.nn.Module):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        with self.prepare_forward(query_layer,
+            is_first_microbatch,
+            num_gemms=3,
+            allow_non_contiguous=True) as query_layer:
+            pass
 
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda

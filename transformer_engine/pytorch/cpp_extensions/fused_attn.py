@@ -922,6 +922,7 @@ def fused_attn_fwd(
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
+    #print('============== rng',output_tensors[-1])
 
     # out, aux_ctx_tensors
     return output_tensors[0], output_tensors[1:]

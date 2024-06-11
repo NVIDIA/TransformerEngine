@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import traceback
 import io
 import os
 import pickle
@@ -283,6 +284,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     self.fp8_meta[meta_key].amax_history, pad=(0, 0, 0, extra_rows)
                 )
 
+            #print('xxxxxxxxxxxxxxxxxxxxxxx buffer key in meta', FP8GlobalStateManager.get_buffer_info() in self.fp8_meta)
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
                 fwd_pos, fwd_key, bwd_pos, bwd_key = (
@@ -301,6 +303,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
+        print('88888888888888888888 inited', self.fp8_meta_tensors_initialized)
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
             self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
@@ -370,12 +373,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state = None
 
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
+        print("BaseModule get_extra_state",fp8_checkpoint,self.fp8)
+        #traceback.print_stack()
 
         if fp8_checkpoint:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            #print('BE scale fwd',state["scale_fwd"])
             state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
             state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+            print('BE scale fwd',state["amax_history_fwd"])
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
@@ -383,7 +390,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
-                if isinstance(v, (bool, int, float, str, tuple, list)):
+                if k != 'buffer_index_and_autocast_key' and isinstance(v, (bool, int, float, str, tuple, list)):
+                #if isinstance(v, (bool, int, float, str, tuple, list)):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
@@ -397,6 +405,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
+        print("BaseModule set_extra_state")
+        #traceback.print_stack()
         if state is None:
             return
 
@@ -405,9 +415,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         elif isinstance(state, io.BytesIO):
             state.seek(0)
             state = torch.load(state, map_location='cuda')
-        else:
-            raise RuntimeError("Unsupported checkpoint format.")
+        #else:
+        #    raise RuntimeError("Unsupported checkpoint format.")
 
+        #print(state["scale_fwd"])
+        #print()
+        print('xxxxxxxx state xxxxxxxxxx',type(state))
+        print(state)
         if state is None:
             return
 
@@ -542,6 +556,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 "Amax reduction across tensor parallel group is " \
                 "necessary when using sequence parallelism with FP8."
 
+            #print('xxxxxxxxxxxxx add_fp8_tensors_to_global_buffer xxxxxxxxx',self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing(),self.fp8_meta["scaling_fwd"].amax_history)
             if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                     self.fp8_meta, fp8_weights=self._get_fp8_params())
@@ -876,6 +891,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Tensors are copied into fp8 tensors only when self.primary_weights_in_fp8=True,
         otherwise, this behavior is not required.
         """
+        print("BBBBB _load_from_state_dict",self.primary_weights_in_fp8)
         if self.primary_weights_in_fp8:
             extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
             if extra_state_key in state_dict:

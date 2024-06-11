@@ -265,6 +265,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
+        #print('LNLN fwd scale',fp8_meta["scaling_fwd"].scale)
 
         if is_grad_enabled:
             if cpu_offloading:
