@@ -9,7 +9,6 @@ set -e
 pip install cpplint==1.6.0 pylint==2.13.5
 if [ -z "${PYTHON_ONLY}" ]
 then
-  cp $TE_PATH/qa/L0_jax_lint/CPPLINT.cfg $TE_PATH
   cd $TE_PATH
   echo "Checking common API headers"
   cpplint --root transformer_engine/common/include --recursive transformer_engine/common/include

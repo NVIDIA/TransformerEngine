@@ -19,7 +19,9 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
       - id: end-of-file-fixer
+        files: .*.(c|cc|cxx|cpp|cu|cuh|h|hpp|py)$
       - id: trailing-whitespace
+        files: .*.(c|cc|cxx|cpp|cu|cuh|h|hpp|py)$
 
   - repo: https://github.com/psf/black
     rev: 24.4.2
@@ -28,11 +30,10 @@ repos:
         name: Format python code
         args: [--line-length=100]
         types: [python]
-        files: ^transformer_engine/
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v18.1.6
     hooks:
       - id: clang-format
+        entry: clang-format -i
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
-
