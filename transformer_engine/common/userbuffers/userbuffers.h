@@ -200,6 +200,7 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
+void reset_counters(void *atomic_ptr, int num_chunks, bool producer, cudaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(communicator **comm,

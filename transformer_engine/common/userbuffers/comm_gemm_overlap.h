@@ -197,7 +197,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
       }
     }
 
-    NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_comm));
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_stream_comm, cudaStreamNonBlocking, -1));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_d2dcopy, 0));
   }
 
@@ -289,6 +289,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
+    reset_counters(counter_ptr, _num_splits, false /* reduce-scatter is consumer */, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _start_compute, 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_compute, 0));
@@ -537,11 +538,11 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     _is_p2p = true;
     _use_ce = 1;
     _aggregate = aggregate;
+    _is_reduce_scatter = is_reduce_scatter;
     _rank_round_tp = (worldrank / localsize) * localsize;
     _next_rank = (localsize + worldrank + 1) % localsize + _rank_round_tp;
     _prev_rank = (localsize + worldrank - 1) % localsize + _rank_round_tp;
-    _self_chunk_id = (_atomic_gemm && !is_reduce_scatter) ? 0 : _tp_id;
-    _is_reduce_scatter = is_reduce_scatter;
+    _self_chunk_id = (_atomic_gemm && !_is_reduce_scatter) ? 0 : _tp_id;
     _num_ubuf_chunks = (_is_reduce_scatter) ? static_cast<int>(localsize * 2 - 1)
                                             : localsize;
 
@@ -550,8 +551,8 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       printf("!!! [UB] using multiatomic send/recv for p2p all-gather overlap\n");
     }
 
-    NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_send));
-    NVTE_CHECK_CUDA(cudaStreamCreate(&_stream_recv));
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_stream_send, cudaStreamNonBlocking, -1));
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, -1));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
   }
@@ -596,9 +597,11 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     assert(pre_gelu_out.numel() == 0);
 
     // Catch up the default torch stream
+    reset_counters(counter_ptr, _tp_size, true /* all-gather is producer */, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _start_compute, 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _start_compute, 0));
 
     TensorWrapper workspace_chunk = TensorWrapper(
       reinterpret_cast<void *>(workspace_ptr), {workspace_size_chunk}, workspace.dtype());
@@ -631,7 +634,7 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
         nvte_cublas_atomic_gemm(
           A.data(), ubuf.data(), D.data(), bias.data(), pre_gelu_out.data(),
           A_trans, B_trans, grad, workspace_chunk.data(), accumulate, use_split_accumulator,
-          _math_sms, 0, _tp_size, false, counters.data(), stream_main);
+          _math_sms, 0, _tp_size, false, counters.data(), _stream_compute[0]);
       }
     }
 
@@ -648,6 +651,8 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     }
 
     // Copy the first GEMM output chunk to the end chunk position of D_buffer
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, _stream_compute[0]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
     char *src_ptr = reinterpret_cast<char *>(D_buffer.dptr());
     NVTE_CHECK_CUDA(cudaMemcpyAsync(
       src_ptr + (D.numel() * D.element_size()),
@@ -861,7 +866,9 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
     // Catch up the main stream
+    reset_counters(counter_ptr, _tp_size, false /* reduce-scatter is consumer */, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _start_compute, 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
 
     // Atomic GEMM
@@ -871,7 +878,7 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     nvte_cublas_atomic_gemm(
       A.data(), B.data(), ubuf.data(), bias.data(), pre_gelu_out.data(),
       A_trans, B_trans, grad, workspace_chunk.data(), accumulate, use_split_accumulator,
-      _math_sms, 0, _tp_size, true, counters.data(), stream_main);
+      _math_sms, 0, _tp_size, true, counters.data(), _stream_compute[0]);
 
     // P2P communication chunk
     for (int i = 1; i < _tp_size; i++) {
@@ -888,6 +895,9 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
                       _ub_comm, recv_rank, _stream_recv);
     }
+
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, _stream_compute[0]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
 
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));

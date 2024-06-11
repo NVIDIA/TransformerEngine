@@ -2559,7 +2559,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
   // Decrement atomic val to signal current output tile finish
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    ((unsigned int *)atomic_ptr)[chunk_i] = 0;
+    ((int *)atomic_ptr)[chunk_i] = 0;
   }
 
   // COMM kernel need to explicitely flash gmem.
@@ -2592,6 +2592,23 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
   }
 }
 
+// reset_counters
+static __global__ void reset_counters(
+  void *atomic_ptr, int num_chunks, bool producer
+) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    for (int i = 0; i < num_chunks * 2; i++) {
+      if (i >= num_chunks || (producer && i == 0)) {
+        // first producer chunk and buffer chunks [num_chunks, num_chunks * 2) are marked ready (0)
+        ((unsigned int *)atomic_ptr)[i] = 0;
+      } else {
+        // chunks [0, num_chunks) is reset to *not* ready (1)
+        ((unsigned int *)atomic_ptr)[i] = 1;
+      }
+    }
+  }
+}
+
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
@@ -2608,6 +2625,12 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
   dim3 block(1);
   dim3 grid(1);
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
+}
+
+void reset_counters(void *atomic_ptr, int num_chunks, bool producer, cudaStream_t stream) {
+  dim3 block(1);
+  dim3 grid(1);
+  reset_counters<<<grid, block, 0, stream>>>(atomic_ptr, num_chunks, producer);
 }
 
 template <typename fp8type>
