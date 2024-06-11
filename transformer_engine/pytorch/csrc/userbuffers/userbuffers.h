@@ -39,9 +39,13 @@ void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbyt
   UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
   UB_MPI_CHECK(MPI_Comm_size(comm, &nranks));
   *globaldata = malloc(nranks * localbytes);
-  memcpy(*globaldata + myrank * localbytes, localdata, localbytes);
-  memcpy(*globaldata + myrank * localbytes, localdata, localbytes);
-                          *globaldata, localbytes, MPI_BYTE, comm));
+  UB_MPI_CHECK(MPI_Allgather(localdata,
+                             localbytes,
+                             MPI_BYTE,
+                             *globaldata,
+                             nranks * localbytes,
+                             MPI_BYTE,
+                             comm));
 }
 
 void ub_barrier(ExtComm comm) {

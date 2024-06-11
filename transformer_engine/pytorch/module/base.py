@@ -202,7 +202,7 @@ def initialize_ub(
         torch.distributed.barrier(group=pg)
 
     def free_callback(data: torch.Tensor) -> None:
-        del data
+        data.data = torch.Tensor()
 
     tex.set_ubuf_bootstrap_callbacks(
         alloc_copy_allgather_callback,
@@ -265,10 +265,6 @@ def get_ub(name: str):
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators
-    for key in _ub_communicators.keys():
-        ub_comm = _ub_communicators[key]
-        _ub_communicators[key] = None
-        del ub_comm
     _ub_communicators = None
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []

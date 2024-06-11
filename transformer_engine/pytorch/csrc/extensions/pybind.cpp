@@ -158,7 +158,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("ATOMIC_GEMM_RS_P2P", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS_P2P);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool, torch::Tensor>())
+    .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool,
+                  torch::Tensor>())
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
     .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
@@ -170,7 +171,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, torch::Tensor>())
+    .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool,
+         torch::Tensor>())
     .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
     .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
