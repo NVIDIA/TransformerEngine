@@ -1431,11 +1431,9 @@ class SWAFuncWithCP(torch.autograd.Function):
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
 
-        fa_optional_backward_kwargs = {}
+        fa_optional_forward_kwargs = {}
         if _flash_attn_2_4_plus:
-            fa_optional_backward_kwargs["alibi_slopes"] = None
-        if _flash_attn_2_4_1_plus:
-            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+            fa_optional_forward_kwargs["alibi_slopes"] = None
 
         for i in range(3):
             if i < 2:
@@ -1506,8 +1504,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                             window_size_left
                         )
                     else:
-                        flash_attn_fwd_softmax_lse_corretion(softmax_lse_[..., -1, :],
-                                                             softmax_lse_per_step[1])
+                        flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., -1, :],
+                                                              softmax_lse_per_step[1])
 
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(2):
