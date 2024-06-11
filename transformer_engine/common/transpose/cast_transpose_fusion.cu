@@ -642,6 +642,36 @@ cast_transpose_fused_kernel_notaligned(const Param param,
     }
 }
 
+static const char* ActTypeToString[] = {
+    "NoAct",    // 0
+    "Sigmoid",  // 1
+    "GeLU",     // 2
+    "QGeLU",    // 3
+    "SiLU",     // 4
+    "ReLU",     // 5
+    "SReLU"     // 6
+};
+
+template <typename ComputeType, typename ParamOP,
+          ComputeType (*OP)(ComputeType, const ParamOP&)>
+int get_dactivation_type() {
+    if (OP == &sigmoid<ComputeType, ComputeType>) {
+        return 1;
+    } else if (OP == &dgelu<ComputeType, ComputeType>) {
+        return 2;
+    } else if (OP == &dqgelu<ComputeType, ComputeType>) {
+        return 3;
+    } else if (OP == &dsilu<ComputeType, ComputeType>) {
+        return 4;
+    } else if (OP == &drelu<ComputeType, ComputeType>) {
+        return 5;
+    } else if (OP == &dsrelu<ComputeType, ComputeType>) {
+        return 6;
+    } else {
+        return 0;
+    }
+}
+
 template <bool IS_DBIAS, bool IS_DACT, typename ComputeType, typename ParamOP,
           ComputeType (*OP)(ComputeType, const ParamOP&)>
 void cast_transpose_fused(const Tensor &input,
@@ -776,8 +806,6 @@ void cast_transpose_fused(const Tensor &input,
                 const size_t shared_size_dbias = cast_transpose_num_threads * VecComputeTypeSize;
                 if (shared_size_transpose < shared_size_dbias) {
                     shared_size_transpose = shared_size_dbias;
-                    // NVTE_CHECK(shared_size_transpose >= shared_size_dbias,
-                    //         "Too large size of the dbias shared memory required");
                 }
             }
 
@@ -801,16 +829,24 @@ void cast_transpose_fused(const Tensor &input,
                 constexpr const char *itype2_name = TypeInfo<InputType2>::name;
                 constexpr const char *otype_name  = TypeInfo<OutputType>::name;
 
+                int dActType = 0;
+                if constexpr (IS_DACT) {
+                    dActType = get_dactivation_type<ComputeType, ParamOP, OP>();
+                }
+
                 // Compile NVRTC kernel if needed and launch
                 auto& rtc_manager = rtc::KernelManager::instance();
-                const std::string kernel_label = concat_strings("cast_transpose"
-                                                                ",itype=", itype_name,
-                                                                ",itype2=", itype2_name,
-                                                                ",otype=", otype_name,
-                                                                ",load_size=", load_size,
-                                                                ",store_size=", store_size,
-                                                                ",IS_DBIAS=", IS_DBIAS,
-                                                                ",IS_DACT=", IS_DACT);
+                const std::string kernel_label =
+                    concat_strings("cast_transpose_fusion"
+                                   ",itype=", itype_name,
+                                   ",itype2=", itype2_name,
+                                   ",otype=", otype_name,
+                                   ",load_size=", load_size,
+                                   ",store_size=", store_size,
+                                   ",IS_DBIAS=", IS_DBIAS,
+                                   ",IS_DACT=", IS_DACT,
+                                   ",dactivationType=", ActTypeToString[dActType]);
+
                 if (!rtc_manager.is_compiled(kernel_label)) {
                     std::string code = string_code_transpose_rtc_cast_transpose_fusion_cu;
                     code = regex_replace(code, "__ITYPE__", itype_name);
@@ -822,10 +858,11 @@ void cast_transpose_fused(const Tensor &input,
                     code = regex_replace(code, "__BLOCK_SIZE__", cast_transpose_num_threads);
                     code = regex_replace(code, "__IS_DBIAS__", IS_DBIAS);
                     code = regex_replace(code, "__IS_DACT__", IS_DACT);
+                    code = regex_replace(code, "__DACTIVATION_TYPE__", dActType);
 
                     rtc_manager.compile(
                         kernel_label,
-                        "cast_transpose_kernel_optimized",
+                        "cast_transpose_fusion_kernel_optimized",
                         code,
                         "transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu");
                 }
@@ -843,33 +880,18 @@ void cast_transpose_fused(const Tensor &input,
                 constexpr size_t nvec_in = load_size / itype_size;
                 constexpr size_t nvec_out = store_size / otype_size;
 
-                const bool is_full_tile = (row_length % tile_size_x == 0)
-                                          && (num_rows % tile_size_y == 0);
-
                 NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
                 NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
 
-                if (is_full_tile) {
-                    cudaFuncSetAttribute(
-                        cast_transpose_fused_kernel
-                            <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>,
-                        cudaFuncAttributePreferredSharedMemoryCarveout,
-                        100);
-                    cast_transpose_fused_kernel
-                        <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>
-                        <<<num_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>
-                        (param, row_length, num_rows, num_tiles);
-                } else {
-                    cudaFuncSetAttribute(
-                        cast_transpose_fused_kernel_notaligned
-                            <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>,
-                        cudaFuncAttributePreferredSharedMemoryCarveout,
-                        100);
+                cudaFuncSetAttribute(
                     cast_transpose_fused_kernel_notaligned
-                        <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>
-                        <<<num_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>
-                        (param, row_length, num_rows, num_tiles);
-                }
+                        <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>,
+                    cudaFuncAttributePreferredSharedMemoryCarveout,
+                    100);
+                cast_transpose_fused_kernel_notaligned
+                    <IS_DBIAS, IS_DACT, ComputeType, Param, nvec_in, nvec_out, Empty, OP>
+                    <<<num_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>
+                    (param, row_length, num_rows, num_tiles);
             }
 
             if constexpr (IS_DBIAS) {

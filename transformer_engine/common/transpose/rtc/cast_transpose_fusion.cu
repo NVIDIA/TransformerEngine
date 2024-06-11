@@ -22,6 +22,7 @@ constexpr size_t WARPS_PER_TILE     = __WARPS_PER_TILE__;
 constexpr size_t BLOCK_SIZE         = __BLOCK_SIZE__;
 constexpr bool IS_DBIAS             = __IS_DBIAS__;
 constexpr bool IS_DACT              = __IS_DACT__;
+constexpr size_t DACT_TYPE          = __DACTIVATION_TYPE__;
 
 constexpr size_t NVEC_IN = LOAD_SIZE / sizeof(IType);
 constexpr size_t NVEC_OUT = STORE_SIZE / sizeof(OType);
@@ -30,6 +31,17 @@ using IVec = Vec<IType, NVEC_IN>;
 using IVec2 = Vec<IType2, NVEC_IN>;
 using OVec = Vec<OType, NVEC_OUT>;
 using Param = CTDBiasDActParam<IType, IType2, OType, CType>;
+
+using OP = CType (*)(const CType, const Empty&);
+constexpr OP Activation[] = {
+    nullptr,                    // 0
+    &dsigmoid<CType, CType>,    // 1
+    &dgelu<CType, CType>,       // 2
+    &dqgelu<CType, CType>,      // 3
+    &dsilu<CType, CType>,       // 4
+    &drelu<CType, CType>,       // 5
+    &dsrelu<CType, CType>       // 6
+};
 
 }  // namespace
 
@@ -80,17 +92,17 @@ cast_and_transpose_regs_optimized(const CVec (&in)[NVEC_OUT],
 
 __global__ void
 __launch_bounds__(BLOCK_SIZE)
-cast_transpose_kernel_optimized(const Param param,
-                                const size_t row_length,
-                                const size_t num_rows,
-                                const size_t num_tiles) {
+cast_transpose_fusion_kernel_optimized(const Param param,
+                                       const size_t row_length,
+                                       const size_t num_rows,
+                                       const size_t num_tiles) {
     extern __shared__ char scratch[];
 
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
     const unsigned int my_id_in_warp = threadIdx.x % THREADS_PER_WARP;
     const size_t num_tiles_x = row_length / (NVEC_IN * THREADS_PER_WARP);
-    const size_t tile_id = blockIdx.x * blockDim.x / (THREADS_PER_WARP * WARPS_PER_TILE) +
-                           warp_id / WARPS_PER_TILE;
+    const size_t tile_id = blockIdx.x * blockDim.x / (THREADS_PER_WARP * WARPS_PER_TILE)
+                           + warp_id / WARPS_PER_TILE;
     if (tile_id >= num_tiles) {
         return;
     }
@@ -98,22 +110,22 @@ cast_transpose_kernel_optimized(const Param param,
     const size_t tile_id_x = tile_id % num_tiles_x;
     const size_t tile_id_y = tile_id / num_tiles_x;
 
-    const size_t tile_offset = (tile_id_x * NVEC_IN + tile_id_y * row_length * NVEC_OUT) *
-                               THREADS_PER_WARP;
-    const size_t tile_offset_transp = (tile_id_y * NVEC_OUT + tile_id_x * num_rows * NVEC_IN) *
-                                      THREADS_PER_WARP;
+    const size_t tile_offset = (tile_id_x * NVEC_IN + tile_id_y * row_length * NVEC_OUT)
+                               * THREADS_PER_WARP;
+    const size_t tile_offset_transp = (tile_id_y * NVEC_OUT + tile_id_x * num_rows * NVEC_IN)
+                                      * THREADS_PER_WARP;
 
     const IType * const my_input_tile = param.input + tile_offset;
     const IType2 * const my_act_input_tile = param.act_input + tile_offset;
     OType * const my_output_c_tile = param.output_c + tile_offset;
     OType * const my_output_t_tile = param.output_t + tile_offset_transp;
-    CType * const my_partial_dbias_tile = param.workspace +
-                                          (tile_id_x * (NVEC_IN * THREADS_PER_WARP) +
-                                           tile_id_y * row_length);
+    CType * const my_partial_dbias_tile = param.workspace
+                                          + (tile_id_x * (NVEC_IN * THREADS_PER_WARP)
+                                            + tile_id_y * row_length);
 
-    OVec * const my_scratch = reinterpret_cast<OVec *>(scratch) +
-                              (my_id_in_warp + warp_id / WARPS_PER_TILE * THREADS_PER_WARP) *
-                              (THREADS_PER_WARP + 1);
+    OVec * const my_scratch = reinterpret_cast<OVec *>(scratch)
+                              + (my_id_in_warp + warp_id / WARPS_PER_TILE * THREADS_PER_WARP)
+                                * (THREADS_PER_WARP + 1);
 
     CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
 
@@ -127,9 +139,9 @@ cast_transpose_kernel_optimized(const Param param,
     const size_t stride = row_length / NVEC_IN;
     const size_t output_stride = num_rows / NVEC_OUT;
     size_t current_stride = warp_id_in_tile * n_iterations * NVEC_OUT * stride;
-    size_t current_row = (tile_id_y * THREADS_PER_WARP + warp_id_in_tile * n_iterations)*NVEC_OUT;
-    unsigned int my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                             THREADS_PER_WARP;
+    size_t current_row = (tile_id_y * THREADS_PER_WARP + warp_id_in_tile * n_iterations) * NVEC_OUT;
+    unsigned int my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations)
+                            % THREADS_PER_WARP;
 
     CType amax = 0.0f;
     const CType scale = param.scale_ptr != nullptr ? *param.scale_ptr : 1;
@@ -168,8 +180,8 @@ cast_transpose_kernel_optimized(const Param param,
             for (unsigned int k = 0; k < NVEC_IN; ++k) {
                 if constexpr (IS_DACT) {
                     in_cast_fp32[j].data.elt[k] =
-                        dgelu<CType>(act_in[current_in ^ 1][j].data.elt[k], {}) *
-                        static_cast<CType>(in[current_in ^ 1][j].data.elt[k]);
+                        static_cast<CType>(in[current_in ^ 1][j].data.elt[k])
+                        * Activation[DACT_TYPE](act_in[current_in ^ 1][j].data.elt[k], {});
                 } else {
                     in_cast_fp32[j].data.elt[k] =
                         static_cast<CType>(in[current_in ^ 1][j].data.elt[k]);
@@ -177,9 +189,8 @@ cast_transpose_kernel_optimized(const Param param,
             }
         }
 
-        const size_t scaling_idx_offset = current_row * num_tiles_x + tile_id_x;
-        const int dbias_shfl_src_lane = (my_id_in_warp + i + warp_id_in_tile * n_iterations) %
-                                        THREADS_PER_WARP;
+        const int dbias_shfl_src_lane = (my_id_in_warp + i + warp_id_in_tile * n_iterations)
+                                        % THREADS_PER_WARP;
 
         cast_and_transpose_regs_optimized(in_cast_fp32, out_space[i], partial_dbias,
                                           my_output_c_tile, current_place,
@@ -194,14 +205,14 @@ cast_transpose_kernel_optimized(const Param param,
     for (unsigned int i = 0; i < NVEC_IN; ++i) {
         #pragma unroll
         for (unsigned int j = 0; j < n_iterations; ++j) {
-            my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                        j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space[j][i];
+            my_scratch[(my_id_in_warp + THREADS_PER_WARP
+                       - j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space[j][i];
         }
         __syncthreads();
-        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-                   THREADS_PER_WARP;
-        current_stride = i * output_stride +
-                         warp_id_in_tile * n_iterations * output_stride * NVEC_IN;
+        my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations)
+                   % THREADS_PER_WARP;
+        current_stride = i * output_stride
+                         + warp_id_in_tile * n_iterations * output_stride * NVEC_IN;
         for (unsigned int j = 0; j < n_iterations; ++j) {
             my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile,
                                                                     current_stride + my_place);
