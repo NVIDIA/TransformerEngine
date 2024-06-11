@@ -35,7 +35,9 @@ def set_jit_fusion_options() -> None:
     # flags required to enable jit fusion kernels
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
-    if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
+    if (TORCH_MAJOR == 2 and TORCH_MINOR >= 2):
+        pass
+    elif (TORCH_MAJOR == 2) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
