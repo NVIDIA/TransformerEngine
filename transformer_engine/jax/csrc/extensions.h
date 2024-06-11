@@ -32,17 +32,6 @@
 namespace transformer_engine {
 namespace jax {
 
-constexpr int kMaxNumDim = 8;
-
-// TODO: Rename Shape to ???
-struct Shape {
-  int num_dim;
-  size_t dims[kMaxNumDim];
-
-  void from_vector(const std::vector<size_t> &shape);
-
-  std::vector<size_t> to_vector() const;
-};
 
 // Phuong: These 3 functions need to stay in the header file for compilation purpose
 // 1.
