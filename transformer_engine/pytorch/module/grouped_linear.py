@@ -8,7 +8,7 @@ from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 from .base import (
     get_multi_stream_cublas_workspace,

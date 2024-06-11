@@ -26,7 +26,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -1317,7 +1317,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
-        torch.testing.assert_close(o, o_ref)
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
