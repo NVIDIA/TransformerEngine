@@ -340,9 +340,8 @@ class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-meth
         weight_amax, weight_scale = generate_a_set(weight_name_post_fix)
         grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
 
-        return FP8MetaPackage(input_amax, input_scale,
-                              weight_amax, weight_scale,
-                              grad_amax,  grad_scale)
+        return FP8MetaPackage(input_amax, input_scale, weight_amax, weight_scale, grad_amax,
+                              grad_scale)
 
 
 class DenseGeneral(TransformerEngineBase):
@@ -921,27 +920,16 @@ class LayerNormMLP(TransformerEngineBase):
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        gated_act_pool = [
-            ('gelu', 'linear'),
-            ('silu', 'linear'),
-            ('relu', 'linear'),
-            ('quick_gelu', 'linear'),
-            ('squared_relu', 'linear')
-        ]
-        act_pool = [
-            ('gelu',),
-            ('silu',),
-            ('relu',),
-            ('quick_gelu',),
-            ('squared_relu',)
-        ]
-        normalize_acts = []
+        gated_act_pool = [('gelu', 'linear'), ('silu', 'linear'), ('relu', 'linear'),
+                          ('quick_gelu', 'linear'), ('squared_relu', 'linear')]
+        act_pool = [('gelu',), ('silu',), ('relu',), ('quick_gelu',), ('squared_relu',)]
+        normalized_acts = []
         for act in self.activations:
             if not isinstance(act, str):
                 return False
             normalized_acts.append(act.lower())
-        normalized_acts = tuple(reversed(normalized_acts)
-                               if normalized_acts[0] == 'linear' else normalized_acts)
+        normalized_acts = tuple(
+            reversed(normalized_acts) if normalized_acts[0] == 'linear' else normalized_acts)
 
         is_act_implemented = normalized_acts in (gated_act_pool + act_pool)
 
@@ -1043,19 +1031,19 @@ class LayerNormMLP(TransformerEngineBase):
                 bias_2 = None
 
             out = fused_layernorm_fp8_mlp(y,
-                                         scale,
-                                         ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
-                                         [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
-                                         self.layernorm_type,
-                                         zero_centered_gamma=self.zero_centered_gamma,
-                                         epsilon=self.epsilon,
-                                         layernorm_input_axes=self.layernorm_input_axes,
-                                         dot_1_input_axes=self.dot_1_input_axes,
-                                         dot_2_input_axes=self.dot_2_input_axes,
-                                         ffn1_ckpt_name=ffn1_ckpt_name,
-                                         ffn2_ckpt_name=ffn2_ckpt_name,
-                                         activation_type = normalized_acts,
-                                         use_bias = self.use_bias)
+                                          scale,
+                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
+                                          [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
+                                          self.layernorm_type,
+                                          zero_centered_gamma=self.zero_centered_gamma,
+                                          epsilon=self.epsilon,
+                                          layernorm_input_axes=self.layernorm_input_axes,
+                                          dot_1_input_axes=self.dot_1_input_axes,
+                                          dot_2_input_axes=self.dot_2_input_axes,
+                                          ffn1_ckpt_name=ffn1_ckpt_name,
+                                          ffn2_ckpt_name=ffn2_ckpt_name,
+                                          activation_type=normalized_acts,
+                                          use_bias=self.use_bias)
 
         else:    # not use_fused_ln_geglu_mlp
             # DenseGeneral 1
