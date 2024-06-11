@@ -7,6 +7,7 @@
 #include "extensions.h"
 #include "transformer_engine/fused_attn.h"
 
+
 namespace transformer_engine {
 namespace jax {
 
