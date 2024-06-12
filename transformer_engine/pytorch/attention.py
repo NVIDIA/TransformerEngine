@@ -826,7 +826,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i-1)%2]):
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
+                        out = torch.zeros_like(q)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
@@ -972,10 +972,10 @@ class AttnFuncWithCP(torch.autograd.Function):
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
         # Flash Attn outputs
-        dq = torch.empty_like(q)
+        dq = torch.zeros_like(q)
 
-        p2p_comm_buffers = [torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device), \
-                            torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device)]
+        p2p_comm_buffers = [torch.zeros((2, *kv.shape), dtype=kv.dtype, device=kv.device), \
+                            torch.zeros((2, *kv.shape), dtype=kv.dtype, device=kv.device)]
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
 
@@ -1049,10 +1049,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                     else:
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         q_ = q.view(-1, *q.shape[-2:])
-                        dq_ = torch.empty_like(q_)
+                        dq_ = torch.zeros_like(q_)
                         # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                         kv_ = kv.view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.empty_like(kv_)
+                        dkv_ = torch.zeros_like(kv_)
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
@@ -1108,14 +1108,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                     else:
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         q_ = q.view(-1, *q.shape[-2:])
-                        dq_ = torch.empty_like(q_)
+                        dq_ = torch.zeros_like(q_)
                         if ctx.qkv_format == "thd":
                             # [2, t, np, hn] -> [2, t/2, np, hn]
                             kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_k, 0)
                         else:
                             # [2, b, 2, sk//2, np, hn]->[2, b, sk//2, np, hn]->[2, b*sk//2, np, hn]
                             kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.empty_like(kv_)
+                        dkv_ = torch.zeros_like(kv_)
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
@@ -1177,10 +1177,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                         else:
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
                             q_ = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
-                        dq_ = torch.empty_like(q_)
+                        dq_ = torch.zeros_like(q_)
                         # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                         kv_ = kv.view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.empty_like(kv_)
+                        dkv_ = torch.zeros_like(kv_)
                         if ctx.qkv_format == "thd":
                             out_ = tex.thd_read_half_tensor(out, cu_seqlens_q, 1)
                             dout_ = tex.thd_read_half_tensor(dout, cu_seqlens_q, 1)
@@ -1219,10 +1219,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                 else:
                     # [b, sq, np, hn] -> [b*sq, np, hn]
                     q_ = q.view(-1, *q.shape[-2:])
-                    dq_ = torch.empty_like(q_)
+                    dq_ = torch.zeros_like(q_)
                     # [2, b, sk, np, hn] -> [2, b*sk, np, hn]
                     kv_ = kv.view(2, -1, *kv.shape[-2:])
-                    dkv_ = torch.empty_like(kv_)
+                    dkv_ = torch.zeros_like(kv_)
                     # [b, sq, np, hn] -> [b*sq, np, hn]
                     out_ = out.view(-1, *out.shape[-2:])
                     dout_ = dout.view(-1, *dout.shape[-2:])
@@ -1250,10 +1250,16 @@ class AttnFuncWithCP(torch.autograd.Function):
 
             if causal:
                 if i > (cp_size-rank-1):
-                    dq.add_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.add_(dq_)
+                    else:
+                        dq[:cu_seqlens_q[-1]].add_(dq_[:cu_seqlens_q[-1]])
                 elif i == (cp_size-rank-1):
                     if rank == (cp_size-1):
-                        dq.copy_(dq_)
+                        if ctx.qkv_format != "thd":
+                            dq.copy_(dq_)
+                        else:
+                            dq[:cu_seqlens_q[-1]].copy_(dq_[:cu_seqlens_q[-1]])
                     else:
                         if ctx.qkv_format == "bshd":
                             dq[:, 0, ...].copy_(dq_[:, 0, ...])
@@ -1279,9 +1285,15 @@ class AttnFuncWithCP(torch.autograd.Function):
                         tex.thd_grad_correction(dq, dq_, cu_seqlens_q, "none", "copy")
             else:
                 if i == 0:
-                    dq.copy_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.copy_(dq_)
+                    else:
+                        dq[:cu_seqlens_q[-1]].copy_(dq_[:cu_seqlens_q[-1]])
                 else:
-                    dq.add_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.add_(dq_)
+                    else:
+                        dq[:cu_seqlens_q[-1]].add_(dq_[:cu_seqlens_q[-1]])
 
             if attn_dbias is not None:
                 idx = (rank+i+1)%cp_size
@@ -1330,7 +1342,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                         elif ctx.qkv_format == "thd":
                             tex.thd_grad_correction(dkv, dkv_, cu_seqlens_k, "add", "copy")
                     else:
-                        dkv.add_(dkv_)
+                        if ctx.qkv_format != "thd":
+                            dkv.add_(dkv_)
+                        else:
+                            dkv[:, :cu_seqlens_kv[-1]].add_(dkv_[:, :cu_seqlens_kv[-1]])
                 elif i >= (cp_size-rank-1):
                     if i == 0 and rank == (cp_size-1):
                         if ctx.qkv_format == "bshd":
@@ -1347,14 +1362,26 @@ class AttnFuncWithCP(torch.autograd.Function):
                         elif ctx.qkv_format == "thd":
                             tex.thd_grad_correction(dkv, dkv_, cu_seqlens_k, "add", "none")
                 elif i > 0:
-                    dkv.add_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.add_(dkv_)
+                    else:
+                        dkv[:, :cu_seqlens_kv[-1]].add_(dkv_[:, :cu_seqlens_kv[-1]])
                 else:
-                    dkv.copy_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.copy_(dkv_)
+                    else:
+                        dkv[:, :cu_seqlens_kv[-1]].copy_(dkv_[:, :cu_seqlens_kv[-1]])
             else:
                 if i == 0:
-                    dkv.copy_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.copy_(dkv_)
+                    else:
+                        dkv[:, :cu_seqlens_kv[-1]].copy_(dkv_[:, :cu_seqlens_kv[-1]])
                 else:
-                    dkv.add_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.add_(dkv_)
+                    else:
+                        dkv[:, :cu_seqlens_kv[-1]].add_(dkv_[:, :cu_seqlens_kv[-1]])
 
         if causal:
             if ctx.qkv_format == "bshd":

@@ -67,24 +67,26 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim)
         kv_input_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.batch_size, config.max_seqlen_q, config.num_heads*config.head_dim)
-        cu_seqlens_q = None
-        cu_seqlens_kv = None
+        cu_seqlens = None
     elif qkv_format == "sbhd":
         q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim)
         kv_input_shape = (config.max_seqlen_kv, config.batch_size, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.max_seqlen_q, config.batch_size, config.num_heads*config.head_dim)
-        cu_seqlens_q = None
-        cu_seqlens_kv = None
+        cu_seqlens = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(world_size * 2, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
-        seqlens_q = seqlens_q - seqlens_q % (world_size * 2)
-        cu_seqlens_q = torch.cat([torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0)])
-        cu_seqlens_kv = cu_seqlens_q
-        q_input_shape = (cu_seqlens_q[-1], config.num_heads, config.head_dim)
-        kv_input_shape = (cu_seqlens_kv[-1], config.num_gqa_groups, config.head_dim)
-        attn_output_shape = (cu_seqlens_q[-1], config.num_heads*config.head_dim)
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32).cuda()
-        cu_seqlens_kv = cu_seqlens_kv.to(torch.int32).cuda()
+        # assuming self-attn, i.e., max_seqlen_q == max_seqlen_kv
+        seqlens = torch.randint(world_size * 2, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
+        seqlens = seqlens - seqlens % (world_size * 2)
+        q_input_shape = (config.max_seqlen_q*config.batch_size, config.num_heads, config.head_dim)
+        kv_input_shape = q_input_shape
+        attn_output_shape = (config.max_seqlen_q*config.batch_size, config.num_heads * config.head_dim)
+        cu_seqlens = torch.cat(
+            [torch.zeros([1], dtype=torch.int32), \
+             seqlens.cumsum(0), \
+             torch.tensor([q_input_shape[0]], dtype=torch.int32) \
+            ]
+        )
+        cu_seqlens = cu_seqlens.to(torch.int32).cuda()
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
@@ -104,8 +106,7 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     for x in [q, k, v, dout] + ([] if bias is None else [bias]):
         dist.broadcast(x, 0, group=cp_comm_group)
     if qkv_format == "thd":
-        for x in [cu_seqlens_q, cu_seqlens_kv]:
-            dist.broadcast(x, 0, group=cp_comm_group)
+        dist.broadcast(cu_seqlens, 0, group=cp_comm_group)
 
     # run core_attn without CP
     for x in [q, k, v]:
@@ -114,8 +115,8 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q, k, v,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
+        cu_seqlens_q=None if cu_seqlens is None else cu_seqlens[:-1],
+        cu_seqlens_kv=None if cu_seqlens is None else cu_seqlens[:-1],
     )
     out.backward(dout)
 
@@ -130,12 +131,9 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
     elif qkv_format == "thd":
-        seq_idx_q  = tex.thd_get_partitioned_indices(cu_seqlens_q, q_.size(0), world_size, rank)
-        seq_idx_kv = tex.thd_get_partitioned_indices(cu_seqlens_kv, k_.size(0), world_size, rank)
-        q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
-        k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
-        cu_seqlens_q = cu_seqlens_q // world_size
-        cu_seqlens_kv = cu_seqlens_kv // world_size
+        seq_idx = tex.thd_get_partitioned_indices(cu_seqlens, q_input_shape[0], world_size, rank)
+        q_, k_, v_, dout_ = [x.index_select(0, seq_idx) for x in [q_, k_, v_, dout_]]
+        cu_seqlens = cu_seqlens // world_size
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
@@ -144,16 +142,14 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream())
-    max_seqlen_q  = config.max_seqlen_q
-    max_seqlen_kv = config.max_seqlen_kv
     out_ = core_attn(
         q_, k_, v_,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias_,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_kv=max_seqlen_kv,
+        cu_seqlens_q=None if cu_seqlens is None else cu_seqlens[:-1],
+        cu_seqlens_kv=None if cu_seqlens is None else cu_seqlens[:-1],
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
     )
     out_.backward(dout_)
 
@@ -176,9 +172,10 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         dq_, dk_, dv_, out_ = [x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim]//2, *x.shape[(seq_dim+1):]) \
             for x in [q_.grad, k_.grad, v_.grad, out_]]
     elif qkv_format == "thd":
-        dq, out = [x.index_select(0, seq_idx_q).contiguous().view(-1) for x in [q.grad, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous().view(-1) for x in [k.grad, v.grad]]
+        dq, dk, dv, out = [x.index_select(0, seq_idx).contiguous().view(-1) for x in [q.grad, k.grad, v.grad, out]]
         dq_, dk_, dv_, out_ = [x.view(-1) for x in [q_.grad, k_.grad, v_.grad, out_]]
+        for x in [dq, dk, dv, out, dq_, dk_, dv_, out_]:
+            assert (torch.all(torch.logical_not(x[cu_seqlens[-2]:])).item())
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
