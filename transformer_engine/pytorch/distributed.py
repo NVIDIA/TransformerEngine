@@ -5,15 +5,19 @@
 """Methods needed for distributed training (DP/TP)."""
 import warnings
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
-from typing import Any, Dict, List, Union, Optional, Callable, Tuple
+from typing import Any, Dict, Union, Optional, Callable, Tuple, List
 
 import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
+from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
+from .float8_tensor import Float8Tensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -630,6 +634,11 @@ def checkpoint(
             **kwargs
         )
 
+    # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
+    # to scatter/gather activations that we will recompute anyway.
+    setattr(function, "fsdp_wrapped", False)
+    setattr(function, "fsdp_group", None)
+
     # Otherwise discard unused te.utils.checkpoint.checkpoint() arguments
     # and execute TE's own checkpointing
     # NOTE: This logic uses the TE checkpoint on all custom callable `function` handles because we
@@ -856,3 +865,110 @@ def allreduce(
     handle = torch.distributed.all_reduce(input_, group=tp_group, async_op=async_op)
 
     return input_, handle
+
+
+def _fsdp_scatter_tensors(
+    fsdp_group: dist_group_type,
+    *tensors: torch.Tensor,
+):
+    shapes = []
+    if fsdp_group is not None:
+        for t in tensors:
+            if isinstance(t, torch.Tensor):
+                target = t._data if isinstance(t, Float8Tensor) else t
+                shapes.append(target.data.shape)
+                safely_set_viewless_tensor_data(
+                    target, split_tensor_into_1d_equal_chunks(
+                        target.data, fsdp_group, new_buffer=True)
+                )
+            else:
+                shapes.append(None)
+    return shapes
+
+
+def _fsdp_gather_tensors(
+    fsdp_group: dist_group_type,
+    shapes: List[Tuple[int,...]],
+    *tensors: torch.Tensor,
+):
+    if fsdp_group is not None:
+        assert len(shapes) == len(tensors), "Number of tensors and tensor shapes must be equal."
+        for s, t in zip(shapes, tensors):
+            if isinstance(t, torch.Tensor):
+                assert s is not None, "Internal TE error."
+                target = t._data if isinstance(t, Float8Tensor) else t
+                safely_set_viewless_tensor_data(
+                    target, gather_split_1d_tensor(target.data, fsdp_group).view(s)
+                )
+
+
+def _is_te_module(module):
+    """
+    Check if given module is a Transformer Engine module that requires the TE checkpoint
+    implementation for activation recompute.
+    """
+    from .module import LayerNorm, RMSNorm
+    from .module.base import TransformerEngineBaseModule
+    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .transformer import TransformerLayer
+    te_classes_list = [
+        LayerNorm,
+        RMSNorm,
+        TransformerEngineBaseModule,
+        UnfusedDotProductAttention,
+        DotProductAttention,
+        MultiheadAttention,
+        TransformerLayer,
+    ]
+    is_te_module = False
+    for te_class in te_classes_list:
+        if isinstance(module, te_class):
+            is_te_module = True
+            break
+    return is_te_module
+
+
+def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
+    """
+    Inject FSDP process gorup references into FSDP-wrapped TE modules in an FSDP-wrapped root
+    module in order to scatter/gather the Fp8 weight copies at the same time FSDP scatters/gathers
+    its `FlatParameters`.
+
+    Parameters
+    ----------
+    fsdp_root: torch.nn.Module
+               FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
+    """
+    assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."
+    assert not fsdp_root.primary_weights_in_fp8, (
+        "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
+        "Please initialize your model without the te.fp8_model_init(...) context."
+    )
+
+    # If the root module is a TE module, inject FSDP information into it
+    if _is_te_module(fsdp_root.module):
+        root_state = _get_module_fsdp_state(fsdp_root)
+        assert root_state is not None, "Root module does not have a valid _FSDPState."
+        setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
+
+    # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
+    fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
+    for state, fsdp_module in zip(fsdp_states, fsdp_modules):
+        assert not fsdp_module.module.primary_weights_in_fp8, (
+            "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
+            "Please initialize your model without the te.fp8_model_init(...) context."
+        )
+        if _is_te_module(fsdp_module.module):
+            setattr(fsdp_module.module, "fsdp_group", state.process_group)
+
+
+class FullyShardedDataParallel(FSDP):
+    """
+    Transformer Engine wrapper around `torch.distributed.fsdp.FullyShardedDataParallel` that
+    extracts necessary information out of the FSDP wrap for TE modules to scatter their
+    activation tensors after each forward pass and gather them before the backward pass.
+    """
+
+    def __init__(self, module, *args, **kwargs):
+        super().__init__(module, *args, **kwargs)
+        prepare_te_modules_for_fsdp(self)

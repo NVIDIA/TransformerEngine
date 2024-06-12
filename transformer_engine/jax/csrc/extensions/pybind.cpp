@@ -3,16 +3,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 
-#include <cublasLt.h>
-
-#include "common/include/transformer_engine/fused_attn.h"
-#include "common/include/transformer_engine/activation.h"
-#include "common/include/transformer_engine/transformer_engine.h"
-#include "jax/csrc/modules.h"
-#include "jax/csrc/utils.h"
+#include "jax/csrc/extensions.h"
 
 namespace transformer_engine {
 namespace jax {

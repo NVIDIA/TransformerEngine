@@ -9,7 +9,7 @@
 *.ncu-rep
 *.sqlite
 *.onnx
-.eggs
+*.eggs
 build/
 *.so
 *.egg-info
@@ -27,3 +27,15 @@ docs/_build
 docs/doxygen
 *.log
 CMakeFiles/CMakeSystem.cmake
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+develop-eggs/
+dist/
+downloads/
+.pytest_cache/

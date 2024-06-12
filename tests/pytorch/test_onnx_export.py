@@ -31,7 +31,7 @@ from torch import nn as nn
 from typing import Optional, Union, Tuple, List
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import gemm, fp8_gemm, gelu, cast_to_fp8, cast_from_fp8
 from transformer_engine.pytorch.module.base import get_workspace
 import transformer_engine.pytorch.cpp_extensions as texcpp
@@ -93,7 +93,7 @@ def reset_global_fp8_state():
 
 
 def create_fp8_recipe():
-    return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
+    return recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
 
 def do_export(

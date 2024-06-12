@@ -15,7 +15,7 @@ import pytest
 
 from utils import assert_allclose
 
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_fp8_metas, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral

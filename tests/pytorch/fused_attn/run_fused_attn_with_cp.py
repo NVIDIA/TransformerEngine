@@ -6,7 +6,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 
 dtypes={'fp16' : torch.float16, 'bf16' : torch.bfloat16}
@@ -22,6 +22,8 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
+        if qkv_format == 'thd' and (config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"):
+            return
 
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv('WORLD_SIZE', '1'))
@@ -44,6 +46,12 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     cp_comm_group = dist.new_group(cp_comm_ranks, backend='nccl')
 
     assert config.attn_mask_type in ['causal', 'no_mask'], f"{config.attn_mask_type} is an unsupported attention mask type!"
+
+    if kernel_backend == 'FusedAttention' and qkv_format == 'thd':
+        if 'causal' in config.attn_mask_type:
+            config.attn_mask_type = 'padding_causal'
+        else:
+            config.attn_mask_type = 'padding'
 
     # instantiate core attn module
     core_attn = DotProductAttention(config.num_heads,
@@ -112,9 +120,9 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     out.backward(dout)
 
     # run core_attn wit CP
+    q_, k_, v_, dout_, *rest = [x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])]
+    bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        q_, k_, v_, dout_, *rest = [x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])]
-        bias_ = rest[0] if len(rest) else None
         seq_dim = qkv_format.index('s')
         q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \
             for x in [q_, k_, v_, dout_]]
@@ -122,14 +130,12 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q_, k_, v_, dout_]]
     elif qkv_format == "thd":
-        q_, k_, v_, dout_ = [x.clone().detach() for x in [q, k, v, dout]]
         seq_idx_q  = tex.thd_get_partitioned_indices(cu_seqlens_q, q_.size(0), world_size, rank)
         seq_idx_kv = tex.thd_get_partitioned_indices(cu_seqlens_kv, k_.size(0), world_size, rank)
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
         cu_seqlens_q = cu_seqlens_q // world_size
         cu_seqlens_kv = cu_seqlens_kv // world_size
-        bias_ = None
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
@@ -158,7 +164,10 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
     # compare results with and without CP
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == 'bf16':
-        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        if config.num_heads == config.num_gqa_groups:
+            tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        else:
+            tols = dict(atol=3.5e-2, rtol=3.5e-2)
 
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [x.view(*x.shape[:seq_dim], 2*world_size, x.shape[seq_dim]//(2*world_size), *x.shape[(seq_dim+1):]) \

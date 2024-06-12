@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
@@ -26,6 +26,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _fsdp_gather_tensors,
 )
 from ..cpp_extensions import (
     fp8_cast_transpose_fused,
@@ -254,6 +255,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.fsdp_wrapped = False
+        self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
@@ -761,6 +764,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         with_transpose: bool = False,
+        fsdp_group: dist_group_type = None,
     ) -> Float8Tensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -787,13 +791,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         with_transpose: bool, default = `False`
             Whether to initialize cached transpose in workspace.
-
+        fsdp_group: bool, default = None
+            FSDP process group that the weights are distributed over.
         """
 
         # Construct workspace if needed
         out = None
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+            # Gather cached Fp8 workspace if it's distributed
+            # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
+            #       for models initialized with Fp8 primary weights.
+            if (not isinstance(out, Float8Tensor) and
+                fsdp_group is not None and
+                out._data.shape != tensor.data.shape):
+                _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
         if out is None:
             if (
                 tensor is None
