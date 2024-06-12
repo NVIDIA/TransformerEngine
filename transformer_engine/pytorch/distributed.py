@@ -615,7 +615,7 @@ def checkpoint(
             "`get_rng_state_tracker` must be passed as keyword arguments to `checkpoint`.",
             DeprecationWarning, stacklevel=2,
         )
-        distribute_saved_activations, get_rng_state_tracker, tp_group = args[:3] # pylint: disable=unbalanced-tuple-unpacking
+        distribute_saved_activations, get_rng_state_tracker, tp_group = args[:3]
         args = args[3:]
 
     # Trigger the native PyTorch checkpoint if the function is not or does not contain a

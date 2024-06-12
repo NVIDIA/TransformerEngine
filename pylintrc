@@ -29,7 +29,10 @@ disable=too-many-locals,
         global-statement,
         too-many-branches,
         global-variable-not-assigned,
-        redefined-argument-from-local
+        redefined-argument-from-local,
+        line-too-long,
+        too-many-return-statements,
+        unbalanced-tuple-unpacking
 
 [TYPECHECK]
 ignored-modules=torch
