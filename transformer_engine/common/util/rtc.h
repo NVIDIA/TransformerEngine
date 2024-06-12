@@ -85,6 +85,12 @@ class Kernel {
    */
   CUfunction get_function(int device_id);
 
+  /*! \brief Sets the preferred cache configuration for a function
+   *
+   * Wrapper of the CUDA Driver API function "cuFuncSetCacheConfig"
+   */
+  void set_function_cache_config(int device_id, CUfunc_cache cache_config);
+
  private:
   /*! \brief Mangled function name */
   std::string mangled_name_;
@@ -165,6 +171,15 @@ class KernelManager {
                                  stream,
                                  std::forward<ArgTs>(args)...);
   }
+
+  /*! \brief Sets the preferred cache configuration for a function in the context
+   *
+   * Assumes the kernel has already been compiled.
+   *
+   * \param[in] kernel_label     Unique identifying string for kernel
+   * \param[in] cache_config     Prefered cache configuration
+   */
+  void set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config);
 
  private:
   /*! \brief Compiled kernels */
