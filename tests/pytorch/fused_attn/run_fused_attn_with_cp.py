@@ -78,7 +78,7 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         seqlens = torch.randint(world_size * 2, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens = seqlens - seqlens % (world_size * 2)
         q_input_shape = (config.max_seqlen_q*config.batch_size, config.num_heads, config.head_dim)
-        kv_input_shape = q_input_shape
+        kv_input_shape = (config.max_seqlen_q*config.batch_size, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.max_seqlen_q*config.batch_size, config.num_heads * config.head_dim)
         cu_seqlens = torch.cat(
             [torch.zeros([1], dtype=torch.int32), \
