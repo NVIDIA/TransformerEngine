@@ -3368,7 +3368,7 @@ class DotProductAttention(torch.nn.Module):
                For that, please use `_get_qkv_layout` to gain the layout information.
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
-                `math.sqrt(kv_channels)`.
+                `1.0 / math.sqrt(kv_channels)`.
 
     Parallelism parameters
     ----------------------
