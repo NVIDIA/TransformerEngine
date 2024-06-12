@@ -61,7 +61,7 @@ def fused_layernorm_fp8_mlp(x: jnp.ndarray,
                             beta: jnp.ndarray,
                             kernels: List[jnp.ndarray],
                             biases: List[jnp.ndarray],
-                            fp8_gemm_pkg: FP8MetaPackage,
+                            fp8_meta_pkgs: List[FP8MetaPackage],
                             layernorm_type: str,
                             zero_centered_gamma: bool = False,
                             epsilon: float = 1e-6,
@@ -77,16 +77,16 @@ def fused_layernorm_fp8_mlp(x: jnp.ndarray,
     """
 
     assert len(kernels) == 2
-    assert fp8_gemm_pkg.num_of_gemm == len(kernels)
+    assert len(fp8_meta_pkgs) == len(kernels)
 
     kernel_1 = kernels[0]
     kernel_2 = kernels[1]
     bias_1 = biases[0]
     bias_2 = biases[1]
-    fp8_max = fp8_gemm_pkg.fp8_max
-    amax = fp8_gemm_pkg.amax
-    scale = fp8_gemm_pkg.scale
-    scale_inv = fp8_gemm_pkg.scale_inv
+    amax_list_1 = fp8_meta_pkgs[0].amax_list
+    amax_list_2 = fp8_meta_pkgs[1].amax_list
+    scale_list_1 = fp8_meta_pkgs[0].scale_list
+    scale_list_2 = fp8_meta_pkgs[1].scale_list
 
     fwd_dtype = FP8Helper.FWD_DTYPE
     bwd_dtype = FP8Helper.BWD_DTYPE
@@ -97,29 +97,31 @@ def fused_layernorm_fp8_mlp(x: jnp.ndarray,
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
 
-    output = _fused_layernorm_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max,
-                                      amax, scale, scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
-                                      zero_centered_gamma, epsilon, layernorm_input_axes,
-                                      dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name,
-                                      ffn2_ckpt_name, activation_type, use_bias)
+    output = _fused_layernorm_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2,
+                                      amax_list_1, amax_list_2, scale_list_1, scale_list_2,
+                                      fwd_dtype, bwd_dtype, layernorm_type, zero_centered_gamma,
+                                      epsilon, layernorm_input_axes, dot_1_input_axes,
+                                      dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name,
+                                      activation_type, use_bias)
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22))
 def _fused_layernorm_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, bias_1: jnp.ndarray,
-                             bias_2: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
-                             scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype,
+                             bias_2: jnp.ndarray, amax_list_1: List[jnp.ndarray],
+                             amax_list_2: List[jnp.ndarray], scale_list_1: List[jnp.ndarray],
+                             scale_list_2: List[jnp.ndarray], fwd_dtype: jnp.dtype,
                              bwd_dtype: jnp.dtype, layernorm_type: str, zero_centered_gamma: bool,
                              epsilon: float, layernorm_input_axes: Tuple[str, ...],
                              dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...],
                              ffn1_ckpt_name: str, ffn2_ckpt_name: str,
                              activation_type: Sequence[Union[str, Callable]], use_bias: bool):
     output, _ = _fused_layernorm_fp8_mlp_fwd_rule(
-        x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, fp8_max, amax, scale, scale_inv,
-        fwd_dtype, bwd_dtype, layernorm_type, zero_centered_gamma, epsilon, layernorm_input_axes,
-        dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name, activation_type,
-        use_bias)
+        x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2, amax_list_1, amax_list_2, scale_list_1,
+        scale_list_2, fwd_dtype, bwd_dtype, layernorm_type, zero_centered_gamma, epsilon,
+        layernorm_input_axes, dot_1_input_axes, dot_2_input_axes, ffn1_ckpt_name, ffn2_ckpt_name,
+        activation_type, use_bias)
     return output
 
 
@@ -131,10 +133,10 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         kernel_2,
         bias_1,
         bias_2,
-        fp8_max,
-        amax,
-        scale,
-        scale_inv,
+        amax_list_1,
+        amax_list_2,
+        scale_list_1,
+        scale_list_2,
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         layernorm_type,
@@ -162,17 +164,24 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     assert kernel_1.shape[-1] == kernel_2.shape[0]
 
     maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
-        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
-    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
-    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(*amax_list_1, *scale_list_1,
+                                                         *amax_list_2, *scale_list_2)
+    amax_list_1 = maybe_fm32_to_fp32(*amax_list_1)
+    scale_list_1 = maybe_fm32_to_fp32(*scale_list_1)
+    amax_list_2 = maybe_fm32_to_fp32(*amax_list_2)
+    scale_list_2 = maybe_fm32_to_fp32(*scale_list_2)
 
-    amax = FP8Helper.update_amax_history(amax)
+    fp8_dtype_list = [fwd_dtype, fwd_dtype, bwd_dtype]
+    scale_list_1, scale_inv_list_1 = FP8MetaPackage.update_fp8_scale(amax_list_1, scale_list_1,
+                                                                     fp8_dtype_list)
+    amax_list_1 = FP8MetaPackage.update_amax_list(amax_list_1)
+    scale_list_2, scale_inv_list_2 = FP8MetaPackage.update_fp8_scale(amax_list_2, scale_list_2,
+                                                                     fp8_dtype_list)
+    amax_list_2 = FP8MetaPackage.update_amax_list(amax_list_2)
 
-    gemm1_x_idx, gemm1_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
-
-    x_amax = amax[gemm1_x_idx, 0:1]
-    x_scale = scale[gemm1_x_idx]
-    x_scale_inv = scale_inv[gemm1_x_idx]
+    x_amax = amax_list_1[FP8MetaPackage.INPUT_IDX][0:1]
+    x_scale = scale_list_1[FP8MetaPackage.INPUT_IDX]
+    x_scale_inv = scale_inv_list_1[FP8MetaPackage.INPUT_IDX]
 
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
@@ -201,9 +210,9 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
 
     assert x.shape == ln_out.shape
 
-    kernel_1_amax = amax[gemm1_kernel_idx, 0:1]
-    kernel_1_scale = scale[gemm1_kernel_idx]
-    kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
+    kernel_1_amax = amax_list_1[FP8MetaPackage.WEIGHT_IDX][0:1]
+    kernel_1_scale = scale_list_1[FP8MetaPackage.WEIGHT_IDX]
+    kernel_1_scale_inv = scale_inv_list_1[FP8MetaPackage.WEIGHT_IDX]
 
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
@@ -224,12 +233,9 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         bias_1_shape = None
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
-    gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
-
-    activation_lu_out_amax = amax[gemm2_x_idx, 0:1]
-    activation_lu_out_scale = scale[gemm2_x_idx]
-    activation_lu_out_scale_inv = scale_inv[gemm2_x_idx]
-
+    activation_lu_out_amax = amax_list_2[FP8MetaPackage.INPUT_IDX][0:1]
+    activation_lu_out_scale = scale_list_2[FP8MetaPackage.INPUT_IDX]
+    activation_lu_out_scale_inv = scale_inv_list_2[FP8MetaPackage.INPUT_IDX]
 
     # (batch..., hidden_in) -> (batch..., hidden)
     casted_activation_lu_out, updated_activation_lu_amax = \
@@ -239,8 +245,8 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     casted_activation_lu_out = with_sharding_constraint_by_logical_axes(
         casted_activation_lu_out, dot_2_input_axes)
 
-    kernel_2_scale = scale[gemm2_kernel_idx]
-    kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
+    kernel_2_scale = scale_list_2[FP8MetaPackage.WEIGHT_IDX]
+    kernel_2_scale_inv = scale_inv_list_2[FP8MetaPackage.WEIGHT_IDX]
     # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
     casted_kernel_2, updated_kernel_2_amax = quantize(kernel_2, fwd_dtype, kernel_2_scale)
@@ -261,9 +267,10 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, casted_kernel_1,
-           casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax,
-           updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax,
-           x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape, maybe_fp32_to_fm32)
+           casted_kernel_2, amax_list_1, amax_list_2, scale_list_1, scale_list_2, scale_inv_list_1,
+           scale_inv_list_2, updated_x_amax, updated_activation_lu_amax, updated_kernel_1_amax,
+           updated_kernel_2_amax, x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape,
+           maybe_fp32_to_fm32)
 
     return dot_2_output, ctx
 
@@ -284,15 +291,14 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_activation_lu_out, \
-    casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
+    casted_kernel_1, casted_kernel_2, amax_list_1, amax_list_2, scale_list_1, scale_list_2, \
+    scale_inv_list_1, scale_inv_list_2, updated_x_amax, \
     updated_activation_lu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims, bias_1_shape, bias_2_shape, maybe_fp32_to_fm32 = ctx
 
-    gemm2_x_idx, gemm2_kernel_idx, gemm2_grad_idx = FP8Helper.get_fp8_meta_indices(1)
-
-    grad_amax = amax[gemm2_grad_idx, 0:1]
-    grad_scale = scale[gemm2_grad_idx]
-    grad_scale_inv = scale_inv[gemm2_grad_idx]
+    grad_amax = amax_list_2[FP8MetaPackage.GRAD_IDX][0:1]
+    grad_scale = scale_list_2[FP8MetaPackage.GRAD_IDX]
+    grad_scale_inv = scale_inv_list_2[FP8MetaPackage.GRAD_IDX]
 
     # Since the sharding of outputs should be the same as dot_1's input
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
@@ -316,24 +322,22 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                                            transpose_axis_boundary=-1)
 
     # (hidden, batch...,) x (hidden, batch...)
-    gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
+    gemm2_x_scale_inv = scale_inv_list_2[FP8MetaPackage.INPUT_IDX]
     wgrad_2 = fp8_dot_impl(casted_activation_lu_out_t, casted_grad_t, gemm2_x_scale_inv,
                            grad_scale_inv, grad.dtype, (xt_batch_dims, xt_batch_dims),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)
-    kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
+    kernel_2_scale_inv = scale_inv_list_2[FP8MetaPackage.WEIGHT_IDX]
     dgrad_2 = fp8_dot_impl(casted_grad, casted_kernel_2, grad_scale_inv, kernel_2_scale_inv,
                            grad.dtype, (x_contracting_dims, (1,)),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
-    gemm1_x_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
-
-    dactivation_lu_amax = amax[gemm1_grad_idx, 0:1]
-    dactivation_lu_scale = scale[gemm1_grad_idx]
-    dactivation_lu_scale_inv = scale_inv[gemm1_grad_idx]
+    dactivation_lu_amax = amax_list_1[FP8MetaPackage.GRAD_IDX][0:1]
+    dactivation_lu_scale = scale_list_1[FP8MetaPackage.GRAD_IDX]
+    dactivation_lu_scale_inv = scale_inv_list_1[FP8MetaPackage.GRAD_IDX]
 
     if len(activation_type) > 1:    # if gated
         if use_bias:
@@ -390,15 +394,15 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     # (hidden, batch...) x (hidden, batch...)
-    gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
+    gemm1_x_scale_inv = scale_inv_list_1[FP8MetaPackage.INPUT_IDX]
     xt_batch_dims_2 = tuple(i + 1 for i in xt_batch_dims)
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dactivation_lu_t, gemm1_x_scale_inv,
                            dactivation_lu_scale_inv, grad.dtype, (xt_batch_dims, xt_batch_dims_2),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
-    x_contracting_dims = ((min(x_contracting_dims),) + tuple(
-            i + 1 for i in x_contracting_dims), (1,2))
-    kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
+    x_contracting_dims = ((min(x_contracting_dims),) + tuple(i + 1 for i in x_contracting_dims),
+                          (1, 2))
+    kernel_1_scale_inv = scale_inv_list_1[FP8MetaPackage.WEIGHT_IDX]
     dgrad_1 = fp8_dot_impl(casted_dactivation_lu, casted_kernel_1, dactivation_lu_scale_inv,
                            kernel_1_scale_inv, grad.dtype, x_contracting_dims,
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
@@ -419,17 +423,26 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
         dx, dgamma = rmsnorm_bwd(dgrad_1, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
 
-    amax = amax.at[gemm1_x_idx, 0].set(updated_x_amax[0])
-    amax = amax.at[gemm1_kernel_idx, 0].set(updated_kernel_1_amax[0])
-    amax = amax.at[gemm1_grad_idx, 0].set(updated_dactivation_lu_amax[0])
-    amax = amax.at[gemm2_x_idx, 0].set(updated_activation_lu_amax[0])
-    amax = amax.at[gemm2_kernel_idx, 0].set(updated_kernel_2_amax)
-    amax = amax.at[gemm2_grad_idx, 0].set(updated_grad_amax[0])
+    amax_list_1[FP8MetaPackage.INPUT_IDX] = \
+        amax_list_1[FP8MetaPackage.INPUT_IDX].at[0].set(updated_x_amax[0])
+    amax_list_1[FP8MetaPackage.WEIGHT_IDX] = \
+        amax_list_1[FP8MetaPackage.WEIGHT_IDX].at[0].set(updated_kernel_1_amax[0])
+    amax_list_1[FP8MetaPackage.GRAD_IDX] = \
+        amax_list_1[FP8MetaPackage.GRAD_IDX].at[0].set(updated_dactivation_lu_amax[0])
+    amax_list_2[FP8MetaPackage.INPUT_IDX] = \
+        amax_list_2[FP8MetaPackage.INPUT_IDX].at[0].set(updated_activation_lu_amax[0])
+    amax_list_2[FP8MetaPackage.WEIGHT_IDX] = \
+        amax_list_2[FP8MetaPackage.WEIGHT_IDX].at[0].set(updated_kernel_2_amax)
+    amax_list_2[FP8MetaPackage.GRAD_IDX] = \
+        amax_list_2[FP8MetaPackage.GRAD_IDX].at[0].set(updated_grad_amax[0])
 
-    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
+    amax_list_1 = maybe_fp32_to_fm32(*amax_list_1)
+    scale_list_1 = maybe_fp32_to_fm32(*scale_list_1)
+    amax_list_2 = maybe_fp32_to_fm32(*amax_list_2)
+    scale_list_2 = maybe_fp32_to_fm32(*scale_list_2)
 
     return dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, \
-           fp8_max, amax, scale, scale_inv
+           amax_list_1, amax_list_2, scale_list_1, scale_list_2
 
 
 _fused_layernorm_fp8_mlp.defvjp(_fused_layernorm_fp8_mlp_fwd_rule,
