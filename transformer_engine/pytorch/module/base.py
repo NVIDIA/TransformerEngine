@@ -114,7 +114,7 @@ def initialize_ub(
         num_splits: int = 0,
         aggregate: int = 0,
         atomic_gemm: int = 0,
-        use_ce: int = 1,
+        use_ce: bool = True,
         fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
@@ -203,7 +203,7 @@ def initialize_ub(
             set_sm_margin = ub_cfg.get("set_sm_margin", 0)
             aggregate = ub_cfg.get("aggregate", 0)
             atomic_gemm = ub_cfg.get("atomic_gemm", 0)
-            use_ce = ub_cfg.get("use_ce", 1)
+            use_ce = ub_cfg.get("use_ce", True)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = ((name in layers_all_gather_overlap) or
