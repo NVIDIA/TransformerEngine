@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import io
+
 import math
 import os
 from typing import Dict, List, Optional
@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -50,8 +49,7 @@ class ModelConfig:
 
 
 model_configs = {
-    #"126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
-    "126m": ModelConfig(1536, 1e-5, 12, 128, 12, 2048),
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
 model_configs_inference = {
@@ -617,140 +615,56 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    #return TransformerLayer(
-    with fp8_model_init(enabled=True):
-        #block = (
-        #    DotProductAttention(
-        #            12, #config.num_heads,
-        #            128, #config.head_dim,
-        #            #num_gqa_groups=config.num_gqa_groups,
-        #            #attention_dropout=config.dropout_p,
-        #            qkv_format='sbhd', #qkv_format,
-        #            #attn_mask_type=config.attn_mask_type,
-        #            sequence_parallel=False,
-        #            tp_size=1,
-        #            #get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-        #            tp_group=None,
-        #            layer_number=1,
-        #            #attention_type=config.attn_type,
-        #    ).to(dtype=dtype, device="cuda")
-        #)
-        block = TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            fuse_qkv_params=True,
-            params_dtype=dtype,
-            device="cuda",
-        )
-    return block
-
-
-def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=4, path="checkpoint.pt"):
-    reset_rng_states()
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        interval=1,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=True,
-        fp8_mha=False,
+    return TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.embed,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        params_dtype=dtype,
+        device="cuda",
     )
 
+
+def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path="checkpoint.pt"):
+    reset_rng_states()
+
+    te_inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    te_inp_hidden_states.retain_grad()
+
     block = _test_e2e_checkpointing_get_model(config, dtype)
-    #print('bbbbbbbbbbbbbbbbbbbbbbbbb0 ',id(block))
 
-    #for i in range(10): #steps // 2):
-    for i in range(steps // 2):
-        te_inp_hidden_states = torch.randn(
-            (config.seq_len, bs, config.hidden_size),
-            dtype=dtype,
-            device="cuda",
-            requires_grad=True,
+    for _ in range(steps // 2):
+        te_out = block(
+            te_inp_hidden_states,
+            None,
         )
-        te_inp_hidden_states.retain_grad()
-        #te_inp_hidden_states_q = 0.1 * torch.randn(
-        #    (config.seq_len, bs, 12, 128), #config.hidden_size),
-        #    dtype=dtype,
-        #    device="cuda",
-        #    requires_grad=True,
-        #)
-        #te_inp_hidden_states_k = 0.1 * torch.randn(
-        #    (config.seq_len, bs, 12, 128), #config.hidden_size),
-        #    dtype=dtype,
-        #    device="cuda",
-        #    requires_grad=True,
-        #)
-        #te_inp_hidden_states_v = 0.1 * torch.randn(
-        #    (config.seq_len, bs, 12, 128), #config.hidden_size),
-        #    dtype=dtype,
-        #    device="cuda",
-        #    requires_grad=True,
-        #)
-        #te_inp_hidden_states_q.retain_grad()
-        #te_inp_hidden_states_k.retain_grad()
-        #te_inp_hidden_states_v.retain_grad()
+        loss = te_out.sum()
+        loss.backward()
 
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-            print(f'----- iter {i} ----')
-            te_out = block(
-                te_inp_hidden_states,
-                #te_inp_hidden_states_q,
-                #te_inp_hidden_states_k,
-                #te_inp_hidden_states_v,
-                #None,
-                is_first_microbatch=True,
-            )
-            #torch.save(te_out, f'te_out_1_{i}.pt')
-            #torch.save(te_out, f'te_out{i}.pt')
-            #print('min',te_out.min().item(), 'max',te_out.max().item())
-            #print(te_out[1071, 0, :10])
-            loss = te_out.sum()
-            loss.backward()
-
-    print('--------- state_dict() 0 ---------')
-    sd = block.state_dict()
-
-    #if False: #checkpoint:
     if checkpoint:
         # This process is necessary so that we can start afresh with
         # a new model while erasing all internal state to ensure that
         # loading from a checkpoint gives bitwise identical results.
         # Since gradients are being accumulated, it is important to
         # restore them post loading the checkpoint.
-        print('--------- state_dict() 1 ---------')
-        #torch.save(block.state_dict(), path)
-        attn_extra_state = sd['self_attention.core_attention._extra_state']
-        attn_extra_state.seek(0)
-        attn_extra_state = torch.load(attn_extra_state, map_location='cuda')
-        print('attn_extra_state',attn_extra_state)
-        random_state = {'a':1, 'b':2}
-        fused_attn_extra_state = io.BytesIO()
-        torch.save(random_state, fused_attn_extra_state)
-        sd['self_attention.core_attention.fused_attention._extra_state']=fused_attn_extra_state
-        torch.save(sd, path)
+        torch.save(block.state_dict(), path)
 
         param_grads = []
         for p in block.parameters():
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
-        #for name, param in block.named_parameters():
-        #    if param.requires_grad:
-        #        print(name)
-        print('--------- state_dict() 2 ---------')
-        #for name, param in block.state_dict().items():
-        for name, param in sd.items():
-            print(name)
-
 
         global _cpu_rng_state, _cuda_rng_state
         _cpu_rng_state = torch.get_rng_state()
@@ -758,48 +672,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=4, path="
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        #block.reset_fp8_meta_tensors()
-        FP8GlobalStateManager.reset()
-        #print('bbbbbbbbbbbbbbbbbbbbbbbbb1 ',id(block))
-        print('--------- load_state_dict()  ---------')
         block.load_state_dict(torch.load(path))
-        sd_new = block.state_dict()
-        attn_extra_state_new = sd_new['self_attention.core_attention._extra_state']
-        attn_extra_state_new.seek(0)
-        attn_extra_state_new = torch.load(attn_extra_state_new, map_location='cuda')
-        print('attn_extra_state_new',attn_extra_state_new)
-        for k,v in attn_extra_state_new.items():
-            if k != 'extra_fp8_variables':
-                #assert(v==attn_extra_state[k]), f'{k} is not equal'
-                assert(torch.equal(v,attn_extra_state[k])), f'{k} is not equal'
-            else:
-                for ek, ev in attn_extra_state_new['extra_fp8_variables'].items():
-                    assert(ev==attn_extra_state['extra_fp8_variables'][ek]), f'{ek} is not equal'
-        print('passsssssssssss 1')
-        #fused_attn_state = block.self_attention.core_attention.fused_attention.get_fp8_meta_tensors()
-        fused_attn_state = block.self_attention.core_attention.fused_attention.fp8_meta
-        print('fused_attn_state',fused_attn_state)
-        for k,v in attn_extra_state.items():
-            if k != 'extra_fp8_variables':
-                #assert(v==attn_extra_state[k]), f'{k} is not equal'
-                kk = "scaling_fwd" if "fwd" in k else "scaling_bwd"        
-                state_tmp = None
-                if "scale_inv" in k:
-                    state_tmp = fused_attn_state[kk].scale_inv
-                elif "scale" in k:
-                    state_tmp = fused_attn_state[kk].scale
-                else:
-                    state_tmp = fused_attn_state[kk].amax_history
-                #state_tmp.seek(0)
-                #state_tmp = torch.load(state_tmp, map_location='cuda')
-                print('k,kk,tmp',k,kk,state_tmp)
-                #assert(torch.equal(v,fused_attn_state[k])), f'{k} is not equal'
-                assert(torch.equal(v,state_tmp)), f'{k} is not equal'
-            else:
-                for ek, ev in attn_extra_state['extra_fp8_variables'].items():
-                    assert(ev==fused_attn_state[ek]), f'{ek} is not equal'
-        print('passsssssssssss 2')
-
         reset_rng_states()
 
         for p in block.parameters():
@@ -808,32 +681,13 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=4, path="
 
         assert not param_grads, "Oops!"
 
-    #te_inp_hidden_states_1 = torch.ones(
-    #    (config.seq_len, bs, config.hidden_size),
-    #    dtype=dtype,
-    #    device="cuda",
-    #    requires_grad=True,
-    #)
-    #te_inp_hidden_states_1.retain_grad()
-    for i in range(steps // 2):
-        te_inp_hidden_states = torch.randn(
-            (config.seq_len, bs, config.hidden_size),
-            dtype=dtype,
-            device="cuda",
-            requires_grad=True,
+    for _ in range(steps // 2):
+        te_out = block(
+            te_inp_hidden_states,
+            None,
         )
-        #print('sum >>> ',torch.sum(te_inp_hidden_states))
-        te_inp_hidden_states.retain_grad()
-
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-            print(f'----- iter {i} ----')
-            te_out = block(
-                te_inp_hidden_states,
-                #None,
-                is_first_microbatch=True,
-            )
-            loss = te_out.sum()
-            loss.backward()
+        loss = te_out.sum()
+        loss.backward()
 
     torch.cuda.synchronize()
 
@@ -852,27 +706,20 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=4, path="
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-    #print("====================== no checkpointing ========")
-    #outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
-    print("====================== checkpointing ========")
+    outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
-    #torch.save(outputs, 'outputs.pt')
-    #torch.save(outputs_checkpoint, 'outputs_checkpoint.pt')
-    #print('types: ',[x.dtype for x in outputs])
-    #print('types: ',[x.dtype for x in outputs_checkpoint])
-    ## Check that results match
-    #tols = dtype_tols(dtype)
-    #if dtype in (torch.float16, torch.bfloat16):
-    #    tols.update(dict(rtol=2e-2, atol=2e-3))
-    #for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
-    #    if i == 0:
-    #        torch.testing.assert_close(
-    #            test,
-    #            ref,
-    #            msg=f"Mismatch in tensor {i}",
-    #            **tols,
-    #        )
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols.update(dict(rtol=2e-2, atol=2e-3))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):

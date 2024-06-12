@@ -723,8 +723,6 @@ void nvte_fused_attn_fwd(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
-//  printf("================ fused_attention_backend %d \n",int(fused_attention_backend));
-//  std::cout << int(Q_type) << int(KV_type) << int(qkv_layout) << int(bias_type) << int(attn_mask_type) << dropout << h_q << h_kv << max_seqlen_q << max_seqlen_kv << d <<std::endl;
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)

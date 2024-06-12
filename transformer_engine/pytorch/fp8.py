@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """FP8 utilities for TransformerEngine"""
-import traceback
 import os
 from contextlib import contextmanager
 from collections import deque
@@ -194,8 +193,6 @@ class FP8GlobalStateManager:
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
         index_in_buffer = cls.get_buffer_info()  # Same index for fwd/bwd fp8 tensors.
-        #print('=========== index_in_buffer', index_in_buffer, index_in_buffer in fp8_meta)
-        #print(fp8_meta["scaling_fwd"].amax_history[0])
         if index_in_buffer in fp8_meta:
             return
 
@@ -226,8 +223,6 @@ class FP8GlobalStateManager:
             key = cls.get_key_in_buffer(
                 forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
-            #print('kkkkkkkkkkkkkkkkkkkkkk buffer keys',cls.global_amax_buffer.keys())
-            #print('key ', key, 'in globl buffer',key not in cls.global_amax_buffer,fp8_meta_tensor_key,fp8_meta[fp8_meta_tensor_key].amax_history[0])
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
                 cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
@@ -325,15 +320,9 @@ class FP8GlobalStateManager:
         fp8_weights: bool = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
-        print(f'------------ reduce_and_update_fp8_tensors {forward=} {fp8_weights=} ----------') 
-        #traceback.print_stack()
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
-            #print()
-            #print(buffer_key, ":      ", amax_buffer)
             # Check for forward or backward reduction.
             fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
-            #print(fwd_update, fp8_weights_update, autocast_key, fp8_weights, len(amax_buffer))
-            #print()
             if fwd_update != forward:
                 continue
             # Only skip a forward update when `fp8_weights` is explicitly set to `True`
@@ -370,12 +359,6 @@ class FP8GlobalStateManager:
                     get_fp8_te_dtype(recipe, forward),
                     recipe.margin,
                 )
-                #print('d:',cls.global_scale_buffer)
-                for k,v in cls.global_scale_buffer.items():
-                    print(f'{"forward" if "forward" in k else "backward"}:')
-                    for vi in v:
-                        print(vi)
-                    print()
             else:
                 split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
 
@@ -435,7 +418,6 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        print('----- fp8_autocast_exit ',enabled, cls.FP8_AUTOCAST_DEPTH == 0, not _graph,torch.is_grad_enabled())
         if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
             cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
 
