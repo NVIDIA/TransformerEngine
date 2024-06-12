@@ -241,13 +241,13 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+    gpu_autocast_enabled = torch.is_autocast_enabled('cuda')
+    gpu_autocast_dtype = torch.get_autocast_dtype('cuda')
     gpu_autocast_ctx = torch.cuda.amp.autocast(
         gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached)
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+    cpu_autocast_enabled = torch.is_autocast_enabled('cpu')
+    cpu_autocast_dtype = torch.get_autocast_dtype('cpu')
     cpu_autocast_ctx = torch.cpu.amp.autocast(
         cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached)
 
@@ -559,7 +559,7 @@ def has_te_modules(network):
     # so just assume that it has TE modules just to be safe.
     return True
 
-
+@torch._disable_dynamo
 def checkpoint(
     function: Callable,
     *args: Tuple[torch.Tensor, ...],
@@ -965,13 +965,14 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
     assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."
-    assert not fsdp_root.primary_weights_in_fp8, (
-        "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-        "Please initialize your model without the te.fp8_model_init(...) context."
-    )
 
     # If the root module is a TE module, inject FSDP information into it
     if _is_te_module(fsdp_root.module):
+        if hasattr(fsdp_root, "primary_weights_in_fp8"):
+            assert not fsdp_root.primary_weights_in_fp8, (
+                "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
+                "Please initialize your model without the te.fp8_model_init(...) context."
+            )
         root_state = _get_module_fsdp_state(fsdp_root)
         assert root_state is not None, "Root module does not have a valid _FSDPState."
         setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
@@ -979,11 +980,12 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
     # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
     fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
     for state, fsdp_module in zip(fsdp_states, fsdp_modules):
-        assert not fsdp_module.module.primary_weights_in_fp8, (
-            "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-            "Please initialize your model without the te.fp8_model_init(...) context."
-        )
         if _is_te_module(fsdp_module.module):
+            if hasattr(fsdp_module.module, "primary_weights_in_fp8"):
+                assert not fsdp_module.module.primary_weights_in_fp8, (
+                    "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
+                    "Please initialize your model without the te.fp8_model_init(...) context."
+                )
             setattr(fsdp_module.module, "fsdp_group", state.process_group)
 
 
