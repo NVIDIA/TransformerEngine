@@ -16,7 +16,7 @@ from jax.typing import DTypeLike
 
 from utils import assert_allclose
 
-from transformer_engine.jax.softmax import is_softmax_kernel_available
+from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
 from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 
