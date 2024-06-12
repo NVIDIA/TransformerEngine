@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_USERBUFFERS_COMM_GEMM_OVERLAP_H_
-#define TRANSFORMER_ENGINE_USERBUFFERS_COMM_GEMM_OVERLAP_H_
+#ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
+#define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 
 #include <cstring>
 #include <pybind11/pybind11.h>
@@ -43,6 +43,19 @@ enum class NVTE_Comm_Overlap_Algo {
   ATOMIC_GEMM_RS = 5,          // atomic GEMM              | collective reduce-scatter
   ATOMIC_GEMM_AG_P2P = 6,      // point-2-point all-gather | atomic GEMM
   ATOMIC_GEMM_RS_P2P = 7       // atomic GEMM              | point-2-point reduce-scatter
+};
+
+bool nvte_comm_overlap_supports_multicast() {
+  int dev, supports_multicast;
+  CUdevice cudev;
+
+  NVTE_CHECK_CUDA(cudaGetDevice(&dev));
+  NVTE_CHECK_CUDRIVER(cuDeviceGet(&cudev, dev));
+  NVTE_CHECK_CUDRIVER(cuDeviceGetAttribute(&supports_multicast,
+                                           CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED,
+                                           cudev));
+
+  return static_cast<bool>(supports_multicast);
 };
 
 namespace transformer_engine {
@@ -270,7 +283,6 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
-    reset_counters(counter_ptr, _num_splits, /* reduce-scatter is consumer */ false, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_compute, 0));
 
@@ -574,7 +586,6 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     assert(pre_gelu_out.numel() == 0);
 
     // Catch up the default torch stream
-    reset_counters(counter_ptr, _tp_size, /* all-gather is producer */ true, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _start_compute, 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
@@ -624,6 +635,9 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
     }
+
+    // Reset atomic counters
+    consumer_batch(counter_ptr, 1, _tp_size, (cudaStream_t)stream_main);
 
     // Copy the first GEMM output chunk to the end chunk position of D_buffer
     char *src_ptr = reinterpret_cast<char *>(D_buffer.dptr());
@@ -839,7 +853,6 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
     // Catch up the main stream
-    reset_counters(counter_ptr, _tp_size, /* reduce-scatter is consumer */ false, stream_main);
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
 
@@ -950,8 +963,8 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   }  // split_gemm_overlap_rs
 };  // CommGemmOverlapP2P
 
-}  // namespace userbuffers
+}  // namespace comm_gemm_overlap
 
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_USERBUFFERS_COMM_GEMM_OVERLAP_H_
+#endif  // TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_

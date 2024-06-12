@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
-#define TRANSFORMER_ENGINE_USERBUFFERS_H_
+#ifndef TRANSFORMER_ENGINE_COMMON_USERBUFFERS_H_
+#define TRANSFORMER_ENGINE_COMMON_USERBUFFERS_H_
 
 #include "ipcsocket.h"
 
@@ -200,7 +200,6 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
-void reset_counters(void *atomic_ptr, int num_chunks, bool producer, cudaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(communicator **comm,
@@ -360,4 +359,4 @@ template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs,
                             int input_size, cudaStream_t stream);
 
-#endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_
+#endif  // TRANSFORMER_ENGINE_COMMON_USERBUFFERS_H_

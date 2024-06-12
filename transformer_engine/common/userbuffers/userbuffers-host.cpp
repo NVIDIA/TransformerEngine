@@ -6,6 +6,8 @@
 
 #include "ipcsocket.h"
 #include "userbuffers.h"
+#include "../util/logging.h"
+
 #include <assert.h>
 #include <chrono>
 #include <cuda.h>
@@ -33,26 +35,6 @@ static char EXT_COMM_INTER[] = "inter";
 #define MULTICAST_GB_TOTAL 512
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
-
-#define CUDACHECK(cmd)                                                                             \
-  do {                                                                                             \
-    cudaError_t e = cmd;                                                                           \
-    if (e != cudaSuccess) {                                                                        \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e));        \
-      exit(EXIT_FAILURE);                                                                          \
-    }                                                                                              \
-  } while (0)
-
-#define CUCHECK(cmd)                                                                               \
-  do {                                                                                             \
-    CUresult retval = cmd;                                                                         \
-    if (retval != CUDA_SUCCESS) {                                                                  \
-      const char *error_string;                                                                    \
-      cuGetErrorString(retval, &error_string);                                                     \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string);                 \
-      exit(EXIT_FAILURE);                                                                          \
-    }                                                                                              \
-  } while (0);
 
 #define NVTE_UB_ERROR(x)                                                                           \
   do {                                                                                             \
@@ -111,9 +93,9 @@ int create_communicator_grouped2(communicator **comm,
 
   int cur_dev, ndev;
   cudaDeviceProp device_prop;
-  CUDACHECK(cudaGetDevice(&cur_dev));
-  CUDACHECK(cudaGetDeviceCount(&ndev));
-  CUDACHECK(cudaGetDeviceProperties(&device_prop, cur_dev));
+  NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
+  NVTE_CHECK_CUDA(cudaGetDeviceCount(&ndev));
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, cur_dev));
   (*comm)->sm_arch = device_prop.major;
   // (*comm)->use_rr_kernel = device_prop.major == 8;
   (*comm)->use_rr_kernel = 0;
@@ -131,7 +113,7 @@ int create_communicator_grouped2(communicator **comm,
   int device_clock    = 0;
   // 110 sec wait time by default
   int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
-  CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {
     printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n",
@@ -175,7 +157,7 @@ int create_communicator_grouped2(communicator **comm,
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
       printf("%d: device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev, mylocal);
-    CUDACHECK(cudaSetDevice(mylocal));
+    NVTE_CHECK_CUDA(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
   // FIXME need to check that numlocal is multiple of pipegpus x tensorgpus
@@ -224,7 +206,8 @@ int create_communicator_grouped2(communicator **comm,
     mcProp.size = (*comm)->mc_maxsize;
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
-    CUCHECK(cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
+    NVTE_CHECK_CUDRIVER(
+      cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
@@ -243,9 +226,10 @@ int create_communicator_grouped2(communicator **comm,
     (*comm)->_barrier((*comm)->comm_world);
 
     if ((*comm)->ar2_nvrank == 0) {
-      CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
-      CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
-                                           CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+      NVTE_CHECK_CUDRIVER(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
+      NVTE_CHECK_CUDRIVER(
+        cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
+                                     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
@@ -256,23 +240,24 @@ int create_communicator_grouped2(communicator **comm,
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
         (*comm)->_barrier((*comm)->comm_intra);
-      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+      NVTE_CHECK_CUDRIVER(
+        cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
+                                       CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
   error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
     close(fd);
-    CUCHECK(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
+    NVTE_CHECK_CUDRIVER(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
 
     CUdeviceptr mc_va;
-    CUCHECK(cuMemAddressReserve(&mc_va, mc_maxsize, 0, 0U, 0));
-    CUCHECK(cuMemMap(mc_va, mc_maxsize, 0, (*comm)->mc_handle, 0));
+    NVTE_CHECK_CUDRIVER(cuMemAddressReserve(&mc_va, mc_maxsize, 0, 0U, 0));
+    NVTE_CHECK_CUDRIVER(cuMemMap(mc_va, mc_maxsize, 0, (*comm)->mc_handle, 0));
 
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     accessDesc.location.id = (*comm)->mydev;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    CUCHECK(cuMemSetAccess(mc_va, mc_maxsize, &accessDesc, 1));
+    NVTE_CHECK_CUDRIVER(cuMemSetAccess(mc_va, mc_maxsize, &accessDesc, 1));
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
     (*comm)->_barrier((*comm)->comm_world);
@@ -289,16 +274,16 @@ int create_communicator_grouped2(communicator **comm,
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
-  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs,
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->gpu_ptrs,
                        LOCALSIZE));  // flags and pointers, no block data yet
-  CUDACHECK(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
-  CUDACHECK(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE,
-                                  *comm);  // will use handler 0
-  CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm);  // will use handler 0
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(
+    cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -307,8 +292,8 @@ int create_communicator_grouped2(communicator **comm,
 #define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
 
-  CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
-  CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags =
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
@@ -395,7 +380,7 @@ int create_communicator_grouped2_mpi(communicator **comm,
   MPI_Comm_size(EXT_COMM_INTRA, &numlocal);
 
   // find internode numbers and make internode communicator
-  CUDACHECK(cudaFree(0));
+  NVTE_CHECK_CUDA(cudaFree(0));
   int allnodes = numranks / numlocal;
   int datanodes = allnodes / pipenodes / tensornodes;
   // data reduction group node belongs, equals 0 for all if both pipenodes=1 and tensornodes=1
@@ -494,7 +479,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;  // CU_MEM_HANDLE_TYPE_FABRIC;
 
     size_t granularity = 0;
-    CUCHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+    NVTE_CHECK_CUDRIVER(
+      cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
     // MPI_Allreduce MAX of granularity check
     aligned_size = (bytes + granularity - 1) / granularity * granularity;
 
@@ -503,17 +489,18 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       mcProp.numDevices = nranks;
       mcProp.size = aligned_size;
       mcProp.handleTypes = prop.requestedHandleTypes;
-      CUCHECK(cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
+      NVTE_CHECK_CUDRIVER(
+        cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
       aligned_size = (aligned_size + granularity - 1) / granularity * granularity;
     }
 
     prop.location.id = comm->mydev;
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
-    CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
+    NVTE_CHECK_CUDRIVER(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
-    CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
+    NVTE_CHECK_CUDRIVER(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
 
     volatile uint32_t abortFlag = 0;
@@ -540,13 +527,13 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
-        CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
+        NVTE_CHECK_CUDRIVER(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
                                                reinterpret_cast<void *>(peerfd[p]),
                                                CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
       close(peerfd[p]);
     }
     CUdeviceptr ptr;
-    CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
+    NVTE_CHECK_CUDRIVER(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -554,7 +541,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     accessDesc.location.id = comm->mydev;
 
     for (int i = 0; i < nranks; i++) {
-      CUCHECK(cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
+      NVTE_CHECK_CUDRIVER(
+        cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
       if (i == comm->nvrank) {
         if (hndl)
@@ -564,11 +552,11 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       }
       comm->peer_ptr[hndl][i] = remptrs[i];
     }
-    CUCHECK(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
+    NVTE_CHECK_CUDRIVER(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
 
     if (hndl == 0)
-      CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
-    CUDACHECK(
+      NVTE_CHECK_CUDA(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
+    NVTE_CHECK_CUDA(
         cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
                    remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
     free(remptrs);
@@ -576,8 +564,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
-      CUCHECK(cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
-                                 0 /*memOffset*/, aligned_size, 0));
+      NVTE_CHECK_CUDRIVER(
+        cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
+                           0 /*memOffset*/, aligned_size, 0));
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
@@ -590,7 +579,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     assert(comm->nvsize <= 8);
 
     cudaIpcMemHandle_t memhndl;
-    CUDACHECK(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
     comm->_alloc_copy_allgather(reinterpret_cast<void**>(&tmp),
@@ -599,16 +588,16 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int i = 0; i < comm->nvsize; i++)
       if (i != comm->nvrank)
-        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
+        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
                                        tmp[i], cudaIpcMemLazyEnablePeerAccess));
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
-    CUDACHECK(cudaDeviceSynchronize());
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-    CUDACHECK(cudaMemcpy(
+    NVTE_CHECK_CUDA(cudaMemcpy(
         reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
-    CUDACHECK(cudaDeviceSynchronize());
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     comm->_free(tmp);
   }
   comm->mem_size[hndl] = aligned_size;

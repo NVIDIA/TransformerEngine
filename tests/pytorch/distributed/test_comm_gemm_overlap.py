@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 import torch
-import transformer_engine
+import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 RNG_SEED:     int = 1234
 NUM_PROCS:    int = torch.cuda.device_count()
@@ -18,15 +20,18 @@ NUM_HEADS:    int = 64
 HEAD_DIM:     int = 128
 HIDDEN_SIZE:  int = NUM_HEADS * HEAD_DIM
 
-TE_PATH = Path(os.getenv("TE_PATH", str(Path(transformer_engine.__file__).resolve().parent.parent)))
-BASE_CMD = [
-    'torchrun', f'--nproc-per-node={torch.cuda.device_count()}',
-    str(TE_PATH / 'examples' / 'pytorch' / 'comm_gemm_overlap' / 'test_gemm.py'),
-    '--check-numerics'
+TEST_PATH = Path(__file__).parent.resolve() / 'run_gemm_with_overlap.py'
+TEST_CMD_BASE = [
+    'torchrun', f'--nproc-per-node={min(torch.cuda.device_count(), 4)}',
+    str(TEST_PATH),
+    '--check-numerics',
+    '--warmup-iters', str(0),
+    '--timing-iters', str(1)
 ]
 
-os.environ['UB_SKIPMC'] = '1'  # CI environment may not support multicast so use CUDA IPC instead.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+# Fall back on CUDA IPC if the platform does not support CUDA multicast
+if not tex.comm_overlap_supports_multicast():
+    os.environ['UB_SKIPMC'] = '1'
 
 @pytest.mark.parametrize(
     "fp8,p2p,comm_type,aggregate",
@@ -42,7 +47,7 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
     """Test communication overlap with split GEMM."""
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    test_cmd = BASE_CMD + [ '--comm-type', comm_type ]
+    test_cmd = TEST_CMD_BASE + [ '--comm-type', comm_type ]
     if fp8:
         test_cmd.append('--fp8')
     if p2p:

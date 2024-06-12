@@ -4,10 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H
-#define TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H
+#ifndef TRANSFORMER_ENGINE_COMMON_IPCSOCKET_H
+#define TRANSFORMER_ENGINE_COMMON_IPCSOCKET_H
 
-// #include "nccl.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>

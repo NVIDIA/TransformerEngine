@@ -234,10 +234,11 @@ def main(opts):
     # Initialize distributed input tensor and GEMM kernels
     torch.manual_seed(opts.seed+WORLD_RANK)
     torch.cuda.manual_seed(opts.seed+WORLD_RANK)
-    inp = torch.rand(local_inp_shape, dtype=torch.bfloat16, device='cuda')/100.
-    kernel1_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda')/100.
+    scale = 1e-2
+    inp = torch.rand(local_inp_shape, dtype=torch.bfloat16, device='cuda') * scale
+    kernel1_t = torch.rand(local_kernel_t_shape, dtype=torch.bfloat16, device='cuda') * scale
     if opts.atomic and opts.check_numerics:
-        kernel2_t = torch.rand(local_kernel2_t_shape, dtype=torch.bfloat16, device='cuda')/100.
+        kernel2_t = torch.rand(local_kernel2_t_shape, dtype=torch.bfloat16, device='cuda') * scale
 
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
@@ -246,7 +247,7 @@ def main(opts):
             te.distributed.gather_along_first_dim(kernel1_t, tp_group)[0],
             0, 1)
         # AG Input: (M/P, N) -> gather -> (M, N)
-        inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
+        inp1_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
         if opts.atomic and opts.check_numerics:
             # RS Kernel 2: (N, K/P) -> T -> (K/P, N) -> gather (K, N)
             ker2_g = te.distributed.gather_along_first_dim(torch.transpose(kernel2_t, 0, 1),
@@ -256,13 +257,23 @@ def main(opts):
         ker1_g = te.distributed.gather_along_first_dim(torch.transpose(kernel1_t, 0, 1),
                                                       tp_group)[0]
         # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-        inp_g = torch.transpose(
+        inp1_g = torch.transpose(
             te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1),
                                                   tp_group)[0],
             0, 1)
-    ref1_g = torch.matmul(inp_g, ker1_g)
+
+    ref1_g = torch.matmul(inp1_g, ker1_g)
+    if world_rank == 0:
+            print(f"[GLOBAL] max(abs(inp1_g)) = {torch.max(torch.abs(inp1_g)).item()} " + \
+                  f"| max(abs(ker1_g)) = {torch.max(torch.abs(ker1_g)).item()} " + \
+                  f"| max(abs(ref1_g)) = {torch.max(torch.abs(ref1_g)).item()}\n", end='')
     if opts.atomic and opts.check_numerics:
-        ref2_g = torch.matmul(ref1_g, ker2_g)
+        inp2_g = ref1_g
+        ref2_g = torch.matmul(inp2_g, ker2_g)
+        if world_rank == 0:
+            print(f"[GLOBAL] max(abs(inp2_g)) = {torch.max(torch.abs(inp2_g)).item()} " + \
+                  f"| max(abs(ker2_g)) = {torch.max(torch.abs(ker2_g)).item()} " + \
+                  f"| max(abs(ref2_g)) = {torch.max(torch.abs(ref2_g)).item()}\n", end='')
 
     inp_final = inp
     if opts.fp8:
@@ -282,15 +293,14 @@ def main(opts):
 
         # Compute initial amaxes and scales
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_INPUT].copy_(
-            torch.max(torch.abs(inp_g)))
+            torch.max(torch.abs(inp1_g)))
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_WEIGHT].copy_(
             torch.max(torch.abs(ker1_g)))
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_OUTPUT].copy_(
             torch.max(torch.abs(ref1_g)))
         if opts.atomic and opts.check_numerics:
-            # output of GEMM1 is input of GEMM2
             fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_INPUT].copy_(
-                fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_OUTPUT])
+                torch.max(torch.abs(inp2_g)))
             fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_WEIGHT].copy_(
                 torch.max(torch.abs(ker2_g)))
             fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_OUTPUT].copy_(
@@ -413,7 +423,7 @@ def main(opts):
                     fp8_dtype,
                     all_outputs[0],
                     fp8_meta.scale_inv,
-                    tex.FP8FwdTensors.GEMM2_INPUT,  # this is set equal to GEMM1_OUTPUT
+                    tex.FP8FwdTensors.GEMM2_INPUT,
                     fp8_dtype,
                     torch.uint8,
                     te.module.base.get_workspace(),
@@ -473,47 +483,58 @@ def main(opts):
             env=os.environ, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Compare against standard GEMM
+    numerics_failed = False
+    numerics_msg = None
     if opts.check_numerics:
+        torch.cuda.synchronize()
+        dist.barrier()
         if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-            # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-            output = rs2_out if opts.atomic else all_outputs[0]
-            out_g = torch.transpose(
-                te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1), tp_group)[0],
-                0, 1)
+            if opts.atomic:
+                # Paired AG + RS output: (M/P, N) -> gather -> (M, N)
+                output = rs2_out
+                out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
+            else:
+                # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+                output = all_outputs[0]
+                out_g = torch.transpose(
+                    te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1),
+                                                          tp_group)[0],
+                    0, 1)
         else:
             # RS Output: (M/P, N) -> gather -> (M, N)
             output = rs_out
             out_g = te.distributed.gather_along_first_dim(output, tp_group)[0]
 
         size_debug = f"[rank:{world_rank}] input: {list(inp.shape)} " + \
-                     f"| kernel1: {reversed(list(kernel1_t.shape))} " + \
-                     f"| kernel2: {reversed(list(kernel2_t.shape))} " if opts.atomic else "" + \
+                     f"| kernel1: {list(kernel1_t.shape)[::-1]} " + \
+                     (f"| kernel2: {list(kernel2_t.shape)[::-1]} " if opts.atomic else "") + \
                      f"| output: {list(output.shape)}\n"
         print(size_debug, end='')
 
-        dist.barrier()
+        ref_g = ref2_g if opts.atomic else ref1_g
         if world_rank == 0:
-            size_debug_g = f"[GLOBAL] input: {list(inp_g.shape)} " + \
-                           f"| kernel1: {list(ker1_g.shape)} " + \
-                           f"| kernel2: {list(ker2_g.shape)} " if opts.atomic else "" + \
+            size_debug_g = f"[GLOBAL] input: {list(inp1_g.shape)} " + \
+                           f"| kernel1: {list(ker1_g.shape)[::-1]} " + \
+                           (f"| kernel2: {list(ker2_g.shape)[::-1]} " if opts.atomic else "") + \
                            f"| output:  {list(out_g.shape)} " + \
-                           f"| reference: {list(ref1_g.shape)}\n"
+                           f"| reference: {list(ref_g.shape)}\n"
             print(size_debug_g, end='')
 
-        ref_g = ref2_g if opts.atomic else ref1_g
+        dist.barrier()
         error_below_tol = torch.allclose(out_g.to(dtype=torch.float32),
                                          ref_g.to(dtype=torch.float32),
                                          rtol=0.125 if opts.fp8 else 1.6e-2,
                                          atol=0.0675 if opts.fp8 else 1e-5)
         if not error_below_tol:
+            numerics_failed = True
             diff = torch.abs(out_g - ref_g).flatten()
             m = torch.argmax(diff)
-            raise AssertionError(
-                f"Outputs not close enough at index {m.item()} "
-                f"with {out_g.flatten()[m].item()} vs {ref_g.flatten()[m].item()} "
-                f"(diff {diff[m].item()}).")
-        elif world_rank == 0:
-            print("[GLOBAL] PASSED\n", end='')
+            numerics_msg = "[GLOBAL] NUMERICAL CHECK FAILED: " + \
+                           f"Outputs not close enough at index {m.item()} " + \
+                           f"with {out_g.flatten()[m].item()} vs {ref_g.flatten()[m].item()} " + \
+                           f"(diff {diff[m].item()})."
+        else:
+            numerics_msg = "[GLOBAL] NUMERICAL CHECK PASSED\n"
 
     avg_gpu_time = sum(gpu_times) / opts.timing_iters
     gemm1_name = " ".join([
@@ -535,13 +556,19 @@ def main(opts):
 
     dist.destroy_process_group()
 
+    if opts.check_numerics:
+        if world_rank == 0:
+            print(numerics_msg)
+        if numerics_failed:
+            return 1
+
     return 0
 
 
 if __name__ == "__main__":
     if "TORCHELASTIC_RUN_ID" in os.environ.keys():
         args = parse_args()
-        main(args)
+        os._exit(main(args))
     else:
         subprocess.run(
             [
@@ -551,4 +578,4 @@ if __name__ == "__main__":
             env=os.environ,
             check=True
         )
-    os._exit(0)
+        os._exit(0)

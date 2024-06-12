@@ -76,6 +76,8 @@ PYBIND11_MODULE(transformer_engine_common, m) {
 
   m.attr("NVTE_COMM_OVERLAP_MAX_STREAMS") = py::int_(NVTE_COMM_OVERLAP_MAX_STREAMS);
 
+  m.def("comm_overlap_supports_multicast", &nvte_comm_overlap_supports_multicast);
+
   py::enum_<NVTE_Comm_Overlap_Type>(m, "NVTE_Comm_Overlap_Type", py::module_local())
     .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
     .value("AG", NVTE_Comm_Overlap_Type::ALL_GATHER);
