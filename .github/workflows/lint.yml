@@ -1,0 +1,90 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger lint tests on GitHub
+name: 'Lint'
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  pytorch_cpplint:
+    name: 'PyTorch C++'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          export CPP_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_pytorch_lint/test.sh
+  pytorch_pylint:
+    name: 'PyTorch Python'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          pip install torch
+          export PYTHON_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_pytorch_lint/test.sh
+  jax_cpplint:
+    name: 'JAX C++'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          export CPP_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_jax_lint/test.sh
+  jax_pylint:
+    name: 'JAX Python'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          export PYTHON_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_jax_lint/test.sh
+  paddle_cpplint:
+    name: 'PaddlePaddle C++'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          export CPP_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_paddle_lint/test.sh
+  paddle_pylint:
+    name: 'PaddlePaddle Python'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Lint'
+        run: |
+          apt-get update
+          apt-get install pip -y
+          pip install paddlepaddle-gpu
+          export PYTHON_ONLY=1
+          export TE_PATH=.
+          bash ./qa/L0_paddle_lint/test.sh
