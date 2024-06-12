@@ -22,7 +22,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 # Skip tests if there are not enough GPUs
 if torch.cuda.device_count() < 2:
