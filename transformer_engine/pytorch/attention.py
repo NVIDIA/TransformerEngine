@@ -76,10 +76,10 @@ _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
-    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward # pylint: disable=no-name-in-module,ungrouped-imports
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
 META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
@@ -101,6 +101,7 @@ _alibi_cache = {
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+
 
 class InferenceParams: # pylint: disable=too-few-public-methods
     """
@@ -1391,8 +1392,8 @@ def attn_forward_func_with_cp(
     assert (qkv_format != 'thd' or \
             not use_fused_attention or \
             attn_mask_type in ["padding", "padding_causal"]
-        ), f"""Context parallelism is not supported for {attn_mask_type} mask type and """ \
-    f"""{qkv_format} format with {"FusedAttention" if use_fused_attention else "FlashAttention"}!"""
+        ), f"Context parallelism is not supported for {attn_mask_type} mask type and " \
+    f"{qkv_format} format with {'FusedAttention' if use_fused_attention else 'FlashAttention'}!"
     assert (attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type)
         ), """Attention bias is only supported with FusedAttention and "causal" """ \
            """or "no_mask" mask types!"""
