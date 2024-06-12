@@ -1730,7 +1730,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         scale = self.softmax_scale
         if apply_qk_layer_scaling:
-            scale *= self.layer_number
+            scale /= self.layer_number
 
         # Raw attention scores. [b * np, sq, sk]
         if core_attention_bias_type == "no_bias":
