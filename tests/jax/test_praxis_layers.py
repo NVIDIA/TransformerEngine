@@ -17,7 +17,7 @@ from utils import assert_allclose
 
 from transformer_engine.transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.jax import fp8_autocast, update_fp8_metas, update_collections
+from transformer_engine.jax import fp8_autocast, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
 from transformer_engine.jax.flax import LayerNorm as flax_LayerNorm
 from transformer_engine.jax.flax import LayerNormMLP as flax_LayerNormMLP
@@ -89,8 +89,6 @@ class TestLayer:
     def loss_and_grads(module, variables, *inputs):
         grad_fn = jax.value_and_grad(TestLayer.loss, argnums=(0, 1))
         loss_val, (wgrads, dgrad) = grad_fn(variables, *inputs, module=module)
-        if FP8Helper.is_fp8_enabled():
-            wgrads = update_fp8_metas(wgrads)
         return loss_val, wgrads, dgrad
 
     def input_getter(self, shape, dtype):
