@@ -172,8 +172,8 @@ def run_dpa_with_cp(dtype='bf16', model=None, qkv_format='bshd', kernel_backend=
         dq_, dk_, dv_, out_ = [x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim]//2, *x.shape[(seq_dim+1):]) \
             for x in [q_.grad, k_.grad, v_.grad, out_]]
     elif qkv_format == "thd":
-        dq, dk, dv, out = [x.index_select(0, seq_idx).contiguous().view(-1) for x in [q.grad, k.grad, v.grad, out]]
-        dq_, dk_, dv_, out_ = [x.view(-1) for x in [q_.grad, k_.grad, v_.grad, out_]]
+        dq, dk, dv, out = [x.index_select(0, seq_idx).contiguous() for x in [q.grad, k.grad, v.grad, out]]
+        dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
         for x in [dq, dk, dv, out, dq_, dk_, dv_, out_]:
             assert (torch.all(torch.logical_not(x[cu_seqlens[-2]:])).item())
     else:
