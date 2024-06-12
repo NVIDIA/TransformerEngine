@@ -260,7 +260,6 @@ class BaseRunner:
                 _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
                 test_others = FP8Helper.update_collections(
                     {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others)
-                test_others = FP8Helper.update_fp8_metas(test_others)
                 del tmp_grad, fp8_meta_grad
 
         grad_fn = jax.value_and_grad(self._loss_fn, argnums=(0, 2), has_aux=False)

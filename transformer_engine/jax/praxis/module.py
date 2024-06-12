@@ -19,7 +19,6 @@ from ..flax.module import LayerNorm as flax_LayerNorm
 from ..flax.module import LayerNormMLP as flax_LayerNormMLP
 from ..flax.module import Softmax
 from ..softmax import SoftmaxType
-from ..sharding import MajorShardingType, ShardingType
 
 
 def _generate_ln_scale_init(scale_init):
@@ -76,7 +75,6 @@ class LayerNorm(TransformerEngineBaseLayer):
     bias_init: WeightInit = WeightInit.Constant(0.0)
     bias_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
-    sharding_type: ShardingType = ShardingType.SINGLE
 
     def setup(self) -> None:
         """setup"""
@@ -106,7 +104,6 @@ class FusedSoftmax(TransformerEngineBaseLayer):
 
     scale_factor: float = 1.0
     softmax_type: SoftmaxType = SoftmaxType.SCALED
-    sharding_type: ShardingType = ShardingType.SINGLE
 
     def setup(self) -> None:
         """setup"""
@@ -136,7 +133,6 @@ class Linear(TransformerEngineBaseLayer):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     transpose_batch_sequence: bool = False
-    sharding_type: ShardingType = ShardingType.SINGLE
 
     def setup(self) -> None:
         """setup"""
@@ -187,7 +183,6 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     axis: Union[Iterable[int], int] = -1
     transpose_batch_sequence: bool = False
     depth_scaling: float = None
-    sharding_type: ShardingType = ShardingType.SINGLE
 
     def setup(self) -> None:
         """setup"""
@@ -253,7 +248,6 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     intermediate_hidden_dropout_dims: Sequence[int] = ()
     axis: Union[Iterable[int], int] = -1
     transpose_batch_sequence: bool = False
-    major_sharding_type: MajorShardingType = MajorShardingType.SINGLE
 
     def setup(self) -> None:
         """setup"""
