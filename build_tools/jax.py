@@ -6,8 +6,9 @@
 from pathlib import Path
 
 import setuptools
+from glob import glob
 
-from .utils import cuda_path
+from .utils import cuda_path, all_files_in_dir
 from typing import List
 
 
@@ -19,11 +20,10 @@ def setup_jax_extension(
     """Setup PyBind11 extension for JAX support"""
     # Source files
     csrc_source_files = Path(csrc_source_files)
+    extensions_dir = csrc_source_files / "extensions"
     sources = [
-        csrc_source_files / "extensions.cpp",
-        csrc_source_files / "modules.cpp",
         csrc_source_files / "utils.cu",
-    ]
+    ] + all_files_in_dir(extensions_dir)
 
     # Header files
     cuda_home, _ = cuda_path()
