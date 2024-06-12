@@ -4,7 +4,7 @@
 """JAX layernorm modules"""
 
 from functools import partial
-from typing import Tuple
+from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -116,25 +116,23 @@ def layernorm_fp8_dot(
     """
     Layernorm + FP8 GEMM
     """
-    fp8_max = fp8_meta_pkg.fp8_max
-    amax = fp8_meta_pkg.amax
-    scale = fp8_meta_pkg.scale
-    scale_inv = fp8_meta_pkg.scale_inv
+    amax_list = fp8_meta_pkg.amax_list
+    scale_list = fp8_meta_pkg.scale_list
     fwd_dtype = FP8Helper.FWD_DTYPE
     bwd_dtype = FP8Helper.BWD_DTYPE
-    output = _layernorm_fp8_dot(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
-                                layernorm_type, fwd_dtype, bwd_dtype, zero_centered_gamma, epsilon,
+    output = _layernorm_fp8_dot(x, kernel, gamma, beta, amax_list, scale_list, layernorm_type,
+                                fwd_dtype, bwd_dtype, zero_centered_gamma, epsilon,
                                 layernorm_input_axes, dot_input_axes)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14))
+@partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9, 10, 11, 12))
 def _layernorm_fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
-                       fp8_max: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                       scale_inv: jnp.ndarray, layernorm_type: str, fwd_dtype: jnp.dtype,
-                       bwd_dtype: jnp.dtype, zero_centered_gamma: bool, epsilon: float,
+                       amax_list: List[jnp.ndarray], scale_list: List[jnp.ndarray],
+                       layernorm_type: str, fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype,
+                       zero_centered_gamma: bool, epsilon: float,
                        layernorm_input_axes: Tuple[str, ...], dot_input_axes: Tuple[str, ...]):
-    output, _ = _layernorm_fp8_dot_fwd_rule(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
+    output, _ = _layernorm_fp8_dot_fwd_rule(x, kernel, gamma, beta, amax_list, scale_list,
                                             layernorm_type, fwd_dtype, bwd_dtype,
                                             zero_centered_gamma, epsilon, layernorm_input_axes,
                                             dot_input_axes)
@@ -146,10 +144,8 @@ def _layernorm_fp8_dot_fwd_rule(
         kernel,
         gamma,
         beta,
-        fp8_max,
-        amax,
-        scale,
-        scale_inv,
+        amax_list,
+        scale_list,
         layernorm_type,
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
@@ -163,17 +159,18 @@ def _layernorm_fp8_dot_fwd_rule(
     assert x.shape[-1] == kernel.shape[0]
 
     maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
-        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
-    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(*amax_list, *scale_list)
+    amax_list = maybe_fm32_to_fp32(*amax_list)
+    scale_list = maybe_fm32_to_fp32(*scale_list)
 
-    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
-    amax = FP8Helper.update_amax_history(amax)
+    fp8_dtype_list = [fwd_dtype, fwd_dtype, bwd_dtype]
+    scale_list, scale_inv_list = FP8MetaPackage.update_fp8_scale(amax_list, scale_list,
+                                                                 fp8_dtype_list)
+    amax_list = FP8MetaPackage.update_amax_list(amax_list)
 
-    gemm_x_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
-
-    x_amax = amax[gemm_x_idx, 0:1]
-    x_scale = scale[gemm_x_idx]
-    x_scale_inv = scale_inv[gemm_x_idx]
+    x_amax = amax_list[FP8MetaPackage.INPUT_IDX][0:1]
+    x_scale = scale_list[FP8MetaPackage.INPUT_IDX]
+    x_scale_inv = scale_inv_list[FP8MetaPackage.INPUT_IDX]
 
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
@@ -202,9 +199,9 @@ def _layernorm_fp8_dot_fwd_rule(
 
     assert x.shape == ln_out.shape
 
-    kernel_amax = amax[gemm_kernel_idx, 0:1]
-    kernel_scale = scale[gemm_kernel_idx]
-    kernel_scale_inv = scale_inv[gemm_kernel_idx]
+    kernel_amax = amax_list[FP8MetaPackage.WEIGHT_IDX][0:1]
+    kernel_scale = scale_list[FP8MetaPackage.WEIGHT_IDX]
+    kernel_scale_inv = scale_inv_list[FP8MetaPackage.WEIGHT_IDX]
 
     # Kernel in (hidden_in, hidden_out...)
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
@@ -219,7 +216,7 @@ def _layernorm_fp8_dot_fwd_rule(
                           (x_contracting_dims, k_contracting_dims),
                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
-    ctx = (ln_out, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
+    ctx = (ln_out, casted_kernel, amax_list, scale_list, scale_inv_list, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, x_contracting_dims,
            k_contracting_dims, maybe_fp32_to_fm32)
 
@@ -236,18 +233,16 @@ def _layernorm_fp8_dot_bwd_rule(
         dot_input_axes,    # pylint: disable=unused-argument
         ctx,
         grad):
-    ln_out_, casted_kernel, fp8_max, amax, scale, scale_inv, \
+    ln_out_, casted_kernel, amax_list, scale_list, scale_inv_list, \
     updated_x_amax, updated_kernel_amax, \
     x_shape, kernel_shape, mu, rsigma, x, gamma, \
     x_contracting_dims, k_contracting_dims, maybe_fp32_to_fm32 = ctx
 
     ln_out_t = transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
-    gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
-
-    grad_amax = amax[gemm_grad_idx, 0:1]
-    grad_scale = scale[gemm_grad_idx]
-    grad_scale_inv = scale_inv[gemm_grad_idx]
+    grad_amax = amax_list[FP8MetaPackage.GRAD_IDX][0:1]
+    grad_scale = scale_list[FP8MetaPackage.GRAD_IDX]
+    grad_scale_inv = scale_inv_list[FP8MetaPackage.GRAD_IDX]
 
     casted_grad, casted_grad_t, updated_grad_amax = \
         cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
@@ -255,7 +250,7 @@ def _layernorm_fp8_dot_bwd_rule(
 
     xt_constracting_dim = tuple(range(len(x_contracting_dims), len(x_shape)))
     gt_constracting_dim = tuple(range(grad.ndim - len(xt_constracting_dim), grad.ndim))
-    x_scale_inv = scale_inv[gemm_x_idx]
+    x_scale_inv = scale_inv_list[FP8MetaPackage.INPUT_IDX]
     wgrad = fp8_dot_impl(ln_out_t, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
                          (xt_constracting_dim, gt_constracting_dim),
                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
@@ -263,7 +258,7 @@ def _layernorm_fp8_dot_bwd_rule(
     g_for_dgrad_constracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(k_contracting_dims), grad.ndim))
     k_constracting_dim = tuple(range(len(k_contracting_dims), len(kernel_shape)))
-    kernel_scale_inv = scale_inv[gemm_kernel_idx]
+    kernel_scale_inv = scale_inv_list[FP8MetaPackage.WEIGHT_IDX]
     dgrad = fp8_dot_impl(casted_grad, casted_kernel, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_for_dgrad_constracting_dim, k_constracting_dim),
                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
@@ -283,15 +278,19 @@ def _layernorm_fp8_dot_bwd_rule(
         dx, dgamma = rmsnorm_bwd(dgrad, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
 
-    amax = amax.at[gemm_x_idx, 0].set(updated_x_amax[0])
-    amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax[0])
-    amax = amax.at[gemm_grad_idx, 0].set(updated_grad_amax[0])
+    amax_list[FP8MetaPackage.INPUT_IDX] = \
+        amax_list[FP8MetaPackage.INPUT_IDX].at[0].set(updated_x_amax[0])
+    amax_list[FP8MetaPackage.WEIGHT_IDX] = \
+        amax_list[FP8MetaPackage.WEIGHT_IDX].at[0].set(updated_kernel_amax[0])
+    amax_list[FP8MetaPackage.GRAD_IDX] = \
+        amax_list[FP8MetaPackage.GRAD_IDX].at[0].set(updated_grad_amax[0])
 
-    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
+    amax_list = maybe_fp32_to_fm32(*amax_list)
+    scale_list = maybe_fp32_to_fm32(*scale_list)
 
     return dx, wgrad, \
            dgamma, dbeta, \
-           fp8_max, amax, scale, scale_inv
+           amax_list, scale_list
 
 
 _layernorm_fp8_dot.defvjp(_layernorm_fp8_dot_fwd_rule, _layernorm_fp8_dot_bwd_rule)
