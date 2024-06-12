@@ -16,8 +16,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           export CPP_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_pytorch_lint/test.sh
@@ -29,8 +29,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           pip install torch
           export PYTHON_ONLY=1
           export TE_PATH=.
@@ -43,8 +43,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           export CPP_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
@@ -56,8 +56,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
@@ -69,8 +69,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           export CPP_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_paddle_lint/test.sh
@@ -82,8 +82,8 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          apt-get update
-          apt-get install pip -y
+          sudo apt-get update
+          sudo apt-get install pip -y
           pip install paddlepaddle-gpu
           export PYTHON_ONLY=1
           export TE_PATH=.
