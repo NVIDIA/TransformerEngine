@@ -414,7 +414,10 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                             scale_inv,
                                             otype_arg,
                                             sm_margin,
-                                            zero_centered_gamma);
+                                            zero_centered_gamma,
+                                            fp8_tensor,  // scale_offset
+                                            fp8_tensor,  // amax_offset
+                                            fp8_tensor);  // scale_inv_offset
 
   return output;
 }
@@ -460,7 +463,10 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                           scale_inv,
                                           otype_arg,
                                           sm_margin,
-                                          zero_centered_gamma);
+                                          zero_centered_gamma,
+                                          fp8_tensor,  // scale_offset
+                                          fp8_tensor,  // amax_offset
+                                          fp8_tensor);  // scale_inv_offset
 
   return output;
 }
