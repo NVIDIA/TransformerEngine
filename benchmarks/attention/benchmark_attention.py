@@ -147,14 +147,21 @@ def main():
                 ])
     times.to_csv('times.csv',index=False)
 
+    device_id = torch.cuda.current_device()
+    device_properties = torch.cuda.get_device_properties(device_id)
+    print(f"Device {device_id}: "
+        f"{device_properties.name} , "
+        f"sm{device_properties.major}{device_properties.minor} compute capability, "
+        f"{device_properties.total_memory/1024**3:.1f}GB memory")
     for model in model_configs.keys():
-        print(f'Running {model}...')
         config = model_configs[model]
         fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
             config, dtype, qkv_layout=qkv_layout,
         )
         fused_attn_supported = fused_attn_supported and not swa
         flash_attn_supported = _is_flash_attention_supported(config)
+        print(f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
+            f'{" and flash-attention" if flash_attn_supported else ""}...')
 
         prof_cmd = [
             "nsys",
@@ -211,6 +218,7 @@ def main():
                 'FlashAttention Kernels (fwd+bwd)',
                 'Fused vs Flash Kernels Speedup (fwd+bwd)']]
     a.columns = ['cuDNN fwd+bwd (ms)', 'flash-attn fwd+bwd (ms)', 'cuDNN vs flash speedup']
+    print()
     print(a)
 
 if __name__ == "__main__":
