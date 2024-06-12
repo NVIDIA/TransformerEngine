@@ -12,7 +12,7 @@ namespace jax {
 
 pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
                                                DType out_dtype, size_t act_enum) {
-    CustomCallCommonDescriptor desc;
+    CustomCallCommonDescriptor desc{};
     desc.shape.from_vector(shape);
     desc.in_dtype = in_dtype;
     desc.out_dtype = out_dtype;
@@ -24,7 +24,7 @@ pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shap
                                                  const std::vector<size_t> &wkshape, DType in_dtype,
                                                  DType out_dtype, DType wk_dtype,
                                                  size_t act_enum) {
-    CustomCallCommonWkDescriptor desc;
+    CustomCallCommonWkDescriptor desc{};
     desc.shape.from_vector(shape);
     desc.wkshape.from_vector(wkshape);
     desc.in_dtype = in_dtype;
@@ -39,7 +39,7 @@ pybind11::bytes PackCustomCallNormDescriptor(
     const std::vector<size_t> &dgamma_part_shape, const std::vector<size_t> &dbeta_part_shape,
     DType x_dtype, DType w_dtype, DType wkspace_dtype, DType barrier_dtype, DType dgamma_part_dtype,
     DType dbeta_part_dtype, bool zero_centered_gamma, float eps, int sm_margin) {
-    CustomCallNormDescriptor desc;
+    CustomCallNormDescriptor desc{};
     desc.batch_size = batch_size;
     desc.hidden_size = hidden_size;
     desc.wkspace_size = wkspace_size;
