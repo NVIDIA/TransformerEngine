@@ -1086,4 +1086,3 @@ def test_sanity_attention_extra_state(model, dtype):
         else:
             for ek, ev in attn_extra_state['extra_fp8_variables'].items():
                 assert(ev==fused_attn_state[ek]), f'{ek} is not equal'
-
