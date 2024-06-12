@@ -239,13 +239,13 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+    gpu_autocast_enabled = torch.is_autocast_enabled('cuda')
+    gpu_autocast_dtype = torch.get_autocast_dtype('cuda')
     gpu_autocast_ctx = torch.cuda.amp.autocast(
         gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached)
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+    cpu_autocast_enabled = torch.is_autocast_enabled('cpu')
+    cpu_autocast_dtype = torch.get_autocast_dtype('cpu')
     cpu_autocast_ctx = torch.cpu.amp.autocast(
         cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached)
 
@@ -557,7 +557,7 @@ def has_te_modules(network):
     # so just assume that it has TE modules just to be safe.
     return True
 
-
+@torch._disable_dynamo
 def checkpoint(
     function: Callable,
     *args: Tuple[torch.Tensor, ...],
