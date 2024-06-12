@@ -18,7 +18,6 @@ then
 fi
 if [ -z "${CPP_ONLY}" ]
 then
-  cp $TE_PATH/qa/L0_jax_lint/pylintrc $TE_PATH
   cd $TE_PATH
   echo "Checking Python files"
   pylint --recursive=y transformer_engine/common transformer_engine/jax

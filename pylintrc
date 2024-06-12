@@ -1,9 +1,13 @@
 [MASTER]
-extension-pkg-whitelist=transformer_engine_jax
+extension-pkg-whitelist=torch,
+                        transformer_engine_torch,
+			transformer_engine_paddle,
+			transformer_engine_jax
 
 extension-pkg-allow-list=transformer_engine.transformer_engine_jax
 
 disable=too-many-locals,
+        too-many-public-methods,
         invalid-name,
         too-many-arguments,
         abstract-method,
@@ -25,3 +29,7 @@ disable=too-many-locals,
         too-many-branches,
         global-variable-not-assigned,
         redefined-argument-from-local
+
+[TYPECHECK]
+ignored-modules=torch
+ignored-classes=torch
