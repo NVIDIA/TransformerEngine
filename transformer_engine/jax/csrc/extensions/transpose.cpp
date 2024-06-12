@@ -68,14 +68,14 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 }
 
 using XlaInpBuf = xla::ffi::AnyBuffer;
-using XlaOutBuf = xla::ffi::Result<AnyBuffer>;
+using XlaOutBuf = xla::ffi::Result<xla::ffi::AnyBuffer>;
 
 void CastTransposeFFI(cudaStream_t stream, XlaInpBuf input_buf, XlaInpBuf amax_buf,
                       XlaInpBuf scale_buf, XlaInpBuf scale_inv_buf,
                       XlaOutBuf input_cast_buf, XlaOutBuf input_cast_trans_buf,
                       XlaOutBuf amax_out_buf) {
-    auto in_dtype = input_buf.dtype;
-    auto out_dtype = input_cast.dtype;
+    auto in_dtype = xla::ffi::NativeType<input_buf.dtype>;
+    auto out_dtype = xla::ffi::NativeType<input_cast.dtype>;
 
     auto *input = reinterpret_cast<in_dtype>(input_buf.data);
     float *amax = reinterpret_cast<float*>(amax_buf.data);
