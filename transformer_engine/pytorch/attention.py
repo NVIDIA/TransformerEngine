@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Attention."""
-import io
 import collections
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
@@ -3655,7 +3654,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        # create boilerplate FP8 meta tensors to hold backends' FP8 metadata when checkpointing
+        # create boilerplate FP8 meta tensors to hold backend's FP8 metadata when checkpointing
         with self.prepare_forward(query_layer,
             is_first_microbatch,
             num_gemms=3,

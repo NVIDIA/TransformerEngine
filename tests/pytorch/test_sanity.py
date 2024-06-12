@@ -991,10 +991,9 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("model", ["large"])
-@pytest.mark.parametrize("dtype", [torch.float16])#, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_sanity_attention_extra_state(model, dtype):
     config = model_configs[model]
-
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         interval=1,
@@ -1004,41 +1003,27 @@ def test_sanity_attention_extra_state(model, dtype):
         fp8_dpa=True,
         fp8_mha=False,
     )
-
-    with fp8_model_init(enabled=True):
-        block = TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            #layernorm_epsilon=config.eps,
-            #init_method=init_method,
-            #output_layer_init_method=output_layer_init_method,
-            #hidden_dropout=0.1,
-            #attention_dropout=0.1,
-            #kv_channels=config.embed,
-            #apply_residual_connection_post_layernorm=False,
-            #output_layernorm=False,
-            fuse_qkv_params=True,
-            params_dtype=dtype,
-            device="cuda",
-        )
-
     hidden_states = torch.randn(
-        #(config.seq_len, config.batch_size, config.num_attention_heads, config.kv_channels),
         (config.seq_len, config.batch_size, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
 
+    with fp8_model_init(enabled=True):
+        block = TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            fuse_qkv_params=True,
+            params_dtype=dtype,
+            device="cuda",
+        )
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-        #te_out = block(q, k, v, is_first_microbatch=True)
         output = block(hidden_states, is_first_microbatch=True)
-        #loss = te_out.sum()
         loss = output.sum()
         loss.backward()
 
-    print('--------- state_dict() 0 ---------')
     # call state_dict()
     sd = block.state_dict()
 
@@ -1046,17 +1031,13 @@ def test_sanity_attention_extra_state(model, dtype):
     attn_extra_state = sd['self_attention.core_attention._extra_state']
     attn_extra_state.seek(0)
     attn_extra_state = torch.load(attn_extra_state, map_location='cuda')
-    print('attn_extra_state',attn_extra_state)
 
-    # add random core_attention.fused_attention._extra_state 
+    # add random core_attention.fused_attention._extra_state
     # it should not be loaded by FusedAttention's _load_from_state_dict()
     random_state = {'a':1, 'b':2}
     fused_attn_extra_state = io.BytesIO()
     torch.save(random_state, fused_attn_extra_state)
     sd['self_attention.core_attention.fused_attention._extra_state']=fused_attn_extra_state
-
-    for name, param in sd.items():
-        print(name)
 
     # save checkpoint
     path = './checkpoint.pt'
@@ -1069,33 +1050,12 @@ def test_sanity_attention_extra_state(model, dtype):
             config.hidden_size,
             4 * config.hidden_size,
             config.num_attention_heads,
-            #layernorm_epsilon=config.eps,
-            #init_method=init_method,
-            #output_layer_init_method=output_layer_init_method,
-            #hidden_dropout=0.1,
-            #attention_dropout=0.1,
-            #kv_channels=config.embed,
-            #apply_residual_connection_post_layernorm=False,
-            #output_layernorm=False,
             fuse_qkv_params=True,
             params_dtype=dtype,
             device="cuda",
         )
-    #with fp8_model_init(enabled=True):
-    #    block_new = (
-    #        DotProductAttention(
-    #                config.num_heads,
-    #                config.kv_channels,
-    #                qkv_format='sbhd',
-    #                sequence_parallel=False,
-    #                tp_size=1,
-    #                tp_group=None,
-    #                layer_number=1,
-    #        ).to(dtype=dtype, device="cuda")
-    #    )
     FP8GlobalStateManager.reset()
 
-    print('--------- load_state_dict()  ---------')
     # load from checkpoint
     block_new.load_state_dict(torch.load(path))
 
@@ -1104,21 +1064,16 @@ def test_sanity_attention_extra_state(model, dtype):
     attn_extra_state_new = sd_new['self_attention.core_attention._extra_state']
     attn_extra_state_new.seek(0)
     attn_extra_state_new = torch.load(attn_extra_state_new, map_location='cuda')
-    print('attn_extra_state_new',attn_extra_state_new)
     for k,v in attn_extra_state_new.items():
         if k != 'extra_fp8_variables':
             assert(torch.equal(v,attn_extra_state[k])), f'{k} is not equal'
         else:
             for ek, ev in attn_extra_state_new['extra_fp8_variables'].items():
                 assert(ev==attn_extra_state['extra_fp8_variables'][ek]), f'{ek} is not equal'
-    print('passsssssssssss 1')
 
-    #fused_attn_state = block.self_attention.core_attention.fused_attention.get_fp8_meta_tensors()
     fused_attn_state = block_new.self_attention.core_attention.fused_attention.fp8_meta
-    print('fused_attn_state',fused_attn_state)
     for k,v in attn_extra_state.items():
         if k != 'extra_fp8_variables':
-            #assert(v==attn_extra_state[k]), f'{k} is not equal'
             kk = "scaling_fwd" if "fwd" in k else "scaling_bwd"
             state_tmp = None
             if "scale_inv" in k:
@@ -1127,13 +1082,8 @@ def test_sanity_attention_extra_state(model, dtype):
                 state_tmp = fused_attn_state[kk].scale
             else:
                 state_tmp = fused_attn_state[kk].amax_history
-            #state_tmp.seek(0)
-            #state_tmp = torch.load(state_tmp, map_location='cuda')
-            print('k,kk,tmp',k,kk,state_tmp)
-            #assert(torch.equal(v,fused_attn_state[k])), f'{k} is not equal'
             assert(torch.equal(v,state_tmp)), f'{k} is not equal'
         else:
             for ek, ev in attn_extra_state['extra_fp8_variables'].items():
                 assert(ev==fused_attn_state[ek]), f'{ek} is not equal'
-    print('passsssssssssss 2')
 
