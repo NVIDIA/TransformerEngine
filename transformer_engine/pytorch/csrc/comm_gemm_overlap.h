@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
+#define TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -1238,3 +1241,5 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 };  // UbufP2PCommOverlap
 
 }  // namespace ubuf
+
+#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
