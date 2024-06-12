@@ -603,7 +603,6 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
         userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes,
                          _ub_comm, _prev_rank, _stream_recv);
         producer(counter_ptr, recv_chunk_id, _stream_recv);
-        }
       }
 
       if (i == 0) {

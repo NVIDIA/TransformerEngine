@@ -11,9 +11,6 @@
 #ifndef TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 #define TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 
-#include <cassert>
-#include <numeric>
-#include <vector>
 #include <stddef.h>
 #include <cuda_runtime_api.h>
 
@@ -44,15 +41,6 @@ struct NVTEShape {
   const size_t *data;
   /*! \brief Number of dimensions. */
   size_t ndim;
-
-  std::vector<size_t> to_vector() {
-    return std::vector<size_t>{data, data+ndim};
-  }
-
-  void from_vector(const std::vector<size_t> &shape) {
-    ndim = shape.size();
-    data = shape.data();
-  }
 };
 
 /*! \brief TE Tensor type
@@ -135,14 +123,6 @@ size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
  */
 size_t nvte_tensor_numel(const NVTETensor tensor);
 
-/*! \brief Get a tensor's total number of elements.
- *
- *  \param[in] tensor Tensor.
- *
- *  \return Number of elements in the tensor.
- */
-size_t nvte_tensor_numel(const NVTETensor tensor);
-
 /*! \brief Get the byte size for the tensor's data type.
  *
  *  \param[in] tensor Tensor.
@@ -205,7 +185,8 @@ void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 
 #ifdef __cplusplus
 }  // extern "C"
-#endif
+
+#include <vector>
 
 /*! \namespace transformer_engine
  *  \brief Namespace containing C++ API of Transformer Engine.
@@ -427,5 +408,7 @@ class TensorWrapper {
 };
 
 }  // namespace transformer_engine
+
+#endif  // __cplusplus
 
 #endif  // TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
