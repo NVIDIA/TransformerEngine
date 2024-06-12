@@ -449,7 +449,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                 )
         for name, buf in self.named_buffers():
-            if buf is not None:
+            if buf is not None and ('weight' in name or 'bias' in name):
                 assert dtype == buf.dtype, (
                     "Data types for buffers must match when outside of autocasted region. "
                     f" Found input dtype: {dtype} and {name!r} dtype: {buf.dtype}"

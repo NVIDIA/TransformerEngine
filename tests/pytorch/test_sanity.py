@@ -16,6 +16,7 @@ from transformer_engine.pytorch.fp8 import (
     fp8_model_init,
 )
 from transformer_engine.pytorch.utils import (
+    get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
@@ -993,6 +994,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     torch.cuda.synchronize()
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_sanity_attention_extra_state(model, dtype):

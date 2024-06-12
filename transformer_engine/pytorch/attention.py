@@ -3119,12 +3119,6 @@ class FusedAttention(TransformerEngineBaseModule):
         has loaded its _extra_state.
         """
 
-    def get_fp8_weights_scratchpad(
-        self,
-        is_first_microbatch: Union[bool, None],
-    ) -> List[Float8Tensor]:
-        """Needs override."""
-
     @no_torch_dynamo()
     def forward(
         self,
