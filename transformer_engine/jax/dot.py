@@ -8,7 +8,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import cast_transpose
+from . import cpp_extensions as tex
 from .fp8 import FP8Helper, FP8MetaPackage
 
 Precision = jax.lax.Precision
@@ -148,7 +148,7 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     grad_scale_inv = scale_inv_list[FP8MetaPackage.GRAD_IDX]
 
     casted_grad, casted_grad_t, updated_grad_amax = \
-        cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv,
+        tex.cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv,
                        bwd_dtype, static_axis_boundary=-1,
                        transpose_axis_boundary=min(lhs_contracting_dims))
 

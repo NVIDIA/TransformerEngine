@@ -15,13 +15,25 @@ from jax import jit, value_and_grad
 from flax import linen as nn
 
 from utils import assert_allclose
-from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
-from transformer_engine.jax.fp8 import is_fp8_available
-from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
-from transformer_engine.jax.mlp import activation_lu, fused_layernorm_fp8_mlp
-from transformer_engine.jax.cpp_extensions import act_lu_fp8, dact_lu_dbias_cast_transpose
-from transformer_engine.jax.cpp_extensions import dgated_act_lu_cast_transpose
+from transformer_engine.jax.dot import (
+    type_safe_dot_general,
+    dequantize,
+    quantize
+)
+from transformer_engine.jax.fp8 import (
+    FP8MetaPackage,
+    FP8Helper,
+    is_fp8_available
+)
+from transformer_engine.jax.layernorm import (
+    layernorm,
+    layernorm_fp8_dot
+)
+from transformer_engine.jax.layernorm_mlp import (
+    activation_lu,
+    fused_layernorm_fp8_mlp
+)
+from transformer_engine.jax import cpp_extensions as tex
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -429,7 +441,7 @@ class TestActivationLuFP8(TestActivationLu):
             return output
 
         def _prim_func_fwd(x, _x_t, _dbias, _amax):
-            activation_lu_out, _ = act_lu_fp8(x, amax, scale, scale_inv,
+            activation_lu_out, _ = tex.act_lu_fp8(x, amax, scale, scale_inv,
                                               FP8Helper.FWD_DTYPE, activation_type)
             activation_lu_out = dequantize(activation_lu_out, x.dtype, scale_inv)
             ctx = (x)
@@ -439,12 +451,12 @@ class TestActivationLuFP8(TestActivationLu):
             x = ctx
             if len(self.activation_type) > 1: #gated, no bias
                 dactivation_lu, dactivation_lu_trans, amax_out = \
-                dgated_act_lu_cast_transpose(g, x, amax, scale, scale_inv,
+                tex.dgated_act_lu_cast_transpose(g, x, amax, scale, scale_inv,
                                              FP8Helper.BWD_DTYPE, -1, activation_type)
                 dbias = jnp.empty(x.shape[-1], x.dtype)
             else: #not gated, with bias
                 dactivation_lu, dactivation_lu_trans, dbias, amax_out = \
-                dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, FP8Helper.BWD_DTYPE,
+                tex.dact_lu_dbias_cast_transpose(g, x, amax, scale, scale_inv, FP8Helper.BWD_DTYPE,
                                              -1, -2, self.activation_type)
             dactivation_lu = dequantize(dactivation_lu, x.dtype, scale_inv)
             dactivation_lu_trans = dequantize(dactivation_lu_trans, x.dtype, scale_inv)

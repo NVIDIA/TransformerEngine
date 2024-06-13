@@ -13,10 +13,7 @@ from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
 
-from .cpp_extensions import FusedAttnHelper
-from .cpp_extensions import fused_attn_fwd_kvpacked, fused_attn_bwd_kvpacked
-from .cpp_extensions import fused_attn_fwd_qkvpacked, fused_attn_bwd_qkvpacked
-from .cpp_extensions import fused_attn_fwd, fused_attn_bwd
+from . import cpp_extensions as tex
 
 
 class AttnBiasType(Enum):
@@ -75,7 +72,7 @@ def is_fused_attn_kernel_available(q_dtype, kv_dtype, qkv_layout, attn_bias_type
     """
     To check whether the fused attention kernel is supported
     """
-    return FusedAttnHelper(q_dtype, kv_dtype, qkv_layout.value, attn_bias_type.value,
+    return tex.FusedAttnHelper(q_dtype, kv_dtype, qkv_layout.value, attn_bias_type.value,
                            attn_mask_type.value, dropout_probability, q_num_heads, kv_num_heads,
                            q_max_seqlen, kv_max_seqlen, head_dim).is_fused_attn_kernel_available()
 
@@ -123,7 +120,7 @@ def _fused_attn_fwd_qkvpacked_rule(qkv: jnp.ndarray, bias: jnp.ndarray | None, m
         assert mask is not None
         mask = jnp.logical_not(mask)
         actual_seqlen = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]    # shape = (b,)
-    output, softmax_aux, rng_state = fused_attn_fwd_qkvpacked(
+    output, softmax_aux, rng_state = tex.fused_attn_fwd_qkvpacked(
         qkv,
         bias,
         actual_seqlen,
@@ -143,7 +140,7 @@ def _fused_attn_bwd_qkvpacked_rule(attn_bias_type, attn_mask_type, scaling_facto
                                    dropout_probability, is_training, ctx, dz):
     qkv, bias, softmax_aux, rng_state, output, actual_seqlen = ctx
 
-    grad_qkv, grad_bias = fused_attn_bwd_qkvpacked(qkv,
+    grad_qkv, grad_bias = tex.fused_attn_bwd_qkvpacked(qkv,
                                                    bias,
                                                    softmax_aux,
                                                    rng_state,
@@ -216,7 +213,7 @@ def _fused_attn_fwd_kvpacked_rule(q, kv, bias, mask, seed, attn_bias_type, attn_
             # When mask is causal, the actual seqlen is not the last row, use max to find it
             kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
-    output, softmax_aux, rng_state = fused_attn_fwd_kvpacked(
+    output, softmax_aux, rng_state = tex.fused_attn_fwd_kvpacked(
         q,
         kv,
         bias,
@@ -238,7 +235,7 @@ def _fused_attn_bwd_kvpacked_rule(attn_bias_type, attn_mask_type, scaling_factor
                                   dropout_probability, is_training, ctx, dz):
     q, kv, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen = ctx
 
-    grad_q, grad_kv, grad_bias = fused_attn_bwd_kvpacked(q,
+    grad_q, grad_kv, grad_bias = tex.fused_attn_bwd_kvpacked(q,
                                                          kv,
                                                          bias,
                                                          softmax_aux,
@@ -312,7 +309,7 @@ def _fused_attn_fwd_rule(q, k, v, bias, mask, seed, attn_bias_type, attn_mask_ty
             # When mask is causal, the actual seqlen is not the last row, use max to find it
             kv_actual_seqlen = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
 
-    output, softmax_aux, rng_state = fused_attn_fwd(q,
+    output, softmax_aux, rng_state = tex.fused_attn_fwd(q,
                                                     k,
                                                     v,
                                                     bias,
@@ -335,7 +332,7 @@ def _fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout
                          is_training, ctx, dz):
     q, k, v, bias, softmax_aux, rng_state, output, q_actual_seqlen, kv_actual_seqlen = ctx
 
-    grad_q, grad_k, grad_v, grad_bias = fused_attn_bwd(q,
+    grad_q, grad_k, grad_v, grad_bias = tex.fused_attn_bwd(q,
                                                        k,
                                                        v,
                                                        bias,
