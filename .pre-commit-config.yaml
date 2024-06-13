@@ -31,3 +31,10 @@ repos:
         args: [--line-length=100, --preview, --enable-unstable-feature=string_processing]
         types: [python]
 
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.6
+    hooks:
+      - id: clang-format
+        entry: clang-format -i
+        args: ["-style=file"]
+        files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
