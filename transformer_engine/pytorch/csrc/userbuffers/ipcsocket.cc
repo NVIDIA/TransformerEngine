@@ -47,7 +47,7 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash,
   cliaddr.sun_family = AF_UNIX;
 
   // Create unique name for the socket.
-  int len =
+  size_t len =
       snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
   if (len > (sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot bind provided name to socket. Name too large");
@@ -76,9 +76,8 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash,
   handle->abortFlag = abortFlag;
   // Mark socket as non-blocking
   if (handle->abortFlag) {
-    int flags;
-    EQCHECK(flags = fcntl(fd, F_GETFL), -1);
-    SYSCHECK(fcntl(fd, F_SETFL, flags | O_NONBLOCK), "fcntl");
+    int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   }
 
   return ncclSuccess;
@@ -193,7 +192,7 @@ ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen,
   bzero(&cliaddr, sizeof(cliaddr));
   cliaddr.sun_family = AF_UNIX;
 
-  int len =
+  size_t len =
       snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
   if (len > (sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot connect to provided name for socket. Name too large");

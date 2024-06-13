@@ -8,11 +8,56 @@
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
 #include <cuda.h>
-#include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
-#include "cuda_runtime.h"
+#include <cuda_runtime.h>
 #include <pthread.h>
 #include <chrono>
 #include <stdexcept>
+#include <functional>
+
+#ifdef UB_MPI_BOOTSTRAP
+#include <stdexcept>
+#include <mpi.h>
+
+#define UB_MPI_CHECK(expr)                                                                       \
+  do {                                                                                           \
+    const int mpicode = (expr);                                                                  \
+    if (mpicode != MPI_SUCCESS) {                                                                \
+      char mpimsg[MPI_MAX_ERROR_STRING];                                                         \
+      int mpilen;                                                                                \
+      MPI_Error_string(mpicode, mpimsg, &mpilen);                                                \
+      std::vector<char> errmsg(1024);  \
+      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s",  \
+               __FILE__, __LINE__, __func__, mpimsg);  \
+      throw std::runtime_error(errmsg.data());  \
+    }                                                                                            \
+  } while (false)
+
+typedef MPI_Comm ExtComm;
+
+void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, ExtComm comm) {
+  int myrank, nranks;
+  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
+  UB_MPI_CHECK(MPI_Comm_size(comm, &nranks));
+  *globaldata = malloc(nranks * localbytes);
+  UB_MPI_CHECK(MPI_Allgather(localdata,
+                             localbytes,
+                             MPI_BYTE,
+                             *globaldata,
+                             nranks * localbytes,
+                             MPI_BYTE,
+                             comm));
+}
+
+void ub_barrier(ExtComm comm) {
+  UB_MPI_CHECK(MPI_Barrier(comm));
+}
+
+void ub_free(void *ptr) {
+  free(ptr);
+}
+#else
+typedef char* ExtComm;
+#endif
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
@@ -99,6 +144,7 @@ struct communicator {
   CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
   void* ucbase_ptr[NVTE_MAX_REGIONS];  // only for cuMem allocated memory
   size_t mem_size[NVTE_MAX_REGIONS];
+  bool mem_dealloc[NVTE_MAX_REGIONS];
 
   void* mc_ptr[NVTE_MAX_REGIONS];
   void* mc_baseptr;
@@ -130,9 +176,18 @@ struct communicator {
   int padding2[15];
   volatile int tail;
 
+  // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
+  std::function<void(void**, void*, size_t, ExtComm)> _alloc_copy_allgather;
+  std::function<void(ExtComm)> _barrier;
+  std::function<void(void*)> _free;
+
+  ExtComm comm_world,
+          comm_inter,       // reduction group communicator (subset of the nodes) along GPU rail
+          comm_intra;       // full intranode (all ndev GPUS)
+#ifdef UB_MPI_BOOTSTRAP
   MPI_Request mpihndl[NVTE_MAX_SHARP];
-  MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
-      comm_intra;       // full intranode (all ndev GPUS)
+#endif
+
   int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
@@ -142,18 +197,38 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
-int create_communicator(communicator **comm);
-/*  creates communicator, allocates all internal buffers if necessary */
 
-int create_communicator_grouped(communicator **comm, int pipegpus, int pipenodes);
-int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
-                                 int tensornodes);
-/*  creates communicator with
-    allreduce1 to happen in datagpus x datanodes groups,
-    allreduce2 to happen in tensorgpus x tensor nodes,
-        where num_nodes = pipenodes x tensornodes x datanodes
-            nvlink_size = pipegpus x tensorgpus x datagpus
- */
+/*  creates communicator, allocates all internal buffers if necessary */
+int create_communicator_grouped2(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
+  int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
+
+int create_communicator_grouped(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free,
+  int pipegpus, int pipenodes);
+
+int create_communicator(communicator **comm,
+  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
+  std::function<void(ExtComm)> ext_barrier,
+  std::function<void(void*)> ext_free);
+
+int create_communicator_grouped2_mpi(communicator **comm,
+  int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
+
+int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipenodes);
+
+int create_communicator_mpi(communicator **comm);
+
+void destroy_communicator(communicator *comm);
+
+void destroy_communicator_mpi(communicator *comm);
 
 // int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
 /*
@@ -167,8 +242,7 @@ int pipe_rank(communicator *comm,
                           // data-parallel and tensor-parallel position within data and tensor
                           // groups would be preserved
 
-int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm,
-                                    bool alloc = false);
+int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
 /*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
    dont mix buffers for different operations returns -1 if cant register (too many preregistered
    regions already) if alloc==true will allocate memory and fill the pointers (required for NVL
