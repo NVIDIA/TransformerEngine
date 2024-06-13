@@ -24,9 +24,9 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
-from ..fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
+from ..attention import AttnBiasType, AttnMaskType, QKVLayout
+from ..attention import is_fused_attn_kernel_available, canonicalize_attn_mask_type
+from ..attention import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis

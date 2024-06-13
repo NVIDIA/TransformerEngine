@@ -18,8 +18,14 @@ from jax import Array
 from jax import value_and_grad, jit
 from jax.typing import ArrayLike, DTypeLike
 
-from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from transformer_engine.jax.fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
+from transformer_engine.jax.attention import (
+    AttnBiasType,
+    AttnMaskType,
+    QKVLayout,
+    fused_attn_qkvpacked,
+    fused_attn_kvpacked,
+    fused_attn
+)
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 
 from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend

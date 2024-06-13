@@ -9,15 +9,27 @@ import jax.numpy as jnp
 import numpy as np
 from flax.linen import dot_product_attention
 from jax import random
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
-
-from distributed_test_base import generate_configs, generate_collectives_count
-from distributed_test_base import compare_ops
+from jax.sharding import (
+    Mesh,
+    NamedSharding,
+    PartitionSpec
+)
+from distributed_test_base import (
+    generate_configs,
+    generate_collectives_count,
+    compare_ops
+)
 from utils import make_causal_mask, make_self_mask
 from transformer_engine.jax import fp8_autocast
-from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
-from transformer_engine.jax.fused_attn import fused_attn_qkvpacked, fused_attn_kvpacked
-from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+from transformer_engine.jax.attention import (
+    is_fused_attn_kernel_available,
+    fused_attn_qkvpacked,
+    fused_attn_kvpacked,
+    AttnBiasType,
+    AttnMaskType,
+    QKVLayout
+)
+
 
 DTYPES = [jnp.float16, jnp.bfloat16]
 
