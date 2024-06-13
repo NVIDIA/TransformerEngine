@@ -150,7 +150,7 @@ def main():
     device_id = torch.cuda.current_device()
     device_properties = torch.cuda.get_device_properties(device_id)
     print(f"Device {device_id}: "
-        f"{device_properties.name} , "
+        f"{device_properties.name} GPU, "
         f"sm{device_properties.major}{device_properties.minor} compute capability, "
         f"{device_properties.total_memory/1024**3:.1f}GB memory")
     for model in model_configs.keys():
