@@ -36,6 +36,8 @@ from ..cpp_extensions import (
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
 
+__all__ = ["initialize_ub", "destroy_ub"]
+
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
@@ -64,7 +66,7 @@ def get_workspace() -> torch.Tensor:
 
 def initialize_ub(
     shape: list,
-    tp_size: int,
+    tp_group: dist_group_type,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None
@@ -74,6 +76,9 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
     rank_id = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    tp_id = torch.distributed.get_rank(tp_group)
+    tp_size = torch.distributed.get_world_size(tp_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -158,6 +163,8 @@ def initialize_ub(
             ub_obj = tex.UbufP2PCommOverlap(
                     sample_buffer,          # Sample userbuffer
                     rank_id,                # Rank id
+                    world_size,             # World size
+                    tp_id,                  # TP id
                     tp_size,                # TP size
                     num_sm,                 # Number of communication SMs
                     cga_size,               # CGA cluster size
@@ -172,6 +179,8 @@ def initialize_ub(
             ub_obj = tex.UbufCommOverlap(
                     sample_buffer,          # Sample userbuffer
                     rank_id,                # Rank id
+                    world_size,             # World size
+                    tp_id,                  # TP id
                     tp_size,                # TP size
                     num_sm,                 # Number of communication SMs
                     cga_size,               # CGA cluster size
@@ -182,6 +191,26 @@ def initialize_ub(
                     torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
+
+    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
+        pg = None if group == "world" else tp_group
+        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
+        global_data = torch.zeros(global_size, dtype=local_data.dtype, device='cuda')
+        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
+        return global_data.cpu()
+
+    def barrier_callback(group: str) -> None:
+        pg = None if group == "world" else tp_group
+        torch.distributed.barrier(group=pg)
+
+    def free_callback(data: torch.Tensor) -> None:
+        data.data = torch.Tensor()
+
+    tex.set_ubuf_bootstrap_callbacks(
+        alloc_copy_allgather_callback,
+        barrier_callback,
+        free_callback
+    )
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -234,6 +263,13 @@ def get_ub(name: str):
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
     return _ub_communicators[name]
+
+def destroy_ub():
+    """Destroy all allocated userbuffer communicators."""
+    global _ub_communicators
+    _ub_communicators = None
+    global layers_atomic_ring_exchange
+    layers_atomic_ring_exchange = []
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
