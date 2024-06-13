@@ -13,12 +13,20 @@ from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.flax import LayerNormMLP
-from transformer_engine.jax.mlp import fused_layernorm_fp8_mlp
-from transformer_engine.jax.sharding import HIDDEN_AXES, HIDDEN_TP_AXES, \
-    BATCH_AXES, SEQLEN_TP_AXES, SEQLEN_AXES, \
+from transformer_engine.jax.layernorm_mlp import fused_layernorm_fp8_mlp
+from transformer_engine.jax.sharding import (
+    HIDDEN_AXES, HIDDEN_TP_AXES,
+    BATCH_AXES,
+    SEQLEN_TP_AXES, SEQLEN_AXES,
     W_NO_SHARD_AXES, W_FSDP_AXES, W_TP_AXES, W_JOINED_AXES
+)
 from transformer_engine.jax.sharding import MeshResource
-from utils import assert_allclose, assert_tree_like_allclose, is_devices_enough
+
+from utils import (
+    assert_allclose, 
+    assert_tree_like_allclose, 
+    is_devices_enough
+)
 
 is_fp8_supported, reason = is_fp8_available()
 DTYPES = [jnp.bfloat16, jnp.float16]

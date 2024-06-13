@@ -9,9 +9,7 @@ from typing import List, Tuple
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import cast_fp8, cast_transpose, transpose
-from .cpp_extensions import rmsnorm_fwd, rmsnorm_fwd_fp8, rmsnorm_bwd
-from .cpp_extensions import layernorm_fwd, layernorm_fwd_fp8, layernorm_bwd
+from . import cpp_extensions as tex
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot
 from .fp8 import FP8Helper, FP8MetaPackage
 from .sharding import with_sharding_constraint_by_logical_axes
@@ -64,11 +62,11 @@ def _layernorm_fwd_rule(x,
                         epsilon: float = 1e-6):
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'layernorm':
-        output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
+        output, mu, rsigma = tex.layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
     elif layernorm_type == 'rmsnorm':
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        output, rsigma = rmsnorm_fwd(x, gamma, epsilon)
+        output, rsigma = tex.rmsnorm_fwd(x, gamma, epsilon)
         mu = None
     else:
         raise ValueError(f"{layernorm_type=} is not supported.")
@@ -78,7 +76,7 @@ def _layernorm_fwd_rule(x,
 def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
     x, mu, rsigma, gamma = ctx
     if layernorm_type == 'layernorm':
-        dx, dgamma, dbeta = layernorm_bwd(dz,
+        dx, dgamma, dbeta = tex.layernorm_bwd(dz,
                                           x,
                                           mu,
                                           rsigma,
@@ -88,7 +86,7 @@ def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
     elif layernorm_type == 'rmsnorm':
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        dx, dgamma = rmsnorm_bwd(dz, x, rsigma, gamma, epsilon=epsilon)
+        dx, dgamma = tex.rmsnorm_bwd(dz, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
     else:
         raise ValueError(f"{layernorm_type=} is not supported.")
@@ -175,7 +173,7 @@ def _layernorm_fp8_dot_fwd_rule(
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
-        ln_out, mu, rsigma, updated_x_amax = layernorm_fwd_fp8(
+        ln_out, mu, rsigma, updated_x_amax = tex.layernorm_fwd_fp8(
             x,
             gamma,
             beta,
@@ -188,7 +186,7 @@ def _layernorm_fp8_dot_fwd_rule(
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        ln_out, rsigma, updated_x_amax = rmsnorm_fwd_fp8(x,
+        ln_out, rsigma, updated_x_amax = tex.rmsnorm_fwd_fp8(x,
                                                          gamma,
                                                          x_amax,
                                                          x_scale,
@@ -207,7 +205,7 @@ def _layernorm_fp8_dot_fwd_rule(
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
     casted_kernel, updated_kernel_amax = \
-        cast_fp8(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype)
+        tex.cast_fp8(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype)
 
     ln_out = with_sharding_constraint_by_logical_axes(ln_out, dot_input_axes)
 
@@ -238,14 +236,14 @@ def _layernorm_fp8_dot_bwd_rule(
     x_shape, kernel_shape, mu, rsigma, x, gamma, \
     x_contracting_dims, k_contracting_dims, maybe_fp32_to_fm32 = ctx
 
-    ln_out_t = transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
+    ln_out_t = tex.transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     grad_amax = amax_list[FP8MetaPackage.GRAD_IDX][0:1]
     grad_scale = scale_list[FP8MetaPackage.GRAD_IDX]
     grad_scale_inv = scale_inv_list[FP8MetaPackage.GRAD_IDX]
 
     casted_grad, casted_grad_t, updated_grad_amax = \
-        cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
+        tex.cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
                        static_axis_boundary=-1, transpose_axis_boundary=min(x_contracting_dims))
 
     xt_constracting_dim = tuple(range(len(x_contracting_dims), len(x_shape)))
@@ -265,7 +263,7 @@ def _layernorm_fp8_dot_bwd_rule(
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
     if layernorm_type == 'layernorm':
-        dx, dgamma, dbeta = layernorm_bwd(dgrad,
+        dx, dgamma, dbeta = tex.layernorm_bwd(dgrad,
                                           x,
                                           mu,
                                           rsigma,
@@ -275,7 +273,7 @@ def _layernorm_fp8_dot_bwd_rule(
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        dx, dgamma = rmsnorm_bwd(dgrad, x, rsigma, gamma, epsilon=epsilon)
+        dx, dgamma = tex.rmsnorm_bwd(dgrad, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
 
     amax_list[FP8MetaPackage.INPUT_IDX] = \
