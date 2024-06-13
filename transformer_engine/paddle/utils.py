@@ -73,12 +73,12 @@ def mask_to_cu_seqlens(mask: paddle.Tensor, need_kv: bool = False) -> paddle.Ten
     """Convert mask to cu_seqlens"""
     assert 'bool' in str(mask.dtype), "mask must be bool dtype"
     assert len(mask.shape) == 4 and mask.shape[1] == 1, "mask must be [b, 1, s_q, s_kv]"
-    q_actual_seqlens = paddle.sum(mask[:, :, :, 0] is False, axis=(-1, -2), dtype='int32')
+    q_actual_seqlens = paddle.sum(mask[:, :, :, 0].logical_not(), axis=(-1, -2), dtype='int32')
     q_cu_seqlens = paddle.cumsum(q_actual_seqlens)
     q_cu_seqlens = paddle.concat([paddle.zeros([1], dtype=paddle.int32), q_cu_seqlens], axis=0)
     if not need_kv:
         return q_cu_seqlens, None
-    kv_actual_seqlens = paddle.sum(mask[:, :, 0, :] is False, axis=(-1, -2), dtype='int32')
+    kv_actual_seqlens = paddle.sum(mask[:, :, 0, :].logical_not(), axis=(-1, -2), dtype='int32')
     kv_cu_seqlens = paddle.cumsum(kv_actual_seqlens)
     kv_cu_seqlens = paddle.concat([paddle.zeros([1], dtype=paddle.int32), kv_cu_seqlens], axis=0)
     return q_cu_seqlens, kv_cu_seqlens
