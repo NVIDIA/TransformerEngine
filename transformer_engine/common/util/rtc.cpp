@@ -23,6 +23,7 @@ namespace {
 
 // Strings with headers for RTC kernels
 #include "string_code_utils_cuh.h"
+#include "string_code_util_math_h.h"
 
 /*! \brief Latest compute capability that NVRTC supports
  *
@@ -136,6 +137,10 @@ CUfunction Kernel::get_function(int device_id) {
   return functions_[device_id];
 }
 
+void Kernel::set_function_cache_config(int device_id, CUfunc_cache cache_config) {
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuFuncSetCacheConfig, get_function(device_id), cache_config);
+}
+
 KernelManager& KernelManager::instance() {
   NVTE_CHECK(is_enabled(), "NVRTC support is not enabled");
   static KernelManager instance_;
@@ -173,9 +178,9 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Compile source
   nvrtcProgram program;
-  constexpr int num_headers = 1;
-  constexpr const char* headers[num_headers] = {string_code_utils_cuh};
-  constexpr const char* include_names[num_headers] = {"utils.cuh"};
+  constexpr int num_headers = 2;
+  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
+  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
                                       code.c_str(),
                                       filename.c_str(),
@@ -227,6 +232,14 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Clean up
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
+}
+
+void KernelManager::set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config) {
+  const int device_id = cuda::current_device();
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
+  NVTE_CHECK(kernel_cache_.count(key) > 0,
+             "Attempted to configure RTC kernel before compilation");
+  kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
 }
 
 bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {

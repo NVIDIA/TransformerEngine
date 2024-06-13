@@ -163,6 +163,25 @@ struct TypeToVec2<nv_bfloat16> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template <typename IType, typename IType2, typename OType, typename CType>
+struct CTDBiasDActParam {
+    using InputType = IType;
+    using InputType2 = IType2;
+    using OutputType = OType;
+    using ComputeType = CType;
+    const IType *input;
+    const IType2 *act_input;
+    OType *output_c;
+    OType *output_t;
+    const CType *scale_ptr;
+    CType *amax;
+    CType *scale_inv;
+    CType *workspace;
+    CType *warp_scales_inv;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<int INDEX>
 struct Get {
     template<typename T, typename R>
