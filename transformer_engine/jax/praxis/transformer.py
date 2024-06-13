@@ -18,7 +18,7 @@ from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
-from ..fused_attn import AttnBiasType, AttnMaskType
+from ..attention import AttnBiasType, AttnMaskType
 
 
 class RelativePositionBiases(TransformerEngineBaseLayer):

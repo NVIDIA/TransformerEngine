@@ -3,13 +3,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 
-#include <cublasLt.h>
-
-#include "modules.h"
-#include "utils.h"
+#include "jax/csrc/extensions.h"
 
 #include "common/util/pybind_helper.h"
 

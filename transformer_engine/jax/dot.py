@@ -3,12 +3,12 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence
+from typing import List, Tuple, Sequence
 from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import cast_transpose
+from . import cpp_extensions as tex
 from .fp8 import FP8Helper, FP8MetaPackage
 
 Precision = jax.lax.Precision
@@ -28,14 +28,11 @@ def type_safe_dot_general(
         kernel = jnp.asarray(kernel, x.dtype)
         return jax.lax.dot_general(x, kernel, (contracting_dims, ((), ())))
 
-    fp8_max = fp8_meta_pkg.fp8_max
-    amax = fp8_meta_pkg.amax
-    scale = fp8_meta_pkg.scale
-    scale_inv = fp8_meta_pkg.scale_inv
+    amax_list = fp8_meta_pkg.amax_list
+    scale_list = fp8_meta_pkg.scale_list
     fwd_dtype = FP8Helper.FWD_DTYPE
     bwd_dtype = FP8Helper.BWD_DTYPE
-    return _fp8_dot(x, kernel, fp8_max, amax, scale, scale_inv, fwd_dtype, bwd_dtype,
-                    contracting_dims)
+    return _fp8_dot(x, kernel, amax_list, scale_list, fwd_dtype, bwd_dtype, contracting_dims)
 
 
 def quantize(x, q_dtype, scale):
@@ -84,11 +81,11 @@ def get_precision_of_fp8_dot(enable_2xACC: bool):
     return jax.lax.Precision.HIGHEST if enable_2xACC else jax.lax.Precision.DEFAULT
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8))
-def _fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, fp8_max: jnp.ndarray, amax: jnp.ndarray,
-             scale: jnp.ndarray, scale_inv: jnp.ndarray, fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype,
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
+def _fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, amax_list: List[jnp.ndarray],
+             scale_list: List[jnp.ndarray], fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype,
              contracting_dims: Tuple[Sequence[int], Sequence[int]]):
-    output, _ = _fp8_dot_fwd_rule(x, kernel, fp8_max, amax, scale, scale_inv, fwd_dtype, bwd_dtype,
+    output, _ = _fp8_dot_fwd_rule(x, kernel, amax_list, scale_list, fwd_dtype, bwd_dtype,
                                   contracting_dims)
     return output
 
@@ -96,17 +93,16 @@ def _fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, fp8_max: jnp.ndarray, amax: jn
 def _fp8_dot_fwd_rule(
         x,
         kernel,
-        fp8_max,
-        amax,
-        scale,
-        scale_inv,
+        amax_list,
+        scale_list,
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         contracting_dims):
 
     maybe_fm32_to_fp32, maybe_fp32_to_fm32 = \
-        FP8Helper.generate_fp8_meta_dtype_converter_pair(fp8_max, amax, scale, scale_inv)
-    fp8_max, amax, scale, scale_inv = maybe_fm32_to_fp32(fp8_max, amax, scale, scale_inv)
+        FP8Helper.generate_fp8_meta_dtype_converter_pair(*amax_list, *scale_list)
+    amax_list = maybe_fm32_to_fp32(*amax_list)
+    scale_list = maybe_fm32_to_fp32(*scale_list)
 
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
@@ -114,19 +110,19 @@ def _fp8_dot_fwd_rule(
     kernel_shape_pre = kernel.shape[:max(rhs_contracting_dims) + 1]
     assert x_shape_suf == kernel_shape_pre
 
-    scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
-    amax = FP8Helper.update_amax_history(amax)
+    fp8_dtype_list = [fwd_dtype, fwd_dtype, bwd_dtype]
+    scale_list, scale_inv_list = FP8MetaPackage.update_fp8_scale(amax_list, scale_list,
+                                                                 fp8_dtype_list)
+    amax_list = FP8MetaPackage.update_amax_list(amax_list)
 
-    gemm_x_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
-
-    x_scale = scale[gemm_x_idx]
-    x_scale_inv = scale_inv[gemm_x_idx]
+    x_scale = scale_list[FP8MetaPackage.INPUT_IDX]
+    x_scale_inv = scale_inv_list[FP8MetaPackage.INPUT_IDX]
     # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
     casted_x, updated_x_amax = quantize(x, fwd_dtype, x_scale)
 
-    kernel_scale = scale[gemm_kernel_idx]
-    kernel_scale_inv = scale_inv[gemm_kernel_idx]
+    kernel_scale = scale_list[FP8MetaPackage.WEIGHT_IDX]
+    kernel_scale_inv = scale_inv_list[FP8MetaPackage.WEIGHT_IDX]
     # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
     casted_kernel, updated_kernel_amax = quantize(kernel, fwd_dtype, kernel_scale)
@@ -135,7 +131,7 @@ def _fp8_dot_fwd_rule(
                           (lhs_contracting_dims, rhs_contracting_dims),
                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
-    ctx = (casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
+    ctx = (casted_x, casted_kernel, amax_list, scale_list, scale_inv_list, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape, maybe_fp32_to_fm32)
     return output, ctx
 
@@ -143,24 +139,22 @@ def _fp8_dot_fwd_rule(
 def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # pylint: disable=unused-argument
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
-    casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, \
+    casted_x, casted_kernel, amax_list, scale_list, scale_inv_list, \
         updated_x_amax, updated_kernel_amax, x_shape, kernel_shape, \
         maybe_fp32_to_fm32 = ctx
 
-    gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
-
-    grad_amax = amax[gemm_grad_idx, 0:1]
-    grad_scale = scale[gemm_grad_idx]
-    grad_scale_inv = scale_inv[gemm_grad_idx]
+    grad_amax = amax_list[FP8MetaPackage.GRAD_IDX][0:1]
+    grad_scale = scale_list[FP8MetaPackage.GRAD_IDX]
+    grad_scale_inv = scale_inv_list[FP8MetaPackage.GRAD_IDX]
 
     casted_grad, casted_grad_t, updated_grad_amax = \
-        cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv,
+        tex.cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv,
                        bwd_dtype, static_axis_boundary=-1,
                        transpose_axis_boundary=min(lhs_contracting_dims))
 
     x_constracting_dim = tuple(range(0, len(x_shape) - len(lhs_contracting_dims)))
     gt_constracting_dim = tuple(range(grad.ndim - len(x_constracting_dim), grad.ndim))
-    x_scale_inv = scale_inv[gemm_x_idx]
+    x_scale_inv = scale_inv_list[FP8MetaPackage.INPUT_IDX]
     wgrad = fp8_dot_impl(casted_x, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
                          (x_constracting_dim, gt_constracting_dim),
                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
@@ -168,18 +162,22 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     g_constracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
     k_constracting_dim = tuple(range(len(rhs_contracting_dims), len(kernel_shape)))
-    kernel_scale_inv = scale_inv[gemm_kernel_idx]
+    kernel_scale_inv = scale_inv_list[FP8MetaPackage.WEIGHT_IDX]
     dgrad = fp8_dot_impl(casted_grad, casted_kernel, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_constracting_dim, k_constracting_dim),
                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
-    amax = amax.at[gemm_x_idx, 0].set(updated_x_amax)
-    amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax)
-    amax = amax.at[gemm_grad_idx, 0].set(updated_grad_amax[0])
+    amax_list[FP8MetaPackage.INPUT_IDX] = \
+        amax_list[FP8MetaPackage.INPUT_IDX].at[0].set(updated_x_amax)
+    amax_list[FP8MetaPackage.WEIGHT_IDX] = \
+        amax_list[FP8MetaPackage.WEIGHT_IDX].at[0].set(updated_kernel_amax)
+    amax_list[FP8MetaPackage.GRAD_IDX] = \
+        amax_list[FP8MetaPackage.GRAD_IDX].at[0].set(updated_grad_amax[0])
 
-    fp8_max, amax, scale, scale_inv = maybe_fp32_to_fm32(fp8_max, amax, scale, scale_inv)
+    amax_list = maybe_fp32_to_fm32(*amax_list)
+    scale_list = maybe_fp32_to_fm32(*scale_list)
 
-    return dgrad, wgrad, fp8_max, amax, scale, scale_inv
+    return dgrad, wgrad, amax_list, scale_list
 
 
 _fp8_dot.defvjp(_fp8_dot_fwd_rule, _fp8_dot_bwd_rule)

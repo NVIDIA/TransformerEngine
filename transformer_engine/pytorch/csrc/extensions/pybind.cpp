@@ -49,25 +49,126 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             "Scaled Bottom-Right Corner Aligned Masked Softmax BWD");
 
   // Other granular functions
-  m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
-  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
+  m.def("layernorm_fwd_fp8",
+        &layernorm_fwd_fp8,
+        "LN FWD FP8",
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("bias"),
+        py::arg("eps"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("sm_margin"),
+        py::arg("zero_centered_gamma"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
+  m.def("layernorm_fwd_fp8_noalloc",
+        &layernorm_fwd_fp8_noalloc,
+        "LN FWD FP8",
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("bias"),
+        py::arg("eps"),
+        py::arg("scale"),
+        py::arg("ln_out"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("sm_margin"),
+        py::arg("zero_centered_gamma"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
   m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
-  m.def("rmsnorm_fwd_fp8", &rmsnorm_fwd_fp8, "RMSNorm FWD FP8");
-  m.def("rmsnorm_fwd_fp8_noalloc", &rmsnorm_fwd_fp8_noalloc, "RMSNorm FWD FP8");
+  m.def("rmsnorm_fwd_fp8",
+        &rmsnorm_fwd_fp8,
+        "RMSNorm FWD FP8",
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("eps"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("sm_margin"),
+        py::arg("zero_centered_gamma"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
+  m.def("rmsnorm_fwd_fp8_noalloc",
+        &rmsnorm_fwd_fp8_noalloc,
+        "RMSNorm FWD FP8",
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("eps"),
+        py::arg("scale"),
+        py::arg("ln_out"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("sm_margin"),
+        py::arg("zero_centered_gamma"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "RMSNorm BWD");
   m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD");
   m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
-  m.def("fused_cast_transpose_noop", &fused_cast_transpose_noop,
-                                              "Fused Cast + Transpose with noop option");
-  m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
-                                              "Fused Cast + Transpose + BGRAD");
-  m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
-                                              "Fused FP8 Transpose + BGRAD");
-  m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
-                                              "Fused Cast + Transpose + BGRAD + DGELU");
+  m.def("fused_cast_transpose_noop",
+        &fused_cast_transpose_noop,
+        "Fused Cast + Transpose with noop option",
+        py::arg("input"),
+        py::arg("noop"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("input_cast"),
+        py::arg("input_transpose"),
+        py::arg("otype"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
+  m.def("fused_cast_transpose_bgrad",
+        &fused_cast_transpose_bgrad,
+        "Fused Cast + Transpose + BGRAD",
+        py::arg("grad_output"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
+  m.def("fused_fp8_transpose_bgrad",
+        &fused_fp8_transpose_bgrad,
+        "Fused FP8 Transpose + BGRAD",
+        py::arg("grad_output"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("grad_bias_type"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
+  m.def("fused_cast_transpose_bgrad_dgelu",
+        &fused_cast_transpose_bgrad_dgelu,
+        "Fused Cast + Transpose + BGRAD + DGELU",
+        py::arg("grad_output"),
+        py::arg("gelu_input"),
+        py::arg("scale"),
+        py::arg("amax"),
+        py::arg("scale_inv"),
+        py::arg("otype"),
+        py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0,
+        py::arg("scale_inv_offset") = 0);
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
                                               "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
