@@ -36,6 +36,8 @@ from ..cpp_extensions import (
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
 
+__all__ = ["initialize_ub", "destroy_ub"]
+
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
