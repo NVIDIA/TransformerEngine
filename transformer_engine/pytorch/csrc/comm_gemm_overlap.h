@@ -135,10 +135,11 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
 
   UbufCommOverlap(
     torch::Tensor sample, int world_rank, int world_size, int tp_rank, int tp_size,
-    int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
-    bool set_sm_margin, bool atomic_gemm)
-  : CommGemmOverlap(world_rank, world_size, tp_rank, tp_size, 0, 1, num_splits, num_max_streams,
-                    comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm,
+    int num_splits, int num_max_streams, int cga_size, int num_comm_sm,
+    bool set_sm_margin, bool use_ce, bool atomic_gemm)
+  : CommGemmOverlap(world_rank, world_size, tp_rank, tp_size, 0, 1,
+                    num_splits, num_max_streams, cga_size, num_comm_sm,
+                    set_sm_margin, use_ce, atomic_gemm,
                     &torch_alloc_copy_allgather, &torch_bcast, &torch_barrier, &torch_free) {
     _ubuf_bytes = sample.numel() * sample.element_size();
     _ubuf_dtype = (sample.element_size() == 1) ? DType::kFloat8E4M3
@@ -467,10 +468,12 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
   int _ubuf_bytes, _ubuf_chunk_bytes;
 
   UbufP2PCommOverlap(torch::Tensor sample,
-    int world_rank, int world_size, int tp_rank, int tp_size, int num_max_streams,
-    bool set_sm_margin, bool atomic_gemm, bool aggregate, bool is_reduce_scatter)
-  : CommGemmOverlapP2P(world_rank, world_size, tp_rank, tp_size, /* node_id */ 0, /* num_nodes */ 1,
-                       num_max_streams, set_sm_margin, atomic_gemm, aggregate, is_reduce_scatter,
+    int world_rank, int world_size, int tp_rank, int tp_size, int num_max_streams, int cga_size,
+    int num_comm_sms, bool set_sm_margin, bool use_ce, bool atomic_gemm, bool aggregate,
+    bool is_reduce_scatter)
+  : CommGemmOverlapP2P(world_rank, world_size, tp_rank, tp_size, 0, 1,
+                       num_max_streams, cga_size, num_comm_sms,
+                       set_sm_margin, use_ce, atomic_gemm, aggregate, is_reduce_scatter,
                        &torch_alloc_copy_allgather, &torch_bcast, &torch_barrier, &torch_free) {
     _ubuf_bytes = sample.numel() * sample.element_size();
     _ubuf_chunk_bytes = _ubuf_bytes / _tp_size;

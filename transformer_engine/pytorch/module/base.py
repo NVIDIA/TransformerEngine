@@ -112,11 +112,12 @@ def initialize_ub(
         method: str,
         num_splits: int = 4,
         cga_size: int = 2,
-        num_sm: int = 16,
-        set_sm_margin: int = 0,
-        atomic_gemm: int = 0,
-        aggregate: int = 0,
-        is_reduce_scatter: int = 0,
+        num_comm_sm: int = 16,
+        set_sm_margin: bool = False,
+        use_ce: bool = True,
+        atomic_gemm: bool = False,
+        aggregate: bool = False,
+        is_reduce_scatter: bool = False,
         fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
@@ -164,11 +165,14 @@ def initialize_ub(
                     world_size,             # Global number of processes
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
-                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # (default: 3)
+                    cga_size,               # CGA cluster size
+                    num_comm_sm,            # Number of communication SMs
                     set_sm_margin,          # Set SM margin
-                    atomic_gemm,            # use a single GEMM with atomic-counters
+                    use_ce,                 # Use copy engine
+                    atomic_gemm,            # Use a single GEMM with atomic-counters
                     aggregate,              # Aggregate 2X GEMM chunks
-                    is_reduce_scatter,      # overlap with reduce scatter
+                    is_reduce_scatter,      # Overlap with reduce scatter
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -177,12 +181,13 @@ def initialize_ub(
                     world_size,             # Global number of processes
                     local_rank,             # Local rank within the TP group
                     local_size,             # Size of the TP group
-                    num_splits,
-                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+                    num_splits,             # Number of work chunks
+                    tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # (default: 3)
                     cga_size,               # CGA cluster size
-                    num_sm,                 # Number of communication SMs
+                    num_comm_sm,            # Number of communication SMs
                     set_sm_margin,          # Set SM margin
-                    atomic_gemm,            # use a single GEMM with atomic-counters
+                    use_ce,                 # Use copy engine
+                    atomic_gemm,            # Use a single GEMM with atomic-counters
                 )
         _ub_communicators[name] = ub_obj
 
@@ -230,6 +235,7 @@ def initialize_ub(
             cga_size = ub_cfg.get("cga_size", 2)
             num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
             set_sm_margin = ub_cfg.get("set_sm_margin", 0)
+            use_ce = ub_cfg.get("use_ce", True)
             aggregate = ub_cfg.get("aggregate", 0)
             atomic_gemm = ub_cfg.get("atomic_gemm", 0)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
@@ -243,6 +249,7 @@ def initialize_ub(
                 cga_size,
                 num_sm,
                 set_sm_margin,
+                use_ce,
                 atomic_gemm,
                 aggregate,
                 is_reduce_scatter,
@@ -253,7 +260,7 @@ def initialize_ub(
             add_ub(
                 name,
                 method=method,
-                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
+                is_reduce_scatter=True if name in layers_reduce_scatter_overlap else False,
                 num_splits=4 if method == "pipeline" else 0,
                 fp8_buf=name in layers_all_gather_overlap,
             )

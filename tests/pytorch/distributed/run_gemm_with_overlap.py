@@ -170,7 +170,10 @@ def main(opts):
         local_rank,
         local_size,
         tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+        1,                                                               # cga_size
+        1,                                                               # num_comm_sms
         opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or opts.atomic,  # set_sm_margin
+        True,                                                            # use_ce
         opts.atomic,
         opts.aggregate,
         opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS                  # is_reduce_scatter
@@ -183,8 +186,9 @@ def main(opts):
         4 if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS else 8,     # num_splits
         tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
         2,                                                               # cga_size
-        1,                                                               # num_sms
+        1,                                                               # num_comm_sms
         opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or opts.atomic,  # set_sm_margin
+        False,                                                           # use_ce
         opts.atomic,
     )
     if opts.atomic and opts.check_numerics:
@@ -195,7 +199,10 @@ def main(opts):
             local_rank,
             local_size,
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
+            1,     # cga_size
+            1,     # num_comm_sms
             True,  # set_sm_margin
+            True,  # use_ce
             True,  # atomic GEMM
             opts.aggregate,
             True   # is_reduce_scatter
@@ -208,8 +215,9 @@ def main(opts):
             4,     # num_splits
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             2,     # cga_size
-            1,     # num_sms
+            1,     # num_comm_sms
             True,  # set_sm_margin
+            False, # use_ce
             True,  # atomic GEMM
         )
 
@@ -264,9 +272,9 @@ def main(opts):
 
     ref1_g = torch.matmul(inp1_g, ker1_g)
     if world_rank == 0:
-            print(f"[GLOBAL] max(abs(inp1_g)) = {torch.max(torch.abs(inp1_g)).item()} " + \
-                  f"| max(abs(ker1_g)) = {torch.max(torch.abs(ker1_g)).item()} " + \
-                  f"| max(abs(ref1_g)) = {torch.max(torch.abs(ref1_g)).item()}\n", end='')
+        print(f"[GLOBAL] max(abs(inp1_g)) = {torch.max(torch.abs(inp1_g)).item()} " + \
+              f"| max(abs(ker1_g)) = {torch.max(torch.abs(ker1_g)).item()} " + \
+              f"| max(abs(ref1_g)) = {torch.max(torch.abs(ref1_g)).item()}\n", end='')
     if opts.atomic and opts.check_numerics:
         inp2_g = ref1_g
         ref2_g = torch.matmul(inp2_g, ker2_g)

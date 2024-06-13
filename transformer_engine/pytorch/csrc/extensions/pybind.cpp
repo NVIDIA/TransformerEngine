@@ -286,7 +286,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("set_bootstrap_callbacks", &te_cgo::set_bootstrap_callbacks);
 
   py::class_<te_cgo::UbufCommOverlap>(m, "UbufCommOverlap", py::module_local())
-    .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, bool, bool>())
+    .def(py::init</* sample_tensor */ torch::Tensor &,
+                  /* world_rank */ int, /* world_size */ int,
+                  /* tp_rank */ int, /* tp_size */ int,
+                  /* num_splits */ int, /* num_max_streams */ int,
+                  /* cga_size */ int, /* num_comm_sm */ int,
+                  /* set_sm_margin */ bool, /* use_ce */ bool, /* atomic_gemm */ bool>())
     .def("bulk_overlap", &te_cgo::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &te_cgo::UbufCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_rs", &te_cgo::UbufCommOverlap::atomic_gemm_overlap_rs)
@@ -298,7 +303,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("is_p2p_overlap", &te_cgo::UbufCommOverlap::is_p2p_overlap);
 
   py::class_<te_cgo::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap", py::module_local())
-    .def(py::init<torch::Tensor &, int, int, int, int, int, bool, bool, bool, bool>())
+    .def(py::init</* sample_tensor */ torch::Tensor &,
+                  /* world_rank */ int, /* world_size */ int,
+                  /* tp_rank */ int, /* tp_size */ int,
+                  /* num_max_streams */ int, /* cga_size */ int, /* num_comm_sm */ int,
+                  /* set_sm_margin */ bool, /* use_ce */ bool, /* atomic_gemm */ bool,
+                  /* aggregate */ bool, /* is_reduce_scatter */ bool>())
     .def("split_overlap_ag_p2p", &te_cgo::UbufP2PCommOverlap::split_overlap_ag)
     .def("split_overlap_rs_p2p", &te_cgo::UbufP2PCommOverlap::split_overlap_rs)
     .def("atomic_gemm_overlap_ag_p2p", &te_cgo::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
@@ -309,4 +319,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("is_fp8_ubuf", &te_cgo::UbufP2PCommOverlap::is_fp8_ubuf)
     .def("is_atomic_gemm", &te_cgo::UbufP2PCommOverlap::is_atomic_gemm)
     .def("is_p2p_overlap", &te_cgo::UbufP2PCommOverlap::is_p2p_overlap);
-}
+}  // PYBIND11_MODULE
