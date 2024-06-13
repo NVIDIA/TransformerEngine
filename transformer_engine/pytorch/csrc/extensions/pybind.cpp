@@ -204,6 +204,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
 
+  // Generation
+  m.def("attention_copy", &attention_copy, "attention_copy");
+
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
