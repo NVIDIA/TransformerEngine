@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine.common.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,

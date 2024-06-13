@@ -39,7 +39,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     is_bf16_compatible,
 )
-from transformer_engine.common.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
