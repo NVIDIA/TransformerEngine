@@ -24,14 +24,6 @@ from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
-# Skip tests if there are not enough GPUs
-if torch.cuda.device_count() < 2:
-    pytest.skip(
-        "Distributed tests require at least 2 GPUs "
-        f"(found {torch.cuda.device_count()})",
-        allow_module_level=True,
-    )
-
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
