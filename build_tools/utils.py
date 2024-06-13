@@ -17,15 +17,6 @@ from typing import List, Optional, Tuple
 
 
 @cache
-def userbuffers_enabled() -> bool:
-    """Check if userbuffers support is enabled"""
-    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")):
-        assert os.getenv("MPI_HOME"), "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
-        return True
-    return False
-
-
-@cache
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:

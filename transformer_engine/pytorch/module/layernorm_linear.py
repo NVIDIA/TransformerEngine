@@ -865,11 +865,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
-        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag]):
-            assert (
-                tex.userbuf_comm_available()
-            ), "Userbuffer communication backend not available."
-
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
