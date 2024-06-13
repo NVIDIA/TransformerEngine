@@ -792,7 +792,7 @@ def run_parallel_tests() -> None:
 _world_sizes = [torch.cuda.device_count()]
 if 1 not in _world_sizes:
     _world_sizes.append(1)
-if 2 not in _world_sizes:
+if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
     _world_sizes.append(2)
 
 @pytest.mark.parametrize("world_size", _world_sizes)
