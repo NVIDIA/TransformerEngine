@@ -16,7 +16,6 @@ from build_tools.utils import (
     found_ninja,
     found_pybind11,
     remove_dups,
-    userbuffers_enabled,
     get_frameworks,
     install_and_import,
 )
@@ -41,21 +40,13 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 
 
 def setup_common_extension() -> CMakeExtension:
-    """Setup CMake extension for common library
-
-    Also builds JAX or userbuffers support if needed.
-
-    """
-    cmake_flags = []
-    if userbuffers_enabled():
-        cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
-
+    """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine"),
-        cmake_flags=cmake_flags,
+        cmake_flags=[],
     )
 
 
