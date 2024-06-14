@@ -2234,11 +2234,11 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, cudaStream_t stream) {
-  int peerlocal      = peer % comm->nvsize;
-  void *flagptr      = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 0);
+  int peerlocal = peer % comm->nvsize;
+  void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 0);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 2);
-  bool signalonly    = (bytes / 16 == 0) || (comm->use_ce != 0);
+  bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
 
   assert(INTRANODE(peer));
 
@@ -2273,7 +2273,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
   int send_peerlocal = send_peer % comm->nvsize;
   int recv_peerlocal = recv_peer % comm->nvsize;
-  void *flagptr_send      = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
+  void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
@@ -2302,17 +2302,17 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   uint64_t arg11 = comm->ub_timeout;
   int arg12 = send_peerlocal;
   int arg13 = recv_peerlocal;
-  int *arg14 = reinterpret_cast<int *>(0 ? // temporary disable
-                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1):
-                                       nullptr);
-  int *arg15 = reinterpret_cast<int *>(0 ? // temporary disable
-                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2):
-                                       nullptr);
-  void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
-                        reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
-                        reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
-                        reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
-                        reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
+  int *arg14 = reinterpret_cast<int *>(0 ?  // temporary disable
+                                           GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1)
+                                         : nullptr);
+  int *arg15 = reinterpret_cast<int *>(0 ?  // temporary disable
+                                           GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2)
+                                         : nullptr);
+  void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),
+                        reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),
+                        reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),
+                        reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),
+                        reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15)};
@@ -2329,10 +2329,10 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
 
   int send_peerlocal = send_peer % comm->nvsize;
   int recv_peerlocal = recv_peer % comm->nvsize;
-  void *flagptr_send      = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
+  void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
-  void *flagptr_recv      = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
+  void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
   void *send_srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + send_offset;
   void *send_dstptr =
@@ -2358,17 +2358,17 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   int arg12 = comm->ub_timeout;
   int arg13 = send_peerlocal;
   int arg14 = recv_peerlocal;
-  int *arg15 = reinterpret_cast<int *>(0 ? // temporary disable
-                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1) :
-                                       nullptr);
-  int *arg16 = reinterpret_cast<int *>(0 ? // temporary disable
-                                       GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2) :
-                                       nullptr);
-  void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
-                        reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
-                        reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
-                        reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),
-                        reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),
+  int *arg15 = reinterpret_cast<int *>(0 ?  // temporary disable
+                                           GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 1)
+                                         : nullptr);
+  int *arg16 = reinterpret_cast<int *>(0 ?  // temporary disable
+                                           GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 2)
+                                         : nullptr);
+  void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),
+                        reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),
+                        reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),
+                        reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),
+                        reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
@@ -2449,13 +2449,14 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
-        &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler],
-        reinterpret_cast<int *>(flagptr), signalonly || comm->sms,
-        comm->ub_timeout,
-        reinterpret_cast<int *>(0 ? // temporary disable
-                                GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1) : nullptr),
-        reinterpret_cast<int *>(0 ? // temporary disable
-                                GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2) : nullptr));
+        &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler], reinterpret_cast<int *>(flagptr),
+        signalonly || comm->sms, comm->ub_timeout,
+        reinterpret_cast<int *>(0 ?  // temporary disable
+                                    GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1)
+                                  : nullptr),
+        reinterpret_cast<int *>(0 ?  // temporary disable
+                                    GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2)
+                                  : nullptr));
   }
 }
 
