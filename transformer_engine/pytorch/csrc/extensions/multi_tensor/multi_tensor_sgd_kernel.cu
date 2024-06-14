@@ -35,9 +35,9 @@ template <int N, typename T_grad, typename T_weight>
 struct SGDFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int* noop_gmem,
                                              TensorListMetadata<N>& tl,  // NOLINT(*)
-                                             float wd, float momentum,
-                                             float dampening, float lr, bool nesterov,
-                                             bool first_run, bool wd_after_momentum, float scale) {
+                                             float wd, float momentum, float dampening, float lr,
+                                             bool nesterov, bool first_run, bool wd_after_momentum,
+                                             float scale) {
     // Early exit if we don't need to do anything
     if (*noop_gmem) return;
 
@@ -176,24 +176,21 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
   // }
   // Case 2. fp32, fp32, fp32, No
   else if (grad_type == at::ScalarType::Float &&  // NOLINT(*)
-           weight_type == at::ScalarType::Float &&
-           num_tensors == 3) {
+           weight_type == at::ScalarType::Float && num_tensors == 3) {
     multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<3, float, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 3. fp16, fp32, fp32, Yes
   else if (grad_type == at::ScalarType::Half &&  // NOLINT(*)
-           weight_type == at::ScalarType::Float &&
-           num_tensors == 4) {
+           weight_type == at::ScalarType::Float && num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, at::Half, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 4. fp32, fp32, fp32, Yes
   else if (grad_type == at::ScalarType::Float &&  // NOLINT(*)
-           weight_type == at::ScalarType::Float &&
-           num_tensors == 4) {
+           weight_type == at::ScalarType::Float && num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, float, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);

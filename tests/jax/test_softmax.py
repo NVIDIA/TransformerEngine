@@ -43,6 +43,7 @@ class SoftmaxRunner:
     """
     Softmax runner
     """
+
     batch_size: int
     max_seqlen_q: int
     max_seqlen_kv: int
@@ -57,14 +58,22 @@ class SoftmaxRunner:
         Jax softmax as the reference
         """
         if mask is not None:
-            logits += lax.select(mask > 0,
-                                 jnp.full(mask.shape, -1e10).astype(logits.dtype),
-                                 jnp.full(mask.shape, 0.).astype(logits.dtype))
+            logits += lax.select(
+                mask > 0,
+                jnp.full(mask.shape, -1e10).astype(logits.dtype),
+                jnp.full(mask.shape, 0.0).astype(logits.dtype),
+            )
         return nn.softmax(logits * scale_factor)
 
     def _is_support(self):
-        return is_softmax_kernel_available(self.softmax_type, self.batch_size, self.num_heads,
-                                           self.max_seqlen_q, self.max_seqlen_kv, self.dtype)
+        return is_softmax_kernel_available(
+            self.softmax_type,
+            self.batch_size,
+            self.num_heads,
+            self.max_seqlen_q,
+            self.max_seqlen_kv,
+            self.dtype,
+        )
 
     def _setup_inputs(self):
         key = jax.random.PRNGKey(0)
@@ -73,7 +82,7 @@ class SoftmaxRunner:
         logits_shape = (self.batch_size, self.num_heads, self.max_seqlen_q, self.max_seqlen_kv)
         mask_shape = (self.batch_size, 1, self.max_seqlen_q, self.max_seqlen_kv)
 
-        self.logits = jax.random.uniform(logits_key, logits_shape, self.dtype, -1.)
+        self.logits = jax.random.uniform(logits_key, logits_shape, self.dtype, -1.0)
 
         match self.softmax_type:
             case SoftmaxType.SCALED:
@@ -81,7 +90,7 @@ class SoftmaxRunner:
             case SoftmaxType.SCALED_MASKED:
                 self.mask = jax.random.bernoulli(mask_key, shape=mask_shape).astype(jnp.uint8)
             case SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-                self.mask = (1. - jnp.tril(jnp.ones_like(self.logits))).astype(jnp.uint8)
+                self.mask = (1.0 - jnp.tril(jnp.ones_like(self.logits))).astype(jnp.uint8)
             case _:
                 raise ValueError(f"Unknown {self.softmax_type=}")
 
@@ -108,18 +117,24 @@ class SoftmaxRunner:
 
         args = [self.logits, self.mask]
         kwargs = {
-            'scale_factor': self.scale_factor,
-            'softmax_type': self.softmax_type,
+            "scale_factor": self.scale_factor,
+            "softmax_type": self.softmax_type,
         }
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
-            value_and_grad(lambda logits, *args: grad_func(softmax, self.logits, *args, **kwargs),
-                           (0,)))
+            value_and_grad(
+                lambda logits, *args: grad_func(softmax, self.logits, *args, **kwargs), (0,)
+            )
+        )
         jitted_reference = jit(
             value_and_grad(
-                lambda logits, *args: grad_func(__class__.reference_softmax, self.logits, *args, **
-                                                kwargs), (0,)))
+                lambda logits, *args: grad_func(
+                    __class__.reference_softmax, self.logits, *args, **kwargs
+                ),
+                (0,),
+            )
+        )
 
         primitive_out, (primitive_grad_logits,) = jitted_primitive(*args)
         reference_out, (reference_grad_logits,) = jitted_reference(*args)
@@ -128,21 +143,30 @@ class SoftmaxRunner:
         assert_allclose(primitive_grad_logits, reference_grad_logits, dtype=self.dtype)
 
 
-@pytest.mark.parametrize('b, s_q, s_kv, h', [
-    pytest.param(8, 16, 16, 16, id='8-16-16-16'),
-    pytest.param(8, 512, 512, 16, id='8-512-512-16'),
-    pytest.param(2, 8, 16384, 8, id='2-8-16384-8')
-])
-@pytest.mark.parametrize('scale_factor', [0.125])
-@pytest.mark.parametrize('softmax_type', [
-    pytest.param(SoftmaxType.SCALED, id='SCALED'),
-    pytest.param(SoftmaxType.SCALED_MASKED, id='SCALED_MASKED'),
-    pytest.param(SoftmaxType.SCALED_UPPER_TRIANG_MASKED, id='SCALED_UPPER_TRIANG_MASKED')
-])
-@pytest.mark.parametrize('dtype', [
-    pytest.param(jnp.bfloat16, id="BF16"),
-    pytest.param(jnp.float16, id="FP16"),
-])
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h",
+    [
+        pytest.param(8, 16, 16, 16, id="8-16-16-16"),
+        pytest.param(8, 512, 512, 16, id="8-512-512-16"),
+        pytest.param(2, 8, 16384, 8, id="2-8-16384-8"),
+    ],
+)
+@pytest.mark.parametrize("scale_factor", [0.125])
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(SoftmaxType.SCALED, id="SCALED"),
+        pytest.param(SoftmaxType.SCALED_MASKED, id="SCALED_MASKED"),
+        pytest.param(SoftmaxType.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
 class TestSoftmax:
     """
     Test transformer_engine.jax.softmax.softmax

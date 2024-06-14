@@ -36,8 +36,15 @@ class _LayerNorm(paddle.autograd.PyLayer):
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps, TE_DType[inp.dtype],
-                                           fwd_ln_sm_margin, zero_centered_gamma)
+        ln_out, mu, rsigma = layernorm_fwd(
+            inputmat,
+            ln_weight,
+            ln_bias,
+            eps,
+            TE_DType[inp.dtype],
+            fwd_ln_sm_margin,
+            zero_centered_gamma,
+        )
 
         ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
         ctx.inp_shape = inp.shape
@@ -52,8 +59,9 @@ class _LayerNorm(paddle.autograd.PyLayer):
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensor()
         d_ln_out = grad_output.reshape(inputmat.shape)
-        dxmat, dgamma, dbeta = layernorm_bwd(d_ln_out, inputmat, mu, rsigma, ln_weight,
-                                             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma)
+        dxmat, dgamma, dbeta = layernorm_bwd(
+            d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+        )
         return (
             dxmat.reshape(ctx.inp_shape) if ctx.requires_dx else None,
             dgamma if ctx.requires_dw else None,
@@ -106,7 +114,7 @@ class LayerNorm(paddle.nn.Layer):
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         zero_centered_gamma: bool = False,
         sequence_parallel: bool = False,
-        backend: str = 'transformer_engine',
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.eps = eps
@@ -117,8 +125,9 @@ class LayerNorm(paddle.nn.Layer):
 
         self._weight_attr = weight_attr
         if not self._weight_attr:
-            self._weight_attr = paddle.ParamAttr(initializer=Constant(
-                value=0.0 if self.zero_centered_gamma else 1.0))
+            self._weight_attr = paddle.ParamAttr(
+                initializer=Constant(value=0.0 if self.zero_centered_gamma else 1.0)
+            )
 
         self._bias_attr = bias_attr
         if self._bias_attr is False:
@@ -151,8 +160,15 @@ class LayerNorm(paddle.nn.Layer):
 
     def _te_forward(self, inp: paddle.Tensor) -> paddle.Tensor:
         """LayerNorm FWD"""
-        return _LayerNorm.apply(inp, self.weight, self.bias, self.eps, self.fwd_ln_sm_margin,
-                                self.bwd_ln_sm_margin, self.zero_centered_gamma)
+        return _LayerNorm.apply(
+            inp,
+            self.weight,
+            self.bias,
+            self.eps,
+            self.fwd_ln_sm_margin,
+            self.bwd_ln_sm_margin,
+            self.zero_centered_gamma,
+        )
 
     def _pd_forward(
         self,
@@ -161,18 +177,21 @@ class LayerNorm(paddle.nn.Layer):
         """Calls Paddle OP"""
         if self.zero_centered_gamma:
             raise NotImplementedError(
-                "Paddle backend does not support LayerNorm with zero-centered scale.")
+                "Paddle backend does not support LayerNorm with zero-centered scale."
+            )
 
-        return F.layer_norm(x=inp,
-                            normalized_shape=inp.shape[-1],
-                            weight=self.weight,
-                            bias=self.bias,
-                            epsilon=self.eps)
+        return F.layer_norm(
+            x=inp,
+            normalized_shape=inp.shape[-1],
+            weight=self.weight,
+            bias=self.bias,
+            epsilon=self.eps,
+        )
 
     def forward(self, *args, **kwargs):
         """forward"""
-        if self.backend == 'transformer_engine':
+        if self.backend == "transformer_engine":
             return self._te_forward(*args, **kwargs)
-        if self.backend == 'paddle':
+        if self.backend == "paddle":
             return self._pd_forward(*args, **kwargs)
         raise AttributeError(f"Backend {self.backend} is not supported.")

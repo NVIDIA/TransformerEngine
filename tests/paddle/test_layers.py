@@ -26,14 +26,14 @@ def setup():
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-@pytest.mark.parametrize('use_fp8', [True, False])
+@pytest.mark.parametrize("use_fp8", [True, False])
 def test_checkpoint(use_fp8):
     """Test checkpoint save / load"""
     bs = 16
     in_features = 16
     out_features = 32
     file_name = "model.pdparams"
-    input_tensor = paddle.uniform(shape=(bs, in_features), dtype='float32')
+    input_tensor = paddle.uniform(shape=(bs, in_features), dtype="float32")
     model = te.Linear(in_features, out_features)
     model_loaded = te.Linear(in_features, out_features)
     # Populate amax_history
@@ -91,15 +91,18 @@ class TestLinear:
     """
 
     @staticmethod
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                        reason="BF16 Linear requires Ampere+ GPU")
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    def test_linear_bf16(bs, in_features, out_features, has_bias, no_dbias, no_dgrad, no_wgrad,
-                         activation_dtype):
+    @pytest.mark.skipif(
+        paddle.device.cuda.get_device_capability() < (8, 0),
+        reason="BF16 Linear requires Ampere+ GPU",
+    )
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    def test_linear_bf16(
+        bs, in_features, out_features, has_bias, no_dbias, no_dgrad, no_wgrad, activation_dtype
+    ):
         """
         Test BF16 Linear
         """
@@ -112,10 +115,9 @@ class TestLinear:
 
         paddle.set_default_dtype(activation_dtype)
         layer_te = te.Linear(in_features, out_features, bias_attr=None if has_bias else False)
-        layer_pd = te.Linear(in_features,
-                             out_features,
-                             bias_attr=None if has_bias else False,
-                             backend='paddle')
+        layer_pd = te.Linear(
+            in_features, out_features, bias_attr=None if has_bias else False, backend="paddle"
+        )
         layer_pd.weight.copy_(layer_te.weight.T, True)
         if has_bias:
             layer_pd.bias.copy_(layer_te.bias, True)
@@ -139,15 +141,25 @@ class TestLinear:
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('fp8_wgrad', [True, False])
-    @pytest.mark.parametrize('do_calibration', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    def test_linear_fp8(bs, in_features, out_features, has_bias, no_dbias, no_dgrad, no_wgrad,
-                        fp8_wgrad, do_calibration, activation_dtype):
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("fp8_wgrad", [True, False])
+    @pytest.mark.parametrize("do_calibration", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    def test_linear_fp8(
+        bs,
+        in_features,
+        out_features,
+        has_bias,
+        no_dbias,
+        no_dgrad,
+        no_wgrad,
+        fp8_wgrad,
+        do_calibration,
+        activation_dtype,
+    ):
         """
         Test FP8 Linear
         """
@@ -170,7 +182,7 @@ class TestLinear:
             in_features=in_features,
             out_features=out_features,
             bias_attr=None if has_bias else False,
-            backend='paddle',
+            backend="paddle",
         )
         layer_pd.weight.copy_(layer_te.weight.T, True)
         if has_bias:
@@ -182,8 +194,9 @@ class TestLinear:
             layer_te.bias.stop_gradient = no_dbias
             layer_pd.bias.stop_gradient = no_dbias
 
-        with fp8_autocast(enabled=not do_calibration, calibrating=do_calibration,
-                          fp8_recipe=recipe):
+        with fp8_autocast(
+            enabled=not do_calibration, calibrating=do_calibration, fp8_recipe=recipe
+        ):
             out_ref, grad_input_ref = calc_output_and_grad(layer_pd, input_tensor, grad_out)
             out, grad_input = calc_output_and_grad(layer_te, input_tensor, grad_out)
 
@@ -199,9 +212,9 @@ class TestLinear:
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
-    @pytest.mark.parametrize('num_microbatch', [8])
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16"])
+    @pytest.mark.parametrize("num_microbatch", [8])
     def test_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype, num_microbatch):
         """
         Test FP8 Linear
@@ -236,17 +249,16 @@ class TestLinear:
                 out_ref.backward(grad_out)
 
             assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-            assert_allclose(layer_cached.weight.grad,
-                            layer_normal.weight.grad,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_cached.weight.grad, layer_normal.weight.grad, rtol=rtol, atol=atol
+            )
 
 
-@pytest.mark.parametrize('bs,hidden_size', NORM_CASES)
-@pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-@pytest.mark.parametrize('no_dgrad', [True, False])
-@pytest.mark.parametrize('no_wgrad', [True, False])
-@pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
+@pytest.mark.parametrize("bs,hidden_size", NORM_CASES)
+@pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+@pytest.mark.parametrize("no_dgrad", [True, False])
+@pytest.mark.parametrize("no_wgrad", [True, False])
+@pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
 def test_layernorm_bf16(bs, hidden_size, has_bias, no_dbias, no_dgrad, no_wgrad, activation_dtype):
     """
     Test BF16 LayerNorm
@@ -261,10 +273,9 @@ def test_layernorm_bf16(bs, hidden_size, has_bias, no_dbias, no_dgrad, no_wgrad,
 
     paddle.set_default_dtype(activation_dtype)
     layer_te = te.LayerNorm(hidden_size=hidden_size, eps=eps, bias_attr=None if has_bias else False)
-    layer_pd = te.LayerNorm(hidden_size=hidden_size,
-                            eps=eps,
-                            bias_attr=None if has_bias else False,
-                            backend='paddle')
+    layer_pd = te.LayerNorm(
+        hidden_size=hidden_size, eps=eps, bias_attr=None if has_bias else False, backend="paddle"
+    )
     layer_pd.weight.copy_(layer_te.weight, True)
     if has_bias:
         layer_pd.bias.copy_(layer_te.bias, True)
@@ -293,17 +304,29 @@ class TestLayerNormLinear:
     """
 
     @staticmethod
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                        reason="BF16 Linear requires Ampere+ GPU")
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('return_ln_out', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-    def test_layernorm_linear_bf16(bs, in_features, out_features, has_bias, no_dbias, no_dgrad,
-                                   no_wgrad, return_ln_out, activation_dtype, normalization):
+    @pytest.mark.skipif(
+        paddle.device.cuda.get_device_capability() < (8, 0),
+        reason="BF16 Linear requires Ampere+ GPU",
+    )
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("return_ln_out", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    @pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+    def test_layernorm_linear_bf16(
+        bs,
+        in_features,
+        out_features,
+        has_bias,
+        no_dbias,
+        no_dgrad,
+        no_wgrad,
+        return_ln_out,
+        activation_dtype,
+        normalization,
+    ):
         """
         Test BF16 LayerNormLinear Layer
         """
@@ -315,7 +338,7 @@ class TestLayerNormLinear:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
         eps = 1e-3
-        has_ln_bias = normalization == 'LayerNorm'
+        has_ln_bias = normalization == "LayerNorm"
 
         layer_te = te.LayerNormLinear(
             in_features=in_features,
@@ -333,7 +356,7 @@ class TestLayerNormLinear:
             normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
-            backend='paddle',
+            backend="paddle",
         )
 
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
@@ -355,11 +378,11 @@ class TestLayerNormLinear:
             layer_pd.bias.stop_gradient = no_dbias
 
         out_ref, ln_out_ref, grad_input_ref = calc_output_and_grad_ln_out(
-            layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out)
-        out, ln_out, grad_input = calc_output_and_grad_ln_out(layer_te,
-                                                              input_tensor,
-                                                              grad_out,
-                                                              return_ln_out=return_ln_out)
+            layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out
+        )
+        out, ln_out, grad_input = calc_output_and_grad_ln_out(
+            layer_te, input_tensor, grad_out, return_ln_out=return_ln_out
+        )
 
         assert_allclose(out, out_ref, rtol=rtol, atol=atol)
         if not no_dgrad:
@@ -377,18 +400,29 @@ class TestLayerNormLinear:
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('fp8_wgrad', [True, False])
-    @pytest.mark.parametrize('do_calibration', [True, False])
-    @pytest.mark.parametrize('return_ln_out', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-    def test_layernorm_linear_fp8(bs, in_features, out_features, has_bias, no_dbias, no_dgrad,
-                                  no_wgrad, fp8_wgrad, do_calibration, return_ln_out,
-                                  activation_dtype, normalization):
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("fp8_wgrad", [True, False])
+    @pytest.mark.parametrize("do_calibration", [True, False])
+    @pytest.mark.parametrize("return_ln_out", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    @pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+    def test_layernorm_linear_fp8(
+        bs,
+        in_features,
+        out_features,
+        has_bias,
+        no_dbias,
+        no_dgrad,
+        no_wgrad,
+        fp8_wgrad,
+        do_calibration,
+        return_ln_out,
+        activation_dtype,
+        normalization,
+    ):
         """
         Test FP8 LayerNormLinear Layer
         """
@@ -400,7 +434,7 @@ class TestLayerNormLinear:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
         eps = 1e-3
-        has_ln_bias = normalization == 'LayerNorm'
+        has_ln_bias = normalization == "LayerNorm"
 
         recipe = DelayedScaling(override_linear_precision=(False, False, not fp8_wgrad))
 
@@ -420,7 +454,7 @@ class TestLayerNormLinear:
             normalization=normalization,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
-            backend='paddle',
+            backend="paddle",
         )
 
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
@@ -441,14 +475,15 @@ class TestLayerNormLinear:
             layer_te.bias.stop_gradient = no_dbias
             layer_pd.bias.stop_gradient = no_dbias
 
-        with fp8_autocast(enabled=not do_calibration, calibrating=do_calibration,
-                          fp8_recipe=recipe):
+        with fp8_autocast(
+            enabled=not do_calibration, calibrating=do_calibration, fp8_recipe=recipe
+        ):
             out_ref, ln_out_ref, grad_input_ref = calc_output_and_grad_ln_out(
-                layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out)
-            out, ln_out, grad_input = calc_output_and_grad_ln_out(layer_te,
-                                                                  input_tensor,
-                                                                  grad_out,
-                                                                  return_ln_out=return_ln_out)
+                layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out
+            )
+            out, ln_out, grad_input = calc_output_and_grad_ln_out(
+                layer_te, input_tensor, grad_out, return_ln_out=return_ln_out
+            )
 
         assert_allclose(out, out_ref, rtol=rtol, atol=atol)
         if not no_dgrad:
@@ -468,11 +503,12 @@ class TestLayerNormLinear:
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
-    @pytest.mark.parametrize('num_microbatch', [8])
-    def test_layernorm_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype,
-                                             num_microbatch):
+    @pytest.mark.parametrize("bs,in_features,out_features", LINEAR_CASES)
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16"])
+    @pytest.mark.parametrize("num_microbatch", [8])
+    def test_layernorm_linear_fp8_microbatch(
+        bs, in_features, out_features, activation_dtype, num_microbatch
+    ):
         """
         Test FP8 LayerNormLinear Layer
         """
@@ -513,14 +549,12 @@ class TestLayerNormLinear:
                 out_ref.backward(grad_out)
 
             assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-            assert_allclose(layer_cached.weight.grad,
-                            layer_normal.weight.grad,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_cached.ln_weight.grad,
-                            layer_normal.ln_weight.grad,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_cached.weight.grad, layer_normal.weight.grad, rtol=rtol, atol=atol
+            )
+            assert_allclose(
+                layer_cached.ln_weight.grad, layer_normal.ln_weight.grad, rtol=rtol, atol=atol
+            )
 
 
 class TestLayerNormMLP:
@@ -529,19 +563,31 @@ class TestLayerNormMLP:
     """
 
     @staticmethod
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                        reason="BF16 Linear requires Ampere+ GPU")
-    @pytest.mark.parametrize('bs,hidden_size,ffn_hidden_size', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('return_ln_out', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-    @pytest.mark.parametrize('activation', ['gelu', 'swiglu'])
-    def test_layernorm_mlp_bf16(bs, hidden_size, ffn_hidden_size, has_bias, no_dbias, no_dgrad,
-                                no_wgrad, return_ln_out, activation_dtype, normalization,
-                                activation):
+    @pytest.mark.skipif(
+        paddle.device.cuda.get_device_capability() < (8, 0),
+        reason="BF16 Linear requires Ampere+ GPU",
+    )
+    @pytest.mark.parametrize("bs,hidden_size,ffn_hidden_size", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("return_ln_out", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    @pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+    @pytest.mark.parametrize("activation", ["gelu", "swiglu"])
+    def test_layernorm_mlp_bf16(
+        bs,
+        hidden_size,
+        ffn_hidden_size,
+        has_bias,
+        no_dbias,
+        no_dgrad,
+        no_wgrad,
+        return_ln_out,
+        activation_dtype,
+        normalization,
+        activation,
+    ):
         """
         Tests for TestLayerNormMLP layer
         """
@@ -553,7 +599,7 @@ class TestLayerNormMLP:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
         eps = 1e-3
-        has_ln_bias = normalization == 'LayerNorm'
+        has_ln_bias = normalization == "LayerNorm"
 
         layer_te = te.LayerNormMLP(
             hidden_size=hidden_size,
@@ -572,7 +618,7 @@ class TestLayerNormMLP:
             activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
-            backend='paddle',
+            backend="paddle",
         )
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
         if has_ln_bias:
@@ -599,55 +645,63 @@ class TestLayerNormMLP:
             layer_pd.fc2_bias.stop_gradient = no_dbias
 
         out_ref, ln_out_ref, grad_input_ref = calc_output_and_grad_ln_out(
-            layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out)
-        out, ln_out, grad_input = calc_output_and_grad_ln_out(layer_te,
-                                                              input_tensor,
-                                                              grad_out,
-                                                              return_ln_out=return_ln_out)
+            layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out
+        )
+        out, ln_out, grad_input = calc_output_and_grad_ln_out(
+            layer_te, input_tensor, grad_out, return_ln_out=return_ln_out
+        )
 
         assert_allclose(out, out_ref, rtol=rtol, atol=atol)
         if not no_dgrad:
             assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
         if not no_wgrad:
             assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
-            assert_allclose(layer_te.fc1_weight.grad,
-                            layer_pd.fc1_weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_te.fc2_weight.grad,
-                            layer_pd.fc2_weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.fc1_weight.grad, layer_pd.fc1_weight.grad.T, rtol=rtol, atol=atol
+            )
+            assert_allclose(
+                layer_te.fc2_weight.grad, layer_pd.fc2_weight.grad.T, rtol=rtol, atol=atol
+            )
         if not no_dbias:
             if has_ln_bias:
                 assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
-                assert_allclose(layer_te.fc1_bias.grad,
-                                layer_pd.fc1_bias.grad,
-                                rtol=rtol,
-                                atol=atol)
-                assert_allclose(layer_te.fc2_bias.grad,
-                                layer_pd.fc2_bias.grad,
-                                rtol=rtol,
-                                atol=atol)
+                assert_allclose(
+                    layer_te.fc1_bias.grad, layer_pd.fc1_bias.grad, rtol=rtol, atol=atol
+                )
+                assert_allclose(
+                    layer_te.fc2_bias.grad, layer_pd.fc2_bias.grad, rtol=rtol, atol=atol
+                )
         if return_ln_out:
             assert_allclose(ln_out, ln_out_ref, rtol=rtol, atol=atol)
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,hidden_size,ffn_hidden_size', LINEAR_CASES)
-    @pytest.mark.parametrize('has_bias,no_dbias', [[True, False], [True, True], [False, False]])
-    @pytest.mark.parametrize('no_dgrad', [True, False])
-    @pytest.mark.parametrize('no_wgrad', [True, False])
-    @pytest.mark.parametrize('fp8_wgrad', [True, False])
-    @pytest.mark.parametrize('do_calibration', [True, False])
-    @pytest.mark.parametrize('return_ln_out', [True, False])
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16', 'float32'])
-    @pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-    @pytest.mark.parametrize('activation', ['gelu', 'swiglu'])
-    def test_layernorm_mlp_fp8(bs, hidden_size, ffn_hidden_size, has_bias, no_dbias, no_dgrad,
-                               no_wgrad, fp8_wgrad, do_calibration, return_ln_out, activation_dtype,
-                               normalization, activation):
+    @pytest.mark.parametrize("bs,hidden_size,ffn_hidden_size", LINEAR_CASES)
+    @pytest.mark.parametrize("has_bias,no_dbias", [[True, False], [True, True], [False, False]])
+    @pytest.mark.parametrize("no_dgrad", [True, False])
+    @pytest.mark.parametrize("no_wgrad", [True, False])
+    @pytest.mark.parametrize("fp8_wgrad", [True, False])
+    @pytest.mark.parametrize("do_calibration", [True, False])
+    @pytest.mark.parametrize("return_ln_out", [True, False])
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16", "float32"])
+    @pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+    @pytest.mark.parametrize("activation", ["gelu", "swiglu"])
+    def test_layernorm_mlp_fp8(
+        bs,
+        hidden_size,
+        ffn_hidden_size,
+        has_bias,
+        no_dbias,
+        no_dgrad,
+        no_wgrad,
+        fp8_wgrad,
+        do_calibration,
+        return_ln_out,
+        activation_dtype,
+        normalization,
+        activation,
+    ):
         """
         Test FP8 LayerNormMLP Layer
         """
@@ -659,7 +713,7 @@ class TestLayerNormMLP:
         input_tensor.stop_gradient = no_dgrad
         grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
         eps = 1e-3
-        has_ln_bias = normalization == 'LayerNorm'
+        has_ln_bias = normalization == "LayerNorm"
 
         recipe = DelayedScaling(override_linear_precision=(False, False, not fp8_wgrad))
 
@@ -681,7 +735,7 @@ class TestLayerNormMLP:
             activation=activation,
             bias_attr=None if has_bias else False,
             return_layernorm_output=return_ln_out,
-            backend='paddle',
+            backend="paddle",
         )
         layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
         if has_ln_bias:
@@ -707,40 +761,37 @@ class TestLayerNormMLP:
             layer_pd.fc1_bias.stop_gradient = no_dbias
             layer_pd.fc2_bias.stop_gradient = no_dbias
 
-        with fp8_autocast(enabled=not do_calibration, calibrating=do_calibration,
-                          fp8_recipe=recipe):
+        with fp8_autocast(
+            enabled=not do_calibration, calibrating=do_calibration, fp8_recipe=recipe
+        ):
             out_ref, ln_out_ref, grad_input_ref = calc_output_and_grad_ln_out(
-                layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out)
-            out, ln_out, grad_input = calc_output_and_grad_ln_out(layer_te,
-                                                                  input_tensor,
-                                                                  grad_out,
-                                                                  return_ln_out=return_ln_out)
+                layer_pd, input_tensor, grad_out, return_ln_out=return_ln_out
+            )
+            out, ln_out, grad_input = calc_output_and_grad_ln_out(
+                layer_te, input_tensor, grad_out, return_ln_out=return_ln_out
+            )
 
         assert_allclose(out, out_ref, rtol=rtol, atol=atol)
         if not no_dgrad:
             assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
         if not no_wgrad:
             assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
-            assert_allclose(layer_te.fc1_weight.grad,
-                            layer_pd.fc1_weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_te.fc2_weight.grad,
-                            layer_pd.fc2_weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.fc1_weight.grad, layer_pd.fc1_weight.grad.T, rtol=rtol, atol=atol
+            )
+            assert_allclose(
+                layer_te.fc2_weight.grad, layer_pd.fc2_weight.grad.T, rtol=rtol, atol=atol
+            )
         if not no_dbias:
             if has_ln_bias:
                 assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
             if has_bias:
-                assert_allclose(layer_te.fc1_bias.grad,
-                                layer_pd.fc1_bias.grad,
-                                rtol=rtol,
-                                atol=atol)
-                assert_allclose(layer_te.fc2_bias.grad,
-                                layer_pd.fc2_bias.grad,
-                                rtol=rtol,
-                                atol=atol)
+                assert_allclose(
+                    layer_te.fc1_bias.grad, layer_pd.fc1_bias.grad, rtol=rtol, atol=atol
+                )
+                assert_allclose(
+                    layer_te.fc2_bias.grad, layer_pd.fc2_bias.grad, rtol=rtol, atol=atol
+                )
         if return_ln_out:
             assert_allclose(ln_out, ln_out_ref, rtol=rtol, atol=atol)
 
@@ -749,11 +800,12 @@ class TestLayerNormMLP:
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize('bs,hidden_size,ffn_hidden_size', LINEAR_CASES)
-    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
-    @pytest.mark.parametrize('num_microbatch', [8])
-    def test_layernorm_mlp_fp8_microbatch(bs, hidden_size, ffn_hidden_size, activation_dtype,
-                                          num_microbatch):
+    @pytest.mark.parametrize("bs,hidden_size,ffn_hidden_size", LINEAR_CASES)
+    @pytest.mark.parametrize("activation_dtype", ["bfloat16"])
+    @pytest.mark.parametrize("num_microbatch", [8])
+    def test_layernorm_mlp_fp8_microbatch(
+        bs, hidden_size, ffn_hidden_size, activation_dtype, num_microbatch
+    ):
         """
         Test FP8 LayerNormMLP Layer
         """
@@ -803,28 +855,26 @@ class TestLayerNormMLP:
                 out_ref.backward(grad_out)
 
             assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-            assert_allclose(layer_cached.ln_weight.grad,
-                            layer_normal.ln_weight.grad,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_cached.fc1_weight.grad,
-                            layer_normal.fc1_weight.grad,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_cached.fc2_weight.grad,
-                            layer_normal.fc2_weight.grad,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_cached.ln_weight.grad, layer_normal.ln_weight.grad, rtol=rtol, atol=atol
+            )
+            assert_allclose(
+                layer_cached.fc1_weight.grad, layer_normal.fc1_weight.grad, rtol=rtol, atol=atol
+            )
+            assert_allclose(
+                layer_cached.fc2_weight.grad, layer_normal.fc2_weight.grad, rtol=rtol, atol=atol
+            )
 
 
-@pytest.mark.parametrize('bs', [1, 2])
-@pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
-@pytest.mark.parametrize('attn_type', ['self', 'cross'])
-@pytest.mark.parametrize('mask_type', ['causal', 'padding'])
-@pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
-def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, attn_type,
-                               mask_type, math_dtype):
+@pytest.mark.parametrize("bs", [1, 2])
+@pytest.mark.parametrize("hidden_size, num_heads", [[1024, 16]])
+@pytest.mark.parametrize("q_seqlen, kv_seqlen", [[1024, 1024]])
+@pytest.mark.parametrize("attn_type", ["self", "cross"])
+@pytest.mark.parametrize("mask_type", ["causal", "padding"])
+@pytest.mark.parametrize("math_dtype", ["bfloat16", "float16"])
+def test_dot_product_attention(
+    bs, hidden_size, num_heads, q_seqlen, kv_seqlen, attn_type, mask_type, math_dtype
+):
     """
     Test DotProductAttention Layer
     """
@@ -835,53 +885,64 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-            num_heads=num_heads,
-            num_gqa_groups=num_heads,
-            q_seqlen=q_seqlen,
-            kv_seqlen=kv_seqlen,
-            head_size=head_size,
-            dtype=math_dtype,
-            dropout=0.0,
-            qkv_layout="bshd_bshd_bshd",
-            bias_type="no_bias",
-            mask_type=mask_type,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        head_size=head_size,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bshd_bshd_bshd",
+        bias_type="no_bias",
+        mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
-    attn_q_input = paddle.normal(mean=0.0, std=0.02,
-                                 shape=(bs, q_seqlen, num_heads, head_size)).astype(math_dtype)
-    attn_k_input = paddle.normal(mean=0.0, std=0.02,
-                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
-    attn_v_input = paddle.normal(mean=0.0, std=0.02,
-                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
+    attn_q_input = paddle.normal(
+        mean=0.0, std=0.02, shape=(bs, q_seqlen, num_heads, head_size)
+    ).astype(math_dtype)
+    attn_k_input = paddle.normal(
+        mean=0.0, std=0.02, shape=(bs, kv_seqlen, num_heads, head_size)
+    ).astype(math_dtype)
+    attn_v_input = paddle.normal(
+        mean=0.0, std=0.02, shape=(bs, kv_seqlen, num_heads, head_size)
+    ).astype(math_dtype)
 
-    q_actual_seqlen = paddle.randint(low=20, high=q_seqlen, shape=(bs,), dtype='int32')
-    kv_actual_seqlen = paddle.randint(low=20, high=kv_seqlen, shape=(bs,),
-                                      dtype='int32') if attn_type == 'cross' else q_actual_seqlen
-    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+    q_actual_seqlen = paddle.randint(low=20, high=q_seqlen, shape=(bs,), dtype="int32")
+    kv_actual_seqlen = (
+        paddle.randint(low=20, high=kv_seqlen, shape=(bs,), dtype="int32")
+        if attn_type == "cross"
+        else q_actual_seqlen
+    )
+    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype="bool")
 
-    grad_out = paddle.normal(mean=0.0, std=0.02,
-                             shape=(bs, q_seqlen, num_heads, head_size)).astype('float32')
+    grad_out = paddle.normal(mean=0.0, std=0.02, shape=(bs, q_seqlen, num_heads, head_size)).astype(
+        "float32"
+    )
     for i in range(0, bs):
-        grad_out[i, q_actual_seqlen[i]:, :, :] = 0
+        grad_out[i, q_actual_seqlen[i] :, :, :] = 0
     grad_out = grad_out.astype(math_dtype)
 
     for i in range(0, bs):
-        attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+        attn_mask[i, 0, 0 : q_actual_seqlen[i], 0 : kv_actual_seqlen[i]] = False
 
     head_size = hidden_size // num_heads
-    layer_te = te.DotProductAttention(num_heads,
-                                      head_size,
-                                      attention_dropout=0.0,
-                                      attn_mask_type=mask_type,
-                                      attention_type=attn_type,
-                                      backend='transformer_engine')
-    layer_pd = te.DotProductAttention(num_heads,
-                                      head_size,
-                                      attention_dropout=0.0,
-                                      attn_mask_type=mask_type,
-                                      attention_type=attn_type,
-                                      backend='paddle')
+    layer_te = te.DotProductAttention(
+        num_heads,
+        head_size,
+        attention_dropout=0.0,
+        attn_mask_type=mask_type,
+        attention_type=attn_type,
+        backend="transformer_engine",
+    )
+    layer_pd = te.DotProductAttention(
+        num_heads,
+        head_size,
+        attention_dropout=0.0,
+        attn_mask_type=mask_type,
+        attention_type=attn_type,
+        backend="paddle",
+    )
 
     def calc_attn_output_and_grad(layer, q, k, v, mask, dout):
         _q = paddle.to_tensor(q, stop_gradient=False)
@@ -892,23 +953,29 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
         out.backward(dout)
         return out, _q.grad, _k.grad, _v.grad
 
-    out, q_grad, k_grad, v_grad = calc_attn_output_and_grad(layer_te, attn_q_input, attn_k_input,
-                                                            attn_v_input, attn_mask, grad_out)
+    out, q_grad, k_grad, v_grad = calc_attn_output_and_grad(
+        layer_te, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out
+    )
     out_ref, q_grad_ref, k_grad_ref, v_grad_ref = calc_attn_output_and_grad(
-        layer_pd, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out)
+        layer_pd, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out
+    )
     valid_out_ref = paddle.full_like(out_ref, 0)
     for i in range(0, bs):
-        valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
+        valid_out_ref[i, 0 : q_actual_seqlen[i], :, :] = out_ref[i, 0 : q_actual_seqlen[i], :, :]
 
     valid_q_grad_ref = paddle.full_like(q_grad_ref, 0)
     valid_k_grad_ref = paddle.full_like(k_grad_ref, 0)
     valid_v_grad_ref = paddle.full_like(v_grad_ref, 0)
     for i in range(0, bs):
-        valid_q_grad_ref[i, 0:q_actual_seqlen[i], :, :] = q_grad_ref[i, 0:q_actual_seqlen[i], :, :]
-        valid_k_grad_ref[i, 0:kv_actual_seqlen[i], :, :] = k_grad_ref[i,
-                                                                      0:kv_actual_seqlen[i], :, :]
-        valid_v_grad_ref[i, 0:kv_actual_seqlen[i], :, :] = v_grad_ref[i,
-                                                                      0:kv_actual_seqlen[i], :, :]
+        valid_q_grad_ref[i, 0 : q_actual_seqlen[i], :, :] = q_grad_ref[
+            i, 0 : q_actual_seqlen[i], :, :
+        ]
+        valid_k_grad_ref[i, 0 : kv_actual_seqlen[i], :, :] = k_grad_ref[
+            i, 0 : kv_actual_seqlen[i], :, :
+        ]
+        valid_v_grad_ref[i, 0 : kv_actual_seqlen[i], :, :] = v_grad_ref[
+            i, 0 : kv_actual_seqlen[i], :, :
+        ]
 
     assert_allclose(out, valid_out_ref, rtol=rtol, atol=atol)
     assert_allclose(q_grad, valid_q_grad_ref, rtol=rtol, atol=atol)
@@ -916,21 +983,34 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize('bs', [1, 2])
-@pytest.mark.parametrize('num_gqa_groups', [1, 2, 4])
-@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[256, 4, 1024]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
-@pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
-@pytest.mark.parametrize('no_wgrad', [True, False])
-@pytest.mark.parametrize('mask_type', ['causal', 'padding'])
-@pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
-@pytest.mark.parametrize('output_layernorm', [True, False])
-@pytest.mark.parametrize('return_layernorm_output', [True, False])
-@pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
-                                   has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
-                                   math_dtype, output_layernorm, return_layernorm_output,
-                                   normalization):
+@pytest.mark.parametrize("bs", [1, 2])
+@pytest.mark.parametrize("num_gqa_groups", [1, 2, 4])
+@pytest.mark.parametrize("hidden_size, num_heads, ffn_hidden_size", [[256, 4, 1024]])
+@pytest.mark.parametrize("q_seqlen, kv_seqlen", [[1024, 1024]])
+@pytest.mark.parametrize("has_bias, no_dbias", [[False, True], [True, True], [True, False]])
+@pytest.mark.parametrize("no_wgrad", [True, False])
+@pytest.mark.parametrize("mask_type", ["causal", "padding"])
+@pytest.mark.parametrize("math_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("output_layernorm", [True, False])
+@pytest.mark.parametrize("return_layernorm_output", [True, False])
+@pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+def test_transformer_encoder_layer(
+    bs,
+    hidden_size,
+    num_heads,
+    num_gqa_groups,
+    ffn_hidden_size,
+    has_bias,
+    no_dbias,
+    no_wgrad,
+    q_seqlen,
+    kv_seqlen,
+    mask_type,
+    math_dtype,
+    output_layernorm,
+    return_layernorm_output,
+    normalization,
+):
     """
     Test Transformer Encoder Layer
     """
@@ -938,68 +1018,73 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     rtol = 5e-2
     atol = 5e-2
     eps = 1e-3
-    has_ln_bias = normalization == 'LayerNorm'
+    has_ln_bias = normalization == "LayerNorm"
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-            num_heads=num_heads,
-            num_gqa_groups=num_gqa_groups,
-            q_seqlen=q_seqlen,
-            kv_seqlen=kv_seqlen,
-            head_size=hidden_size // num_heads,
-            dtype=math_dtype,
-            dropout=0.0,
-            qkv_layout="bshd_bshd_bshd",
-            bias_type="no_bias",
-            mask_type=mask_type,
+        num_heads=num_heads,
+        num_gqa_groups=num_gqa_groups,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        head_size=hidden_size // num_heads,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bshd_bshd_bshd",
+        bias_type="no_bias",
+        mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
     encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
 
-    q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
+    q_actual_seqlen = paddle.ones(shape=(bs,), dtype="int32") * q_seqlen
     kv_actual_seqlen = q_actual_seqlen
-    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype="bool")
 
-    grad_out = paddle.normal(mean=0.0, std=0.02,
-                             shape=(bs, q_seqlen, hidden_size)).astype('float32')
+    grad_out = paddle.normal(mean=0.0, std=0.02, shape=(bs, q_seqlen, hidden_size)).astype(
+        "float32"
+    )
     for i in range(0, bs):
-        grad_out[i, q_actual_seqlen[i]:, :] = 0
+        grad_out[i, q_actual_seqlen[i] :, :] = 0
     grad_out = grad_out.astype(math_dtype)
 
     for i in range(0, bs):
-        attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+        attn_mask[i, 0, 0 : q_actual_seqlen[i], 0 : kv_actual_seqlen[i]] = False
 
-    layer_te = te.TransformerLayer(hidden_size,
-                                   ffn_hidden_size,
-                                   num_heads,
-                                   num_gqa_groups=num_gqa_groups,
-                                   layernorm_epsilon=eps,
-                                   hidden_dropout=0.0,
-                                   attention_dropout=0.0,
-                                   weight_attr=None,
-                                   bias_attr=None if has_bias else False,
-                                   self_attn_mask_type=mask_type,
-                                   apply_residual_connection_post_layernorm=return_layernorm_output,
-                                   output_layernorm=output_layernorm,
-                                   layer_type='encoder',
-                                   normalization=normalization,
-                                   backend='transformer_engine')
-    layer_pd = te.TransformerLayer(hidden_size,
-                                   ffn_hidden_size,
-                                   num_heads,
-                                   num_gqa_groups=num_gqa_groups,
-                                   layernorm_epsilon=eps,
-                                   hidden_dropout=0.0,
-                                   attention_dropout=0.0,
-                                   weight_attr=None,
-                                   bias_attr=None if has_bias else False,
-                                   self_attn_mask_type=mask_type,
-                                   apply_residual_connection_post_layernorm=return_layernorm_output,
-                                   output_layernorm=output_layernorm,
-                                   layer_type='encoder',
-                                   normalization=normalization,
-                                   backend='paddle')
+    layer_te = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        num_gqa_groups=num_gqa_groups,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None if has_bias else False,
+        self_attn_mask_type=mask_type,
+        apply_residual_connection_post_layernorm=return_layernorm_output,
+        output_layernorm=output_layernorm,
+        layer_type="encoder",
+        normalization=normalization,
+        backend="transformer_engine",
+    )
+    layer_pd = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        num_gqa_groups=num_gqa_groups,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None if has_bias else False,
+        self_attn_mask_type=mask_type,
+        apply_residual_connection_post_layernorm=return_layernorm_output,
+        output_layernorm=output_layernorm,
+        layer_type="encoder",
+        normalization=normalization,
+        backend="paddle",
+    )
 
     # MultiHeadAttention params
     if output_layernorm:
@@ -1012,21 +1097,25 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
             layer_te.self_attention.qkv.bias.stop_gradient = no_dbias
     else:
         layer_pd.self_attention.layernorm_qkv.ln_weight.copy_(
-            layer_te.self_attention.layernorm_qkv.ln_weight, True)
+            layer_te.self_attention.layernorm_qkv.ln_weight, True
+        )
         layer_pd.self_attention.layernorm_qkv.weight.copy_(
-            layer_te.self_attention.layernorm_qkv.weight.T, True)
+            layer_te.self_attention.layernorm_qkv.weight.T, True
+        )
         layer_pd.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
         layer_pd.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         if has_ln_bias:
             layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
-                layer_te.self_attention.layernorm_qkv.ln_bias, True)
+                layer_te.self_attention.layernorm_qkv.ln_bias, True
+            )
             layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
             layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_pd.self_attention.layernorm_qkv.bias.copy_(
-                layer_te.self_attention.layernorm_qkv.bias, True)
+                layer_te.self_attention.layernorm_qkv.bias, True
+            )
             layer_pd.self_attention.layernorm_qkv.bias.stop_gradient = no_dbias
             layer_te.self_attention.layernorm_qkv.bias.stop_gradient = no_dbias
 
@@ -1074,52 +1163,75 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
         out.backward(dout)
         return out, _encoder_input.grad
 
-    out_ref, grad_input_ref = calc_transformer_output_and_grad(layer_pd, encoder_input, attn_mask,
-                                                               grad_out)
+    out_ref, grad_input_ref = calc_transformer_output_and_grad(
+        layer_pd, encoder_input, attn_mask, grad_out
+    )
     out, grad_input = calc_transformer_output_and_grad(layer_te, encoder_input, attn_mask, grad_out)
 
     assert_allclose(out, out_ref, rtol=rtol, atol=atol)
     assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
     if not no_wgrad:
         if output_layernorm:
-            assert_allclose(layer_te.self_attention.qkv.weight.grad,
-                            layer_pd.self_attention.qkv.weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.self_attention.qkv.weight.grad,
+                layer_pd.self_attention.qkv.weight.grad.T,
+                rtol=rtol,
+                atol=atol,
+            )
         else:
-            assert_allclose(layer_te.self_attention.layernorm_qkv.weight.grad,
-                            layer_pd.self_attention.layernorm_qkv.weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.self_attention.layernorm_qkv.weight.grad,
+                layer_pd.self_attention.layernorm_qkv.weight.grad.T,
+                rtol=rtol,
+                atol=atol,
+            )
     if not no_dbias:
         if output_layernorm:
-            assert_allclose(layer_te.self_attention.qkv.bias.grad,
-                            layer_pd.self_attention.qkv.bias.grad,
-                            rtol=0.01,
-                            atol=0.5)
+            assert_allclose(
+                layer_te.self_attention.qkv.bias.grad,
+                layer_pd.self_attention.qkv.bias.grad,
+                rtol=0.01,
+                atol=0.5,
+            )
         else:
-            assert_allclose(layer_te.self_attention.layernorm_qkv.bias.grad,
-                            layer_pd.self_attention.layernorm_qkv.bias.grad,
-                            rtol=0.01,
-                            atol=0.5)
+            assert_allclose(
+                layer_te.self_attention.layernorm_qkv.bias.grad,
+                layer_pd.self_attention.layernorm_qkv.bias.grad,
+                rtol=0.01,
+                atol=0.5,
+            )
 
 
-@pytest.mark.parametrize('bs', [1, 2])
-@pytest.mark.parametrize('num_gqa_groups', [1, 2, 4])
-@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[256, 4, 1024]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[1024, 1024]])
-@pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
-@pytest.mark.parametrize('no_wgrad', [True, False])
-@pytest.mark.parametrize('mask_type', ['causal', 'padding'])
-@pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
-@pytest.mark.parametrize('output_layernorm', [True, False])
-@pytest.mark.parametrize('return_layernorm_output', [True, False])
-@pytest.mark.parametrize('recompute_core_attention', [True, False])
-@pytest.mark.parametrize('normalization', ['RMSNorm', 'LayerNorm'])
-def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
-                                   has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
-                                   math_dtype, output_layernorm, return_layernorm_output,
-                                   recompute_core_attention, normalization):
+@pytest.mark.parametrize("bs", [1, 2])
+@pytest.mark.parametrize("num_gqa_groups", [1, 2, 4])
+@pytest.mark.parametrize("hidden_size, num_heads, ffn_hidden_size", [[256, 4, 1024]])
+@pytest.mark.parametrize("q_seqlen, kv_seqlen", [[1024, 1024]])
+@pytest.mark.parametrize("has_bias, no_dbias", [[False, True], [True, True], [True, False]])
+@pytest.mark.parametrize("no_wgrad", [True, False])
+@pytest.mark.parametrize("mask_type", ["causal", "padding"])
+@pytest.mark.parametrize("math_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("output_layernorm", [True, False])
+@pytest.mark.parametrize("return_layernorm_output", [True, False])
+@pytest.mark.parametrize("recompute_core_attention", [True, False])
+@pytest.mark.parametrize("normalization", ["RMSNorm", "LayerNorm"])
+def test_transformer_decoder_layer(
+    bs,
+    hidden_size,
+    num_heads,
+    num_gqa_groups,
+    ffn_hidden_size,
+    has_bias,
+    no_dbias,
+    no_wgrad,
+    q_seqlen,
+    kv_seqlen,
+    mask_type,
+    math_dtype,
+    output_layernorm,
+    return_layernorm_output,
+    recompute_core_attention,
+    normalization,
+):
     """
     Test Transformer Decoder Layer
     """
@@ -1127,34 +1239,37 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     rtol = 5e-2
     atol = 6e-2
     eps = 1e-3
-    has_ln_bias = normalization == 'LayerNorm'
+    has_ln_bias = normalization == "LayerNorm"
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-            num_heads=num_heads,
-            num_gqa_groups=num_gqa_groups,
-            q_seqlen=q_seqlen,
-            kv_seqlen=kv_seqlen,
-            head_size=hidden_size // num_heads,
-            dtype=math_dtype,
-            dropout=0.0,
-            qkv_layout="bshd_bshd_bshd",
-            bias_type="no_bias",
-            mask_type=mask_type,
+        num_heads=num_heads,
+        num_gqa_groups=num_gqa_groups,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        head_size=hidden_size // num_heads,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bshd_bshd_bshd",
+        bias_type="no_bias",
+        mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
-    encoder_input = paddle.normal(mean=0.0, std=0.1,
-                                  shape=(bs, q_seqlen, hidden_size)).astype(math_dtype)
-    encoder_output = paddle.normal(mean=0.0, std=0.1,
-                                   shape=(bs, kv_seqlen, hidden_size)).astype(math_dtype)
+    encoder_input = paddle.normal(mean=0.0, std=0.1, shape=(bs, q_seqlen, hidden_size)).astype(
+        math_dtype
+    )
+    encoder_output = paddle.normal(mean=0.0, std=0.1, shape=(bs, kv_seqlen, hidden_size)).astype(
+        math_dtype
+    )
 
-    q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
+    q_actual_seqlen = paddle.ones(shape=(bs,), dtype="int32") * q_seqlen
     kv_actual_seqlen = q_actual_seqlen
-    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+    attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype="bool")
 
-    grad_out = paddle.normal(mean=0.0, std=0.01,
-                             shape=(bs, q_seqlen, hidden_size)).astype('float32')
+    grad_out = paddle.normal(mean=0.0, std=0.01, shape=(bs, q_seqlen, hidden_size)).astype(
+        "float32"
+    )
 
     # rounding to avoid numerical issues
     encoder_input = paddle.round(encoder_input * 1000) / 1000
@@ -1162,42 +1277,46 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
     grad_out = paddle.round(grad_out * 1000) / 1000
 
     for i in range(0, bs):
-        grad_out[i, q_actual_seqlen[i]:, :] = 0
+        grad_out[i, q_actual_seqlen[i] :, :] = 0
     grad_out = grad_out.astype(math_dtype)
 
     for i in range(0, bs):
-        attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+        attn_mask[i, 0, 0 : q_actual_seqlen[i], 0 : kv_actual_seqlen[i]] = False
 
-    layer_te = te.TransformerLayer(hidden_size,
-                                   ffn_hidden_size,
-                                   num_heads,
-                                   num_gqa_groups=num_gqa_groups,
-                                   layernorm_epsilon=eps,
-                                   hidden_dropout=0.0,
-                                   attention_dropout=0.0,
-                                   weight_attr=None,
-                                   bias_attr=None if has_bias else False,
-                                   self_attn_mask_type=mask_type,
-                                   apply_residual_connection_post_layernorm=return_layernorm_output,
-                                   output_layernorm=output_layernorm,
-                                   layer_type='decoder',
-                                   normalization=normalization,
-                                   backend='transformer_engine')
-    layer_pd = te.TransformerLayer(hidden_size,
-                                   ffn_hidden_size,
-                                   num_heads,
-                                   num_gqa_groups=num_gqa_groups,
-                                   layernorm_epsilon=eps,
-                                   hidden_dropout=0.0,
-                                   attention_dropout=0.0,
-                                   weight_attr=None,
-                                   bias_attr=None if has_bias else False,
-                                   self_attn_mask_type=mask_type,
-                                   apply_residual_connection_post_layernorm=return_layernorm_output,
-                                   output_layernorm=output_layernorm,
-                                   layer_type='decoder',
-                                   normalization=normalization,
-                                   backend='paddle')
+    layer_te = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        num_gqa_groups=num_gqa_groups,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None if has_bias else False,
+        self_attn_mask_type=mask_type,
+        apply_residual_connection_post_layernorm=return_layernorm_output,
+        output_layernorm=output_layernorm,
+        layer_type="decoder",
+        normalization=normalization,
+        backend="transformer_engine",
+    )
+    layer_pd = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        num_gqa_groups=num_gqa_groups,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None if has_bias else False,
+        self_attn_mask_type=mask_type,
+        apply_residual_connection_post_layernorm=return_layernorm_output,
+        output_layernorm=output_layernorm,
+        layer_type="decoder",
+        normalization=normalization,
+        backend="paddle",
+    )
 
     # MultiHeadAttention params - self attn
     if output_layernorm:
@@ -1210,21 +1329,25 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
             layer_te.self_attention.qkv.bias.stop_gradient = no_dbias
     else:
         layer_pd.self_attention.layernorm_qkv.ln_weight.copy_(
-            layer_te.self_attention.layernorm_qkv.ln_weight, True)
+            layer_te.self_attention.layernorm_qkv.ln_weight, True
+        )
         layer_pd.self_attention.layernorm_qkv.weight.copy_(
-            layer_te.self_attention.layernorm_qkv.weight.T, True)
+            layer_te.self_attention.layernorm_qkv.weight.T, True
+        )
         layer_pd.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
         layer_pd.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.ln_weight.stop_gradient = no_wgrad
         layer_te.self_attention.layernorm_qkv.weight.stop_gradient = no_wgrad
         if has_ln_bias:
             layer_pd.self_attention.layernorm_qkv.ln_bias.copy_(
-                layer_te.self_attention.layernorm_qkv.ln_bias, True)
+                layer_te.self_attention.layernorm_qkv.ln_bias, True
+            )
             layer_pd.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
             layer_te.self_attention.layernorm_qkv.ln_bias.stop_gradient = no_dbias
         if has_bias:
             layer_pd.self_attention.layernorm_qkv.bias.copy_(
-                layer_te.self_attention.layernorm_qkv.bias, True)
+                layer_te.self_attention.layernorm_qkv.bias, True
+            )
             layer_pd.self_attention.layernorm_qkv.bias.stop_gradient = no_dbias
             layer_te.self_attention.layernorm_qkv.bias.stop_gradient = no_dbias
 
@@ -1238,26 +1361,31 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
 
     # MultiHeadAttention params - cross attn
     layer_pd.inter_attention.layernorm_query.ln_weight.copy_(
-        layer_te.inter_attention.layernorm_query.ln_weight, True)
+        layer_te.inter_attention.layernorm_query.ln_weight, True
+    )
     layer_pd.inter_attention.layernorm_query.weight.copy_(
-        layer_te.inter_attention.layernorm_query.weight.T, True)
+        layer_te.inter_attention.layernorm_query.weight.T, True
+    )
     layer_pd.inter_attention.layernorm_query.ln_weight.stop_gradient = no_wgrad
     layer_pd.inter_attention.layernorm_query.weight.stop_gradient = no_wgrad
     layer_te.inter_attention.layernorm_query.ln_weight.stop_gradient = no_wgrad
     layer_te.inter_attention.layernorm_query.weight.stop_gradient = no_wgrad
     if has_ln_bias:
         layer_pd.inter_attention.layernorm_query.ln_bias.copy_(
-            layer_te.inter_attention.layernorm_query.ln_bias, True)
+            layer_te.inter_attention.layernorm_query.ln_bias, True
+        )
         layer_pd.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
         layer_te.inter_attention.layernorm_query.ln_bias.stop_gradient = no_dbias
     if has_bias:
         layer_pd.inter_attention.layernorm_query.bias.copy_(
-            layer_te.inter_attention.layernorm_query.bias, True)
+            layer_te.inter_attention.layernorm_query.bias, True
+        )
         layer_pd.inter_attention.layernorm_query.bias.stop_gradient = no_dbias
         layer_te.inter_attention.layernorm_query.bias.stop_gradient = no_dbias
 
-    layer_pd.inter_attention.key_value.weight.copy_(layer_te.inter_attention.key_value.weight.T,
-                                                    True)
+    layer_pd.inter_attention.key_value.weight.copy_(
+        layer_te.inter_attention.key_value.weight.T, True
+    )
     layer_pd.inter_attention.key_value.weight.stop_gradient = no_wgrad
     layer_te.inter_attention.key_value.weight.stop_gradient = no_wgrad
     layer_pd.inter_attention.proj.weight.copy_(layer_te.inter_attention.proj.weight.T, True)
@@ -1301,25 +1429,30 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
         layer_te.layernorm.weight.stop_gradient = no_wgrad
         layer_te.layernorm.bias.stop_gradient = no_dbias
 
-    def calc_transformer_output_and_grad(layer,
-                                         encoder_input,
-                                         mask,
-                                         encoder_output,
-                                         enc_dec_attn_mask,
-                                         dout,
-                                         recompute_core_attention=False):
+    def calc_transformer_output_and_grad(
+        layer,
+        encoder_input,
+        mask,
+        encoder_output,
+        enc_dec_attn_mask,
+        dout,
+        recompute_core_attention=False,
+    ):
         _encoder_input = paddle.to_tensor(encoder_input, stop_gradient=False)
         _encoder_output = paddle.to_tensor(encoder_output, stop_gradient=False)
-        out = layer(_encoder_input,
-                    mask,
-                    _encoder_output,
-                    enc_dec_attn_mask,
-                    recompute_core_attention=recompute_core_attention)
+        out = layer(
+            _encoder_input,
+            mask,
+            _encoder_output,
+            enc_dec_attn_mask,
+            recompute_core_attention=recompute_core_attention,
+        )
         out.backward(dout)
         return out, _encoder_input.grad, _encoder_output.grad
 
     out_ref, grad_encoder_input_ref, grad_encoder_output_ref = calc_transformer_output_and_grad(
-        layer_pd, encoder_input, attn_mask, encoder_output, attn_mask, grad_out)
+        layer_pd, encoder_input, attn_mask, encoder_output, attn_mask, grad_out
+    )
     out, grad_encoder_input, grad_encoder_output = calc_transformer_output_and_grad(
         layer_te,
         encoder_input,
@@ -1327,52 +1460,74 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, f
         encoder_output,
         attn_mask,
         grad_out,
-        recompute_core_attention=recompute_core_attention)
+        recompute_core_attention=recompute_core_attention,
+    )
 
     assert_allclose(out, out_ref, rtol=rtol, atol=atol)
     assert_allclose(grad_encoder_input, grad_encoder_input_ref, rtol=rtol, atol=atol)
     assert_allclose(grad_encoder_output, grad_encoder_output_ref, rtol=rtol, atol=atol)
     if not no_wgrad:
         if output_layernorm:
-            assert_allclose(layer_te.self_attention.qkv.weight.grad,
-                            layer_pd.self_attention.qkv.weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.self_attention.qkv.weight.grad,
+                layer_pd.self_attention.qkv.weight.grad.T,
+                rtol=rtol,
+                atol=atol,
+            )
         else:
-            assert_allclose(layer_te.self_attention.layernorm_qkv.weight.grad,
-                            layer_pd.self_attention.layernorm_qkv.weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
-            assert_allclose(layer_te.inter_attention.layernorm_query.weight.grad,
-                            layer_pd.inter_attention.layernorm_query.weight.grad.T,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.self_attention.layernorm_qkv.weight.grad,
+                layer_pd.self_attention.layernorm_qkv.weight.grad.T,
+                rtol=rtol,
+                atol=atol,
+            )
+            assert_allclose(
+                layer_te.inter_attention.layernorm_query.weight.grad,
+                layer_pd.inter_attention.layernorm_query.weight.grad.T,
+                rtol=rtol,
+                atol=atol,
+            )
     if not no_dbias:
         if output_layernorm:
-            assert_allclose(layer_te.self_attention.qkv.bias.grad,
-                            layer_pd.self_attention.qkv.bias.grad,
-                            rtol=0.5,
-                            atol=0.6)
+            assert_allclose(
+                layer_te.self_attention.qkv.bias.grad,
+                layer_pd.self_attention.qkv.bias.grad,
+                rtol=0.5,
+                atol=0.6,
+            )
         else:
-            assert_allclose(layer_te.self_attention.layernorm_qkv.bias.grad,
-                            layer_pd.self_attention.layernorm_qkv.bias.grad,
-                            rtol=0.01,
-                            atol=0.5)
-            assert_allclose(layer_te.inter_attention.layernorm_query.bias.grad,
-                            layer_pd.inter_attention.layernorm_query.bias.grad,
-                            rtol=rtol,
-                            atol=atol)
+            assert_allclose(
+                layer_te.self_attention.layernorm_qkv.bias.grad,
+                layer_pd.self_attention.layernorm_qkv.bias.grad,
+                rtol=0.01,
+                atol=0.5,
+            )
+            assert_allclose(
+                layer_te.inter_attention.layernorm_query.bias.grad,
+                layer_pd.inter_attention.layernorm_query.bias.grad,
+                rtol=rtol,
+                atol=atol,
+            )
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-@pytest.mark.parametrize('bs', [8])
-@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128]])
-@pytest.mark.parametrize('mask_type', ['causal'])
-@pytest.mark.parametrize('math_dtype', ['bfloat16'])
-@pytest.mark.parametrize('num_microbatch', [8])
-def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hidden_size, q_seqlen,
-                                              kv_seqlen, mask_type, math_dtype, num_microbatch):
+@pytest.mark.parametrize("bs", [8])
+@pytest.mark.parametrize("hidden_size, num_heads, ffn_hidden_size", [[1024, 16, 4096]])
+@pytest.mark.parametrize("q_seqlen, kv_seqlen", [[128, 128]])
+@pytest.mark.parametrize("mask_type", ["causal"])
+@pytest.mark.parametrize("math_dtype", ["bfloat16"])
+@pytest.mark.parametrize("num_microbatch", [8])
+def test_transformer_encoder_layer_microbatch(
+    bs,
+    hidden_size,
+    num_heads,
+    ffn_hidden_size,
+    q_seqlen,
+    kv_seqlen,
+    mask_type,
+    math_dtype,
+    num_microbatch,
+):
     """
     Test Transformer Encoder Layer with FP8 weight caching
     """
@@ -1383,48 +1538,56 @@ def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hi
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-            num_heads=num_heads,
-            num_gqa_groups=num_heads,
-            q_seqlen=q_seqlen,
-            kv_seqlen=kv_seqlen,
-            head_size=hidden_size // num_heads,
-            dtype=math_dtype,
-            dropout=0.0,
-            qkv_layout="bs3hd",
-            bias_type="no_bias",
-            mask_type=mask_type,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        head_size=hidden_size // num_heads,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bs3hd",
+        bias_type="no_bias",
+        mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
 
-    layer_cached = te.TransformerLayer(hidden_size,
-                                       ffn_hidden_size,
-                                       num_heads,
-                                       layernorm_epsilon=eps,
-                                       hidden_dropout=0.0,
-                                       attention_dropout=0.0,
-                                       weight_attr=None,
-                                       bias_attr=None,
-                                       self_attn_mask_type=mask_type,
-                                       layer_type='encoder')
-    layer_normal = te.TransformerLayer(hidden_size,
-                                       ffn_hidden_size,
-                                       num_heads,
-                                       layernorm_epsilon=eps,
-                                       hidden_dropout=0.0,
-                                       attention_dropout=0.0,
-                                       weight_attr=None,
-                                       bias_attr=None,
-                                       self_attn_mask_type=mask_type,
-                                       layer_type='encoder')
+    layer_cached = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None,
+        self_attn_mask_type=mask_type,
+        layer_type="encoder",
+    )
+    layer_normal = te.TransformerLayer(
+        hidden_size,
+        ffn_hidden_size,
+        num_heads,
+        layernorm_epsilon=eps,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        weight_attr=None,
+        bias_attr=None,
+        self_attn_mask_type=mask_type,
+        layer_type="encoder",
+    )
 
     layer_normal.self_attention.layernorm_qkv.ln_weight.copy_(
-        layer_cached.self_attention.layernorm_qkv.ln_weight, True)
+        layer_cached.self_attention.layernorm_qkv.ln_weight, True
+    )
     layer_normal.self_attention.layernorm_qkv.ln_bias.copy_(
-        layer_cached.self_attention.layernorm_qkv.ln_bias, True)
+        layer_cached.self_attention.layernorm_qkv.ln_bias, True
+    )
     layer_normal.self_attention.layernorm_qkv.weight.copy_(
-        layer_cached.self_attention.layernorm_qkv.weight, True)
+        layer_cached.self_attention.layernorm_qkv.weight, True
+    )
     layer_normal.self_attention.layernorm_qkv.bias.copy_(
-        layer_cached.self_attention.layernorm_qkv.bias, True)
+        layer_cached.self_attention.layernorm_qkv.bias, True
+    )
 
     layer_normal.self_attention.proj.weight.copy_(layer_cached.self_attention.proj.weight, True)
     layer_normal.self_attention.proj.bias.copy_(layer_cached.self_attention.proj.bias, True)
@@ -1442,18 +1605,19 @@ def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hi
     def generate_input():
         encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
 
-        q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
+        q_actual_seqlen = paddle.ones(shape=(bs,), dtype="int32") * q_seqlen
         kv_actual_seqlen = q_actual_seqlen
-        attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+        attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype="bool")
 
-        grad_out = paddle.normal(mean=0.0, std=0.02,
-                                 shape=(bs, q_seqlen, hidden_size)).astype('float32')
+        grad_out = paddle.normal(mean=0.0, std=0.02, shape=(bs, q_seqlen, hidden_size)).astype(
+            "float32"
+        )
         for i in range(0, bs):
-            grad_out[i, q_actual_seqlen[i]:, :] = 0
+            grad_out[i, q_actual_seqlen[i] :, :] = 0
         grad_out = grad_out.astype(math_dtype)
 
         for i in range(0, bs):
-            attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+            attn_mask[i, 0, 0 : q_actual_seqlen[i], 0 : kv_actual_seqlen[i]] = False
 
         return encoder_input, attn_mask, grad_out
 
@@ -1477,7 +1641,9 @@ def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hi
             out_ref.backward(grad_out)
 
         assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-        assert_allclose(layer_cached.self_attention.layernorm_qkv.weight.grad,
-                        layer_normal.self_attention.layernorm_qkv.weight.grad,
-                        rtol=rtol,
-                        atol=atol)
+        assert_allclose(
+            layer_cached.self_attention.layernorm_qkv.weight.grad,
+            layer_normal.self_attention.layernorm_qkv.weight.grad,
+            rtol=rtol,
+            atol=atol,
+        )

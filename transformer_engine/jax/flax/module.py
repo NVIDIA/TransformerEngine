@@ -30,8 +30,9 @@ PRNGKey = Any
 Shape = Tuple[int, ...]
 DType = jnp.dtype
 Array = jnp.ndarray
-PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision,
-                                                                       lax.Precision]]
+PrecisionLike = Union[
+    None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
+]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
@@ -55,25 +56,22 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
     return nn.initializers.zeros
 
 
-def _create_layernorm_parameters(layernorm_type, shape, scale_init, scale_axes, bias_init,
-                                 bias_axes, dtype):
-    scale = nn_partitioning.param_with_axes('scale',
-                                            scale_init,
-                                            shape,
-                                            jnp.float32,
-                                            axes=scale_axes)
+def _create_layernorm_parameters(
+    layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, dtype
+):
+    scale = nn_partitioning.param_with_axes(
+        "scale", scale_init, shape, jnp.float32, axes=scale_axes
+    )
     scale = jnp.asarray(scale, dtype)
 
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
-    if layernorm_type == 'layernorm':
-        bias = nn_partitioning.param_with_axes('ln_bias',
-                                               bias_init,
-                                               shape,
-                                               jnp.float32,
-                                               axes=bias_axes)
+    if layernorm_type == "layernorm":
+        bias = nn_partitioning.param_with_axes(
+            "ln_bias", bias_init, shape, jnp.float32, axes=bias_axes
+        )
         bias = jnp.asarray(bias, dtype)
     else:
-        assert layernorm_type == 'rmsnorm'
+        assert layernorm_type == "rmsnorm"
         bias = None
 
     return scale, bias
@@ -81,7 +79,7 @@ def _create_layernorm_parameters(layernorm_type, shape, scale_init, scale_axes, 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Callable:
     """Convert a string to an activation function."""
-    if fn_or_string == 'linear':
+    if fn_or_string == "linear":
         return lambda x: x
     if isinstance(fn_or_string, str):
         return getattr(nn, fn_or_string)
@@ -96,8 +94,9 @@ def _combine_biases(*masks: List[Array]):
     masks = [m for m in masks if m is not None]
     if not masks:
         return None
-    assert all(map(lambda x: x.ndim == masks[0].ndim,
-                   masks)), (f'masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}')
+    assert all(
+        map(lambda x: x.ndim == masks[0].ndim, masks)
+    ), f"masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}"
     mask, *other_masks = masks
     for other_mask in other_masks:
         mask = mask + other_mask
@@ -108,10 +107,10 @@ def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel, 
     """Low Rank Adaptation Implementation"""
 
     assert len(axis) <= 5
-    hidden_in_names = 'ijklm'[:len(axis)]
+    hidden_in_names = "ijklm"[: len(axis)]
     assert len(features) <= 5
-    hidden_out_names = 'nopqr'[:len(features)]
-    rank_name = 's'
+    hidden_out_names = "nopqr"[: len(features)]
+    rank_name = "s"
 
     assert lora_a_kernel.shape[-1] == lora_b_kernel.shape[-2]
     rank = lora_a_kernel.shape[-1]
@@ -121,15 +120,17 @@ def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel, 
     lora_a_einsum_express = f"{hidden_in_names}{hidden_out_names[:-1]}{rank_name}"
     lora_b_einsum_express = f"{hidden_out_names[:-1]}{rank_name}{hidden_out_names[-1]}"
     output_einsum_express = f"...{hidden_out_names}"
-    final_einsum_express = f"{x_einsum_express},{lora_a_einsum_express},{lora_b_einsum_express}" \
-                           f"->{output_einsum_express}"
+    final_einsum_express = (
+        f"{x_einsum_express},{lora_a_einsum_express},{lora_b_einsum_express}"
+        f"->{output_einsum_express}"
+    )
 
     output = jnp.einsum(final_einsum_express, x, lora_a_kernel, lora_b_kernel)
     output = output * scaling
     return output
 
 
-class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
+class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     r"""
     Applies softmax over a mini-batch of inputs.
     The input's shape should be [batch, heads, q_seqlen, k_seqlen].
@@ -160,8 +161,9 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
         dtype = inputs.dtype
         logits = inputs
 
-        if (self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
-                self.softmax_type, batch, heads, q_seqlen, k_seqlen, inputs.dtype)):
+        if self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
+            self.softmax_type, batch, heads, q_seqlen, k_seqlen, inputs.dtype
+        ):
 
             if bias is not None:
                 logits = logits + bias.astype(dtype)
@@ -174,9 +176,11 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
         else:
             attention_bias = None
             if mask is not None:
-                attention_bias = lax.select(mask > 0,
-                                            jnp.full(mask.shape, -1e10).astype(dtype),
-                                            jnp.full(mask.shape, 0.).astype(dtype))
+                attention_bias = lax.select(
+                    mask > 0,
+                    jnp.full(mask.shape, -1e10).astype(dtype),
+                    jnp.full(mask.shape, 0.0).astype(dtype),
+                )
 
             if bias is not None:
                 attention_bias = _combine_biases(attention_bias, bias)
@@ -186,8 +190,9 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
 
             # For the case that self.softmax == SoftmaxType.SCALED_UPPER_TRIANG_MASKED
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
-            if is_softmax_kernel_available(SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen,
-                                           dtype):
+            if is_softmax_kernel_available(
+                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, dtype
+            ):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
@@ -195,7 +200,7 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
         return outputs
 
 
-class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
+class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     r"""
     Applies layer normalization over a mini-batch of inputs.
     There are two types of normalization supported by this module,
@@ -262,19 +267,21 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
+
     epsilon: float = 1e-6
-    layernorm_type: str = 'layernorm'
+    layernorm_type: str = "layernorm"
     zero_centered_gamma: bool = False
     scale_init: Initializer = None
-    scale_axes: Tuple[str, ...] = ('embed',)
+    scale_axes: Tuple[str, ...] = ("embed",)
     bias_init: Initializer = nn.initializers.zeros
-    bias_axes: Tuple[str, ...] = ('embed',)
+    bias_axes: Tuple[str, ...] = ("embed",)
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma)
+            self.scale_init, self.zero_centered_gamma
+        )
         super().__post_init__()
 
     @nn.compact
@@ -294,18 +301,26 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
         """
 
         features = x.shape[-1]
-        scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
-                                                      self.scale_init, self.scale_axes,
-                                                      self.bias_init, self.bias_axes, self.dtype)
-        return layernorm(x,
-                         scale,
-                         ln_bias,
-                         layernorm_type=self.layernorm_type,
-                         zero_centered_gamma=self.zero_centered_gamma,
-                         epsilon=self.epsilon)
+        scale, ln_bias = _create_layernorm_parameters(
+            self.layernorm_type,
+            (features,),
+            self.scale_init,
+            self.scale_axes,
+            self.bias_init,
+            self.bias_axes,
+            self.dtype,
+        )
+        return layernorm(
+            x,
+            scale,
+            ln_bias,
+            layernorm_type=self.layernorm_type,
+            zero_centered_gamma=self.zero_centered_gamma,
+            epsilon=self.epsilon,
+        )
 
 
-class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-methods
+class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-methods
     """
     Base class of transformer engine
     """
@@ -321,18 +336,23 @@ class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-meth
         grad_name_post_fix = f"_g_{postfix}"
 
         def generate_a_set(target_postfix):
-            amax = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,
-                                                      f"{FP8Helper.FP8_AMAX_NAME}{target_postfix}",
-                                                      jnp.zeros, (FP8Helper.AMAX_HISTORY_LEN,),
-                                                      jnp.float32,
-                                                      axes=(None,))
+            amax = nn_partitioning.variable_with_axes(
+                FP8Helper.FP8_COLLECTION_NAME,
+                f"{FP8Helper.FP8_AMAX_NAME}{target_postfix}",
+                jnp.zeros,
+                (FP8Helper.AMAX_HISTORY_LEN,),
+                jnp.float32,
+                axes=(None,),
+            )
 
             scale = nn_partitioning.variable_with_axes(
                 FP8Helper.FP8_COLLECTION_NAME,
                 f"{FP8Helper.FP8_SCALE_NAME}{target_postfix}",
-                jnp.ones, (1,),
+                jnp.ones,
+                (1,),
                 jnp.float32,
-                axes=(None,))
+                axes=(None,),
+            )
 
             return amax.value, scale.value
 
@@ -340,8 +360,9 @@ class TransformerEngineBase(nn.Module):    # pylint: disable=too-few-public-meth
         weight_amax, weight_scale = generate_a_set(weight_name_post_fix)
         grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
 
-        return FP8MetaPackage(input_amax, input_scale, weight_amax, weight_scale, grad_amax,
-                              grad_scale)
+        return FP8MetaPackage(
+            input_amax, input_scale, weight_amax, weight_scale, grad_amax, grad_scale
+        )
 
 
 class DenseGeneral(TransformerEngineBase):
@@ -403,7 +424,7 @@ class DenseGeneral(TransformerEngineBase):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
         super().__post_init__()
 
     @nn.compact
@@ -430,20 +451,16 @@ class DenseGeneral(TransformerEngineBase):
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
-        kernel = nn_partitioning.param_with_axes('kernel',
-                                                 self.kernel_init,
-                                                 kernel_param_shape,
-                                                 jnp.float32,
-                                                 axes=self.kernel_axes)
+        kernel = nn_partitioning.param_with_axes(
+            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+        )
 
         kernel = jnp.reshape(kernel, kernel_shape)
 
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes('bias',
-                                                   self.bias_init,
-                                                   features,
-                                                   jnp.float32,
-                                                   axes=self.bias_axes)
+            bias = nn_partitioning.param_with_axes(
+                "bias", self.bias_init, features, jnp.float32, axes=self.bias_axes
+            )
             bias = bias.astype(self.dtype)
         else:
             bias = None
@@ -453,36 +470,46 @@ class DenseGeneral(TransformerEngineBase):
         if FP8Helper.is_fp8_enabled():
             fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
 
-        y = type_safe_dot_general(inputs,
-                                  kernel,
-                                  fp8_meta_pkg=fp8_meta_pkg,
-                                  contracting_dims=(axis, contract_ind))
+        y = type_safe_dot_general(
+            inputs, kernel, fp8_meta_pkg=fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+        )
 
         if self.enable_low_rank_adaptation:
-            lora_a_kernel_shape = (*kernel_shape[:len(axis)], *features[:-1],
-                                   self.low_rank_adaptation_dim)
-            lora_a_kernel_init_shape = (kernel_param_shape[0], *features[:-1],
-                                        self.low_rank_adaptation_dim)
+            lora_a_kernel_shape = (
+                *kernel_shape[: len(axis)],
+                *features[:-1],
+                self.low_rank_adaptation_dim,
+            )
+            lora_a_kernel_init_shape = (
+                kernel_param_shape[0],
+                *features[:-1],
+                self.low_rank_adaptation_dim,
+            )
             lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
-            lora_a_kernel = nn_partitioning.param_with_axes('lora_a_kernel',
-                                                            self.kernel_init,
-                                                            lora_a_kernel_init_shape,
-                                                            jnp.float32,
-                                                            axes=lora_a_kernel_axes)
+            lora_a_kernel = nn_partitioning.param_with_axes(
+                "lora_a_kernel",
+                self.kernel_init,
+                lora_a_kernel_init_shape,
+                jnp.float32,
+                axes=lora_a_kernel_axes,
+            )
             lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
             lora_a_kernel = lora_a_kernel.astype(self.dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
-            lora_b_kernel = nn_partitioning.param_with_axes('lora_b_kernel',
-                                                            nn.initializers.zeros,
-                                                            lora_b_kernel_shape,
-                                                            jnp.float32,
-                                                            axes=lora_b_kernel_axes)
+            lora_b_kernel = nn_partitioning.param_with_axes(
+                "lora_b_kernel",
+                nn.initializers.zeros,
+                lora_b_kernel_shape,
+                jnp.float32,
+                axes=lora_b_kernel_axes,
+            )
             lora_b_kernel = lora_b_kernel.astype(self.dtype)
 
-            y += _apply_low_rank_adaptation(inputs, axis, features, lora_a_kernel, lora_b_kernel,
-                                            self.low_rank_adaptation_alpha)
+            y += _apply_low_rank_adaptation(
+                inputs, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
+            )
 
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
@@ -581,13 +608,13 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
     features: Union[Iterable[int], int]
     enable_layernorm: bool = True
-    layernorm_type: str = 'layernorm'
+    layernorm_type: str = "layernorm"
     epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     scale_init: Initializer = None
-    scale_axes: Tuple[str, ...] = ('embed',)
+    scale_axes: Tuple[str, ...] = ("embed",)
     ln_bias_init: Initializer = nn.initializers.zeros
-    ln_bias_axes: Tuple[str, ...] = ('embed',)
+    ln_bias_axes: Tuple[str, ...] = ("embed",)
     kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
@@ -606,9 +633,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma)
+            self.scale_init, self.zero_centered_gamma
+        )
         super().__post_init__()
 
     @nn.compact
@@ -632,27 +660,37 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         ln_output = None
 
-        fuse_layernorm = FP8Helper.is_fp8_enabled(
-        ) and not self.return_layernorm_output and self.enable_layernorm
+        fuse_layernorm = (
+            FP8Helper.is_fp8_enabled()
+            and not self.return_layernorm_output
+            and self.enable_layernorm
+        )
 
         if self.enable_layernorm:
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
 
-            assert self.axis == -1    # Only support axis = =-1 at this moment
+            assert self.axis == -1  # Only support axis = =-1 at this moment
             features = inputs.shape[-1]
 
-            scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
-                                                          self.scale_init, self.scale_axes,
-                                                          self.ln_bias_init, self.ln_bias_axes,
-                                                          self.dtype)
+            scale, ln_bias = _create_layernorm_parameters(
+                self.layernorm_type,
+                (features,),
+                self.scale_init,
+                self.scale_axes,
+                self.ln_bias_init,
+                self.ln_bias_axes,
+                self.dtype,
+            )
 
             if not fuse_layernorm:
-                y = layernorm(inputs,
-                              scale,
-                              ln_bias,
-                              layernorm_type=self.layernorm_type,
-                              zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon)
+                y = layernorm(
+                    inputs,
+                    scale,
+                    ln_bias,
+                    layernorm_type=self.layernorm_type,
+                    zero_centered_gamma=self.zero_centered_gamma,
+                    epsilon=self.epsilon,
+                )
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -670,11 +708,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         kernel_shape = tuple(y.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
-        kernel = nn_partitioning.param_with_axes('kernel',
-                                                 self.kernel_init,
-                                                 kernel_param_shape,
-                                                 jnp.float32,
-                                                 axes=self.kernel_axes)
+        kernel = nn_partitioning.param_with_axes(
+            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+        )
 
         kernel = jnp.reshape(kernel, kernel_shape)
 
@@ -685,56 +721,66 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
 
         if fuse_layernorm:
-            z = layernorm_fp8_dot(y,
-                                  kernel,
-                                  scale,
-                                  ln_bias,
-                                  fp8_meta_pkg,
-                                  self.layernorm_type,
-                                  zero_centered_gamma=self.zero_centered_gamma,
-                                  epsilon=self.epsilon,
-                                  layernorm_input_axes=self.layernorm_input_axes,
-                                  dot_input_axes=self.dot_input_axes)
+            z = layernorm_fp8_dot(
+                y,
+                kernel,
+                scale,
+                ln_bias,
+                fp8_meta_pkg,
+                self.layernorm_type,
+                zero_centered_gamma=self.zero_centered_gamma,
+                epsilon=self.epsilon,
+                layernorm_input_axes=self.layernorm_input_axes,
+                dot_input_axes=self.dot_input_axes,
+            )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = type_safe_dot_general(y,
-                                      kernel,
-                                      fp8_meta_pkg=fp8_meta_pkg,
-                                      contracting_dims=(axis, contract_ind))
+            z = type_safe_dot_general(
+                y, kernel, fp8_meta_pkg=fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+            )
 
         if self.enable_low_rank_adaptation:
-            lora_a_kernel_shape = (*kernel_shape[:len(axis)], *features[:-1],
-                                   self.low_rank_adaptation_dim)
-            lora_a_kernel_init_shape = (kernel_param_shape[0], *features[:-1],
-                                        self.low_rank_adaptation_dim)
+            lora_a_kernel_shape = (
+                *kernel_shape[: len(axis)],
+                *features[:-1],
+                self.low_rank_adaptation_dim,
+            )
+            lora_a_kernel_init_shape = (
+                kernel_param_shape[0],
+                *features[:-1],
+                self.low_rank_adaptation_dim,
+            )
             lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
-            lora_a_kernel = nn_partitioning.param_with_axes('lora_a_kernel',
-                                                            self.kernel_init,
-                                                            lora_a_kernel_init_shape,
-                                                            jnp.float32,
-                                                            axes=lora_a_kernel_axes)
+            lora_a_kernel = nn_partitioning.param_with_axes(
+                "lora_a_kernel",
+                self.kernel_init,
+                lora_a_kernel_init_shape,
+                jnp.float32,
+                axes=lora_a_kernel_axes,
+            )
             lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
             lora_a_kernel = lora_a_kernel.astype(self.dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
-            lora_b_kernel = nn_partitioning.param_with_axes('lora_b_kernel',
-                                                            nn.initializers.zeros,
-                                                            lora_b_kernel_shape,
-                                                            jnp.float32,
-                                                            axes=lora_b_kernel_axes)
+            lora_b_kernel = nn_partitioning.param_with_axes(
+                "lora_b_kernel",
+                nn.initializers.zeros,
+                lora_b_kernel_shape,
+                jnp.float32,
+                axes=lora_b_kernel_axes,
+            )
             lora_b_kernel = lora_b_kernel.astype(self.dtype)
 
-            z += _apply_low_rank_adaptation(y, axis, features, lora_a_kernel, lora_b_kernel,
-                                            self.low_rank_adaptation_alpha)
+            z += _apply_low_rank_adaptation(
+                y, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
+            )
 
         bias = None
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes('bias',
-                                                   self.bias_init,
-                                                   features,
-                                                   jnp.float32,
-                                                   axes=self.bias_axes)
+            bias = nn_partitioning.param_with_axes(
+                "bias", self.bias_init, features, jnp.float32, axes=self.bias_axes
+            )
             bias = bias.astype(self.dtype)
 
         if bias is not None:
@@ -744,7 +790,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
 
-        return z, ln_output    # dense_output, layer_norm_output
+        return z, ln_output  # dense_output, layer_norm_output
 
 
 class LayerNormMLP(TransformerEngineBase):
@@ -858,23 +904,23 @@ class LayerNormMLP(TransformerEngineBase):
 
     intermediate_dim: int = 2048
     enable_layernorm: bool = True
-    layernorm_type: str = 'layernorm'
+    layernorm_type: str = "layernorm"
     epsilon: float = 1e-6
     zero_centered_gamma: bool = False
     scale_init: Initializer = None
-    scale_axes: Tuple[str, ...] = ('embed',)
+    scale_axes: Tuple[str, ...] = ("embed",)
     ln_bias_init: Initializer = nn.initializers.zeros
-    ln_bias_axes: Tuple[str, ...] = ('embed',)
+    ln_bias_axes: Tuple[str, ...] = ("embed",)
     kernel_init: Initializer = None
-    kernel_axes_1: Tuple[str, ...] = ('embed', 'act', 'mlp')
-    kernel_axes_2: Tuple[str, ...] = ('mlp', 'embed')
+    kernel_axes_1: Tuple[str, ...] = ("embed", "act", "mlp")
+    kernel_axes_2: Tuple[str, ...] = ("mlp", "embed")
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
-    bias_axes_1: Tuple[str, ...] = ('act', 'mlp')
-    bias_axes_2: Tuple[str, ...] = ('embed',)
+    bias_axes_1: Tuple[str, ...] = ("act", "mlp")
+    bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = True
-    activations: Sequence[Union[str, Callable]] = ('relu',)
-    intermediate_dropout_rng_name: str = 'dropout'
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()
     enable_low_rank_adaptation: bool = False
@@ -889,9 +935,10 @@ class LayerNormMLP(TransformerEngineBase):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma)
+            self.scale_init, self.zero_centered_gamma
+        )
         super().__post_init__()
 
     @nn.compact
@@ -917,44 +964,61 @@ class LayerNormMLP(TransformerEngineBase):
 
         ln_output = None
 
-        fuse_layernorm = FP8Helper.is_fp8_enabled(
-        ) and not self.return_layernorm_output and self.enable_layernorm
+        fuse_layernorm = (
+            FP8Helper.is_fp8_enabled()
+            and not self.return_layernorm_output
+            and self.enable_layernorm
+        )
 
-        gated_act_pool = [('gelu', 'linear'), ('silu', 'linear'), ('relu', 'linear'),
-                          ('quick_gelu', 'linear'), ('squared_relu', 'linear')]
-        act_pool = [('gelu',), ('silu',), ('relu',), ('quick_gelu',), ('squared_relu',)]
+        gated_act_pool = [
+            ("gelu", "linear"),
+            ("silu", "linear"),
+            ("relu", "linear"),
+            ("quick_gelu", "linear"),
+            ("squared_relu", "linear"),
+        ]
+        act_pool = [("gelu",), ("silu",), ("relu",), ("quick_gelu",), ("squared_relu",)]
         normalized_acts = []
         for act in self.activations:
             if not isinstance(act, str):
                 return False
             normalized_acts.append(act.lower())
         normalized_acts = tuple(
-            reversed(normalized_acts) if normalized_acts[0] == 'linear' else normalized_acts)
+            reversed(normalized_acts) if normalized_acts[0] == "linear" else normalized_acts
+        )
 
         is_act_implemented = normalized_acts in (gated_act_pool + act_pool)
 
-        use_fused_layernorm_mlp = fuse_layernorm and is_act_implemented and\
-                                self.intermediate_dropout_rate < 1e-3
+        use_fused_layernorm_mlp = (
+            fuse_layernorm and is_act_implemented and self.intermediate_dropout_rate < 1e-3
+        )
 
         # LayerNorm
         if self.enable_layernorm:
-            assert self.axis == -1    # Only support axis == -1 at this moment
+            assert self.axis == -1  # Only support axis == -1 at this moment
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
 
             features = inputs.shape[-1]
 
-            scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
-                                                          self.scale_init, self.scale_axes,
-                                                          self.ln_bias_init, self.ln_bias_axes,
-                                                          self.dtype)
+            scale, ln_bias = _create_layernorm_parameters(
+                self.layernorm_type,
+                (features,),
+                self.scale_init,
+                self.scale_axes,
+                self.ln_bias_init,
+                self.ln_bias_axes,
+                self.dtype,
+            )
 
             if not fuse_layernorm:
-                y = layernorm(inputs,
-                              scale,
-                              ln_bias,
-                              layernorm_type=self.layernorm_type,
-                              zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon)
+                y = layernorm(
+                    inputs,
+                    scale,
+                    ln_bias,
+                    layernorm_type=self.layernorm_type,
+                    zero_centered_gamma=self.zero_centered_gamma,
+                    epsilon=self.epsilon,
+                )
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -984,125 +1048,149 @@ class LayerNormMLP(TransformerEngineBase):
         intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
         kernel_1_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
         kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
-        kernel_1 = nn_partitioning.param_with_axes('wi_kernel',
-                                                   kernel_1_init,
-                                                   num_activations,
-                                                   -2,
-                                                   kernel_1_each_shape,
-                                                   jnp.float32,
-                                                   axes=self.kernel_axes_1)
+        kernel_1 = nn_partitioning.param_with_axes(
+            "wi_kernel",
+            kernel_1_init,
+            num_activations,
+            -2,
+            kernel_1_each_shape,
+            jnp.float32,
+            axes=self.kernel_axes_1,
+        )
         kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
         kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
-        kernel_2 = nn_partitioning.param_with_axes('wo_kernel',
-                                                   self.kernel_init,
-                                                   kernel_2_param_shape,
-                                                   jnp.float32,
-                                                   axes=self.kernel_axes_2)
+        kernel_2 = nn_partitioning.param_with_axes(
+            "wo_kernel",
+            self.kernel_init,
+            kernel_2_param_shape,
+            jnp.float32,
+            axes=self.kernel_axes_2,
+        )
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
         contract_ind = tuple(range(0, len(axis)))
 
-        ffn1_ckpt_name = 'ffn1'
-        ffn2_ckpt_name = 'ffn2'
+        ffn1_ckpt_name = "ffn1"
+        ffn2_ckpt_name = "ffn2"
 
         if use_fused_layernorm_mlp:
-            assert self.axis == -1    # Only support axis = =-1 at this moment
+            assert self.axis == -1  # Only support axis = =-1 at this moment
 
             if self.use_bias:
                 bias_1_shape = intermediate_dim
-                bias_1 = nn_partitioning.param_with_axes('wi_bias',
-                                                         self.bias_init,
-                                                         bias_1_shape,
-                                                         jnp.float32,
-                                                         axes=self.bias_axes_1)
+                bias_1 = nn_partitioning.param_with_axes(
+                    "wi_bias", self.bias_init, bias_1_shape, jnp.float32, axes=self.bias_axes_1
+                )
                 bias_1 = bias_1.astype(self.dtype)
 
                 bias_2_shape = (hidden_size,)
-                bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                         self.bias_init,
-                                                         bias_2_shape,
-                                                         jnp.float32,
-                                                         axes=self.bias_axes_2)
+                bias_2 = nn_partitioning.param_with_axes(
+                    "wo_bias", self.bias_init, bias_2_shape, jnp.float32, axes=self.bias_axes_2
+                )
                 bias_2 = bias_2.astype(self.dtype)
             else:
                 bias_1 = None
                 bias_2 = None
 
-            out = fused_layernorm_fp8_mlp(y,
-                                          scale,
-                                          ln_bias, [kernel_1, kernel_2], [bias_1, bias_2],
-                                          [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
-                                          self.layernorm_type,
-                                          zero_centered_gamma=self.zero_centered_gamma,
-                                          epsilon=self.epsilon,
-                                          layernorm_input_axes=self.layernorm_input_axes,
-                                          dot_1_input_axes=self.dot_1_input_axes,
-                                          dot_2_input_axes=self.dot_2_input_axes,
-                                          ffn1_ckpt_name=ffn1_ckpt_name,
-                                          ffn2_ckpt_name=ffn2_ckpt_name,
-                                          activation_type=normalized_acts,
-                                          use_bias=self.use_bias)
+            out = fused_layernorm_fp8_mlp(
+                y,
+                scale,
+                ln_bias,
+                [kernel_1, kernel_2],
+                [bias_1, bias_2],
+                [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
+                self.layernorm_type,
+                zero_centered_gamma=self.zero_centered_gamma,
+                epsilon=self.epsilon,
+                layernorm_input_axes=self.layernorm_input_axes,
+                dot_1_input_axes=self.dot_1_input_axes,
+                dot_2_input_axes=self.dot_2_input_axes,
+                ffn1_ckpt_name=ffn1_ckpt_name,
+                ffn2_ckpt_name=ffn2_ckpt_name,
+                activation_type=normalized_acts,
+                use_bias=self.use_bias,
+            )
 
-        else:    # not use_fused_ln_geglu_mlp
+        else:  # not use_fused_ln_geglu_mlp
             # DenseGeneral 1
             if fuse_layernorm:
-                x = layernorm_fp8_dot(y,
-                                      kernel_1,
-                                      scale,
-                                      ln_bias,
-                                      wi_fp8_meta_pkg,
-                                      self.layernorm_type,
-                                      zero_centered_gamma=self.zero_centered_gamma,
-                                      epsilon=self.epsilon,
-                                      layernorm_input_axes=self.layernorm_input_axes,
-                                      dot_input_axes=self.dot_1_input_axes)
+                x = layernorm_fp8_dot(
+                    y,
+                    kernel_1,
+                    scale,
+                    ln_bias,
+                    wi_fp8_meta_pkg,
+                    self.layernorm_type,
+                    zero_centered_gamma=self.zero_centered_gamma,
+                    epsilon=self.epsilon,
+                    layernorm_input_axes=self.layernorm_input_axes,
+                    dot_input_axes=self.dot_1_input_axes,
+                )
             else:
                 y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
-                x = type_safe_dot_general(y,
-                                          kernel_1,
-                                          fp8_meta_pkg=wi_fp8_meta_pkg,
-                                          contracting_dims=(axis, contract_ind))
+                x = type_safe_dot_general(
+                    y, kernel_1, fp8_meta_pkg=wi_fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+                )
 
             if self.enable_low_rank_adaptation:
-                wi_lora_a_kernel_shape = (*kernel_1_shape[:len(axis)], num_activations,
-                                          self.low_rank_adaptation_dim)
-                wi_lora_a_kernel_init_shape = (kernel_1_each_shape[0], num_activations,
-                                               self.low_rank_adaptation_dim)
-                wi_lora_a_kernel_init_each_shape = (kernel_1_each_shape[0],
-                                                    self.low_rank_adaptation_dim)
+                wi_lora_a_kernel_shape = (
+                    *kernel_1_shape[: len(axis)],
+                    num_activations,
+                    self.low_rank_adaptation_dim,
+                )
+                wi_lora_a_kernel_init_shape = (
+                    kernel_1_each_shape[0],
+                    num_activations,
+                    self.low_rank_adaptation_dim,
+                )
+                wi_lora_a_kernel_init_each_shape = (
+                    kernel_1_each_shape[0],
+                    self.low_rank_adaptation_dim,
+                )
                 wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_init_shape)
-                wi_lora_a_kernel = nn_partitioning.param_with_axes('wi_lora_a_kernel',
-                                                                   kernel_1_init,
-                                                                   num_activations,
-                                                                   -2,
-                                                                   wi_lora_a_kernel_init_each_shape,
-                                                                   jnp.float32,
-                                                                   axes=wi_lora_a_kernel_axes)
+                wi_lora_a_kernel = nn_partitioning.param_with_axes(
+                    "wi_lora_a_kernel",
+                    kernel_1_init,
+                    num_activations,
+                    -2,
+                    wi_lora_a_kernel_init_each_shape,
+                    jnp.float32,
+                    axes=wi_lora_a_kernel_axes,
+                )
                 wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
                 wi_lora_a_kernel = wi_lora_a_kernel.astype(self.dtype)
 
-                wi_lora_b_kernel_shape = (num_activations, self.low_rank_adaptation_dim,
-                                          self.intermediate_dim)
+                wi_lora_b_kernel_shape = (
+                    num_activations,
+                    self.low_rank_adaptation_dim,
+                    self.intermediate_dim,
+                )
                 wi_lora_b_kernel_axes = (None,) * len(wi_lora_b_kernel_shape)
-                wi_lora_b_kernel = nn_partitioning.param_with_axes('wi_lora_b_kernel',
-                                                                   nn.initializers.zeros,
-                                                                   wi_lora_b_kernel_shape,
-                                                                   jnp.float32,
-                                                                   axes=wi_lora_b_kernel_axes)
+                wi_lora_b_kernel = nn_partitioning.param_with_axes(
+                    "wi_lora_b_kernel",
+                    nn.initializers.zeros,
+                    wi_lora_b_kernel_shape,
+                    jnp.float32,
+                    axes=wi_lora_b_kernel_axes,
+                )
                 wi_lora_b_kernel = wi_lora_b_kernel.astype(self.dtype)
 
-                x += _apply_low_rank_adaptation(y, axis, intermediate_dim, wi_lora_a_kernel,
-                                                wi_lora_b_kernel, self.low_rank_adaptation_alpha)
+                x += _apply_low_rank_adaptation(
+                    y,
+                    axis,
+                    intermediate_dim,
+                    wi_lora_a_kernel,
+                    wi_lora_b_kernel,
+                    self.low_rank_adaptation_alpha,
+                )
 
             bias_1 = None
             if self.use_bias:
-                bias_1 = nn_partitioning.param_with_axes('wi_bias',
-                                                         self.bias_init,
-                                                         intermediate_dim,
-                                                         jnp.float32,
-                                                         axes=self.bias_axes_1)
+                bias_1 = nn_partitioning.param_with_axes(
+                    "wi_bias", self.bias_init, intermediate_dim, jnp.float32, axes=self.bias_axes_1
+                )
                 bias_1 = bias_1.astype(self.dtype)
                 bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
                 x += jnp.reshape(bias_1, bias_1_shape)
@@ -1120,50 +1208,59 @@ class LayerNormMLP(TransformerEngineBase):
                 # Remove act axis
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
-            z = nn.Dropout(rate=self.intermediate_dropout_rate,
-                           broadcast_dims=self.intermediate_hidden_dropout_dims,
-                           rng_collection=self.intermediate_dropout_rng_name)(
-                               z, deterministic=deterministic)
+            z = nn.Dropout(
+                rate=self.intermediate_dropout_rate,
+                broadcast_dims=self.intermediate_hidden_dropout_dims,
+                rng_collection=self.intermediate_dropout_rng_name,
+            )(z, deterministic=deterministic)
 
             z = with_sharding_constraint_by_logical_axes(z, self.dot_2_input_axes)
 
             # DenseGeneral 2
-            out = type_safe_dot_general(z,
-                                        kernel_2,
-                                        fp8_meta_pkg=wo_fp8_meta_pkg,
-                                        contracting_dims=(axis, contract_ind))
+            out = type_safe_dot_general(
+                z, kernel_2, fp8_meta_pkg=wo_fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+            )
 
             if self.enable_low_rank_adaptation:
                 wo_lora_a_kernel_shape = (self.intermediate_dim, self.low_rank_adaptation_dim)
                 wo_lora_a_kernel_axes = (None,) * len(wo_lora_a_kernel_shape)
-                wo_lora_a_kernel = nn_partitioning.param_with_axes('wo_lora_a_kernel',
-                                                                   self.kernel_init,
-                                                                   wo_lora_a_kernel_shape,
-                                                                   jnp.float32,
-                                                                   axes=wo_lora_a_kernel_axes)
+                wo_lora_a_kernel = nn_partitioning.param_with_axes(
+                    "wo_lora_a_kernel",
+                    self.kernel_init,
+                    wo_lora_a_kernel_shape,
+                    jnp.float32,
+                    axes=wo_lora_a_kernel_axes,
+                )
                 wo_lora_a_kernel = wo_lora_a_kernel.astype(self.dtype)
 
                 wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
                 wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
-                wo_lora_b_kernel = nn_partitioning.param_with_axes('wo_lora_b_kernel',
-                                                                   nn.initializers.zeros,
-                                                                   wo_lora_b_kernel_shape,
-                                                                   jnp.float32,
-                                                                   axes=wo_lora_b_kernel_axes)
+                wo_lora_b_kernel = nn_partitioning.param_with_axes(
+                    "wo_lora_b_kernel",
+                    nn.initializers.zeros,
+                    wo_lora_b_kernel_shape,
+                    jnp.float32,
+                    axes=wo_lora_b_kernel_axes,
+                )
                 wo_lora_b_kernel = wo_lora_b_kernel.astype(self.dtype)
 
-                out += _apply_low_rank_adaptation(z, axis, hidden_size_tuple, wo_lora_a_kernel,
-                                                  wo_lora_b_kernel, self.low_rank_adaptation_alpha)
+                out += _apply_low_rank_adaptation(
+                    z,
+                    axis,
+                    hidden_size_tuple,
+                    wo_lora_a_kernel,
+                    wo_lora_b_kernel,
+                    self.low_rank_adaptation_alpha,
+                )
 
             bias_2 = None
             if self.use_bias:
-                bias_2 = nn_partitioning.param_with_axes('wo_bias',
-                                                         self.bias_init, (hidden_size,),
-                                                         jnp.float32,
-                                                         axes=self.bias_axes_2)
+                bias_2 = nn_partitioning.param_with_axes(
+                    "wo_bias", self.bias_init, (hidden_size,), jnp.float32, axes=self.bias_axes_2
+                )
                 bias_2 = bias_2.astype(self.dtype)
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 
-        return out, ln_output    # Output, layner_norm_output
+        return out, ln_output  # Output, layner_norm_output

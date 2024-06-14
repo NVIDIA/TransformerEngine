@@ -27,7 +27,7 @@ class TestAmaxReduction(unittest.TestCase):
     def setUp(self):
         self.data_parallel_size = 2
         self.init_dist_env()
-        self.global_dtype = 'bfloat16'
+        self.global_dtype = "bfloat16"
         paddle.set_default_dtype(self.global_dtype)
 
     def init_dist_env(self):
@@ -83,5 +83,5 @@ class TestAmaxReduction(unittest.TestCase):
             assert_allclose_across_ranks(layer2.fp8_meta["scaling_bwd"].scale_inv)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

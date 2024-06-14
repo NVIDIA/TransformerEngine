@@ -68,7 +68,9 @@ def get_filename(
     config = f"gpt3_{model}_dp{dp}_tp{tp}_pp{pp}_sp{sp}"
     config_dir = os.path.join(mlm_log_dir, config)
     os.makedirs(config_dir, exist_ok=True)
-    fname = f"{'te' if use_te else 'megatron'}" + (f"_fp8_{fp8_recipe}" if fp8_recipe else "") + ".txt"
+    fname = (
+        f"{'te' if use_te else 'megatron'}" + (f"_fp8_{fp8_recipe}" if fp8_recipe else "") + ".txt"
+    )
     return os.path.join(config_dir, fname)
 
 
@@ -106,4 +108,5 @@ def test_distributed(dtype, fp8_recipe, dp, tp, pp, sp, use_te, model):
             TRANSFORMER_IMPL="transformer_engine" if use_te else "local",
             **asdict(model_configs[model]),
         ),
-        check=True)
+        check=True,
+    )

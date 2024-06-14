@@ -132,7 +132,7 @@ void compute_bwd_ref(
   for (int b = 0; b < batches; ++b) {
     for (int h = 0; h < heads; ++h) {
       size_t offset = b * batch_size + h * head_size;
-      compute_single_head_bwd(grad_out + offset, grad_in + offset, softmax_in + offset, 
+      compute_single_head_bwd(grad_out + offset, grad_in + offset, softmax_in + offset,
                               buff + offset, scaling_factor, batches, heads, rows, cols);
     }
   }
