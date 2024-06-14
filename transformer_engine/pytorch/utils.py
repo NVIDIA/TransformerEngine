@@ -4,8 +4,10 @@
 
 """Utility functions for Transformer Engine modules"""
 import math
+import functools
 from typing import Any, Callable, Optional, Tuple
 import torch
+import transformer_engine.pytorch.cpp_extensions as ext
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -241,8 +243,19 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         f"but got tensor with dims={list(tensor.size())}"
     )
 
+
 def is_bf16_compatible() -> None:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
        check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+@functools.cache
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = ext.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
