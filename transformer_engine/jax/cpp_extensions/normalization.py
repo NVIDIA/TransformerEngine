@@ -23,27 +23,29 @@ from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
-    te_dtype_to_jax_dtype
+    te_dtype_to_jax_dtype,
 )
-from ..sharding import (all_reduce_max_along_all_axes_except_PP,
-    all_reduce_sum_along_dp_fsdp)
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
-__all__ = ['layernorm_fwd',
-           'layernorm_bwd',
-           'rmsnorm_fwd',
-           'rmsnorm_bwd',
-           'layernorm_fwd_fp8',
-           'rmsnorm_fwd_fp8',
-           ]
+__all__ = [
+    "layernorm_fwd",
+    "layernorm_bwd",
+    "rmsnorm_fwd",
+    "rmsnorm_bwd",
+    "layernorm_fwd_fp8",
+    "rmsnorm_fwd_fp8",
+]
+
 
 class LayerNormFwdPrimitive(BasePrimitive):
     """
     Layer Normalization Forward Primitive
     """
+
     name = "te_layernorm_forward"
     multiple_results = True
-    impl_static_args = (3, 4)    # zero_centered_gamma, epsilon
+    impl_static_args = (3, 4)  # zero_centered_gamma, epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -65,18 +67,21 @@ class LayerNormFwdPrimitive(BasePrimitive):
         assert x_aval.size % hidden_size == 0
 
         wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
-            x_aval.size // hidden_size,    # batch size
+            x_aval.size // hidden_size,  # batch size
             hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
-            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
-            jax_dtype_to_te_dtype(x_aval.dtype),    # out te_dtype (same as input for Fp16/Bf16)
+            jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            jax_dtype_to_te_dtype(x_aval.dtype),  # out te_dtype (same as input for Fp16/Bf16)
             True,
-            kwargs['zero_centered_gamma'],
-            kwargs['epsilon'])
-        wkspace_aval = out_aval.update(shape=wkspace_info[0],
-                                       dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = out_aval.update(shape=barrier_info[0],
-                                       dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+            kwargs["zero_centered_gamma"],
+            kwargs["epsilon"],
+        )
+        wkspace_aval = out_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = out_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
 
         return out_aval, mu_aval, rsigma_aval, wkspace_aval, barrier_aval
 
@@ -85,8 +90,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         """
         LayerNorm fwd outer primitive abstract
         """
-        out_aval, mu_aval, rsigma_aval, _, _ = \
-            LayerNormFwdPrimitive.abstract(*args, **kwargs)
+        out_aval, mu_aval, rsigma_aval, _, _ = LayerNormFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, mu_aval, rsigma_aval
 
     @staticmethod
@@ -124,7 +128,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
         ]
         operands = [x, gamma, beta]
         operand_shapes = [x_shape, g_shape, b_shape]
@@ -137,14 +141,14 @@ class LayerNormFwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            (0,),    # no dgamma_part in FWD pass
-            (0,),    # no dbeta_part in BWD pass
+            (0,),  # no dgamma_part in FWD pass
+            (0,),  # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             jax_dtype_to_te_dtype(barrier_aval.dtype),
-            TEDType.kByte,    # dummy dgamma_part te_dtype
-            TEDType.kByte,    # dummy dbeta_part te_dtype
+            TEDType.kByte,  # dummy dgamma_part te_dtype
+            TEDType.kByte,  # dummy dbeta_part te_dtype
             zero_centered_gamma,
             epsilon,
             sm_margin,
@@ -161,7 +165,8 @@ class LayerNormFwdPrimitive(BasePrimitive):
         """
         assert LayerNormFwdPrimitive.inner_primitive is not None
         out, mu, rsigma, _, _ = LayerNormFwdPrimitive.inner_primitive.bind(
-            x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
+            x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+        )
         return out, mu, rsigma
 
     @staticmethod
@@ -175,11 +180,12 @@ class LayerNormFwdPrimitive(BasePrimitive):
         x_bdim, _, _ = batch_dims
 
         out_bdims = x_bdim, x_bdim, x_bdim
-        return LayerNormFwdPrimitive.outer_primitive.bind(x,
-                                                          gamma,
-                                                          beta,
-                                                          zero_centered_gamma=zero_centered_gamma,
-                                                          epsilon=epsilon), out_bdims
+        return (
+            LayerNormFwdPrimitive.outer_primitive.bind(
+                x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            ),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
@@ -187,9 +193,9 @@ class LayerNormFwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[0])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
@@ -201,19 +207,19 @@ class LayerNormFwdPrimitive(BasePrimitive):
         x_spec, g_spec, b_spec = map(get_padded_spec, arg_infos)
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         if b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter beta " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormFwdPrimitive.name} does not support sharding of parameter beta "
+                "Enforcing no sharding of parameters hidden dim! "
             )
 
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
@@ -224,34 +230,34 @@ class LayerNormFwdPrimitive(BasePrimitive):
 
         arg_shardings = (x_sharding, g_sharding, b_sharding)
         out_shardings = (out_sharding, mu_sharding, rsigma_sharding)
-        impl = partial(LayerNormFwdPrimitive.impl,
-                       zero_centered_gamma=zero_centered_gamma,
-                       epsilon=epsilon)
+        impl = partial(
+            LayerNormFwdPrimitive.impl, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+        )
         return mesh, impl, out_shardings, arg_shardings
 
 
 register_primitive(LayerNormFwdPrimitive)
 
 
-def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
-                  epsilon: float):
+def layernorm_fwd(
+    x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool, epsilon: float
+):
     """
     Wrapper for TE layernorm fwd
     """
-    return LayerNormFwdPrimitive.outer_primitive.bind(x,
-                                                      gamma,
-                                                      beta,
-                                                      zero_centered_gamma=zero_centered_gamma,
-                                                      epsilon=epsilon)
+    return LayerNormFwdPrimitive.outer_primitive.bind(
+        x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+    )
 
 
 class LayerNormBwdPrimitive(BasePrimitive):
     """
     Layer Normalization Backward Primitive
     """
+
     name = "te_layernorm_backward"
     multiple_results = True
-    impl_static_args = (5, 6)    # zero_centered_gamma, epsilon
+    impl_static_args = (5, 6)  # zero_centered_gamma, epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -272,33 +278,48 @@ class LayerNormBwdPrimitive(BasePrimitive):
         dx_aval = core.raise_to_shaped(dz_aval)
         dgamma_aval = dbeta_aval = core.raise_to_shaped(gamma_aval)
 
-        wkspace_info, barrier_info, dgamma_part_info, dbeta_part_info = \
+        wkspace_info, barrier_info, dgamma_part_info, dbeta_part_info = (
             transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
-                x_aval.size // gamma_aval.size,           # batch size
-                gamma_aval.size,                          # hidden size
-                jax_dtype_to_te_dtype(x_aval.dtype),      # input te_dtype
+                x_aval.size // gamma_aval.size,  # batch size
+                gamma_aval.size,  # hidden size
+                jax_dtype_to_te_dtype(x_aval.dtype),  # input te_dtype
                 jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
-                True, kwargs['zero_centered_gamma'], kwargs['epsilon']
+                True,
+                kwargs["zero_centered_gamma"],
+                kwargs["epsilon"],
             )
-        wkspace_aval = dx_aval.update(shape=wkspace_info[0],
-                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = dx_aval.update(shape=barrier_info[0],
-                                      dtype=te_dtype_to_jax_dtype(barrier_info[1]))
-        dgamma_part_aval = dgamma_aval.update(shape=dgamma_part_info[0],
-                                              dtype=te_dtype_to_jax_dtype(dgamma_part_info[1]))
-        dbeta_part_aval = dbeta_aval.update(shape=dbeta_part_info[0],
-                                            dtype=te_dtype_to_jax_dtype(dbeta_part_info[1]))
+        )
+        wkspace_aval = dx_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = dx_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
+        dgamma_part_aval = dgamma_aval.update(
+            shape=dgamma_part_info[0], dtype=te_dtype_to_jax_dtype(dgamma_part_info[1])
+        )
+        dbeta_part_aval = dbeta_aval.update(
+            shape=dbeta_part_info[0], dtype=te_dtype_to_jax_dtype(dbeta_part_info[1])
+        )
 
-        return dx_aval, dgamma_aval, dbeta_aval, wkspace_aval, barrier_aval, \
-               dgamma_part_aval, dbeta_part_aval
+        return (
+            dx_aval,
+            dgamma_aval,
+            dbeta_aval,
+            wkspace_aval,
+            barrier_aval,
+            dgamma_part_aval,
+            dbeta_part_aval,
+        )
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         LayerNorm bwd outer primitive abstract
         """
-        dx_aval, dgamma_aval, dbeta_aval, _, _, _, _ = \
-            LayerNormBwdPrimitive.abstract(*args, **kwargs)
+        dx_aval, dgamma_aval, dbeta_aval, _, _, _, _ = LayerNormBwdPrimitive.abstract(
+            *args, **kwargs
+        )
         return dx_aval, dgamma_aval, dbeta_aval
 
     @staticmethod
@@ -361,7 +382,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
     def impl(dz, x, mu, rsigma, gamma, zero_centered_gamma, epsilon):
         assert LayerNormBwdPrimitive.inner_primitive is not None
         dx, dgamma, dbeta, _, _, _, _ = LayerNormBwdPrimitive.inner_primitive.bind(
-            dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
+            dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+        )
         return dx, dgamma, dbeta
 
     @staticmethod
@@ -372,13 +394,12 @@ class LayerNormBwdPrimitive(BasePrimitive):
         _, x_bdim, _, _, gamma_bdim = batch_dims
 
         out_bdims = x_bdim, gamma_bdim, gamma_bdim
-        return LayerNormBwdPrimitive.outer_primitive.bind(dz,
-                                                          x,
-                                                          mu,
-                                                          rsigma,
-                                                          gamma,
-                                                          zero_centered_gamma=zero_centered_gamma,
-                                                          epsilon=epsilon), out_bdims
+        return (
+            LayerNormBwdPrimitive.outer_primitive.bind(
+                dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            ),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
@@ -386,16 +407,16 @@ class LayerNormBwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         g_b_spec = get_padded_spec(arg_infos[4])
         if g_b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
-                f"of gamma and beta of Layernorm " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients "
+                "of gamma and beta of Layernorm "
+                "Enforcing no sharding of parameters hidden dim! "
             )
 
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
@@ -408,30 +429,29 @@ class LayerNormBwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         g_b_spec = get_padded_spec(arg_infos[4])
         if g_b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients " \
-                f"of gamma and beta of Layernorm " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormBwdPrimitive.name} does not support sharding of gradients "
+                "of gamma and beta of Layernorm "
+                "Enforcing no sharding of parameters hidden dim! "
             )
 
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
-        x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
+        x_shardings = (dx_sharding,) * 2  # dz and x should have the same sharding.
         mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
         arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, mu, rsigma, gamma):
-            local_dx, local_dgamma, local_dbeta = \
-                LayerNormBwdPrimitive.impl(dz, x, mu, rsigma, gamma,
-                     zero_centered_gamma=zero_centered_gamma,
-                     epsilon=epsilon)
+            local_dx, local_dgamma, local_dbeta = LayerNormBwdPrimitive.impl(
+                dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            )
             global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
             global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta)
             return local_dx, global_dgamma, global_dbeta
@@ -442,27 +462,31 @@ class LayerNormBwdPrimitive(BasePrimitive):
 register_primitive(LayerNormBwdPrimitive)
 
 
-def layernorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.ndarray,
-                  gamma: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
+def layernorm_bwd(
+    dz: jnp.ndarray,
+    x: jnp.ndarray,
+    mu: jnp.ndarray,
+    rsigma: jnp.ndarray,
+    gamma: jnp.ndarray,
+    zero_centered_gamma: bool,
+    epsilon: float,
+):
     """
     Wrapper for TE layernorm bwd
     """
-    return LayerNormBwdPrimitive.outer_primitive.bind(dz,
-                                                      x,
-                                                      mu,
-                                                      rsigma,
-                                                      gamma,
-                                                      zero_centered_gamma=zero_centered_gamma,
-                                                      epsilon=epsilon)
+    return LayerNormBwdPrimitive.outer_primitive.bind(
+        dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+    )
 
 
 class RmsNormFwdPrimitive(BasePrimitive):
     """
     RMS Normalization Forward Primitive
     """
+
     name = "te_rmsnorm_forward"
     multiple_results = True
-    impl_static_args = (2,)    # epsilon
+    impl_static_args = (2,)  # epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -483,18 +507,21 @@ class RmsNormFwdPrimitive(BasePrimitive):
         assert x_aval.size % hidden_size == 0
 
         wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
-            x_aval.size // hidden_size,    # batch size
+            x_aval.size // hidden_size,  # batch size
             hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
-            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
-            jax_dtype_to_te_dtype(x_aval.dtype),    # out te_dtype (same as input for Fp16/Bf16)
+            jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            jax_dtype_to_te_dtype(x_aval.dtype),  # out te_dtype (same as input for Fp16/Bf16)
             False,
             False,
-            kwargs['epsilon'])
-        wkspace_aval = out_aval.update(shape=wkspace_info[0],
-                                       dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = out_aval.update(shape=barrier_info[0],
-                                       dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+            kwargs["epsilon"],
+        )
+        wkspace_aval = out_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = out_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
 
         return out_aval, rsigma_aval, wkspace_aval, barrier_aval
 
@@ -529,7 +556,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(out_shape, x_type.element_type),
             ir.RankedTensorType.get(batch_shape, rsigma_element_type),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
         ]
         operands = [x, gamma]
         operand_shapes = [x_shape, g_shape]
@@ -542,15 +569,15 @@ class RmsNormFwdPrimitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            (0,),    # no dgamma_part in FWD pass
-            (0,),    # no dbeta_part in BWD pass
+            (0,),  # no dgamma_part in FWD pass
+            (0,),  # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             jax_dtype_to_te_dtype(barrier_aval.dtype),
-            TEDType.kByte,    # dummy dgamma_part te_dtype
-            TEDType.kByte,    # dummy dbeta_part te_dtype
-            False,    # RMSNorm doesn't support zero_centered_gamma
+            TEDType.kByte,  # dummy dgamma_part te_dtype
+            TEDType.kByte,  # dummy dbeta_part te_dtype
+            False,  # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
         )
@@ -587,9 +614,9 @@ class RmsNormFwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[0])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
@@ -601,14 +628,14 @@ class RmsNormFwdPrimitive(BasePrimitive):
         x_spec, g_spec = map(get_padded_spec, arg_infos)
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{RmsNormFwdPrimitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{RmsNormFwdPrimitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
 
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
@@ -635,9 +662,10 @@ class RmsNormBwdPrimitive(BasePrimitive):
     """
     RMS Normalization Backward Primitive
     """
+
     name = "te_rmsnorm_backward"
     multiple_results = True
-    impl_static_args = (4,)    # epsilon
+    impl_static_args = (4,)  # epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -657,20 +685,26 @@ class RmsNormBwdPrimitive(BasePrimitive):
         dx_aval = core.raise_to_shaped(dz_aval)
         dgamma_aval = core.raise_to_shaped(gamma_aval)
 
-        wkspace_info, barrier_info, dgamma_part_info, _ = \
+        wkspace_info, barrier_info, dgamma_part_info, _ = (
             transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
-                x_aval.size // gamma_aval.size,           # batch size
-                gamma_aval.size,                          # hidden size
-                jax_dtype_to_te_dtype(x_aval.dtype),      # in te_dtype
+                x_aval.size // gamma_aval.size,  # batch size
+                gamma_aval.size,  # hidden size
+                jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
                 jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
-                False, False, kwargs['epsilon']
+                False,
+                False,
+                kwargs["epsilon"],
             )
-        wkspace_aval = dx_aval.update(shape=wkspace_info[0],
-                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = dx_aval.update(shape=barrier_info[0],
-                                      dtype=te_dtype_to_jax_dtype(barrier_info[1]))
-        dgamma_part_aval = dgamma_aval.update(shape=dgamma_part_info[0],
-                                              dtype=te_dtype_to_jax_dtype(dgamma_part_info[1]))
+        )
+        wkspace_aval = dx_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = dx_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
+        dgamma_part_aval = dgamma_aval.update(
+            shape=dgamma_part_info[0], dtype=te_dtype_to_jax_dtype(dgamma_part_info[1])
+        )
 
         return dx_aval, dgamma_aval, wkspace_aval, barrier_aval, dgamma_part_aval
 
@@ -705,8 +739,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(g_shape, g_type.element_type),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
             ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
-            ir.RankedTensorType.get(dgamma_part_aval.shape,
-                                    jax_dtype_to_ir_dtype(dgamma_part_aval.dtype))
+            ir.RankedTensorType.get(
+                dgamma_part_aval.shape, jax_dtype_to_ir_dtype(dgamma_part_aval.dtype)
+            ),
         ]
         operands = [dz, rsigma, x, gamma]
         operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
@@ -720,14 +755,14 @@ class RmsNormBwdPrimitive(BasePrimitive):
             wkspace_aval.size,
             barrier_aval.size,
             dgamma_part_aval.shape,
-            (0,),    # no dbeta_part for RMSnorm
+            (0,),  # no dbeta_part for RMSnorm
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             jax_dtype_to_te_dtype(barrier_aval.dtype),
             jax_dtype_to_te_dtype(dgamma_part_aval.dtype),
-            TEDType.kByte,    # dummy dbeta_part te_dtype
-            False,    # RMSNorm doesn't support zero_centered_gamma
+            TEDType.kByte,  # dummy dbeta_part te_dtype
+            False,  # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
         )
@@ -739,8 +774,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, rsigma, gamma, epsilon):
         assert RmsNormBwdPrimitive.inner_primitive is not None
-        dx, dgamma, _, _, _ = \
-            RmsNormBwdPrimitive.inner_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
+        dx, dgamma, _, _, _ = RmsNormBwdPrimitive.inner_primitive.bind(
+            dz, x, rsigma, gamma, epsilon=epsilon
+        )
         return dx, dgamma
 
     @staticmethod
@@ -751,8 +787,10 @@ class RmsNormBwdPrimitive(BasePrimitive):
         _, x_bdim, _, gamma_bdim = batch_dims
 
         out_bdims = x_bdim, gamma_bdim
-        return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma,
-                                                        epsilon=epsilon), out_bdims
+        return (
+            RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(epsilon, mesh, arg_infos, result_infos):
@@ -760,15 +798,15 @@ class RmsNormBwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         g_spec = get_padded_spec(arg_infos[3])
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -780,26 +818,25 @@ class RmsNormBwdPrimitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         g_spec = get_padded_spec(arg_infos[3])
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{RmsNormBwdPrimitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = dx_sharding, dgamma_sharding
-        x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
+        x_shardings = (dx_sharding,) * 2  # dz and x should have the same sharding.
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(None)))
 
         def sharded_impl(dz, x, rsigma, gamma):
-            local_dx, local_dgamma = \
-                RmsNormBwdPrimitive.impl(dz, x, rsigma, gamma, epsilon=epsilon)
+            local_dx, local_dgamma = RmsNormBwdPrimitive.impl(dz, x, rsigma, gamma, epsilon=epsilon)
             global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
             return local_dx, global_dgamma
 
@@ -809,8 +846,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
 register_primitive(RmsNormBwdPrimitive)
 
 
-def rmsnorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp.ndarray,
-                epsilon: float):
+def rmsnorm_bwd(
+    dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp.ndarray, epsilon: float
+):
     """
     Wrapper for TE layernorm bwd
     """
@@ -821,15 +859,26 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
     """
     Layer Normalization Forward FP8 Primitive
     """
+
     name = "te_layernorm_forward_fp8"
     multiple_results = True
-    impl_static_args = (6, 7, 8)    # out_type, zero_centered_gamma, epsilon
+    impl_static_args = (6, 7, 8)  # out_type, zero_centered_gamma, epsilon
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(x_aval, gamma_aval, beta_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
-                 zero_centered_gamma, epsilon):
+    def abstract(
+        x_aval,
+        gamma_aval,
+        beta_aval,
+        amax_aval,
+        scale_aval,
+        scale_inv_aval,
+        *,
+        out_dtype,
+        zero_centered_gamma,
+        epsilon,
+    ):
         """
         LayerNorm fwd (fp8 out) inner primitive abstract
         """
@@ -845,22 +894,25 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         assert gamma_aval.size == beta_aval.size
 
         wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
-            x_aval.size // gamma_aval.size,    # batch size
-            gamma_aval.size,    # hidden size
-            jax_dtype_to_te_dtype(x_aval.dtype),    # in type
-            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight type
+            x_aval.size // gamma_aval.size,  # batch size
+            gamma_aval.size,  # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),  # in type
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight type
             jax_dtype_to_te_dtype(out_dtype),
             True,
             zero_centered_gamma,
-            epsilon)
+            epsilon,
+        )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-        wkspace_aval = x_aval.update(shape=wkspace_info[0],
-                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = x_aval.update(shape=barrier_info[0],
-                                     dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+        wkspace_aval = x_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = x_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
 
         return out_aval, mu_aval, rsigma_aval, updated_amax_aval, wkspace_aval, barrier_aval
 
@@ -869,13 +921,15 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         """
         LayerNorm fwd (fp8 out) outer primitive abstract
         """
-        out_aval, mu_aval, rsigma_aval, updated_amax_aval, _, _ = \
-            LayerNormFwdFp8Primitive.abstract(*args, **kwargs)
+        out_aval, mu_aval, rsigma_aval, updated_amax_aval, _, _ = LayerNormFwdFp8Primitive.abstract(
+            *args, **kwargs
+        )
         return out_aval, mu_aval, rsigma_aval, updated_amax_aval
 
     @staticmethod
-    def lowering(ctx, x, gamma, beta, amax, scale, scale_inv, *, out_dtype, zero_centered_gamma,
-                 epsilon):
+    def lowering(
+        ctx, x, gamma, beta, amax, scale, scale_inv, *, out_dtype, zero_centered_gamma, epsilon
+    ):
         """
         LayerNorm fwd (fp8 out) lowering rules
         """
@@ -922,11 +976,16 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
         ]
         operands = [x, gamma, beta, amax, scale, scale_inv]
         operand_shapes = [
-            x_shape, g_shape, b_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape
+            x_shape,
+            g_shape,
+            b_shape,
+            ir_amax_shape,
+            ir_scale_shape,
+            ir_scale_inv_shape,
         ]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
@@ -937,24 +996,22 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            (0,),    # no dgamma_part in FWD pass
-            (0,),    # no dbeta_part in BWD pass
+            (0,),  # no dgamma_part in FWD pass
+            (0,),  # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             jax_dtype_to_te_dtype(barrier_aval.dtype),
-            TEDType.kByte,    # dummy dgamma_part te_dtype
-            TEDType.kByte,    # dummy dbeta_part te_dtype
+            TEDType.kByte,  # dummy dgamma_part te_dtype
+            TEDType.kByte,  # dummy dbeta_part te_dtype
             zero_centered_gamma,
             epsilon,
             sm_margin,
         )
 
-        out = custom_caller(LayerNormFwdFp8Primitive.name,
-                            args,
-                            opaque,
-                            False,
-                            operand_output_aliases={3: 3})
+        out = custom_caller(
+            LayerNormFwdFp8Primitive.name, args, opaque, False, operand_output_aliases={3: 3}
+        )
 
         return out
 
@@ -973,7 +1030,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             scale_inv,
             out_dtype=out_dtype,
             zero_centered_gamma=zero_centered_gamma,
-            epsilon=epsilon)
+            epsilon=epsilon,
+        )
         return out, mu, rsigma, updated_amax
 
     @staticmethod
@@ -987,27 +1045,33 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         x_bdim, _, _, amax_bdim, _, _ = batch_dims
 
         out_bdims = x_bdim, x_bdim, x_bdim, amax_bdim
-        return LayerNormFwdFp8Primitive.outer_primitive.bind(
-            x,
-            gamma,
-            beta,
-            amax,
-            scale,
-            scale_inv,
-            out_dtype=out_dtype,
-            zero_centered_gamma=zero_centered_gamma,
-            epsilon=epsilon), out_bdims
+        return (
+            LayerNormFwdFp8Primitive.outer_primitive.bind(
+                x,
+                gamma,
+                beta,
+                amax,
+                scale,
+                scale_inv,
+                out_dtype=out_dtype,
+                zero_centered_gamma=zero_centered_gamma,
+                epsilon=epsilon,
+            ),
+            out_bdims,
+        )
 
     @staticmethod
-    def infer_sharding_from_operands(out_dtype, zero_centered_gamma, epsilon, mesh, arg_infos,
-                                     result_infos):
+    def infer_sharding_from_operands(
+        out_dtype, zero_centered_gamma, epsilon, mesh, arg_infos, result_infos
+    ):
         del out_dtype, zero_centered_gamma, epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[0])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance.")
+                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
+            )
 
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
@@ -1022,37 +1086,44 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         b_spec = get_padded_spec(arg_infos[2])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {LayerNormFwdFp8Primitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {LayerNormFwdFp8Primitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         if b_spec[-1] is not None:
             warnings.warn(
-                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter beta " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{LayerNormFwdFp8Primitive.name} does not support sharding of parameter beta "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         g_sharding = NamedSharding(mesh, PartitionSpec(None))
         b_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_sharding = x_sharding
         mu_sharding = rsigma_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+            mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1])
+        )
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[3])))
         fp8_meta_sharding = amax_sharding
         arg_shardings = (x_sharding, g_sharding, b_sharding) + (fp8_meta_sharding,) * 3
         out_shardings = (out_sharding, mu_sharding, rsigma_sharding, amax_sharding)
 
         def sharded_impl(x, gamma, beta, amax, scale, scale_inv):
-            local_x, local_mu, local_rsigma, local_amax = \
-                LayerNormFwdFp8Primitive.impl(x, gamma, beta, amax, scale, scale_inv,
-                                            out_dtype=out_dtype,
-                                            zero_centered_gamma=zero_centered_gamma,
-                                            epsilon=epsilon)
+            local_x, local_mu, local_rsigma, local_amax = LayerNormFwdFp8Primitive.impl(
+                x,
+                gamma,
+                beta,
+                amax,
+                scale,
+                scale_inv,
+                out_dtype=out_dtype,
+                zero_centered_gamma=zero_centered_gamma,
+                epsilon=epsilon,
+            )
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
 
             return local_x, local_mu, local_rsigma, global_updated_amax
@@ -1063,30 +1134,41 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
 register_primitive(LayerNormFwdFp8Primitive)
 
 
-def layernorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, amax: jnp.ndarray,
-                      scale: jnp.ndarray, scale_inv: jnp.ndarray, out_dtype: jnp.dtype,
-                      zero_centered_gamma: bool, epsilon: float):
+def layernorm_fwd_fp8(
+    x: jnp.ndarray,
+    gamma: jnp.ndarray,
+    beta: jnp.ndarray,
+    amax: jnp.ndarray,
+    scale: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    out_dtype: jnp.dtype,
+    zero_centered_gamma: bool,
+    epsilon: float,
+):
     """
     Wrapper for TE layernorm fwd (fp8 out)
     """
-    return LayerNormFwdFp8Primitive.outer_primitive.bind(x,
-                                                         gamma,
-                                                         beta,
-                                                         amax,
-                                                         scale,
-                                                         scale_inv,
-                                                         out_dtype=out_dtype,
-                                                         zero_centered_gamma=zero_centered_gamma,
-                                                         epsilon=epsilon)
+    return LayerNormFwdFp8Primitive.outer_primitive.bind(
+        x,
+        gamma,
+        beta,
+        amax,
+        scale,
+        scale_inv,
+        out_dtype=out_dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        epsilon=epsilon,
+    )
 
 
 class RmsNormFwdFp8Primitive(BasePrimitive):
     """
     RMS Normalization Forward FP8 Primitive
     """
+
     name = "te_rmsnorm_forward_fp8"
     multiple_results = True
-    impl_static_args = (5, 6)    # out_dtype, epsilon
+    impl_static_args = (5, 6)  # out_dtype, epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -1108,22 +1190,25 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         rsigama_dtype = jnp.float32
 
         wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
-            x_aval.size // hidden_size,    # batch_size
+            x_aval.size // hidden_size,  # batch_size
             hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),    # in te_dtype
-            jax_dtype_to_te_dtype(gamma_aval.dtype),    # weight te_dtype
-            jax_dtype_to_te_dtype(out_dtype),    # out te_dtype
+            jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            jax_dtype_to_te_dtype(out_dtype),  # out te_dtype
             False,
             False,
-            epsilon)
+            epsilon,
+        )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=rsigama_dtype)
         amax_aval = out_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-        wkspace_aval = x_aval.update(shape=wkspace_info[0],
-                                     dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
-        barrier_aval = x_aval.update(shape=barrier_info[0],
-                                     dtype=te_dtype_to_jax_dtype(barrier_info[1]))
+        wkspace_aval = x_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+        barrier_aval = x_aval.update(
+            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
+        )
 
         return out_aval, rsigma_aval, amax_aval, wkspace_aval, barrier_aval
 
@@ -1176,7 +1261,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
             ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype))
+            ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
         ]
         operands = [x, gamma, amax, scale, scale_inv]
         operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -1189,24 +1274,22 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             wkspace_aval.size,
             barrier_aval.size,
-            (0,),    # no dgamma_part in FWD pass
-            (0,),    # no dbeta_part in BWD pass
+            (0,),  # no dgamma_part in FWD pass
+            (0,),  # no dbeta_part in BWD pass
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             jax_dtype_to_te_dtype(barrier_aval.dtype),
-            TEDType.kByte,    # dummy dgamma_part te_dtype
-            TEDType.kByte,    # dummy dbeta_part te_dtype
-            False,    # RMSNorm doesn't support zero_centered_gamma
+            TEDType.kByte,  # dummy dgamma_part te_dtype
+            TEDType.kByte,  # dummy dbeta_part te_dtype
+            False,  # RMSNorm doesn't support zero_centered_gamma
             epsilon,
             sm_margin,
         )
 
-        out = custom_caller(RmsNormFwdFp8Primitive.name,
-                            args,
-                            opaque,
-                            False,
-                            operand_output_aliases={2: 2})
+        out = custom_caller(
+            RmsNormFwdFp8Primitive.name, args, opaque, False, operand_output_aliases={2: 2}
+        )
 
         return out
 
@@ -1216,13 +1299,9 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert RmsNormFwdFp8Primitive.inner_primitive is not None
-        out, rsigma, amax, _, _ = RmsNormFwdFp8Primitive.inner_primitive.bind(x,
-                                                                              gamma,
-                                                                              amax,
-                                                                              scale,
-                                                                              scale_inv,
-                                                                              out_dtype=out_dtype,
-                                                                              epsilon=epsilon)
+        out, rsigma, amax, _, _ = RmsNormFwdFp8Primitive.inner_primitive.bind(
+            x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
+        )
         return out, rsigma, amax
 
     @staticmethod
@@ -1235,13 +1314,12 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         x, gamma, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
         out_bdims = x_bdim, x_bdim, amax_bdim
-        return RmsNormFwdFp8Primitive.outer_primitive.bind(x,
-                                                           gamma,
-                                                           amax,
-                                                           scale,
-                                                           scale_inv,
-                                                           out_dtype=out_dtype,
-                                                           epsilon=epsilon), out_bdims
+        return (
+            RmsNormFwdFp8Primitive.outer_primitive.bind(
+                x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
+            ),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, epsilon, mesh, arg_infos, result_infos):
@@ -1249,9 +1327,9 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         x_spec = get_padded_spec(arg_infos[0])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormFwdFp8Primitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormFwdFp8Primitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
@@ -1265,14 +1343,14 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         g_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
-                f"Does not support to shard hidden dim in {RmsNormFwdFp8Primitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
+                f"Does not support to shard hidden dim in {RmsNormFwdFp8Primitive.name}! "
+                "Force to not shard the hidden dim, which might introduce extra collective ops, "
+                "and hurt performance."
             )
         if g_spec[-1] is not None:
             warnings.warn(
-                f"{RmsNormFwdFp8Primitive.name} does not support sharding of parameter gamma " \
-                f"Enforcing no sharding of parameters hidden dim! " \
+                f"{RmsNormFwdFp8Primitive.name} does not support sharding of parameter gamma "
+                "Enforcing no sharding of parameters hidden dim! "
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         g_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -1284,9 +1362,9 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         out_shardings = (out_sharding, rsigma_sharding, amax_sharding)
 
         def sharded_impl(x, gamma, amax, scale, scale_inv):
-            local_x, local_rsigma, local_amax= \
-                RmsNormFwdFp8Primitive.impl(x, gamma, amax, scale, scale_inv,
-                                            out_dtype=out_dtype, epsilon=epsilon)
+            local_x, local_rsigma, local_amax = RmsNormFwdFp8Primitive.impl(
+                x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
+            )
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
 
             return local_x, local_rsigma, global_updated_amax
@@ -1297,15 +1375,18 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
 register_primitive(RmsNormFwdFp8Primitive)
 
 
-def rmsnorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                    scale_inv: jnp.ndarray, out_dtype: jnp.dtype, epsilon: float):
+def rmsnorm_fwd_fp8(
+    x: jnp.ndarray,
+    gamma: jnp.ndarray,
+    amax: jnp.ndarray,
+    scale: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    out_dtype: jnp.dtype,
+    epsilon: float,
+):
     """
     Wrapper for TE rmsnorm fwd (fp8 out)
     """
-    return RmsNormFwdFp8Primitive.outer_primitive.bind(x,
-                                                       gamma,
-                                                       amax,
-                                                       scale,
-                                                       scale_inv,
-                                                       out_dtype=out_dtype,
-                                                       epsilon=epsilon)
+    return RmsNormFwdFp8Primitive.outer_primitive.bind(
+        x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
+    )

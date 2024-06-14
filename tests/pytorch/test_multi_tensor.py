@@ -28,9 +28,7 @@ appliers = [MultiTensorApply(2048 * 32), MultiTensorApply(333), MultiTensorApply
 @pytest.mark.parametrize("in_type", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("out_type", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("inplace", [False, True])
-def test_multi_tensor_scale(
-    input_size_pair, applier, repeat, in_type, out_type, inplace
-):
+def test_multi_tensor_scale(input_size_pair, applier, repeat, in_type, out_type, inplace):
     if inplace is True and (out_type is not in_type):
         pytest.skip("inplace=True and out_type != in_type is not supported.")
     elif (in_type == torch.float16 and out_type == torch.bfloat16) or (
@@ -154,9 +152,7 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
         in_list += [a.clone().to(in_type), b.clone().to(in_type)]
 
     if per_tensor:
-        norm, norm_per_tensor = applier(
-            tex.multi_tensor_l2norm, overflow_buf, [in_list], True
-        )
+        norm, norm_per_tensor = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], True)
         normab = torch.cat((a.norm().view(1), b.norm().view(1)))
         norm_per_tensor = norm_per_tensor.view(-1, 2)
     else:
@@ -168,9 +164,7 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
 
     torch.testing.assert_close(norm, reference.broadcast_to(norm.shape))
     if per_tensor:
-        torch.testing.assert_close(
-            norm_per_tensor, normab.broadcast_to(norm_per_tensor.shape)
-        )
+        torch.testing.assert_close(norm_per_tensor, normab.broadcast_to(norm_per_tensor.shape))
     assert overflow_buf.item() == 0
 
 
@@ -179,9 +173,7 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
 @pytest.mark.parametrize("repeat", [1, 55])
 @pytest.mark.parametrize("in_type", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("per_tensor", [False, True])
-def test_multi_tensor_unscale_l2norm(
-    input_size_pair, applier, repeat, in_type, per_tensor
-):
+def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, per_tensor):
     sizea, sizeb = input_size_pair
     device = torch.device("cuda")
     val = 4.0
@@ -205,9 +197,7 @@ def test_multi_tensor_unscale_l2norm(
             inv_scale_cuda,
             True,
         )
-        normab = torch.cat(
-            ((a * inv_scale).norm().view(1), (b * inv_scale).norm().view(1))
-        )
+        normab = torch.cat(((a * inv_scale).norm().view(1), (b * inv_scale).norm().view(1)))
         norm_per_tensor = norm_per_tensor.view(-1, 2)
     else:
         norm, _ = applier(
@@ -224,7 +214,5 @@ def test_multi_tensor_unscale_l2norm(
 
     torch.testing.assert_close(norm, reference.broadcast_to(norm.shape))
     if per_tensor:
-        torch.testing.assert_close(
-            norm_per_tensor, normab.broadcast_to(norm_per_tensor.shape)
-        )
+        torch.testing.assert_close(norm_per_tensor, normab.broadcast_to(norm_per_tensor.shape))
     assert overflow_buf.item() == 0

@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_H_
 
 #include <transformer_engine/transformer_engine.h>
+
 #include <functional>
 #include <map>
 #include <stdexcept>
@@ -15,7 +16,6 @@
 #include <vector>
 
 #include "../common.h"
-
 #include "../layer_norm/ln.h"
 
 namespace transformer_engine {
@@ -47,40 +47,40 @@ extern BwdGeneralRegistry BWD_GENERAL_FUNCS;
 
 template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct FwdTunedRegistrar {
-    explicit FwdTunedRegistrar(FwdFunction f) {
-        uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
-        FWD_TUNED_FUNCS.insert({key, f});
-    }
+  explicit FwdTunedRegistrar(FwdFunction f) {
+    uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+    FWD_TUNED_FUNCS.insert({key, f});
+  }
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct FwdGeneralRegistrar {
-    explicit FwdGeneralRegistrar(FwdFunction f) {
-        uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(0);
-        FWD_GENERAL_FUNCS[key].insert({HIDDEN_SIZE, f});
-    }
+  explicit FwdGeneralRegistrar(FwdFunction f) {
+    uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(0);
+    FWD_GENERAL_FUNCS[key].insert({HIDDEN_SIZE, f});
+  }
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct BwdTunedRegistrar {
-    explicit BwdTunedRegistrar(BwdFunction f) {
-        uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
-        BWD_TUNED_FUNCS.insert({key, f});
-    }
+  explicit BwdTunedRegistrar(BwdFunction f) {
+    uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+    BWD_TUNED_FUNCS.insert({key, f});
+  }
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct BwdGeneralRegistrar {
-    explicit BwdGeneralRegistrar(BwdFunction f) {
-        uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(0);
-        BWD_GENERAL_FUNCS[key].insert({HIDDEN_SIZE, f});
-    }
+  explicit BwdGeneralRegistrar(BwdFunction f) {
+    uint64_t key = layer_norm::Types2Key<W, I, O, C>::get(0);
+    BWD_GENERAL_FUNCS[key].insert({HIDDEN_SIZE, f});
+  }
 };
 
 }  // namespace rmsnorm

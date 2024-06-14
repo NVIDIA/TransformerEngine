@@ -18,18 +18,19 @@ from .misc import (
     get_padded_spec,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
-    jax_dtype_to_ir_dtype
+    jax_dtype_to_ir_dtype,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
-__all__ = ['cast_fp8']
+__all__ = ["cast_fp8"]
 
 
 class CastFP8Primitive(BasePrimitive):
     """
     Cast Primitive
     """
+
     name = "te_quantize"
     multiple_results = True
     impl_static_args = (4,)
@@ -79,15 +80,13 @@ class CastFP8Primitive(BasePrimitive):
         operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor(ir_x_shape,
-                                                               jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype))
+        opaque = transformer_engine_jax.pack_common_descriptor(
+            ir_x_shape, jax_dtype_to_te_dtype(x_aval.dtype), jax_dtype_to_te_dtype(out_dtype)
+        )
 
-        out = custom_caller(CastFP8Primitive.name,
-                            args,
-                            opaque,
-                            False,
-                            operand_output_aliases={1: 1})
+        out = custom_caller(
+            CastFP8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
+        )
 
         return out
 
@@ -97,9 +96,9 @@ class CastFP8Primitive(BasePrimitive):
         te_cast implementation
         """
         assert CastFP8Primitive.inner_primitive is not None
-        casted_x, updated_amax = \
-            CastFP8Primitive.inner_primitive.bind(
-                x, amax, scale, scale_inv, out_dtype=out_dtype)
+        casted_x, updated_amax = CastFP8Primitive.inner_primitive.bind(
+            x, amax, scale, scale_inv, out_dtype=out_dtype
+        )
         return casted_x, updated_amax
 
     @staticmethod
@@ -111,8 +110,10 @@ class CastFP8Primitive(BasePrimitive):
         x_bdim, amax_bdim, *_ = batch_dims
 
         out_bdims = x_bdim, amax_bdim
-        return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv,
-                                                     out_dtype=out_dtype), out_bdims
+        return (
+            CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, mesh, arg_infos, result_infos):
@@ -132,8 +133,9 @@ class CastFP8Primitive(BasePrimitive):
         out_shardings = (casted_x_sharding, amax_sharding)
 
         def sharded_impl(x, amax, scale, scale_inv):
-            local_cx, local_updated_amax = \
-                CastFP8Primitive.impl(x, amax, scale, scale_inv, out_dtype=out_dtype)
+            local_cx, local_updated_amax = CastFP8Primitive.impl(
+                x, amax, scale, scale_inv, out_dtype=out_dtype
+            )
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax)
 
             return local_cx, global_updated_amax
@@ -144,8 +146,13 @@ class CastFP8Primitive(BasePrimitive):
 register_primitive(CastFP8Primitive)
 
 
-def cast_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
-             out_dtype: TEDType) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cast_fp8(
+    x: jnp.ndarray,
+    amax: jnp.ndarray,
+    scale: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    out_dtype: TEDType,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Cast wrapper
     Return FP8 tensor

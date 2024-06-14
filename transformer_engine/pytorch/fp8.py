@@ -22,9 +22,9 @@ __all__ = ["fp8_autocast", "fp8_model_init"]
 
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if get_device_compute_capability() >= (9, 0): # hopper and above
+    if get_device_compute_capability() >= (9, 0):  # hopper and above
         return True, ""
-    if get_device_compute_capability() < (8, 9): # pre-ada
+    if get_device_compute_capability() < (8, 9):  # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
     if tex.get_cublasLt_version() < 120103:
         return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
@@ -38,9 +38,7 @@ def get_default_fp8_recipe() -> DelayedScaling:
     return DelayedScaling()
 
 
-def get_fp8_te_dtype(
-    fp8_recipe: DelayedScaling, fprop_tensor: bool = True
-) -> tex.DType:
+def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
     """Get fp8 data type according to recipe and tensor"""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -49,9 +47,7 @@ def get_fp8_te_dtype(
     return tex.DType.kFloat8E5M2
 
 
-def get_fp8_max(
-    fp8_recipe: DelayedScaling, fprop_tensor: bool = True
-) -> tex.DType:
+def get_fp8_max(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -64,6 +60,7 @@ class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
     FP8 state at different stages of execution.
     """
+
     FP8_ENABLED = False
     FP8_CALIBRATION = False
     FP8_RECIPE = None
@@ -207,19 +204,22 @@ class FP8GlobalStateManager:
 
             if forward and fp8_weights is not None:
                 autocast_key = cls.get_unique_autocast_key(
-                                    fp8_meta["recipe"], fp8_meta["fp8_group"])
+                    fp8_meta["recipe"], fp8_meta["fp8_group"]
+                )
                 fp8_weight_set = {id(w._data) for w in fp8_weights}
                 if autocast_key not in cls.autocast_to_fp8_params:
                     cls.autocast_to_fp8_params[autocast_key] = fp8_weight_set
                 else:
-                    cls.autocast_to_fp8_params[autocast_key] = (
-                        cls.autocast_to_fp8_params[autocast_key].union(fp8_weight_set))
+                    cls.autocast_to_fp8_params[autocast_key] = cls.autocast_to_fp8_params[
+                        autocast_key
+                    ].union(fp8_weight_set)
                 # Identify correct autocast key for a given param.
                 for w in fp8_weight_set:
                     cls.fp8_param_to_autocast[w] = autocast_key
 
             key = cls.get_key_in_buffer(
-                forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"])
+                forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"]
+            )
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -229,7 +229,8 @@ class FP8GlobalStateManager:
             else:
                 cls.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 cls.global_amax_history_buffer[key].append(
-                    fp8_meta[fp8_meta_tensor_key].amax_history)
+                    fp8_meta[fp8_meta_tensor_key].amax_history
+                )
                 cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
                 cls.global_scale_inv_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale_inv)
             fp8_meta[index_in_buffer].append(len(cls.global_amax_buffer[key]) - 1)
@@ -283,25 +284,25 @@ class FP8GlobalStateManager:
             cls.FP8_RECIPE,
             cls.FP8_DISTRIBUTED_GROUP,
             cls.IS_FIRST_FP8_MODULE,
-            cls.FP8_GRAPH_CAPTURING)
+            cls.FP8_GRAPH_CAPTURING,
+        )
 
     @classmethod
     def set_fp8_autocast_state(
-        cls,
-        fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool]
+        cls, fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool]
     ) -> None:
         """FP8 autocast state setter"""
-        (cls.FP8_ENABLED,
-         cls.FP8_CALIBRATION,
-         cls.FP8_RECIPE,
-         cls.FP8_DISTRIBUTED_GROUP,
-         cls.IS_FIRST_FP8_MODULE,
-         cls.FP8_GRAPH_CAPTURING) = fp8_state
+        (
+            cls.FP8_ENABLED,
+            cls.FP8_CALIBRATION,
+            cls.FP8_RECIPE,
+            cls.FP8_DISTRIBUTED_GROUP,
+            cls.IS_FIRST_FP8_MODULE,
+            cls.FP8_GRAPH_CAPTURING,
+        ) = fp8_state
 
     @staticmethod
-    def reduce_tensor_across_group_op_max(
-        tensor: torch.Tensor, group: dist_group_type
-    ) -> None:
+    def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
         """Reduce tensor across given group."""
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(
@@ -337,15 +338,19 @@ class FP8GlobalStateManager:
             contiguous_amax = torch.cat(amax_buffer)
 
             # Reduction.
-            if (recipe.reduce_amax
+            if (
+                recipe.reduce_amax
                 and torch.distributed.is_initialized()
-                and torch.distributed.get_world_size(group=group) > 1):
+                and torch.distributed.get_world_size(group=group) > 1
+            ):
                 cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
 
             # Amax and scale update.
-            unfused_update = (bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
-                              or callable(recipe.amax_compute_algo)
-                              or callable(recipe.scaling_factor_compute_algo))
+            unfused_update = (
+                bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
+                or callable(recipe.amax_compute_algo)
+                or callable(recipe.scaling_factor_compute_algo)
+            )
 
             if not unfused_update:
                 tex.fused_amax_and_scale_update_after_reduction(
@@ -366,7 +371,8 @@ class FP8GlobalStateManager:
                     cls.global_scale_inv_buffer[buffer_key],
                 ):
                     _amax_and_scale_update(
-                        amax_history, scale, scale_inv, get_fp8_max(recipe, forward), recipe)
+                        amax_history, scale, scale_inv, get_fp8_max(recipe, forward), recipe
+                    )
 
     @classmethod
     def get_unique_autocast_key(
@@ -455,9 +461,7 @@ class FP8GlobalStateManager:
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
-        stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[
-            fp8_meta[buffer_position_key]
-        ].popleft()
+        stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
         fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
@@ -554,11 +558,13 @@ def fp8_autocast(
                are reduced at the end of each training step.
     """
     fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
-    FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
-                                             calibrating=calibrating,
-                                             fp8_recipe=fp8_recipe,
-                                             fp8_group=fp8_group,
-                                             _graph=_graph)
+    FP8GlobalStateManager.fp8_autocast_enter(
+        enabled=enabled,
+        calibrating=calibrating,
+        fp8_recipe=fp8_recipe,
+        fp8_group=fp8_group,
+        _graph=_graph,
+    )
     try:
         yield
     finally:
@@ -610,7 +616,7 @@ def _default_sf_compute(
     4. When amax == inf or amax == nan:
        No action is possible, set scale to the previous scale (or 1).
     """
-    sf = (fp8_max / amax) / (2 ** margin)
+    sf = (fp8_max / amax) / (2**margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
     sf = torch.where(torch.isinf(sf), torch.full_like(sf, _fp32_max), sf)

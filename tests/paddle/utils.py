@@ -11,7 +11,7 @@ import paddle
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 
-import transformer_engine    # pylint: disable=unused-import
+import transformer_engine  # pylint: disable=unused-import
 from transformer_engine.paddle.constants import (
     TE_DType,
     AttnBiasType,
@@ -19,7 +19,9 @@ from transformer_engine.paddle.constants import (
     FusedAttnBackend,
 )
 from transformer_engine.paddle.fp8 import FP8TensorMeta
-from transformer_engine import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
+from transformer_engine import (
+    transformer_engine_paddle as tex,
+)  # pylint: disable=wrong-import-order
 
 
 def create_fp8_meta(num_gemms=1, amax_history_len=10):
@@ -31,18 +33,14 @@ def create_fp8_meta(num_gemms=1, amax_history_len=10):
     return fp8_meta
 
 
-def assert_allclose(actual,
-                    desired,
-                    rtol=1e-05,
-                    atol=1e-08,
-                    equal_nan=True,
-                    err_msg='',
-                    verbose=True):
+def assert_allclose(
+    actual, desired, rtol=1e-05, atol=1e-08, equal_nan=True, err_msg="", verbose=True
+):
     """Compare two input paddle tensors"""
     if isinstance(actual, paddle.Tensor):
-        actual = paddle.cast(actual, 'float32')
+        actual = paddle.cast(actual, "float32")
     if isinstance(desired, paddle.Tensor):
-        desired = paddle.cast(desired, 'float32')
+        desired = paddle.cast(desired, "float32")
     if len(actual.shape) == 0:
         actual = actual.item()
         desired = desired.item()
@@ -54,8 +52,9 @@ def assert_allclose(actual,
 
 def assert_shape(inp, expected_shape):
     """Assert the shape of input tensor equals to expected shape"""
-    assert inp.shape == expected_shape, f"Expected tensor shape: {expected_shape} != " \
-        f"actual tensor shape: {inp.shape}"
+    assert (
+        inp.shape == expected_shape
+    ), f"Expected tensor shape: {expected_shape} != actual tensor shape: {inp.shape}"
 
 
 def is_devices_enough(required):
@@ -91,12 +90,21 @@ def set_random_seed(seed):
     np.random.seed(seed + 100 * pp_rank)
 
     seed_offset = seed + 1024 + paddle.distributed.get_world_size()
-    global_seed = (seed_offset + pp_rank * (mp_size) + dp_rank * (mp_size * pp_size) +
-                   sharding_rank * (mp_size * pp_size * dp_size))
+    global_seed = (
+        seed_offset
+        + pp_rank * (mp_size)
+        + dp_rank * (mp_size * pp_size)
+        + sharding_rank * (mp_size * pp_size * dp_size)
+    )
 
     seed_offset += paddle.distributed.get_world_size()
-    local_seed = (seed_offset + mp_rank + pp_rank * (mp_size) + dp_rank * (mp_size * pp_size) +
-                  sharding_rank * (mp_size * pp_size * dp_size))
+    local_seed = (
+        seed_offset
+        + mp_rank
+        + pp_rank * (mp_size)
+        + dp_rank * (mp_size * pp_size)
+        + sharding_rank * (mp_size * pp_size * dp_size)
+    )
 
     tracker = get_rng_state_tracker()
     # tracker.reset()

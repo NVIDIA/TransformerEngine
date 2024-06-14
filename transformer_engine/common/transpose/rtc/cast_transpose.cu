@@ -21,16 +21,11 @@ constexpr size_t block_size = __BLOCK_SIZE__;
 
 }  // namespace
 
-__global__ void
-__launch_bounds__(block_size)
-cast_transpose_optimized_kernel(const IType * __restrict__ const input,
-                                const CType * __restrict__ const noop,
-                                OType * __restrict__  const output_c,
-                                OType * __restrict__  const output_t,
-                                const CType * __restrict__ const scale_ptr,
-                                CType * __restrict__ const amax_ptr,
-                                const size_t row_length,
-                                const size_t num_rows) {
+__global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
+    const IType* __restrict__ const input, const CType* __restrict__ const noop,
+    OType* __restrict__ const output_c, OType* __restrict__ const output_t,
+    const CType* __restrict__ const scale_ptr, CType* __restrict__ const amax_ptr,
+    const size_t row_length, const size_t num_rows) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
   // Vectorized load/store sizes
@@ -73,18 +68,18 @@ cast_transpose_optimized_kernel(const IType * __restrict__ const input,
   // Note: Each thread loads num_iterations subtiles, computes amax,
   // casts type, and transposes in registers.
   OVecT local_output_t[nvec_in][num_iterations];
-  #pragma unroll
+#pragma unroll
   for (size_t iter = 0; iter < num_iterations; ++iter) {
     const size_t i1 = tidy + iter * bdimy;
     const size_t j1 = tidx;
-    #pragma unroll
+#pragma unroll
     for (size_t i2 = 0; i2 < nvec_out; ++i2) {
       const size_t row = tile_row + i1 * nvec_out + i2;
       const size_t col = tile_col + j1 * nvec_in;
       IVec local_input;
       OVecC local_output_c;
       local_input.load_from(&input[row * row_length + col]);
-      #pragma unroll
+#pragma unroll
       for (size_t j2 = 0; j2 < nvec_in; ++j2) {
         const CType in = static_cast<CType>(local_input.data.elt[j2]);
         const OType out = OType(in * scale);
@@ -98,17 +93,17 @@ cast_transpose_optimized_kernel(const IType * __restrict__ const input,
   }
 
   // Copy from registers to shared memory to global memory
-  __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP+1];
-  #pragma unroll
+  __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
+#pragma unroll
   for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-    #pragma unroll
+#pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidy + iter * bdimy;
       const size_t j1 = tidx;
       shared_output_t[j1][i1] = local_output_t[j2][iter];
     }
     __syncthreads();
-    #pragma unroll
+#pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidx;
       const size_t j1 = tidy + iter * bdimy;
