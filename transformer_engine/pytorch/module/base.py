@@ -430,8 +430,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
-                if (k != 'buffer_index_and_autocast_key'
-                    and isinstance(v, (bool, int, float, str, tuple, list))):
+                if k != "buffer_index_and_autocast_key" and isinstance(
+                    v, (bool, int, float, str, tuple, list)
+                ):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
@@ -493,7 +494,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                 )
         for name, buf in self.named_buffers():
-            if buf is not None and ('weight' in name or 'bias' in name):
+            if buf is not None and ("weight" in name or "bias" in name):
                 assert dtype == buf.dtype, (
                     "Data types for buffers must match when outside of autocasted region. "
                     f" Found input dtype: {dtype} and {name!r} dtype: {buf.dtype}"

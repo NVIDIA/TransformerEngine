@@ -1001,6 +1001,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     )
     torch.cuda.synchronize()
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("model", ["large"])
@@ -1041,19 +1042,19 @@ def test_sanity_attention_extra_state(model, dtype):
     sd = block.state_dict()
 
     # check core_attention._extra_state (saved by FusedAttention)
-    attn_extra_state = sd['self_attention.core_attention._extra_state']
+    attn_extra_state = sd["self_attention.core_attention._extra_state"]
     attn_extra_state.seek(0)
-    attn_extra_state = torch.load(attn_extra_state, map_location='cuda')
+    attn_extra_state = torch.load(attn_extra_state, map_location="cuda")
 
     # add random core_attention.fused_attention._extra_state
     # it should not be loaded by FusedAttention's _load_from_state_dict()
-    random_state = {'a':1, 'b':2}
+    random_state = {"a": 1, "b": 2}
     fused_attn_extra_state = io.BytesIO()
     torch.save(random_state, fused_attn_extra_state)
-    sd['self_attention.core_attention.fused_attention._extra_state']=fused_attn_extra_state
+    sd["self_attention.core_attention.fused_attention._extra_state"] = fused_attn_extra_state
 
     # save checkpoint
-    path = './checkpoint.pt'
+    path = "./checkpoint.pt"
     torch.save(sd, path)
 
     # reinit the model
@@ -1074,19 +1075,19 @@ def test_sanity_attention_extra_state(model, dtype):
 
     # check state_dict
     sd_new = block_new.state_dict()
-    attn_extra_state_new = sd_new['self_attention.core_attention._extra_state']
+    attn_extra_state_new = sd_new["self_attention.core_attention._extra_state"]
     attn_extra_state_new.seek(0)
-    attn_extra_state_new = torch.load(attn_extra_state_new, map_location='cuda')
-    for k,v in attn_extra_state_new.items():
-        if k != 'extra_fp8_variables':
-            assert(torch.equal(v,attn_extra_state[k])), f'{k} is not equal'
+    attn_extra_state_new = torch.load(attn_extra_state_new, map_location="cuda")
+    for k, v in attn_extra_state_new.items():
+        if k != "extra_fp8_variables":
+            assert torch.equal(v, attn_extra_state[k]), f"{k} is not equal"
         else:
-            for ek, ev in attn_extra_state_new['extra_fp8_variables'].items():
-                assert(ev==attn_extra_state['extra_fp8_variables'][ek]), f'{ek} is not equal'
+            for ek, ev in attn_extra_state_new["extra_fp8_variables"].items():
+                assert ev == attn_extra_state["extra_fp8_variables"][ek], f"{ek} is not equal"
 
     fused_attn_state = block_new.self_attention.core_attention.fused_attention.fp8_meta
-    for k,v in attn_extra_state.items():
-        if k != 'extra_fp8_variables':
+    for k, v in attn_extra_state.items():
+        if k != "extra_fp8_variables":
             kk = "scaling_fwd" if "fwd" in k else "scaling_bwd"
             state_tmp = None
             if "scale_inv" in k:
@@ -1095,7 +1096,7 @@ def test_sanity_attention_extra_state(model, dtype):
                 state_tmp = fused_attn_state[kk].scale
             else:
                 state_tmp = fused_attn_state[kk].amax_history
-            assert(torch.equal(v,state_tmp)), f'{k} is not equal'
+            assert torch.equal(v, state_tmp), f"{k} is not equal"
         else:
-            for ek, ev in attn_extra_state['extra_fp8_variables'].items():
-                assert(ev==fused_attn_state[ek]), f'{ek} is not equal'
+            for ek, ev in attn_extra_state["extra_fp8_variables"].items():
+                assert ev == fused_attn_state[ek], f"{ek} is not equal"

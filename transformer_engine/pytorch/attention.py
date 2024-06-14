@@ -4172,10 +4172,11 @@ class FusedAttention(TransformerEngineBaseModule):
         """
         Override to save to DotProductAttention's _extra_state.
         """
-        super()._save_to_state_dict(destination, prefix.replace('fused_attention.',''), keep_vars)
+        super()._save_to_state_dict(destination, prefix.replace("fused_attention.", ""), keep_vars)
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         """
         Override to load nothing as DotProductAttention's _load_from_state_dict()
         has loaded its _extra_state.
@@ -4609,25 +4610,27 @@ class DotProductAttention(TransformerEngineBaseModule):
             softmax_scale, **attn_kwargs, layer_number=layer_number
         )
 
-        def remove_extra_states_check(self, incompatible_keys): # pylint: disable=unused-argument
+        def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove core_attention._extra_state as a missing key
             when loading older TransformerEngine checkpoints. Will phase out
             this hook in TransformerEngine 2.0.
             """
             for key in incompatible_keys.missing_keys:
-                if 'core_attention._extra_state' in key:
+                if "core_attention._extra_state" in key:
                     incompatible_keys.missing_keys.remove(key)
+
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         """
         Override to pass DotProductAttention's _extra_state to backend's _extra_state.
         """
         if self.use_fused_attention:
-            if prefix+'_extra_state' in state_dict:
-                self.fused_attention.set_extra_state(state_dict[prefix+'_extra_state'])
+            if prefix + "_extra_state" in state_dict:
+                self.fused_attention.set_extra_state(state_dict[prefix + "_extra_state"])
             else:
                 self.fused_attention.set_extra_state(None)
 
@@ -4835,10 +4838,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                                produced)
         """
         # create boilerplate FP8 meta tensors to hold backend's FP8 metadata when checkpointing
-        with self.prepare_forward(query_layer,
-            is_first_microbatch,
-            num_gemms=3,
-            allow_non_contiguous=True) as query_layer:
+        with self.prepare_forward(
+            query_layer, is_first_microbatch, num_gemms=3, allow_non_contiguous=True
+        ) as query_layer:
             pass
 
         assert (
