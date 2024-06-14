@@ -10,6 +10,7 @@ import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
+import logging
 
 import numpy as np
 from packaging.version import Version as PkgVersion
@@ -18,6 +19,8 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_torch as tex
+import transformer_engine as te
+from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,
@@ -88,7 +91,17 @@ META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
 META_S    = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP   = tex.FP8BwdTensors.GRAD_INPUT3
 
+# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
+log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+logging.basicConfig(
+    format='[%(levelname)-8s | %(name)-19s]: %(message)s',
+    level=log_levels[log_level if log_level in [0,1,2] else 2],
+)
+
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
@@ -2298,9 +2311,9 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend, use_FAv2_bwd,
                 fp8, fp8_meta):
+        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using FP8 forward')
+            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(qkv, Float8Tensor)), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
@@ -2357,8 +2370,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using non-FP8 forward')
+            logger.debug("Running forward in %s",qkv.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
                 fused_attention_backend, attn_bias,
@@ -2391,6 +2403,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert (isinstance(d_out, Float8Tensor)
                 ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -2420,8 +2433,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_qkvpacked"):
                 if ctx.fp8:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using FP8 backward')
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2467,8 +2479,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                             ctx.fp8_meta["scaling_bwd"], META_DQKV,
                             fp8_dtype_backward, ctx.qkv_dtype).view(dqkv_fp8.shape)
                 else:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using non-FP8 backward')
+                    logger.debug("Running backward in %s",qkv.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
@@ -2500,9 +2511,9 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 q, kv, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta):
+        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using FP8 forward')
+            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(q, Float8Tensor)
                     and isinstance(kv, Float8Tensor)), "q/kv must be Float8Tensors for FP8 MHA."
@@ -2566,8 +2577,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using non-FP8 forward')
+            logger.debug("Running forward in %s",q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2601,6 +2611,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert (isinstance(d_out, Float8Tensor)
                 ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -2632,8 +2643,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_kvpacked"):
                 if ctx.fp8:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using FP8 backward')
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
@@ -2690,8 +2700,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                             ctx.fp8_meta["scaling_bwd"], META_DQKV,
                             fp8_dtype_backward, ctx.qkv_dtype).view(dkv_fp8.shape)
                 else:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using non-FP8 backward')
+                    logger.debug("Running backward in %s",q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
@@ -2723,9 +2732,9 @@ class FusedAttnFunc(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type, rng_gen, fused_attention_backend,
                 use_FAv2_bwd, fp8, fp8_meta):
+        logger = logging.getLogger("FusedAttnFunc")
         if fp8:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using FP8 forward')
+            logger.debug("Running forward in FP8")
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
@@ -2838,8 +2847,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale.clone(),
                 fp8_meta["scaling_fwd"].scale_inv.clone())
         else:
-            if _NVTE_DEBUG:
-                print('[DotProductAttention]: using non-FP8 forward')
+            logger.debug("Running forward in %s",q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -2881,6 +2889,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        logger = logging.getLogger("FusedAttnFunc")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert (isinstance(d_out, Float8Tensor)
                 ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -2914,8 +2923,7 @@ class FusedAttnFunc(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn"):
                 if ctx.fp8:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using FP8 backward')
+                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -3007,8 +3015,7 @@ class FusedAttnFunc(torch.autograd.Function):
                                 ctx.fp8_meta["scaling_bwd"], META_DQKV,
                                 fp8_dtype_backward, ctx.qkv_dtype).view(dv_fp8.shape)
                 else:
-                    if _NVTE_DEBUG:
-                        print('[DotProductAttention]: using non-FP8 backward')
+                    logger.debug("Running backward in %s",q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dk, dv, *rest = fused_attn_bwd(
@@ -3073,6 +3080,7 @@ class FusedAttention(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
+        self.logger = logging.getLogger("FusedAttention")
         self.softmax_scale = softmax_scale
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3267,12 +3275,14 @@ class FusedAttention(TransformerEngineBaseModule):
                         if not self.fp8_meta["recipe"].fp8_dpa:
                             self.fp8_meta["recipe"].fp8_dpa = True
                             forced_fp8_dpa = " (forced)"
-                    if _NVTE_DEBUG:
-                        print("[DotProductAttention]: "
-                            f"""using fp8_recipe.fp8_mha={self.fp8_meta["recipe"].fp8_mha}, """
-                            f"""fp8_recipe.fp8_dpa={self.fp8_meta["recipe"].fp8_dpa}"""
-                            f"""{forced_fp8_dpa} and """
-                            f"""NVTE_FP8_DPA_BWD={int(os.getenv("NVTE_FP8_DPA_BWD", "1"))}""")
+                    if fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8:
+                        self.logger.debug(
+                            "Running with fp8_recipe.fp8_mha=%s, "
+                            "fp8_recipe.fp8_dpa=%s%s, and NVTE_FP8_DPA_BWD=%s",
+                            self.fp8_meta["recipe"].fp8_mha,
+                            self.fp8_meta["recipe"].fp8_dpa,
+                            forced_fp8_dpa,
+                            int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
                     output = FusedAttnFunc.apply(
                         self.training,
                         max_seqlen_q, max_seqlen_kv,
@@ -3412,6 +3422,7 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        self.logger = logging.getLogger("DotProductAttention")
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",","_")
         if attn_mask_type == "causal_padding":
@@ -3457,9 +3468,14 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and self.device_compute_capability >= (8, 0)
         )
+        if int(os.getenv("NVTE_FLASH_ATTN", "1")) == 0:
+            self.logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
+        if self.device_compute_capability < (8, 0):
+            self.logger.debug("Disabling FlashAttention for compute capability < sm80")
+
         if not _flash_attn_2_4_1_plus and self.deterministic:
             self.use_flash_attention = False
-            warnings.warn(
+            self.logger.warning(
                 "Disabling usage of FlashAttention since version <2.4.1 does not support "
                 "deterministic execution. In order to use FA with deterministic behavior,"
                 " please install FlashAttention version >=2.4.1."
@@ -3469,6 +3485,10 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
             and self.device_compute_capability >= (8, 0)
         )
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
+            self.logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
+        if self.device_compute_capability < (8, 0):
+            self.logger.debug("Disabling FusedAttention for compute capability < sm80")
 
         assert (
             attention_type in AttnTypes
@@ -3836,44 +3856,69 @@ class DotProductAttention(torch.nn.Module):
         # certain asserts before executing the forward pass.
 
         # Filter: QKV layout.
-        if qkv_format == 'thd':
+        if use_unfused_attention and qkv_format == 'thd':
+            self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
 
         # Filter: ONNX export.
         if is_in_onnx_export_mode():
+            if use_flash_attention:
+                self.logger.debug("Disabling FlashAttention for ONNX mode")
             use_flash_attention = False
+            if use_fused_attention:
+                self.logger.debug("Disabling FusedAttention for ONNX mode")
             use_fused_attention = False
 
         # Filter: Input type.
-        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
-            or key_layer.dtype not in [torch.bfloat16, torch.float16]
-            or value_layer.dtype not in [torch.bfloat16, torch.float16]
-            or any(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
+        if (use_flash_attention
+            and (query_layer.dtype not in [torch.bfloat16, torch.float16]
+                or key_layer.dtype not in [torch.bfloat16, torch.float16]
+                or value_layer.dtype not in [torch.bfloat16, torch.float16]
+                or any(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]))
         ):
+            self.logger.debug(
+                "Disabling FlashAttention due to unsupported QKV data types. "
+                "Supported: [torch.bfloat16, torch.float16]. "
+                "Found: query_layer.dtype=%s, key_layer.dtype=%s, value_layer.dtype=%s.",
+                query_layer.dtype, key_layer.dtype, value_layer.dtype)
             use_flash_attention = False
-        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
-            or key_layer.dtype not in [torch.bfloat16, torch.float16]
-            or value_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (use_fused_attention
+            and (query_layer.dtype not in [torch.bfloat16, torch.float16]
+                or key_layer.dtype not in [torch.bfloat16, torch.float16]
+                or value_layer.dtype not in [torch.bfloat16, torch.float16])
         ):
+            self.logger.debug(
+                "Disabling FusedAttention due to unsupported QKV data types. "
+                "Supported: [torch.bfloat16, torch.float16, Float8Tensor]. "
+                "Found: query_layer.dtype=%s, key_layer.dtype=%s, value_layer.dtype=%s.",
+                query_layer.dtype, key_layer.dtype, value_layer.dtype)
             use_fused_attention = False
 
         # Filter: Device and dimensions.
         # FAv2 supports head_dim <= 256, and for >192 requires sm80/sm90
         # FAv2 requires head_dim % 8 == 0
-        if (key_layer.shape[-1] > 256
-            or key_layer.shape[-1] % 8 != 0
-            or (key_layer.shape[-1] > 192
-                and self.device_compute_capability not in ((8, 0), (9, 0)))):
+        if (use_flash_attention
+            and (query_layer.shape[-1] > 256
+                or query_layer.shape[-1] % 8 != 0
+                or (query_layer.shape[-1] > 192
+                    and self.device_compute_capability not in ((8, 0), (9, 0))))):
+            self.logger.debug(
+                "Disabling FlashAttention due to unsupported head_dim. "
+                "Supported: %%8 == 0, and <= 256; sm80/90 for >192. "
+                "Found: query_layer.shape[-1]=%s, key_layer.shape[-1]=%s, sm=%s",
+                query_layer.shape[-1], key_layer.shape[-1],
+                '.'.join([str(i) for i in self.device_compute_capability]))
             use_flash_attention = False
 
         # Filter: cross attention + causal mask.
         # (in training mode)
-        if (inference_params is None
+        if (use_flash_attention
+            and inference_params is None
             and _flash_attn_2_1_plus
             and "causal" in attn_mask_type
             and max_seqlen_q != max_seqlen_kv
         ):
-            warnings.warn(
+            self.logger.warning(
                 "In training mode, disable the use of FlashAttention since version 2.1+ has "
                 "changed its behavior for causal mask in cross attention. See "
                 "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
@@ -3886,8 +3931,14 @@ class DotProductAttention(torch.nn.Module):
         # Filter: sliding window attention.
         # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
         if window_size not in ((-1, -1), (-1, 0)):
+            if use_fused_attention:
+                self.logger.debug("Disabling FusedAttention for SWA")
             use_fused_attention = False
             if (not _flash_attn_2_3_plus) or context_parallel:
+                if use_flash_attention:
+                    self.logger.debug(
+                        "Disabling FusedAttention as it requires flash-attn 2.3+ "
+                        "and no context parallelism")
                 use_flash_attention = False
 
         # Filter: Attention mask type.
@@ -3900,13 +3951,19 @@ class DotProductAttention(torch.nn.Module):
         #   arbitrary            |     UnfusedDotProductAttention
         #
         if attn_mask_type == "arbitrary":
+            if use_flash_attention:
+                self.logger.debug("Disabling FlashAttention for arbitrary mask")
             use_flash_attention = False
+            if use_fused_attention:
+                self.logger.debug("Disabling FusedAttention for arbitrary mask")
             use_fused_attention = False
 
-        if (inference_params is None
+        if (use_unfused_attention
+            and inference_params is None
             and "causal" in attn_mask_type
             and max_seqlen_q != max_seqlen_kv
         ):
+            self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
 
         # Filter: bias.
@@ -3927,7 +3984,10 @@ class DotProductAttention(torch.nn.Module):
                 _alibi_cache["_alibi_slopes_require_update"] = True
                 _alibi_cache["_alibi_bias_require_update"] = True
 
-        if core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None:
+        if (use_flash_attention
+            and (core_attention_bias_type not in ["no_bias", "alibi"]
+                or core_attention_bias is not None)):
+            self.logger.debug("Disabling FlashAttention for pre/post_scale_bias")
             use_flash_attention = False
 
         fu_core_attention_bias_type = core_attention_bias_type
@@ -3944,6 +4004,7 @@ class DotProductAttention(torch.nn.Module):
             if fu_core_attention_bias.requires_grad:
                 # remove this line when cuDNN adds bwd support for
                 # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
+                self.logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
                 use_fused_attention = False
             else:
                 # max512 backend will only support [1, h, s, s]
@@ -3978,6 +4039,8 @@ class DotProductAttention(torch.nn.Module):
                 and fu_core_attention_bias_type == "post_scale_bias"
                 and (fu_core_attention_bias.shape[0] != 1
                 or fu_core_attention_bias.shape[1] != query_layer.shape[-2])):
+                self.logger.debug(
+                    "Disabling FusedAttention as no backend supports the provided input")
                 use_fused_attention = False
 
         # Filter: determinism.
@@ -3996,6 +4059,7 @@ class DotProductAttention(torch.nn.Module):
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and self.deterministic
             and self.device_compute_capability != (9, 0)):
+            self.logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False
 
         # Select FusedAttention on sm90 and FlashAttention on others for performance
@@ -4003,11 +4067,35 @@ class DotProductAttention(torch.nn.Module):
             and use_fused_attention
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
             if self.device_compute_capability == (9, 0):
+                self.logger.debug(
+                    "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
+                    "for performance reasons")
                 use_flash_attention = False
 
+        run_config = {
+            "compute_capability":"sm"+str((lambda x,y: x*10+y)(
+                self.device_compute_capability[0],self.device_compute_capability[1])),
+            "q_dtype":query_layer.dtype,
+            "k_dtype":key_layer.dtype,
+            "v_dtype":value_layer.dtype,
+            "q_shape":list(query_layer.shape),
+            "k_shape":list(key_layer.shape),
+            "v_shape":list(value_layer.shape),
+            "qkv_format":qkv_format,
+            "qkv_layout":qkv_layout,
+            "mask_type":attn_mask_type,
+            "bias_type":core_attention_bias_type,
+            "bias_shape":core_attention_bias.shape if core_attention_bias is not None else None,
+            "dropout":self.attention_dropout,
+            "context_parallel":context_parallel,
+            "is_training":self.training,
+            "transformer_engine_version":te.__version__,
+            "flash_attn_version":_flash_attn_version,
+            "cudnn_version":'.'.join([str(i) for i in get_cudnn_version()])}
+
         if use_flash_attention:
-            if _NVTE_DEBUG:
-                print("[DotProductAttention]: using flash-attn",_flash_attn_version)
+            self.logger.info("Running with FlashAttention backend ")
+            self.logger.debug("Running with config=%s",run_config)
             if core_attention_bias_type == "alibi":
                 alibi_slopes, _ = get_alibi(
                     query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes)
@@ -4028,9 +4116,10 @@ class DotProductAttention(torch.nn.Module):
                                         max_seqlen_kv=max_seqlen_kv)
 
         if use_fused_attention:
-            if _NVTE_DEBUG:
-                print("[DotProductAttention]: using cuDNN fused attention (backend "
-                    + str(int(fused_attention_backend)) + ")")
+            self.logger.info(
+                "Running with FusedAttention backend (sub-backend %s)",
+                int(fused_attention_backend))
+            self.logger.debug("Running with config=%s",run_config)
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(
                     self.fused_attention,
@@ -4090,9 +4179,9 @@ class DotProductAttention(torch.nn.Module):
                            "with Flash Attention and Fused Attention!"
                          )
 
-        if _NVTE_DEBUG:
-            print("[DotProductAttention]: using unfused DPA")
         if use_unfused_attention:
+            self.logger.info("Running with UnfusedDotProductAttention backend")
+            self.logger.debug("Running with config=%s",run_config)
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(
                     self.unfused_attention,
