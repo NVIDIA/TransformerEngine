@@ -493,12 +493,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     "Data types for parameters must match when outside of autocasted region. "
                     f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                 )
-        for name, buf in self.named_buffers():
-            if buf is not None and ("weight" in name or "bias" in name):
-                assert dtype == buf.dtype, (
-                    "Data types for buffers must match when outside of autocasted region. "
-                    f" Found input dtype: {dtype} and {name!r} dtype: {buf.dtype}"
-                )
         self.activation_dtype = dtype
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:

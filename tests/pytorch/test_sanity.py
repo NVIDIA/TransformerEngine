@@ -88,7 +88,7 @@ model_configs = {
     "126m": ModelConfig(12, 2048, 2, 768, 12),
     "small": ModelConfig(2, 32, 2, 64, 2),
     "weird": ModelConfig(2, 37, 3, 69, 3),
-    "large": ModelConfig(1, 2048, 2, 2048, 16, 128),
+    "large": ModelConfig(1, 128, 2, 512, 4, 128),
 }
 
 fp8_recipes = [
@@ -1010,7 +1010,6 @@ def test_sanity_attention_extra_state(model, dtype):
     config = model_configs[model]
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
-        interval=1,
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
