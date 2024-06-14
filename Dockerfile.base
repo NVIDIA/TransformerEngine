@@ -9,7 +9,7 @@ COPY qa/ qa/
 COPY tests/ tests/
 COPY transformer_engine/ transformer_engine/
 COPY build_tools/ build_tools/
-COPY CONTRIBUTING.rst LICENSE README.rst setup.py .
+COPY CONTRIBUTING.rst LICENSE README.rst setup.py pylintrc CPPLINT.cfg .
 
 FROM ${FROM_IMAGE_NAME}
 ARG FRAMEWORK
