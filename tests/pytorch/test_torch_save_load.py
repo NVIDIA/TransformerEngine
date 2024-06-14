@@ -28,7 +28,7 @@ from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
-def init_meta(size: int=1):
+def init_meta(size: int = 1):
     meta = tex.FP8TensorMeta()
     meta.scale = torch.ones(size, dtype=torch.float32, device="cuda")
     meta.scale_inv = torch.ones(size, dtype=torch.float32, device="cuda")
@@ -65,22 +65,18 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
             self.inp_type = tex.DType.kFloat8E4M3
             self.weights_type = tex.DType.kFloat8E4M3
             self.outp_type = precision
-        
+
         def get_fp8_weights_scratchpad(self, is_first_microbatch):
-            raise RuntimeError("Method get_fp8_weights_scratchpad is dummy and should not be invoked.")
+            raise RuntimeError(
+                "Method get_fp8_weights_scratchpad is dummy and should not be invoked."
+            )
 
         def forward(self, inp, weight):
-            inp_fp8 = cast_to_fp8(
-                inp,
-                self.meta_inp,
-                self.fp8_tensor_inp,
-                self.inp_type)
+            inp_fp8 = cast_to_fp8(inp, self.meta_inp, self.fp8_tensor_inp, self.inp_type)
 
             weight_fp8 = cast_to_fp8(
-                weight,
-                self.meta_weight,
-                self.fp8_tensor_weight,
-                self.weights_type)
+                weight, self.meta_weight, self.fp8_tensor_weight, self.weights_type
+            )
 
             ret = fp8_gemm(
                 weight_fp8,
@@ -95,20 +91,33 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
                 get_workspace(),
                 bias=self.bias,
                 use_bias=self.use_bias,
-                use_split_accumulator=False)
+                use_split_accumulator=False,
+            )
             return ret
 
     model_in = Test_TE_Export(precision, True)
     with te.fp8_autocast(enabled=True):
         model_in.init_fp8_metadata()
         # scaling fwd
-        model_in.fp8_meta["scaling_fwd"].scale = torch.ones(3, dtype=torch.float32, device="cuda") * scale_fwd
-        model_in.fp8_meta["scaling_fwd"].scale_inv = torch.ones(3, dtype=torch.float32, device="cuda") / scale_fwd
-        model_in.fp8_meta["scaling_fwd"].amax_history = torch.ones(3, dtype=torch.float32, device="cuda") * history_fwd
+        model_in.fp8_meta["scaling_fwd"].scale = (
+            torch.ones(3, dtype=torch.float32, device="cuda") * scale_fwd
+        )
+        model_in.fp8_meta["scaling_fwd"].scale_inv = (
+            torch.ones(3, dtype=torch.float32, device="cuda") / scale_fwd
+        )
+        model_in.fp8_meta["scaling_fwd"].amax_history = (
+            torch.ones(3, dtype=torch.float32, device="cuda") * history_fwd
+        )
         # scaling bwd
-        model_in.fp8_meta["scaling_bwd"].scale = torch.ones(2, dtype=torch.float32, device="cuda") * scale_bwd
-        model_in.fp8_meta["scaling_bwd"].scale_inv = torch.ones(2, dtype=torch.float32, device="cuda") / scale_bwd
-        model_in.fp8_meta["scaling_bwd"].amax_history = torch.ones(2, dtype=torch.float32, device="cuda") * history_bwd
+        model_in.fp8_meta["scaling_bwd"].scale = (
+            torch.ones(2, dtype=torch.float32, device="cuda") * scale_bwd
+        )
+        model_in.fp8_meta["scaling_bwd"].scale_inv = (
+            torch.ones(2, dtype=torch.float32, device="cuda") / scale_bwd
+        )
+        model_in.fp8_meta["scaling_bwd"].amax_history = (
+            torch.ones(2, dtype=torch.float32, device="cuda") * history_bwd
+        )
 
     torch.save(model_in.state_dict(), tmp_filename)
 
@@ -117,13 +126,27 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     model_out.eval()
 
     # scaling fwd
-    assert torch.allclose(model_in.fp8_meta["scaling_fwd"].scale, model_out.fp8_meta["scaling_fwd"].scale)
-    assert torch.allclose(model_in.fp8_meta["scaling_fwd"].scale_inv, model_out.fp8_meta["scaling_fwd"].scale_inv)
-    assert torch.allclose(model_in.fp8_meta["scaling_fwd"].amax_history, model_out.fp8_meta["scaling_fwd"].amax_history)
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_fwd"].scale, model_out.fp8_meta["scaling_fwd"].scale
+    )
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_fwd"].scale_inv, model_out.fp8_meta["scaling_fwd"].scale_inv
+    )
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_fwd"].amax_history,
+        model_out.fp8_meta["scaling_fwd"].amax_history,
+    )
     # scaling bwd
-    assert torch.allclose(model_in.fp8_meta["scaling_bwd"].scale, model_out.fp8_meta["scaling_bwd"].scale)
-    assert torch.allclose(model_in.fp8_meta["scaling_bwd"].scale_inv, model_out.fp8_meta["scaling_bwd"].scale_inv)
-    assert torch.allclose(model_in.fp8_meta["scaling_bwd"].amax_history, model_out.fp8_meta["scaling_bwd"].amax_history)
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_bwd"].scale, model_out.fp8_meta["scaling_bwd"].scale
+    )
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_bwd"].scale_inv, model_out.fp8_meta["scaling_bwd"].scale_inv
+    )
+    assert torch.allclose(
+        model_in.fp8_meta["scaling_bwd"].amax_history,
+        model_out.fp8_meta["scaling_bwd"].amax_history,
+    )
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -132,7 +155,7 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
 def test_fp8_model_checkpoint(
     save_fp8_model: bool,
     load_fp8_model: bool,
-    dims: Iterable[int] = [32,32],
+    dims: Iterable[int] = [32, 32],
     dtype: torch.dtype = torch.float32,
     device: Union[torch.device, str] = "cuda",
 ):
@@ -153,7 +176,7 @@ def test_fp8_model_checkpoint(
     with te.fp8_autocast():
         y_ref = model(x.detach().clone()).detach().clone()
 
-    fp8_meta_ref = { "scaling_fwd": {}, "scaling_bwd": {} }
+    fp8_meta_ref = {"scaling_fwd": {}, "scaling_bwd": {}}
     with te.fp8_autocast(), torch.no_grad():
         fp8_meta_fwd = model.fp8_meta["scaling_fwd"]
         fp8_meta_bwd = model.fp8_meta["scaling_bwd"]
@@ -168,7 +191,7 @@ def test_fp8_model_checkpoint(
         fp8_meta_bwd.scale.copy_(fp8_meta_bwd_ref["scale"])
         fp8_meta_bwd.scale_inv.copy_(fp8_meta_bwd_ref["scale_inv"])
         del fp8_meta_fwd, fp8_meta_bwd
-    
+
     # [ This is part of logic that tests save_fp8_model=False and load_fp8_model=True ]
     # This line copies the fp8 scale_inv from the model metadata to the weight fp8 tensor.
     # The sole purpose of the following lines is to set the scale_inv of the weight tensor, which is the simplest method.
@@ -226,15 +249,14 @@ def test_fp8_model_checkpoint(
         with pytest.raises(AssertionError):
             torch.testing.assert_close(y, y_ref, **tols)
 
-
     # [ This is part of logic that tests save_fp8_model=False and load_fp8_model=True ]
-    # When save_fp8_model=True, we load a model with weights in high precision, 
+    # When save_fp8_model=True, we load a model with weights in high precision,
     # which does not include _scale_inv,
-    # but has the fp8 scaling factor in the meta data. This scenario can occur 
+    # but has the fp8 scaling factor in the meta data. This scenario can occur
     # when using te.fp8_autocast(enabled=False, calibrating=True).
     #
     # In such cases, the default behavior of load_state_dict is incorrect - it loads tensors first,
-    # followed by the fp8 metadata. This results in an incorrect _scale_inv for the tensor. This behavior 
+    # followed by the fp8 metadata. This results in an incorrect _scale_inv for the tensor. This behavior
     # is corrected by overriding the _load_state_dict method from PyTorch in TransformerEngineBaseModule,
     # to load the fp8 metadata before loading tensors.
     #
@@ -262,4 +284,6 @@ def test_fp8_model_checkpoint(
         # We need to ensure that the tensor's scale_inv parameter matches its meta data.
         # This is crucial to avoid confusion about which value is correct.
         meta_index = model.weight._fp8_meta_index
-        torch.testing.assert_close(model.weight._scale_inv.item(), fp8_meta_fwd_ref["scale_inv"][meta_index].item())
+        torch.testing.assert_close(
+            model.weight._scale_inv.item(), fp8_meta_fwd_ref["scale_inv"][meta_index].item()
+        )

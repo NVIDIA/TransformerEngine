@@ -11,11 +11,11 @@ import transformer_engine.pytorch as te
 
 # Model names for test_torch_dynamo
 _model_factory = {
-        "Linear": [(lambda: te.Linear(16, 16)), [16, 16]],
-        "LayerNorm": [(lambda: te.LayerNorm(16)), [16, 16]],
-        "LayerNormLinear": [(lambda: te.LayerNormLinear(16, 16)), [16, 16]],
-        "LayerNormMLP": [(lambda: te.LayerNormMLP(16, 16)), [16, 16]],
-        "TransformerLayer": [(lambda: te.TransformerLayer(128, 128, 2)), [4, 1, 128]],
+    "Linear": [(lambda: te.Linear(16, 16)), [16, 16]],
+    "LayerNorm": [(lambda: te.LayerNorm(16)), [16, 16]],
+    "LayerNormLinear": [(lambda: te.LayerNormLinear(16, 16)), [16, 16]],
+    "LayerNormMLP": [(lambda: te.LayerNormMLP(16, 16)), [16, 16]],
+    "TransformerLayer": [(lambda: te.TransformerLayer(128, 128, 2)), [4, 1, 128]],
 }
 
 
@@ -31,11 +31,11 @@ def test_torch_dynamo(model_name: str):
 
     # Helper function to construct tensor with default options
     def make_tensor(
-            dims: Tuple[int],
-            dtype: torch.dtype = torch.float32,
-            device: torch.device = "cuda",
-            requires_grad: bool = True,
-            **kwargs,
+        dims: Tuple[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        requires_grad: bool = True,
+        **kwargs,
     ):
         return torch.zeros(
             dims,

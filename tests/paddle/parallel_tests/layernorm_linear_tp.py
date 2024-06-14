@@ -42,22 +42,22 @@ class TestLayerNormLinearTp(unittest.TestCase):
         self.batch_size = 16
         self.in_features = 32
         self.out_features = 64
-        self.global_dtype = 'bfloat16'
+        self.global_dtype = "bfloat16"
         self.rtol = 1e-3
         self.atol = 1e-3
         self.eps = 1e-3
         self.fp8 = False
         self.sequence_parallel = False
 
-    def _train_one_step(self, layer, inp, optimizer, split_input='none', gather_output=False):
+    def _train_one_step(self, layer, inp, optimizer, split_input="none", gather_output=False):
         inp = paddle.to_tensor(inp, stop_gradient=True)
-        assert split_input in ['none', 'column', 'row']
-        if split_input == 'column':
+        assert split_input in ["none", "column", "row"]
+        if split_input == "column":
             split_size = inp.shape[1] // self.world_size
-            input_parallel = inp[:, split_size * self.rank:split_size * (self.rank + 1)]
-        elif split_input == 'row':
+            input_parallel = inp[:, split_size * self.rank : split_size * (self.rank + 1)]
+        elif split_input == "row":
             split_size = inp.shape[0] // self.world_size
-            input_parallel = inp[split_size * self.rank:split_size * (self.rank + 1), :]
+            input_parallel = inp[split_size * self.rank : split_size * (self.rank + 1), :]
         else:
             input_parallel = inp
         input_parallel.stop_gradient = False
@@ -70,12 +70,12 @@ class TestLayerNormLinearTp(unittest.TestCase):
         loss.backward()
         optimizer.step()
         optimizer.clear_grad()
-        if split_input != 'none':
+        if split_input != "none":
             grad_input = []
             paddle.distributed.all_gather(grad_input, input_parallel.grad, group=self.tp_group)
-            if split_input == 'column':
+            if split_input == "column":
                 grad_input = paddle.concat(grad_input, axis=1)
-            elif split_input == 'row':
+            elif split_input == "row":
                 grad_input = paddle.concat(grad_input, axis=0)
         else:
             grad_input = input_parallel.grad
@@ -88,14 +88,14 @@ class TestLayerNormLinearTp(unittest.TestCase):
             self.in_features,
             self.out_features,
             eps=self.eps,
-            parallel_mode='column',
+            parallel_mode="column",
             sequence_parallel=self.sequence_parallel,
         )
         layer_pd = te.LayerNormLinear(
             self.in_features,
             self.out_features,
             eps=self.eps,
-            backend='paddle',
+            backend="paddle",
         )
         # Get total weight
         total_weight = []
@@ -104,8 +104,9 @@ class TestLayerNormLinearTp(unittest.TestCase):
         total_weight = paddle.concat(total_weight, axis=0)
         layer_pd.weight.copy_(total_weight.T, True)
 
-        assert_shape(layer_te.weight,
-                     [self.out_features // self.model_parallel_size, self.in_features])
+        assert_shape(
+            layer_te.weight, [self.out_features // self.model_parallel_size, self.in_features]
+        )
         assert_shape(layer_te.bias, [self.out_features // self.model_parallel_size])
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_te.parameters())
@@ -121,8 +122,9 @@ class TestLayerNormLinearTp(unittest.TestCase):
                     layer_te,
                     inp,
                     optimizer_te,
-                    split_input='row' if self.sequence_parallel else 'none',
-                    gather_output=True)
+                    split_input="row" if self.sequence_parallel else "none",
+                    gather_output=True,
+                )
             loss_ref, grad_input_ref = self._train_one_step(layer_pd, inp, optimizer_pd)
             assert_allclose(loss_tp, loss_ref, rtol=self.rtol, atol=self.atol)
             assert_allclose(grad_input, grad_input_ref, rtol=self.rtol, atol=self.atol)
@@ -136,7 +138,7 @@ class TestLayerNormLinearTpFp8(TestLayerNormLinearTp):
         self.batch_size = 16
         self.in_features = 32
         self.out_features = 64
-        self.global_dtype = 'bfloat16'
+        self.global_dtype = "bfloat16"
         self.rtol = 1e-2
         self.atol = 1e-2
         self.eps = 1e-3
@@ -152,7 +154,7 @@ class TestLayerNormLinearSp(TestLayerNormLinearTp):
         self.batch_size = 16
         self.in_features = 32
         self.out_features = 64
-        self.global_dtype = 'bfloat16'
+        self.global_dtype = "bfloat16"
         self.rtol = 1e-3
         self.atol = 1e-3
         self.eps = 1e-3
@@ -168,7 +170,7 @@ class TestLayerNormLinearSpFp8(TestLayerNormLinearTp):
         self.batch_size = 16
         self.in_features = 32
         self.out_features = 64
-        self.global_dtype = 'bfloat16'
+        self.global_dtype = "bfloat16"
         self.rtol = 1e-2
         self.atol = 1e-2
         self.eps = 1e-3
@@ -176,5 +178,5 @@ class TestLayerNormLinearSpFp8(TestLayerNormLinearTp):
         self.sequence_parallel = True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

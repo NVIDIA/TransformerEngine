@@ -3,4 +3,5 @@
 # See LICENSE for license information.
 
 import transformer_engine.paddle
+
 print("OK")

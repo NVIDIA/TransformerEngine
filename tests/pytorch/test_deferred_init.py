@@ -27,33 +27,31 @@ num_heads = 16
 head_dim = 64
 dtype = torch.bfloat16
 
+
 class TestDeferredInit:
 
     @staticmethod
     def get_module_args(module):
         hidden_size = num_heads * head_dim
         args = (hidden_size,)
-        kwargs = {
-            'params_dtype': dtype,
-            'device': 'meta'
-        }
+        kwargs = {"params_dtype": dtype, "device": "meta"}
         if module in [te.Linear, te.LayerNormLinear, te.LayerNormMLP]:
             ffn_hidden_size = 2 * hidden_size
-            args += (ffn_hidden_size, )
-            kwargs['bias'] = True
+            args += (ffn_hidden_size,)
+            kwargs["bias"] = True
             if module == te.LayerNormMLP:
-                kwargs['seq_length'] = seq_length
+                kwargs["seq_length"] = seq_length
         elif module == te.MultiheadAttention:
-            args += (num_heads, )
-            kwargs['fuse_qkv_params'] = True
+            args += (num_heads,)
+            kwargs["fuse_qkv_params"] = True
         elif module == te.TransformerLayer:
             args += (3 * hidden_size, num_heads)
-            kwargs['fuse_qkv_params'] = True
-            kwargs['seq_length'] = seq_length
+            kwargs["fuse_qkv_params"] = True
+            kwargs["seq_length"] = seq_length
 
         return args, kwargs
 
-    @pytest.mark.parametrize("module_type", _core_modules+_composed_modules)
+    @pytest.mark.parametrize("module_type", _core_modules + _composed_modules)
     def test_zero_memory_init(
         self,
         module_type: torch.nn.Module,
