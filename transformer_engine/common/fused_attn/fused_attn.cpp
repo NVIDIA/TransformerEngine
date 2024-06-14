@@ -218,10 +218,7 @@ void nvte_fused_attn_fwd_qkvpacked(
             NVTETensor O,
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_with_offset,
             const NVTETensor rng_state,
             size_t max_seqlen,
             bool is_training, float attn_scale, float dropout,
@@ -233,10 +230,7 @@ void nvte_fused_attn_fwd_qkvpacked(
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_with_offset);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
@@ -287,7 +281,7 @@ void nvte_fused_attn_fwd_qkvpacked(
           input_QKV, input_Bias, output_O,
           Aux_CTX_Tensors,
           input_cu_seqlens,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_with_offset,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -322,10 +316,7 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTETensor dQKV,
             NVTETensor dBias,
             const NVTETensor cu_seqlens,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_with_offset,
             size_t max_seqlen,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -336,10 +327,7 @@ void nvte_fused_attn_bwd_qkvpacked(
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_with_offset);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
@@ -402,7 +390,7 @@ void nvte_fused_attn_bwd_qkvpacked(
           output_S,
           output_dQKV, output_dBias,
           input_cu_seqlens,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_with_offset,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -443,10 +431,8 @@ void nvte_fused_attn_fwd_kvpacked(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_q_with_offset,
+            const NVTETensor cu_seqlens_kv_with_offset,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -458,10 +444,8 @@ void nvte_fused_attn_fwd_kvpacked(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_q_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_q_with_offset);
+  const Tensor *input_cu_seqlens_kv_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_kv_with_offset);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
@@ -516,7 +500,7 @@ void nvte_fused_attn_fwd_kvpacked(
           input_Q, input_KV, input_Bias, output_O,
           Aux_CTX_Tensors,
           input_cu_seqlens_q, input_cu_seqlens_kv,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_q_with_offset, input_cu_seqlens_kv_with_offset,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -554,10 +538,8 @@ void nvte_fused_attn_bwd_kvpacked(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_q_with_offset,
+            const NVTETensor cu_seqlens_kv_with_offset,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -568,10 +550,8 @@ void nvte_fused_attn_bwd_kvpacked(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_q_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_q_with_offset);
+  const Tensor *input_cu_seqlens_kv_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_kv_with_offset);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
@@ -639,7 +619,7 @@ void nvte_fused_attn_bwd_kvpacked(
           output_S,
           output_dQ, output_dKV, output_dBias,
           input_cu_seqlens_q, input_cu_seqlens_kv,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_q_with_offset, input_cu_seqlens_kv_with_offset,
           input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =
@@ -680,10 +660,8 @@ void nvte_fused_attn_fwd(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_q_with_offset,
+            const NVTETensor cu_seqlens_kv_with_offset,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -695,10 +673,8 @@ void nvte_fused_attn_fwd(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_q_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_q_with_offset);
+  const Tensor *input_cu_seqlens_kv_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_kv_with_offset);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
@@ -745,7 +721,7 @@ void nvte_fused_attn_fwd(
           input_Q, input_K, input_V, input_Bias, output_O,
           Aux_CTX_Tensors,
           input_cu_seqlens_q, input_cu_seqlens_kv,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_q_with_offset, input_cu_seqlens_kv_with_offset,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -785,10 +761,8 @@ void nvte_fused_attn_bwd(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
+            const NVTETensor cu_seqlens_q_with_offset,
+            const NVTETensor cu_seqlens_kv_with_offset,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -799,10 +773,8 @@ void nvte_fused_attn_bwd(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_seq_offsets_q = reinterpret_cast<const Tensor*>(seq_offsets_q);
-  const Tensor *input_seq_offsets_k = reinterpret_cast<const Tensor*>(seq_offsets_k);
-  const Tensor *input_seq_offsets_v = reinterpret_cast<const Tensor*>(seq_offsets_v);
-  const Tensor *input_seq_offsets_o = reinterpret_cast<const Tensor*>(seq_offsets_o);
+  const Tensor *input_cu_seqlens_q_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_q_with_offset);
+  const Tensor *input_cu_seqlens_kv_with_offset = reinterpret_cast<const Tensor*>(cu_seqlens_kv_with_offset);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
@@ -863,7 +835,7 @@ void nvte_fused_attn_bwd(
           output_S,
           output_dQ, output_dK, output_dV, output_dBias,
           input_cu_seqlens_q, input_cu_seqlens_kv,
-          input_seq_offsets_q, input_seq_offsets_k, input_seq_offsets_v, input_seq_offsets_o,
+          input_cu_seqlens_q_with_offset, input_cu_seqlens_kv_with_offset,
           input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =

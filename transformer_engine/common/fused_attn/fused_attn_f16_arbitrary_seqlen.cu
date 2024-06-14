@@ -57,8 +57,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 void *devPtrSoftmaxStats, void *devPtrO,
                 void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
-                void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsK,
-                void* devPtrSeqOffsetsV, void* devPtrSeqOffsetsO,
+                void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsKV,
                 cudnn_frontend::DataType_t tensorType,
                 void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
@@ -302,8 +301,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         auto plan_workspace_size = mha_graph->get_workspace_size();
         // Exit to request upper level API to allocate memory if needed
         size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+        size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int32_t);
         if (workspace == nullptr) {
-            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size
+                + seqlen_offsets_workspace_size;
             return;
         }
 
@@ -339,10 +340,25 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         }
 
         if (is_ragged) {
-            variant_pack[offset_q] = devPtrSeqOffsetsQ;
-            variant_pack[offset_k] = devPtrSeqOffsetsK;
-            variant_pack[offset_v] = devPtrSeqOffsetsV;
-            variant_pack[offset_o] = devPtrSeqOffsetsO;
+            constexpr size_t nthreads_per_block = 128;
+            const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+            void *devOffsetsQ = static_cast<int8_t *>(workspace)
+                + plan_workspace_size + actual_seqlen_workspace_size;
+            void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b+1) * sizeof(int32_t);
+            void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b+1) * sizeof(int32_t);
+            void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b+1) * sizeof(int32_t);
+            NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+            cu_seqlens_with_offset_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
+                layout_group, b, h, hg, d, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+                static_cast<int32_t *>(devPtrSeqOffsetsKV),
+                static_cast<int32_t *>(devOffsetsQ),
+                static_cast<int32_t *>(devOffsetsK),
+                static_cast<int32_t *>(devOffsetsV),
+                static_cast<int32_t *>(devOffsetsO));
+            variant_pack[offset_q] = devOffsetsQ;
+            variant_pack[offset_k] = devOffsetsK;
+            variant_pack[offset_v] = devOffsetsV;
+            variant_pack[offset_o] = devOffsetsO;
         }
 
         if (is_dropout) {
@@ -366,8 +382,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO, void* devPtrdBias,
                 void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
-                void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsK,
-                void* devPtrSeqOffsetsV, void* devPtrSeqOffsetsO,
+                void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsKV,
                 cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
                 cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
@@ -663,8 +678,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
         // Exit to request upper level API to allocate memory if needed
         size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+        size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int32_t);
         if (workspace == nullptr) {
-            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size
+                + seqlen_offsets_workspace_size;
             return;
         }
 
@@ -710,10 +727,25 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         }
 
         if (is_ragged) {
-            variant_pack[offset_q] = devPtrSeqOffsetsQ;
-            variant_pack[offset_k] = devPtrSeqOffsetsK;
-            variant_pack[offset_v] = devPtrSeqOffsetsV;
-            variant_pack[offset_o] = devPtrSeqOffsetsO;
+            constexpr size_t nthreads_per_block = 128;
+            const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+            void *devOffsetsQ = static_cast<int8_t *>(workspace)
+                + plan_workspace_size + actual_seqlen_workspace_size;
+            void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b+1) * sizeof(int32_t);
+            void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b+1) * sizeof(int32_t);
+            void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b+1) * sizeof(int32_t);
+            NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+            cu_seqlens_with_offset_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
+                layout_group, b, h, hg, d, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+                static_cast<int32_t *>(devPtrSeqOffsetsKV),
+                static_cast<int32_t *>(devOffsetsQ),
+                static_cast<int32_t *>(devOffsetsK),
+                static_cast<int32_t *>(devOffsetsV),
+                static_cast<int32_t *>(devOffsetsO));
+            variant_pack[offset_q] = devOffsetsQ;
+            variant_pack[offset_k] = devOffsetsK;
+            variant_pack[offset_v] = devOffsetsV;
+            variant_pack[offset_o] = devOffsetsO;
         }
 
         if (is_dropout) {
@@ -733,8 +765,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_QKV, const Tensor *input_Bias, Tensor *output_O,
-    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens, const Tensor *seq_offsets_q,
-    const Tensor *seq_offsets_k, const Tensor *seq_offsets_v, const Tensor *seq_offsets_o,
+    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens, const Tensor *cu_seqlens_with_offset,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
@@ -762,10 +793,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     void *devPtrO = output_O->data.dptr;
     void *devPtrS = nullptr;
     void *devPtrCuSeqlens = cu_seqlens->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsets = cu_seqlens_with_offset->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
         if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -822,8 +850,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
                                 devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsets, devPtrSeqOffsets,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
                                 stream, handle);
@@ -850,9 +877,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
                                   const Tensor *input_QKV, const Tensor *input_O,
                                   const Tensor *input_dO, const Tensor *input_Bias,
                                   Tensor *output_S, Tensor *output_dQKV, Tensor *output_dBias,
-                                  const Tensor *cu_seqlens, const Tensor *seq_offsets_q,
-                                  const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
-                                  const Tensor *seq_offsets_o, const Tensor *rng_state,
+                                  const Tensor *cu_seqlens, const Tensor *cu_seqlens_with_offset,
+                                  const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
@@ -892,10 +918,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
     devPtrSoftmaxStats = output_S->data.dptr;
 
     void *devPtrCuSeqlens = cu_seqlens->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsets = cu_seqlens_with_offset->data.dptr;
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
@@ -911,8 +934,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsets, devPtrSeqOffsets,
                                 get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle);
 
@@ -936,8 +958,8 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_KV,
     const Tensor *input_Bias, Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
-    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *seq_offsets_q,
-    const Tensor *seq_offsets_k, const Tensor *seq_offsets_v, const Tensor *seq_offsets_o,
+    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+    const Tensor *cu_seqlens_q_with_offset, const Tensor *cu_seqlens_kv_with_offset,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
@@ -967,10 +989,8 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 
     void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsetsQ = cu_seqlens_q_with_offset->data.dptr;
+    void *devPtrSeqOffsetsKV = cu_seqlens_kv_with_offset->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
         if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -1027,8 +1047,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
                                 devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
                                 stream, handle);
@@ -1058,9 +1077,8 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                   const Tensor *input_Bias, Tensor *output_S,
                                   Tensor *output_dQ, Tensor *output_dKV,
                                   Tensor *output_dBias, const Tensor *cu_seqlens_q,
-                                  const Tensor *cu_seqlens_kv, const Tensor *seq_offsets_q,
-                                  const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
-                                  const Tensor *seq_offsets_o, const Tensor *rng_state,
+                                  const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_with_offset,
+                                  const Tensor *cu_seqlens_kv_with_offset, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
@@ -1100,10 +1118,8 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
     void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsetsQ = cu_seqlens_q_with_offset->data.dptr;
+    void *devPtrSeqOffsetsKV = cu_seqlens_kv_with_offset->data.dptr;
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
@@ -1119,8 +1135,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
                                 get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle);
 
@@ -1146,9 +1161,8 @@ void fused_attn_arbitrary_seqlen_fwd(
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-    const Tensor *seq_offsets_q, const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
-    const Tensor *seq_offsets_o, const Tensor *rng_state,
-    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    const Tensor *cu_seqlens_q_with_offset, const Tensor *cu_seqlens_kv_with_offset,
+    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
     const auto QKV_type = input_Q->data.dtype;
@@ -1168,10 +1182,8 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsetsQ = cu_seqlens_q_with_offset->data.dptr;
+    void *devPtrSeqOffsetsKV = cu_seqlens_kv_with_offset->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
         if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -1228,8 +1240,7 @@ void fused_attn_arbitrary_seqlen_fwd(
                                 devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
                                 stream, handle);
@@ -1259,9 +1270,8 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
                                   Tensor *output_S,
                                   Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
                                   Tensor *output_dBias, const Tensor *cu_seqlens_q,
-                                  const Tensor *cu_seqlens_kv, const Tensor *seq_offsets_q,
-                                  const Tensor *seq_offsets_k, const Tensor *seq_offsets_v,
-                                  const Tensor *seq_offsets_o, const Tensor *rng_state,
+                                  const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_with_offset,
+                                  const Tensor *cu_seqlens_kv_with_offset, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
     const auto QKV_type = input_Q->data.dtype;
@@ -1289,10 +1299,8 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
 
     void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
-    void *devPtrSeqOffsetsQ = seq_offsets_q->data.dptr;
-    void *devPtrSeqOffsetsK = seq_offsets_k->data.dptr;
-    void *devPtrSeqOffsetsV = seq_offsets_v->data.dptr;
-    void *devPtrSeqOffsetsO = seq_offsets_o->data.dptr;
+    void *devPtrSeqOffsetsQ = cu_seqlens_q_with_offset->data.dptr;
+    void *devPtrSeqOffsetsKV = cu_seqlens_kv_with_offset->data.dptr;
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
@@ -1307,8 +1315,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                                devPtrSeqOffsetsQ, devPtrSeqOffsetsK,
-                                devPtrSeqOffsetsV, devPtrSeqOffsetsO,
+                                devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
                                 get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle);
 

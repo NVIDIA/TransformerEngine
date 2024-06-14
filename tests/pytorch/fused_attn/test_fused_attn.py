@@ -704,23 +704,23 @@ def _run_dot_product_attention(
         inp[i].requires_grad = True
         inp_orig[i].requires_grad = True
 
-    # Create ragged offsets for q/k/v
-    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
-    qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
-    if qkv_format == 'thd':
-        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-        if qkv_group == 'hd_hd_hd':
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
-        if qkv_group in ['3hd', 'h3d']:
-            seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-        if qkv_group in ['hd_2hd', 'hd_h2d']:
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
+    ## Create ragged offsets for q/k/v
+    #seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
+    #qkv_group = ''.join([x for x in qkv_layout if x not in 'bst'])
+    #if qkv_format == 'thd':
+    #    seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+    #    if qkv_group == 'hd_hd_hd':
+    #        seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+    #        seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
+    #        seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
+    #    if qkv_group in ['3hd', 'h3d']:
+    #        seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+    #        seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+    #        seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
+    #    if qkv_group in ['hd_2hd', 'hd_h2d']:
+    #        seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
+    #        seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
+    #        seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
 
     # Create output gradient
     qkv_format_kv = '_'.join(qkv_format)
@@ -793,10 +793,12 @@ def _run_dot_product_attention(
             max_seqlen_kv=config.max_seqlen_kv,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            seq_offsets_q=seq_offsets_q,
-            seq_offsets_k=seq_offsets_k,
-            seq_offsets_v=seq_offsets_v,
-            seq_offsets_o=seq_offsets_o,
+            cu_seqlens_q_with_offset=cu_seqlens_q_after_pad,
+            cu_seqlens_kv_with_offset=cu_seqlens_kv_after_pad,
+            #seq_offsets_q=seq_offsets_q,
+            #seq_offsets_k=seq_offsets_k,
+            #seq_offsets_v=seq_offsets_v,
+            #seq_offsets_o=seq_offsets_o,
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
             core_attention_bias_type=config.attn_bias_type,
