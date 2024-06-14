@@ -17,15 +17,6 @@ from typing import List, Optional, Tuple
 
 
 @cache
-def userbuffers_enabled() -> bool:
-    """Check if userbuffers support is enabled"""
-    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")):
-        assert os.getenv("MPI_HOME"), "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
-        return True
-    return False
-
-
-@cache
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:
@@ -183,7 +174,7 @@ def cuda_version() -> Tuple[int, ...]:
         universal_newlines=True,
     )
     match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split('.')
+    version = match.group(1).split(".")
     return tuple(int(v) for v in version)
 
 
@@ -233,9 +224,7 @@ def get_frameworks() -> List[str]:
     _frameworks = [framework.lower() for framework in _frameworks]
     for framework in _frameworks:
         if framework not in supported_frameworks:
-            raise ValueError(
-                f"Transformer Engine does not support framework={framework}"
-            )
+            raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
 
@@ -251,8 +240,8 @@ def package_files(directory):
 
 def copy_common_headers(te_src, dst):
     headers = te_src / "common"
-    for file_path in glob.glob(os.path.join(str(headers), "**",  '*.h'), recursive=True):
-        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1:])
+    for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
+        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1 :])
         Path(new_path).parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(file_path, new_path)
 
@@ -260,9 +249,10 @@ def copy_common_headers(te_src, dst):
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
     import importlib
+
     try:
         importlib.import_module(package)
     except ImportError:
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     finally:
         globals()[package] = importlib.import_module(package)

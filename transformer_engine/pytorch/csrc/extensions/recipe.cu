@@ -4,21 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
-
-#include <string>
-
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 
+#include <string>
 
-void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
-                                                 std::vector<at::Tensor> amax_histories,
-                                                 std::vector<at::Tensor> scales,
-                                                 std::vector<at::Tensor> scale_invs,
-                                                 const std::string &amax_compute_algo,
-                                                 transformer_engine::DType fp8_dtype,
-                                                 float margin) {
+#include "extensions.h"
+
+void fused_amax_and_scale_update_after_reduction(
+    const at::Tensor &amax_reduction_buffer, std::vector<at::Tensor> amax_histories,
+    std::vector<at::Tensor> scales, std::vector<at::Tensor> scale_invs,
+    const std::string &amax_compute_algo, transformer_engine::DType fp8_dtype, float margin) {
   using namespace transformer_engine;
   size_t num_tensors = amax_histories.size();
   std::vector<Tensor> t_amax_histories(num_tensors);
@@ -51,12 +47,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
     te_scale_invs[i] = reinterpret_cast<NVTETensor>(&t_scale_invs[i]);
   }
   nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
-    makeTransformerEngineTensor(amax_reduction_buffer).data(),
-    te_amax_histories,
-    te_scales,
-    te_scale_invs,
-    amax_compute_algo.c_str(),
-    static_cast<NVTEDType>(fp8_dtype),
-    margin,
-    at::cuda::getCurrentCUDAStream());
+      makeTransformerEngineTensor(amax_reduction_buffer).data(), te_amax_histories, te_scales,
+      te_scale_invs, amax_compute_algo.c_str(), static_cast<NVTEDType>(fp8_dtype), margin,
+      at::cuda::getCurrentCUDAStream());
 }

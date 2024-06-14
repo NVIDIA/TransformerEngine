@@ -17,7 +17,7 @@ is_fp8_supported, reason = is_fp8_available()
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-@pytest.mark.parametrize('use_reentrant', [False, True])
+@pytest.mark.parametrize("use_reentrant", [False, True])
 def test_transformer_encoder_recompute(use_reentrant):
     """
     Test TransformerLayer encoder recompute
@@ -29,17 +29,17 @@ def test_transformer_encoder_recompute(use_reentrant):
         """Launch training in subprocess and check output"""
         try:
             cmd = [
-                'python',
-                str(test_root / 'recompute_tests' / 'recompute_transformer_encoder.py'),
+                "python",
+                str(test_root / "recompute_tests" / "recompute_transformer_encoder.py"),
                 str(int(enable_recompute)),
-                str(int(use_reentrant))
+                str(int(use_reentrant)),
             ]
             result = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
 
             print(result)
 
-            loss_match = re.search(r'Loss:\s+(-?\d+\.\d+)', result)
-            memory_match = re.search(r'Peak memory:\s+(\d+)', result)
+            loss_match = re.search(r"Loss:\s+(-?\d+\.\d+)", result)
+            memory_match = re.search(r"Peak memory:\s+(\d+)", result)
 
             loss_value = float(loss_match.group(1))
             memory_value = int(memory_match.group(1))
