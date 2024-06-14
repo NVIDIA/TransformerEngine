@@ -212,7 +212,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                                                 static_cast<size_t>(rs_output.size(1))},
                                                DType::kBFloat16);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlap::bulk_gemm_overlap((cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
                                        D_, pre_gelu_out_, ubuf_, rs_out_, workspace_,
                                        grad, accumulate, use_split_accumulator, comm_type);
@@ -299,7 +299,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                                                 static_cast<size_t>(rs_output.size(1))},
                                                DType::kBFloat16);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlap::atomic_gemm_overlap_rs(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubuf_, rs_out_, counters_, workspace_,
@@ -370,7 +370,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
                                                 static_cast<size_t>(rs_output.size(1))},
                                                DType::kBFloat16);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlap::split_gemm_overlap_rs(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubuf_, rs_out_, workspace_,
@@ -394,7 +394,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
       }
     }
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     NVTE_CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_d2dcopy, 0));
     NVTE_CHECK_CUDA(
@@ -584,7 +584,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                   static_cast<size_t>(D_buffer.size(1))},
                                                  D_type, D_amax_ptr, D_scale_ptr, nullptr);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlapP2P::atomic_gemm_overlap_ag(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubuf_, ubufs_, counters_, B_copy_, D_buffer_, workspace_,
@@ -667,13 +667,11 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                B_copy_shape, B_type,
                                                nullptr, nullptr, B_scale_inv_ptr);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlapP2P::split_gemm_overlap_ag(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubufs_, B_copy_, workspace_,
       grad, accumulate, use_split_accumulator);
-
-    at::cuda::setCurrentCUDAStream(stream_main);
 
     return D;
   }  // UbufP2PCommOverlap::split_overlap_ag
@@ -749,7 +747,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                  {static_cast<size_t>(_counters.size(0))},
                                                  DType::kInt32);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlapP2P::atomic_gemm_overlap_rs(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubuf_, ubufs_, counters_, workspace_,
@@ -831,7 +829,7 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
                                                   {workspaceSize},
                                                   DType::kByte);
 
-    at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+    at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     CommGemmOverlapP2P::split_gemm_overlap_rs(
       (cudaStream_t)stream_main, A_, transa, B_, transb, bias_,
       D_, pre_gelu_out_, ubufs_, workspace_,
