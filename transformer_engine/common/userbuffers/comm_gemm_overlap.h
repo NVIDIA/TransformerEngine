@@ -7,14 +7,19 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 
+// Standard library includes
 #include <cstring>
+
+// External includes
+#include <cuda.h>
+#include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
+
+// TE/common includes
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/gemm.h>
-
 #include "../util/logging.h"
 #include "../util/system.h"
-
 #include "userbuffers.h"
 
 #define HALF_BYTES 2
@@ -84,10 +89,8 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
     int num_splits, int num_max_streams, int cga_size, int num_comm_sms,
     bool set_sm_margin, bool use_ce, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle,
-    std::function<void(void *)> free_handle
-  ) {
+    std::function<void(void *)> free_handle) {
     // Initialize the UB communicator
     if (!_comm_created) {
 #ifdef UB_MPI_BOOTSTRAP
@@ -95,7 +98,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
 #else
       create_communicator_grouped2(&_ub_comm,
         worldrank, worldsize, localrank, localsize, nodeid, numnodes,
-        alloc_copy_allgather_handle, bcast_handle, barrier_handle, free_handle,
+        alloc_copy_allgather_handle, barrier_handle, free_handle,
         1, 1, localsize, 1);
 #endif
       if (worldrank == 0) {
@@ -169,16 +172,14 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
 
   CommGemmOverlap(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
-    int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms,
-    bool set_sm_margin, bool use_ce, bool atomic_gemm,
+    int num_splits, int num_max_streams, int num_comm_cga, int num_comm_sms, bool set_sm_margin,
+    bool use_ce, bool atomic_gemm,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(void *, size_t, int, char *)> bcast_handle,
-    std::function<void(char *)> barrier_handle,
-    std::function<void(void *)> free_handle)
+    std::function<void(char *)> barrier_handle, std::function<void(void *)> free_handle)
   : CommGemmOverlapBase(
       worldrank, worldsize, localrank, localsize, nodeid, numnodes,
       num_splits, num_max_streams, num_comm_cga, num_comm_sms, set_sm_margin, use_ce, atomic_gemm,
-      alloc_copy_allgather_handle, bcast_handle, barrier_handle, free_handle) {
+      alloc_copy_allgather_handle, barrier_handle, free_handle) {
     if (_atomic_gemm) {
       _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 0);
       NVTE_CHECK(0 <= _rs_kernel_type && _rs_kernel_type < 3,
@@ -512,13 +513,12 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     int num_max_streams, int cga_size, int num_comm_sms,
     bool set_sm_margin, bool use_ce, bool atomic_gemm, bool aggregate, bool is_reduce_scatter,
     std::function<void(void **, void *, size_t, char *)> alloc_copy_allgather_handle,
-    std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle,
     std::function<void(void *)> free_handle)
   : CommGemmOverlapBase(
       worldrank, worldsize, localrank, localsize, nodeid, numnodes,
       localsize, num_max_streams, cga_size, num_comm_sms, use_ce, set_sm_margin, atomic_gemm,
-      alloc_copy_allgather_handle, bcast_handle, barrier_handle, free_handle) {
+      alloc_copy_allgather_handle, barrier_handle, free_handle) {
     _is_p2p = true;
     _aggregate = aggregate;
     _is_reduce_scatter = is_reduce_scatter;

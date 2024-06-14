@@ -27,7 +27,7 @@ def te_dtype_to_jax_dtype(te_dtype):
         TEDType.kInt64: jnp.int64,
         TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
         TEDType.kFloat8E5M2: jnp.float8_e5m2,
-        TEDType.kByte: jnp.uint8
+        TEDType.kByte: jnp.uint8,
     }
 
     if te_dtype not in converter:
@@ -88,12 +88,11 @@ def check_valid_batch_dims(bdims):
     Assert out non-supported bath dims
     """
     for dim in bdims:
-        assert dim in [0, None], \
-            "Currently only support batch_dim in [0, None], " \
-            f"but got {dim=}"
+        assert dim in [0, None], f"Currently only support batch_dim in [0, None], but got {dim=}"
+
 
 def normalize_axis_boundary(axis, ndim):
-    """ NA """
+    """NA"""
     return axis if axis >= 0 else ndim + axis
 
 
@@ -119,10 +118,13 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
             Xt = (dim0, dim3, dim4, dim1. dim2)
     """
     if static_axis_boundary < 0:
-        static_axis_boundary = -1    # means no static axes
-    assert static_axis_boundary < len(shape) - 2    # at least 2 remaining for transpose.
+        static_axis_boundary = -1  # means no static axes
+    assert static_axis_boundary < len(shape) - 2  # at least 2 remaining for transpose.
     transpose_start_idx = static_axis_boundary + 1
     transpose_axis_boundary = normalize_axis_boundary(transpose_axis_boundary, len(shape))
     assert transpose_start_idx < transpose_axis_boundary
-    return (*shape[:transpose_start_idx], *shape[transpose_axis_boundary:],
-            *shape[transpose_start_idx:transpose_axis_boundary])
+    return (
+        *shape[:transpose_start_idx],
+        *shape[transpose_axis_boundary:],
+        *shape[transpose_start_idx:transpose_axis_boundary],
+    )

@@ -39,20 +39,10 @@ extern "C" {
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream used for the operation.
  */
-void nvte_cublas_gemm(const NVTETensor A,
-                      const NVTETensor B,
-                      NVTETensor D,
-                      const NVTETensor bias,
-                      NVTETensor pre_gelu_out,
-                      bool transa,
-                      bool transb,
-                      bool grad,
-                      NVTETensor workspace,
-                      bool accumulate,
-                      bool use_split_accumulator,
-                      int math_sm_count,
-                      cudaStream_t stream
-);
+void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+                      NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
+                      NVTETensor workspace, bool accumulate, bool use_split_accumulator,
+                      int math_sm_count, cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices with chunking and atomic counters.
  *
@@ -82,27 +72,14 @@ void nvte_cublas_gemm(const NVTETensor A,
  *  \param[in,out] counter               counter[chunk_i]=0 indicates chunk_i has been produced.
  *  \param[in]     stream                CUDA stream used for the operation.
  */
-void nvte_cublas_atomic_gemm(const NVTETensor A,
-                             const NVTETensor B,
-                             NVTETensor D,
-                             const NVTETensor bias,
-                             NVTETensor pre_gelu_out,
-                             bool transa,
-                             bool transb,
-                             bool grad,
-                             NVTETensor workspace,
-                             bool accumulate,
-                             bool use_split_accumulator,
-                             int math_sm_count,
-                             int m_split,
-                             int n_split,
-                             bool gemm_producer,
-                             const NVTETensor counter,
-                             cudaStream_t stream
-);
+void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
+                             const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
+                             bool transb, bool grad, NVTETensor workspace, bool accumulate,
+                             bool use_split_accumulator, int math_sm_count, int m_split,
+                             int n_split, bool gemm_producer, const NVTETensor counter,
+                             cudaStream_t stream);
 #ifdef __cplusplus
 }  // extern "C"
 #endif
-
 
 #endif  // TRANSFORMER_ENGINE_GEMM_H_

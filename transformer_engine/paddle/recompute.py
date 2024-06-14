@@ -12,7 +12,7 @@ from .constants import RecomputeFunctionNames
 from .fp8 import get_global_fp8_state
 
 
-__all__ = ['recompute']
+__all__ = ["recompute"]
 
 
 _DISABLE_RECOMPUTE = int(os.getenv("NVTE_DISABLE_RECOMPUTE", "0"))
@@ -48,8 +48,9 @@ def recompute(function, *args, **kwargs):
     kwargs : dict
             dictionary of string keys for keyword arguments to :attr:`function`.
     """
-    assert not _DISABLE_RECOMPUTE, "Recompute is disabled. " \
-        f"Got NVTE_DISABLE_RECOMPUTE={_DISABLE_RECOMPUTE}."
+    assert (
+        not _DISABLE_RECOMPUTE
+    ), f"Recompute is disabled. Got NVTE_DISABLE_RECOMPUTE={_DISABLE_RECOMPUTE}."
 
     global_fp8_state = get_global_fp8_state()
 

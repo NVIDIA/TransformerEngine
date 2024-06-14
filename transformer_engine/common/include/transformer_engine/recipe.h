@@ -44,18 +44,11 @@ extern "C" {
  *  \param[in] margin                   Scaling factor margin.
  *  \param[in] stream                   CUDA stream.
  */
-void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_history,
-                                                       const NVTETensor scale,
-                                                       const NVTETensor scale_inv,
-                                                       const NVTETensor scale_inv_mask,
-                                                       NVTETensor updated_amax_history,
-                                                       NVTETensor updated_scale,
-                                                       NVTETensor updated_scale_inv,
-                                                       const char* amax_compute_algo,
-                                                       NVTEDType fp8_dtype,
-                                                       float margin,
-                                                       cudaStream_t stream);
-
+void nvte_delayed_scaling_recipe_amax_and_scale_update(
+    const NVTETensor amax_history, const NVTETensor scale, const NVTETensor scale_inv,
+    const NVTETensor scale_inv_mask, NVTETensor updated_amax_history, NVTETensor updated_scale,
+    NVTETensor updated_scale_inv, const char* amax_compute_algo, NVTEDType fp8_dtype, float margin,
+    cudaStream_t stream);
 
 /*! \brief Bulk-update FP8 scaling factors with delayed scaling recipe after amax reduction.
  *
@@ -85,15 +78,9 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(const NVTETensor amax_his
  *  \param[in] stream                   CUDA stream.
  */
 void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
-                           const NVTETensor amax_reduction_buffer,
-                           std::vector<NVTETensor> amax_histories,
-                           std::vector<NVTETensor> scales,
-                           std::vector<NVTETensor> scale_invs,
-                           const char *amax_compute_algo,
-                           NVTEDType fp8_dtype,
-                           float margin,
-                           cudaStream_t stream);
-
+    const NVTETensor amax_reduction_buffer, std::vector<NVTETensor> amax_histories,
+    std::vector<NVTETensor> scales, std::vector<NVTETensor> scale_invs,
+    const char* amax_compute_algo, NVTEDType fp8_dtype, float margin, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

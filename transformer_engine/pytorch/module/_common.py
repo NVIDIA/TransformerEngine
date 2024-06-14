@@ -14,23 +14,23 @@ from ..export import is_in_onnx_export_mode
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
 
-def _get_normalization_func(normalization: str,
-                            fp8_output: bool,
-                            is_grad_enabled: bool,
-                            forward: bool):
+
+def _get_normalization_func(
+    normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
+):
     fwd_normalization_funcs = {
-            ('LayerNorm', True, True):   tex.layernorm_fwd_fp8,
-            ('LayerNorm', True, False):  tex.layernorm_fwd_fp8_inf,
-            ('LayerNorm', False, True):  tex.layernorm_fwd_noalloc,
-            ('LayerNorm', False, False): tex.layernorm_fwd_inf,
-            ('RMSNorm', True, True):     tex.rmsnorm_fwd_fp8,
-            ('RMSNorm', True, False):    tex.rmsnorm_fwd_fp8_inf,
-            ('RMSNorm', False, True):    tex.rmsnorm_fwd_noalloc,
-            ('RMSNorm', False, False):   tex.rmsnorm_fwd_inf,
+        ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
+        ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
+        ("LayerNorm", False, True): tex.layernorm_fwd_noalloc,
+        ("LayerNorm", False, False): tex.layernorm_fwd_inf,
+        ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
+        ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
+        ("RMSNorm", False, True): tex.rmsnorm_fwd_noalloc,
+        ("RMSNorm", False, False): tex.rmsnorm_fwd_inf,
     }
     bwd_normalization_funcs = {
-            'LayerNorm':  tex.layernorm_bwd,
-            'RMSNorm':    tex.rmsnorm_bwd,
+        "LayerNorm": tex.layernorm_bwd,
+        "RMSNorm": tex.rmsnorm_bwd,
     }
 
     if forward:
@@ -39,21 +39,21 @@ def _get_normalization_func(normalization: str,
     assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
     return bwd_normalization_funcs[normalization]
 
-def _apply_normalization(inputmat:torch.Tensor,
-                         ln_out: torch.Tensor,
-                         ln_weight: torch.Tensor,
-                         ln_bias: Union[torch.Tensor, None],
-                         eps: float,
-                         fp8_out: bool,
-                         fp8_meta: Dict[str, Any],
-                         normalization: str,
-                         fwd_ln_sm_margin: int,
-                         zero_centered_gamma: bool,
-                         is_grad_enabled: bool):
-    normalization_func = _get_normalization_func(normalization,
-                                                 fp8_out,
-                                                 is_grad_enabled,
-                                                 True)
+
+def _apply_normalization(
+    inputmat: torch.Tensor,
+    ln_out: torch.Tensor,
+    ln_weight: torch.Tensor,
+    ln_bias: Union[torch.Tensor, None],
+    eps: float,
+    fp8_out: bool,
+    fp8_meta: Dict[str, Any],
+    normalization: str,
+    fwd_ln_sm_margin: int,
+    zero_centered_gamma: bool,
+    is_grad_enabled: bool,
+):
+    normalization_func = _get_normalization_func(normalization, fp8_out, is_grad_enabled, True)
 
     inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
     if fp8_out:
@@ -73,25 +73,28 @@ def _apply_normalization(inputmat:torch.Tensor,
                 **output_kwarg,
             )
         else:
-            return normalization_func(
-                *inputs,
-                eps,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-                fwd_ln_sm_margin,
-                zero_centered_gamma,
-            ), None, None
+            return (
+                normalization_func(
+                    *inputs,
+                    eps,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                    fwd_ln_sm_margin,
+                    zero_centered_gamma,
+                ),
+                None,
+                None,
+            )
     else:
         if is_grad_enabled:
-            output = normalization_func(
-                *inputs, ln_out, eps,
-                fwd_ln_sm_margin, zero_centered_gamma
-            )
+            output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
         else:
-            return normalization_func(
-                    *inputs, eps, fwd_ln_sm_margin, zero_centered_gamma
-            ), None, None
+            return (
+                normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
+                None,
+                None,
+            )
     if normalization == "RMSNorm":
         output = (ln_out, None, output[1])
     elif normalization == "LayerNorm":
@@ -132,7 +135,7 @@ class _NoopCatFunc(torch.autograd.Function):
             if (
                 len(in_shape) != num_dims
                 or in_shape[:dim] != out_shape[:dim]
-                or in_shape[dim+1:] != out_shape[dim+1:]
+                or in_shape[dim + 1 :] != out_shape[dim + 1 :]
             ):
                 raise ValueError(
                     "Attempted to concatenate tensors with shapes "
@@ -213,6 +216,7 @@ class _ParameterInitMeta:
     """
     Stores essential metadata needed to support deferred parameter initialization.
     """
+
     init_fn: Optional[Callable] = get_default_init_method()
     get_rng_state_tracker: Optional[Callable] = None
     fp8_meta_index: Optional[int] = None
