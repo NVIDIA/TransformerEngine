@@ -2476,11 +2476,11 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, dqkv, None, None, None,
+            return (None, None, None, None, dqkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, dqkv, None, rest[0], None,
+        return (None, None, None, None, dqkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -2700,11 +2700,11 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (None, None, None, None, None, None, None, None, None, dq, dkv, None, None, None,
+            return (None, None, None, None, None, None, None, dq, dkv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
+        return (None, None, None, None, None, None, None, dq, dkv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -3018,12 +3018,12 @@ class FusedAttnFunc(torch.autograd.Function):
         # if no_bias or alibi, return dqkv
         if ctx.attn_bias_type in ["no_bias", "alibi"]:
             return (None, None, None, None, None, None,
-                    None, None, None, dq, dk, dv, None, None, None,
+                    None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
         return (None, None, None, None, None, None,
-                None, None, None, dq, dk, dv, None, rest[0], None,
+                None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -3808,9 +3808,9 @@ class DotProductAttention(torch.nn.Module):
         if qkv_format == 'thd':
             use_unfused_attention = False
             if ((cu_seqlens_q_with_offset is not None
-                and cu_seqlens_q_with_offset != cu_seqlens_q_with_offset)
+                and torch.equal(cu_seqlens_q_with_offset, cu_seqlens_q))
                 or (cu_seqlens_kv_with_offset is not None
-                and cu_seqlens_kv_with_offset != cu_seqlens_kv_with_offset)):
+                and torch.equal(cu_seqlens_kv_with_offset, cu_seqlens_kv))):
                 use_flash_attention = False
 
         # Filter: ONNX export.
