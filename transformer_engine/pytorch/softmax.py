@@ -20,6 +20,7 @@ THREADS_PER_BLOCK = 128
 
 _default_causal_mask = {}
 
+
 def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if sq == 1:
@@ -29,8 +30,8 @@ def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     if matrix_shape not in _default_causal_mask:
         diagonal_offset = sk - sq + 1
         _default_causal_mask[matrix_shape] = torch.triu(
-            torch.ones(sq, sk, dtype=torch.bool, device="cuda"),
-            diagonal=diagonal_offset)
+            torch.ones(sq, sk, dtype=torch.bool, device="cuda"), diagonal=diagonal_offset
+        )
     return _default_causal_mask[matrix_shape]
 
 
@@ -49,15 +50,17 @@ def _get_onnx_export_causal_mask(
     """
     assert len(onnx_causal_mask.size()) == 2
     assert onnx_causal_mask.size(0) == onnx_causal_mask.size(1)
-    assert onnx_causal_mask.size(0) >= (seq_k-seq_q) >= 0
-    derived_mask = onnx_causal_mask[seq_k-seq_q:seq_k, :seq_k]
+    assert onnx_causal_mask.size(0) >= (seq_k - seq_q) >= 0
+    derived_mask = onnx_causal_mask[seq_k - seq_q : seq_k, :seq_k]
     return derived_mask
 
 
 def fp32_compute(onnx_symbolic_fn):
     """A decorator that wraps an ONNX symoblic function with FP32 compute operators."""
+
     def wrapper(g: torch.Graph, inp: torch._C.Value, scale: float, *args, **kwargs):
         return compute_in_fp32(g, inp, onnx_symbolic_fn, scale, *args, **kwargs)
+
     return wrapper
 
 
@@ -73,17 +76,13 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledUpperTriangMaskedSoftmax fwd"""
         scale_t = torch.tensor([scale])
-        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(
-            inputs, scale_t[0]
-        )
+        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(inputs, scale_t[0])
 
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledUpperTriangMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
         input_grads = tex.scaled_upper_triang_masked_softmax_backward(
@@ -96,8 +95,9 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     @fp32_compute
     def symbolic(g: torch.Graph, inputs: torch._C.Value, scale: float) -> torch._C.Value:
         """ScaledUpperTriangMaskedSoftmax symbolic method"""
+
         def triangular_mask():
-            dtype =  _type_utils.JitScalarType.INT64
+            dtype = _type_utils.JitScalarType.INT64
             ones = torch.onnx.symbolic_opset9.ones_like(g, inputs, dtype)
             k = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
             mask = g.op("Trilu", ones, k, upper_i=1)
@@ -109,7 +109,7 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
         inv_mask = g.op("Sub", one, mask)
 
-        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
+        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000.0, dtype=torch.float16))
         softmax_mask = g.op("Mul", mask, neg_tenK)
 
         scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
@@ -132,16 +132,12 @@ class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledAlignedCausalMaskedSoftmax fwd"""
         scale_t = torch.tensor([scale])
-        softmax_results = tex.scaled_aligned_causal_masked_softmax_forward(
-            inputs, scale_t[0]
-        )
+        softmax_results = tex.scaled_aligned_causal_masked_softmax_forward(inputs, scale_t[0])
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledAlignedCausalMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
         input_grads = tex.scaled_aligned_causal_masked_softmax_backward(
@@ -154,8 +150,9 @@ class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
     @fp32_compute
     def symbolic(g: torch.Graph, inputs: torch._C.Value, scale: float) -> torch._C.Value:
         """ScaledAlignedCausalMaskedSoftmax symbolic method"""
+
         def triangular_mask():
-            dtype =  _type_utils.JitScalarType.INT64
+            dtype = _type_utils.JitScalarType.INT64
             ones = torch.onnx.symbolic_opset9.ones_like(g, inputs, dtype)
             k = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
 
@@ -173,7 +170,7 @@ class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
         inv_mask = g.op("Sub", one, mask)
 
-        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
+        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000.0, dtype=torch.float16))
         softmax_mask = g.op("Mul", mask, neg_tenK)
 
         scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
@@ -193,9 +190,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float
-    ) -> torch.Tensor:
+    def forward(ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledMaskedSoftmax fwd"""
         scale_t = torch.tensor([scale])
 
@@ -204,24 +199,18 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = tex.scaled_masked_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
+        input_grads = tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
     @staticmethod
     @fp32_compute
     def symbolic(
-        g: torch.Graph,
-        inputs: torch._C.Value,
-        mask: torch._C.Value,
-        scale: float) -> torch._C.Value:
+        g: torch.Graph, inputs: torch._C.Value, mask: torch._C.Value, scale: float
+    ) -> torch._C.Value:
         """ScaledMaskedSoftmax symbolic method"""
         # Captures the logic of function scaled_masked_softmax_warp_forward.
         # output = softmax(mask(input*scale)
@@ -234,7 +223,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
         inv_mask = g.op("Sub", one, mask)
         # Note: type is hard coded because softmax uses FP16 or BF16
-        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
+        neg_tenK = g.op("Constant", value_t=torch.tensor(-10000.0, dtype=torch.float16))
         softmax_mask = g.op("Mul", mask, neg_tenK)
         masked_scaled = g.op("Mul", inv_mask, scaled)
         masked = g.op("Add", masked_scaled, softmax_mask)
@@ -259,15 +248,11 @@ class ScaledSoftmax(torch.autograd.Function):
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = tex.scaled_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
+        input_grads = tex.scaled_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
     @staticmethod
@@ -278,7 +263,6 @@ class ScaledSoftmax(torch.autograd.Function):
         scaled = g.op("Mul", inputs, scale_input)
         out = g.op("Softmax", scaled)
         return out
-
 
 
 class FusedScaleMaskSoftmax(nn.Module):
@@ -296,9 +280,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         softmax_in_fp32: bool = True,
     ) -> None:
         super().__init__()
-        self.scaled_masked_softmax_fusion = bool(
-            int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1"))
-        )
+        self.scaled_masked_softmax_fusion = bool(int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1")))
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
 
@@ -309,9 +291,10 @@ class FusedScaleMaskSoftmax(nn.Module):
                 "onnx_causal_mask",
                 torch.triu(
                     torch.ones(self.kvcache_max_seq, self.kvcache_max_seq, device="cuda"),
-                    diagonal=1
+                    diagonal=1,
                 ).bool(),
-                persistent=False)
+                persistent=False,
+            )
 
     def forward(
         self,
@@ -328,9 +311,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.input_in_float16 = self.input_in_fp16 or self.input_in_bf16
         self.attn_mask_type = attn_mask_type
 
-        assert (
-            scale is None or self.softmax_in_fp32
-        ), "softmax should be in fp32 when scaled"
+        assert scale is None or self.softmax_in_fp32, "softmax should be in fp32 when scaled"
 
         if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
             return self.forward_fused_softmax(inp, mask, scale)
@@ -351,11 +332,12 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.attn_mask_type == "arbitrary":
             return False  # Custom masks not supported
 
-        if self.attn_mask_type == "causal":         # unfused causal softmax kernel
+        if self.attn_mask_type == "causal":  # unfused causal softmax kernel
             return True
 
-        if (sq % 4 == 0                             # sq must be divisor of 4
-            and attn_batches % 4 == 0               # np * b must be divisor of 4
+        if (
+            sq % 4 == 0  # sq must be divisor of 4
+            and attn_batches % 4 == 0  # np * b must be divisor of 4
             and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
             batch_per_block = self.get_batch_per_block(int(sk))

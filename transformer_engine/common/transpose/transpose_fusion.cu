@@ -4,18 +4,19 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transpose.h>
 #include <cuda_runtime.h>
+#include <transformer_engine/transpose.h>
+
 #include <cfloat>
 #include <iostream>
 #include <type_traits>
-#include "../utils.cuh"
+
 #include "../common.h"
+#include "../utils.cuh"
 
 namespace transformer_engine {
 
-template <int nvec_in, int nvec_out,
-          typename IVec, typename OVec, typename CVec, typename CType>
+template <int nvec_in, int nvec_out, typename IVec, typename OVec, typename CVec, typename CType>
 inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
                                                     OVec (&out_trans)[nvec_in],
                                                     CVec &out_dbias,  // NOLINT(*)
@@ -24,7 +25,8 @@ inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
   using T = typename OVec::type;
   using OVecC = Vec<T, nvec_in>;
 
-  CVec step_dbias; step_dbias.clear();
+  CVec step_dbias;
+  step_dbias.clear();
 
 #pragma unroll
   for (unsigned int i = 0; i < nvec_out; ++i) {
@@ -61,24 +63,21 @@ namespace {
 
 template <typename IType, typename OType, typename CType>
 struct TDBiasParam {
-    using InputType = IType;
-    using OutputType = OType;
-    using ComputeType = CType;
-    const IType *input;
-    OType *output_t;
-    const CType *scale_inv;
-    CType *workspace;
+  using InputType = IType;
+  using OutputType = OType;
+  using ComputeType = CType;
+  const IType *input;
+  OType *output_t;
+  const CType *scale_inv;
+  CType *workspace;
 };
 
 }  // namespace
 
 template <int nvec_in, int nvec_out, typename Param>
-__global__ void
-__launch_bounds__(cast_transpose_num_threads)
-transpose_dbias_kernel(const Param param,
-                            const size_t row_length,
-                            const size_t num_rows,
-                            const size_t num_tiles) {
+__global__ void __launch_bounds__(cast_transpose_num_threads)
+    transpose_dbias_kernel(const Param param, const size_t row_length, const size_t num_rows,
+                           const size_t num_tiles) {
   using IType = typename Param::InputType;
   using OType = typename Param::OutputType;
   using CType = typename Param::ComputeType;
@@ -92,27 +91,24 @@ transpose_dbias_kernel(const Param param,
   const unsigned int my_id_in_warp = threadIdx.x % THREADS_PER_WARP;
   const size_t num_tiles_x = row_length / (nvec_in * THREADS_PER_WARP);
   // const size_t num_tiles_y = num_rows / (nvec * THREADS_PER_WARP);
-  const size_t tile_id = blockIdx.x * blockDim.x / (THREADS_PER_WARP * n_warps_per_tile) +
-                         warp_id / n_warps_per_tile;
+  const size_t tile_id =
+      blockIdx.x * blockDim.x / (THREADS_PER_WARP * n_warps_per_tile) + warp_id / n_warps_per_tile;
   if (tile_id >= num_tiles) return;
   const size_t tile_id_x = tile_id % num_tiles_x;
   const size_t tile_id_y = tile_id / num_tiles_x;
 
-  const IType * const my_input_tile = param.input + (tile_id_x * nvec_in +
-                                                     tile_id_y * row_length * nvec_out) *
-                                                    THREADS_PER_WARP;
-  OType * const my_output_t_tile = param.output_t + (tile_id_y * nvec_out +
-                                                     tile_id_x * num_rows * nvec_in) *
-                                                    THREADS_PER_WARP;
-  CType * const my_partial_dbias_tile = param.workspace +
-                                        (tile_id_x * (nvec_in * THREADS_PER_WARP) +
-                                         tile_id_y * row_length);
+  const IType *const my_input_tile =
+      param.input + (tile_id_x * nvec_in + tile_id_y * row_length * nvec_out) * THREADS_PER_WARP;
+  OType *const my_output_t_tile =
+      param.output_t + (tile_id_y * nvec_out + tile_id_x * num_rows * nvec_in) * THREADS_PER_WARP;
+  CType *const my_partial_dbias_tile =
+      param.workspace + (tile_id_x * (nvec_in * THREADS_PER_WARP) + tile_id_y * row_length);
 
-  OVec * const my_scratch = reinterpret_cast<OVec *>(scratch) +
-                            (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
-                            (THREADS_PER_WARP + 1);
+  OVec *const my_scratch =
+      reinterpret_cast<OVec *>(scratch) +
+      (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) * (THREADS_PER_WARP + 1);
 
-  CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
+  CVec *const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
 
   IVec in[2][nvec_out];
   const unsigned int warp_id_in_tile = warp_id % n_warps_per_tile;
@@ -123,9 +119,8 @@ transpose_dbias_kernel(const Param param,
   const size_t stride = row_length / nvec_in;
   const size_t output_stride = num_rows / nvec_out;
   size_t current_stride = warp_id_in_tile * n_iterations * nvec_out * stride;
-  unsigned int my_place = (my_id_in_warp + THREADS_PER_WARP -
-                           warp_id_in_tile * n_iterations) %
-                          THREADS_PER_WARP;
+  unsigned int my_place =
+      (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) % THREADS_PER_WARP;
   const CType scale_inv = param.scale_inv != nullptr ? *param.scale_inv : 1;
 
   partial_dbias.clear();
@@ -147,11 +142,8 @@ transpose_dbias_kernel(const Param param,
     }
     OVec out_trans[nvec_in];  // NOLINT(*)
     transpose_regs_partial_dbias(
-                    in[current_in ^ 1],
-                    out_trans,
-                    partial_dbias,
-                    scale_inv,
-                    (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
+        in[current_in ^ 1], out_trans, partial_dbias, scale_inv,
+        (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
 
 #pragma unroll
     for (unsigned int j = 0; j < nvec_in; ++j) {
@@ -164,14 +156,13 @@ transpose_dbias_kernel(const Param param,
   for (unsigned int i = 0; i < nvec_in; ++i) {
 #pragma unroll
     for (unsigned int j = 0; j < n_iterations; ++j) {
-      my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                  j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space[j][i];
+      my_scratch[(my_id_in_warp + THREADS_PER_WARP - j - warp_id_in_tile * n_iterations) %
+                 THREADS_PER_WARP] = out_space[j][i];
     }
     __syncthreads();
-    my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-               THREADS_PER_WARP;
-    current_stride = i * output_stride +
-                     warp_id_in_tile * n_iterations * output_stride * nvec_in;
+    my_place =
+        (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) % THREADS_PER_WARP;
+    current_stride = i * output_stride + warp_id_in_tile * n_iterations * output_stride * nvec_in;
     for (unsigned int j = 0; j < n_iterations; ++j) {
       my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile,
                                                               current_stride + my_place);
@@ -199,12 +190,9 @@ transpose_dbias_kernel(const Param param,
 }
 
 template <int nvec_in, int nvec_out, typename Param>
-__global__ void
-__launch_bounds__(cast_transpose_num_threads)
-transpose_dbias_kernel_notaligned(const Param param,
-                                       const size_t row_length,
-                                       const size_t num_rows,
-                                       const size_t num_tiles) {
+__global__ void __launch_bounds__(cast_transpose_num_threads)
+    transpose_dbias_kernel_notaligned(const Param param, const size_t row_length,
+                                      const size_t num_rows, const size_t num_tiles) {
   using IType = typename Param::InputType;
   using OType = typename Param::OutputType;
   using CType = typename Param::ComputeType;
@@ -216,38 +204,35 @@ transpose_dbias_kernel_notaligned(const Param param,
 
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
   const unsigned int my_id_in_warp = threadIdx.x % THREADS_PER_WARP;
-  const size_t num_tiles_x = (row_length + nvec_in * THREADS_PER_WARP - 1) /
-                             (nvec_in * THREADS_PER_WARP);
-  const size_t tile_id = blockIdx.x * blockDim.x / (THREADS_PER_WARP * n_warps_per_tile) +
-                         warp_id / n_warps_per_tile;
+  const size_t num_tiles_x =
+      (row_length + nvec_in * THREADS_PER_WARP - 1) / (nvec_in * THREADS_PER_WARP);
+  const size_t tile_id =
+      blockIdx.x * blockDim.x / (THREADS_PER_WARP * n_warps_per_tile) + warp_id / n_warps_per_tile;
   if (tile_id >= num_tiles) return;
   const size_t tile_id_x = tile_id % num_tiles_x;
   const size_t tile_id_y = tile_id / num_tiles_x;
 
-  const IType * const my_input_tile = param.input + (tile_id_x * nvec_in +
-                                                     tile_id_y * row_length * nvec_out) *
-                                                    THREADS_PER_WARP;
-  OType * const my_output_t_tile = param.output_t + (tile_id_y * nvec_out +
-                                                     tile_id_x * num_rows * nvec_in) *
-                                                    THREADS_PER_WARP;
-  CType * const my_partial_dbias_tile = param.workspace +
-                                        (tile_id_x * (nvec_in * THREADS_PER_WARP) +
-                                         tile_id_y * row_length);
+  const IType *const my_input_tile =
+      param.input + (tile_id_x * nvec_in + tile_id_y * row_length * nvec_out) * THREADS_PER_WARP;
+  OType *const my_output_t_tile =
+      param.output_t + (tile_id_y * nvec_out + tile_id_x * num_rows * nvec_in) * THREADS_PER_WARP;
+  CType *const my_partial_dbias_tile =
+      param.workspace + (tile_id_x * (nvec_in * THREADS_PER_WARP) + tile_id_y * row_length);
 
   const size_t stride = row_length / nvec_in;
   const size_t output_stride = num_rows / nvec_out;
   const size_t row_length_rest = stride - tile_id_x * THREADS_PER_WARP;
   const size_t row_height_rest = output_stride - tile_id_y * THREADS_PER_WARP;
-  const unsigned int tile_length = row_length_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                      : row_length_rest;
-  const unsigned int tile_height = row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP
-                                                                      : row_height_rest;
+  const unsigned int tile_length =
+      row_length_rest > THREADS_PER_WARP ? THREADS_PER_WARP : row_length_rest;
+  const unsigned int tile_height =
+      row_height_rest > THREADS_PER_WARP ? THREADS_PER_WARP : row_height_rest;
 
-  OVec * const my_scratch = reinterpret_cast<OVec *>(scratch) +
-                            (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
-                            (THREADS_PER_WARP + 1);
+  OVec *const my_scratch =
+      reinterpret_cast<OVec *>(scratch) +
+      (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) * (THREADS_PER_WARP + 1);
 
-  CVec * const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
+  CVec *const my_dbias_scratch = reinterpret_cast<CVec *>(scratch);
 
   IVec in[2][nvec_out];
   const unsigned int warp_id_in_tile = warp_id % n_warps_per_tile;
@@ -256,16 +241,14 @@ transpose_dbias_kernel_notaligned(const Param param,
   CVec partial_dbias;
 
   size_t current_stride = warp_id_in_tile * n_iterations * nvec_out * stride;
-  unsigned int my_place = (my_id_in_warp + THREADS_PER_WARP -
-                           warp_id_in_tile * n_iterations) %
-                          THREADS_PER_WARP;
+  unsigned int my_place =
+      (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) % THREADS_PER_WARP;
   const CType scale_inv = param.scale_inv != nullptr ? *param.scale_inv : 1;
 
   partial_dbias.clear();
 
   {
-    const bool valid_load = my_place < tile_length &&
-                            warp_id_in_tile * n_iterations < tile_height;
+    const bool valid_load = my_place < tile_length && warp_id_in_tile * n_iterations < tile_height;
 #pragma unroll
     for (unsigned int i = 0; i < nvec_out; ++i) {
       if (valid_load) {
@@ -280,8 +263,8 @@ transpose_dbias_kernel_notaligned(const Param param,
     const unsigned int my_place_in = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
     const unsigned int current_in = (i + 1) % 2;
     if (i < n_iterations - 1) {
-      const bool valid_load = my_place_in < tile_length &&
-                              warp_id_in_tile * n_iterations + i + 1 < tile_height;
+      const bool valid_load =
+          my_place_in < tile_length && warp_id_in_tile * n_iterations + i + 1 < tile_height;
 #pragma unroll
       for (unsigned int j = 0; j < nvec_out; ++j) {
         if (valid_load) {
@@ -294,11 +277,8 @@ transpose_dbias_kernel_notaligned(const Param param,
     }
     OVec out_trans[nvec_in];  // NOLINT(*)
     transpose_regs_partial_dbias(
-                    in[current_in ^ 1],
-                    out_trans,
-                    partial_dbias,
-                    scale_inv,
-                    (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
+        in[current_in ^ 1], out_trans, partial_dbias, scale_inv,
+        (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
 
 #pragma unroll
     for (unsigned int j = 0; j < nvec_in; ++j) {
@@ -311,14 +291,13 @@ transpose_dbias_kernel_notaligned(const Param param,
   for (unsigned int i = 0; i < nvec_in; ++i) {
 #pragma unroll
     for (unsigned int j = 0; j < n_iterations; ++j) {
-      my_scratch[(my_id_in_warp + THREADS_PER_WARP -
-                  j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space[j][i];
+      my_scratch[(my_id_in_warp + THREADS_PER_WARP - j - warp_id_in_tile * n_iterations) %
+                 THREADS_PER_WARP] = out_space[j][i];
     }
     __syncthreads();
-    my_place = (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) %
-               THREADS_PER_WARP;
-    current_stride = i * output_stride +
-                     warp_id_in_tile * n_iterations * output_stride * nvec_in;
+    my_place =
+        (my_id_in_warp + THREADS_PER_WARP - warp_id_in_tile * n_iterations) % THREADS_PER_WARP;
+    current_stride = i * output_stride + warp_id_in_tile * n_iterations * output_stride * nvec_in;
     for (unsigned int j = 0; warp_id_in_tile * n_iterations + j < tile_length; ++j) {
       const bool valid_store = my_place < tile_height;
       if (valid_store) {
@@ -352,27 +331,25 @@ transpose_dbias_kernel_notaligned(const Param param,
 
 constexpr size_t reduce_dbias_num_threads = 256;
 
-template<int nvec, typename ComputeType, typename OutputType>
-__global__ void
-__launch_bounds__(reduce_dbias_num_threads)
-reduce_dbias_kernel(OutputType*  const dbias_output,
-                    const ComputeType* const dbias_partial,
-                    const int row_length,
-                    const int num_rows) {
+template <int nvec, typename ComputeType, typename OutputType>
+__global__ void __launch_bounds__(reduce_dbias_num_threads)
+    reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial,
+                        const int row_length, const int num_rows) {
   using ComputeVec = Vec<ComputeType, nvec>;
-  using OutputVec  = Vec<OutputType,  nvec>;
+  using OutputVec = Vec<OutputType, nvec>;
 
   const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (thread_id * nvec >= row_length) return;
 
-  const ComputeType* const thread_in_base  = dbias_partial + thread_id * nvec;
-  OutputType*  const thread_out_base = dbias_output  + thread_id * nvec;
+  const ComputeType *const thread_in_base = dbias_partial + thread_id * nvec;
+  OutputType *const thread_out_base = dbias_output + thread_id * nvec;
 
   const int stride_in_vec = row_length / nvec;
 
   ComputeVec ldg_vec;
-  ComputeVec acc_vec; acc_vec.clear();
+  ComputeVec acc_vec;
+  acc_vec.clear();
   for (int i = 0; i < num_rows; ++i) {
     ldg_vec.load_from(thread_in_base, i * stride_in_vec);
 #pragma unroll
@@ -381,7 +358,7 @@ reduce_dbias_kernel(OutputType*  const dbias_output,
     }
   }
 
-  OutputVec  stg_vec;
+  OutputVec stg_vec;
 #pragma unroll
   for (int e = 0; e < nvec; ++e) {
     stg_vec.data.elt[e] = OutputType(acc_vec.data.elt[e]);
@@ -390,10 +367,9 @@ reduce_dbias_kernel(OutputType*  const dbias_output,
 }
 
 void populate_transpose_dbias_workspace_config(const Tensor &input, /*cast*/
-                                                    Tensor* workspace,
-                                                    const int nvec_out) {
+                                               Tensor *workspace, const int nvec_out) {
   const size_t row_length = input.data.shape[1];
-  const size_t num_rows   = input.data.shape[0];
+  const size_t num_rows = input.data.shape[0];
 
   const size_t tile_size_y = (nvec_out * THREADS_PER_WARP);
   NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");
@@ -405,37 +381,28 @@ void populate_transpose_dbias_workspace_config(const Tensor &input, /*cast*/
 }
 
 template <typename BiasType>
-void reduce_dbias(const Tensor &workspace, Tensor *dbias,
-                  const size_t row_length, const size_t num_rows, const int nvec_out,
-                  cudaStream_t stream) {
-  constexpr int reduce_dbias_store_bytes  = 8;  // stg.64
-  constexpr int reduce_dbias_nvec         = reduce_dbias_store_bytes / sizeof(BiasType);
+void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_length,
+                  const size_t num_rows, const int nvec_out, cudaStream_t stream) {
+  constexpr int reduce_dbias_store_bytes = 8;  // stg.64
+  constexpr int reduce_dbias_nvec = reduce_dbias_store_bytes / sizeof(BiasType);
 
   NVTE_CHECK(row_length % reduce_dbias_nvec == 0, "Unsupported shape.");
 
   const size_t reduce_dbias_row_length = row_length;
-  const size_t reduce_dbias_num_rows   = DIVUP(num_rows,
-                                               static_cast<size_t>(nvec_out *
-                                                                   THREADS_PER_WARP));
-  const size_t reduce_dbias_num_blocks = DIVUP(row_length,
-                                               reduce_dbias_num_threads * reduce_dbias_nvec);
+  const size_t reduce_dbias_num_rows =
+      DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
+  const size_t reduce_dbias_num_blocks =
+      DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
 
   reduce_dbias_kernel<reduce_dbias_nvec, fp32, BiasType>
-    <<<reduce_dbias_num_blocks,
-    reduce_dbias_num_threads,
-    0,
-    stream>>>(
-        reinterpret_cast<BiasType *>(dbias->data.dptr),
-        reinterpret_cast<const fp32 *>(workspace.data.dptr),
-        reduce_dbias_row_length,
-        reduce_dbias_num_rows);
+      <<<reduce_dbias_num_blocks, reduce_dbias_num_threads, 0, stream>>>(
+          reinterpret_cast<BiasType *>(dbias->data.dptr),
+          reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
+          reduce_dbias_num_rows);
 }
 
-void fp8_transpose_dbias(const Tensor &input,
-                          Tensor *transposed_output,
-                          Tensor *dbias,
-                          Tensor *workspace,
-                          cudaStream_t stream) {
+void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor *dbias,
+                         Tensor *workspace, cudaStream_t stream) {
   CheckInputTensor(input, "fp8_transpose_dbias_input");
   CheckOutputTensor(*transposed_output, "transposed_output");
   CheckOutputTensor(*dbias, "dbias");
@@ -449,82 +416,71 @@ void fp8_transpose_dbias(const Tensor &input,
   NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
   NVTE_CHECK(transposed_output->data.dtype == input.data.dtype,
-                           "T output must have the same type as input.");
-  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
+             "T output must have the same type as input.");
+  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{row_length}, "Wrong shape of DBias.");
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dbias->data.dtype, BiasType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(input.data.dtype, Type,
-      constexpr int type_size = sizeof(Type);
-      constexpr int nvec_in = desired_load_size / type_size;
-      constexpr int nvec_out = desired_store_size / type_size;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      dbias->data.dtype, BiasType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          input.data.dtype, Type, constexpr int type_size = sizeof(Type);
+          constexpr int nvec_in = desired_load_size / type_size;
+          constexpr int nvec_out = desired_store_size / type_size;
 
-      if (workspace->data.dptr == nullptr) {
-        populate_transpose_dbias_workspace_config(input, workspace, nvec_out);
-        return;
-      }
+          if (workspace->data.dptr == nullptr) {
+            populate_transpose_dbias_workspace_config(input, workspace, nvec_out);
+            return;
+          }
 
-      NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
-      NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
-      const size_t n_tiles = DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
-                             DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
-      const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
-      const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
+          NVTE_CHECK(row_length % nvec_in == 0, "Unsupported shape.");
+          NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");
+          const size_t n_tiles =
+              DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
+              DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
+          const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
+          const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
 
-      const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
-                             num_rows % (nvec_out * THREADS_PER_WARP) == 0;
+          const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
+                                 num_rows % (nvec_out * THREADS_PER_WARP) == 0;
 
-      using ComputeType = fp32;
-      constexpr size_t shared_size_transpose = cast_transpose_num_threads / n_warps_per_tile *
-                                               (THREADS_PER_WARP + 1) *
-                                               sizeof(Vec<Type, nvec_out>);
-      constexpr size_t shared_size_dbias = cast_transpose_num_threads *
-                                           sizeof(Vec<ComputeType, nvec_in>);
-      static_assert(shared_size_transpose >= shared_size_dbias);
-      using Param = TDBiasParam<Type, Type, ComputeType>;
-      Param param;
-      param.input     = reinterpret_cast<const Type *>(input.data.dptr);
-      param.output_t  = reinterpret_cast<Type *>(transposed_output->data.dptr);
-      param.scale_inv = reinterpret_cast<const ComputeType *>(transposed_output->scale_inv.dptr);
-      param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
+          using ComputeType = fp32; constexpr size_t shared_size_transpose =
+                                        cast_transpose_num_threads / n_warps_per_tile *
+                                        (THREADS_PER_WARP + 1) * sizeof(Vec<Type, nvec_out>);
+          constexpr size_t shared_size_dbias =
+              cast_transpose_num_threads * sizeof(Vec<ComputeType, nvec_in>);
+          static_assert(shared_size_transpose >= shared_size_dbias);
+          using Param = TDBiasParam<Type, Type, ComputeType>; Param param;
+          param.input = reinterpret_cast<const Type *>(input.data.dptr);
+          param.output_t = reinterpret_cast<Type *>(transposed_output->data.dptr);
+          param.scale_inv =
+              reinterpret_cast<const ComputeType *>(transposed_output->scale_inv.dptr);
+          param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
-      if (full_tile) {
-        cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        transpose_dbias_kernel<nvec_in, nvec_out, Param>
-          <<<n_blocks,
-             cast_transpose_num_threads,
-             shared_size_transpose,
-             stream>>>(param, row_length, num_rows, n_tiles);
-      } else {
-        cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
-          <<<n_blocks,
-             cast_transpose_num_threads,
-             shared_size_transpose,
-             stream>>>(param, row_length, num_rows, n_tiles);
-      }
+          if (full_tile) {
+            cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
+                                 cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+            transpose_dbias_kernel<nvec_in, nvec_out, Param>
+                <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
+                    param, row_length, num_rows, n_tiles);
+          } else {
+            cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
+                                 cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+            transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
+                <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
+                    param, row_length, num_rows, n_tiles);
+          }
 
-      reduce_dbias<BiasType>(*workspace, dbias, row_length, num_rows, nvec_out, stream);
-    );  // NOLINT(*)
-  );  // NOLINT(*)
+          reduce_dbias<BiasType>(*workspace, dbias, row_length, num_rows, nvec_out,
+                                 stream););  // NOLINT(*)
+  );                                         // NOLINT(*)
 }
-
 
 }  // namespace transformer_engine
 
-void nvte_fp8_transpose_dbias(const NVTETensor input,
-                               NVTETensor transposed_output,
-                               NVTETensor dbias,
-                               NVTETensor workspace,
-                               cudaStream_t stream) {
+void nvte_fp8_transpose_dbias(const NVTETensor input, NVTETensor transposed_output,
+                              NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fp8_transpose_dbias);
   using namespace transformer_engine;
-  fp8_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
-                       reinterpret_cast<Tensor*>(transposed_output),
-                       reinterpret_cast<Tensor*>(dbias),
-                       reinterpret_cast<Tensor*>(workspace),
-                       stream);
+  fp8_transpose_dbias(
+      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<Tensor *>(transposed_output),
+      reinterpret_cast<Tensor *>(dbias), reinterpret_cast<Tensor *>(workspace), stream);
 }

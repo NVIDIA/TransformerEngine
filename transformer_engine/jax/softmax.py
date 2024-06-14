@@ -14,15 +14,18 @@ from . import cpp_extensions as tex
 
 class SoftmaxType(Enum):
     """SoftmaxType."""
+
     SCALED = "scaled"
     SCALED_MASKED = "scaled_masked"
     SCALED_UPPER_TRIANG_MASKED = "scaled_upper_triang_masked"
 
 
-def softmax(logits: jnp.ndarray,
-            mask: Optional[jnp.ndarray] = None,
-            scale_factor: Optional[float] = 1.0,
-            softmax_type: Optional[SoftmaxType] = SoftmaxType.SCALED):
+def softmax(
+    logits: jnp.ndarray,
+    mask: Optional[jnp.ndarray] = None,
+    scale_factor: Optional[float] = 1.0,
+    softmax_type: Optional[SoftmaxType] = SoftmaxType.SCALED,
+):
     """
     Softmax wrapper
     """
@@ -50,7 +53,7 @@ def _softmax_fwd_rule(logits, mask, scale_factor, softmax_type):
 
 
 def _softmax_bwd_rule(scale_factor, softmax_type, ctx, dz):
-    softmax_output, = ctx
+    (softmax_output,) = ctx
 
     if softmax_type is SoftmaxType.SCALED_MASKED:
         dgrad = tex.scaled_masked_softmax_bwd(dz, softmax_output, scale_factor)

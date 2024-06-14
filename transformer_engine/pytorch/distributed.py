@@ -51,10 +51,12 @@ def set_all_rng_states(states: List) -> None:
 
 def graph_safe_rng_available() -> bool:
     """Returns whether cuda graph safe RNG state manipulation is supported."""
-    return (hasattr(torch.cuda.CUDAGraph, "register_generator_state")
-            and hasattr(torch.Generator, "graphsafe_set_state")
-            and hasattr(torch.Generator, "graphsafe_get_state")
-            and hasattr(torch.Generator, "clone_state"))
+    return (
+        hasattr(torch.cuda.CUDAGraph, "register_generator_state")
+        and hasattr(torch.Generator, "graphsafe_set_state")
+        and hasattr(torch.Generator, "graphsafe_get_state")
+        and hasattr(torch.Generator, "clone_state")
+    )
 
 
 def _get_cuda_rng_state(
@@ -85,7 +87,7 @@ def _get_cuda_rng_state(
 def _set_cuda_rng_state(
     new_state: torch.Tensor,
     device: Union[int, str] = -1,
-    graph_safe = True,
+    graph_safe=True,
 ) -> None:
     """Sets the random number generator state of the current GPU."""
 
@@ -177,9 +179,7 @@ def split_tensor_into_1d_equal_chunks(
     return data
 
 
-def gather_split_1d_tensor(
-    tensor: torch.Tensor, tp_group: dist_group_type
-) -> torch.Tensor:
+def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> torch.Tensor:
     """Opposite of above function, gather values from model parallel ranks."""
     numel_gathered = torch.numel(tensor) * get_distributed_world_size(tp_group)
     gathered = torch.empty(
@@ -200,11 +200,8 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     retrieved, and the forward pass is computed again while tracking the intermediate
     activations, followed by calculation of gradients using these values.
     """
-    def __init__(
-        self,
-        activation_recompute: bool = False,
-        recompute_phase: bool = False
-    ):
+
+    def __init__(self, activation_recompute: bool = False, recompute_phase: bool = False):
         super().__init__()
         self.activation_recompute = activation_recompute
         self.recompute_phase = recompute_phase
@@ -242,12 +239,14 @@ def _get_active_autocast_contexts():
     gpu_autocast_enabled = torch.is_autocast_enabled()
     gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
     gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached)
+        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+    )
 
     cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
     cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
     cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached)
+        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+    )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
@@ -291,9 +290,7 @@ class _CheckpointFunction(torch.autograd.Function):
         torch_gpu_amp_ctx, torch_cpu_amp_ctx = _get_active_autocast_contexts()
 
         with torch.no_grad(), forward_ctx:
-            with activation_recompute_forward(
-                activation_recompute=True, recompute_phase=False
-            ):
+            with activation_recompute_forward(activation_recompute=True, recompute_phase=False):
                 outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
@@ -302,9 +299,7 @@ class _CheckpointFunction(torch.autograd.Function):
             ctx.input_0_shape = args[0].data.shape
             safely_set_viewless_tensor_data(
                 args[0],
-                split_tensor_into_1d_equal_chunks(
-                    args[0].data, tp_group, new_buffer=True
-                ),
+                split_tensor_into_1d_equal_chunks(args[0].data, tp_group, new_buffer=True),
             )
 
         # Store everything.
@@ -328,13 +323,11 @@ class _CheckpointFunction(torch.autograd.Function):
         """Call backward function with activation recomputation."""
         if not torch.autograd._is_checkpoint_valid():
             raise RuntimeError(
-                "Checkpointing is not compatible with .grad(), "
-                "please use .backward() if possible"
+                "Checkpointing is not compatible with .grad(), please use .backward() if possible"
             )
 
         inputs = tuple(
-            t if t is not None else arg
-            for (t, arg) in zip(ctx.saved_tensors, ctx.inputs)
+            t if t is not None else arg for (t, arg) in zip(ctx.saved_tensors, ctx.inputs)
         )
 
         get_rng_state_tracker = ctx.get_rng_state_tracker
@@ -342,9 +335,7 @@ class _CheckpointFunction(torch.autograd.Function):
         if ctx.distribute_saved_activations:
             safely_set_viewless_tensor_data(
                 inputs[0],
-                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).view(
-                    ctx.input_0_shape
-                ),
+                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).view(ctx.input_0_shape),
             )
 
         # Store the current states.
@@ -361,10 +352,13 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
-        with (torch.enable_grad(), ctx.recompute_ctx,
-              ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx,
-              activation_recompute_forward(
-                  activation_recompute=True, recompute_phase=True)):
+        with (
+            torch.enable_grad(),
+            ctx.recompute_ctx,
+            ctx.torch_gpu_amp_ctx,
+            ctx.torch_cpu_amp_ctx,
+            activation_recompute_forward(activation_recompute=True, recompute_phase=True),
+        ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.
@@ -384,14 +378,12 @@ class _CheckpointFunction(torch.autograd.Function):
                 args_with_grad.append(args[i])
         if len(outputs_with_grad) == 0:
             raise RuntimeError(
-                "none of output has requires_grad=True,"
-                " this checkpoint() is not necessary"
+                "none of output has requires_grad=True, this checkpoint() is not necessary"
             )
 
         torch.autograd.backward(outputs_with_grad, args_with_grad)
         grads = tuple(
-            inp.grad if isinstance(inp, torch.Tensor) else None
-            for inp in detached_inputs
+            inp.grad if isinstance(inp, torch.Tensor) else None for inp in detached_inputs
         )
         return (None, None, None, None, None, None) + grads
 
@@ -400,18 +392,14 @@ class _CheckpointFrame:
     """
     Storage frame for forward RNG states and detached activations from the forward recompute.
     """
-    def __init__(
-        self,
-        recompute_fn: Callable,
-        get_rng_state_tracker: Callable
-    ):
+
+    def __init__(self, recompute_fn: Callable, get_rng_state_tracker: Callable):
         self.recompute_fn = recompute_fn
         self.recomputed = []
         self.count = 0
         self.get_rng_state_tracker = get_rng_state_tracker
         self.fwd_rng_states = None
         self.bwd_rng_states = None
-
 
     def cache_rng_states(self, forward=True):
         """Cache fwd/bwd RNG states in the frame to restore later."""
@@ -420,7 +408,7 @@ class _CheckpointFrame:
             _get_cuda_rng_state(graph_safe=False),
         )
         if self.get_rng_state_tracker is not None:
-            rng_states += (self.get_rng_state_tracker().get_states(), )
+            rng_states += (self.get_rng_state_tracker().get_states(),)
 
         if forward:
             self.fwd_rng_states = rng_states
@@ -440,7 +428,9 @@ class _CheckpointFrame:
             self.get_rng_state_tracker().set_states(rng_states[2])
 
 
-class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: disable=too-few-public-methods
+class _recomputation_hook(
+    torch.autograd.graph.saved_tensors_hooks
+):  # pylint: disable=too-few-public-methods
     """torch.autograd hook for packing/unpacking tensors during the activation recompute phase."""
 
     def __init__(self, frame):
@@ -463,7 +453,9 @@ class _recomputation_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: 
         super().__init__(pack_hook, unpack_hook)
 
 
-class _checkpoint_hook(torch.autograd.graph.saved_tensors_hooks):  # pylint: disable=too-few-public-methods
+class _checkpoint_hook(
+    torch.autograd.graph.saved_tensors_hooks
+):  # pylint: disable=too-few-public-methods
     """torch.autograd hook for packing/unpacking tensors during the checkpointed forward pass."""
 
     def __init__(self, frame, args, kwargs):
@@ -557,6 +549,7 @@ def has_te_modules(network):
     # so just assume that it has TE modules just to be safe.
     return True
 
+
 @torch._disable_dynamo
 def checkpoint(
     function: Callable,
@@ -607,13 +600,18 @@ def checkpoint(
     get_rng_state_tracker = kwargs.pop("get_rng_state_tracker", None)
 
     # Ensure backward compatibility.
-    if (len(args) > 3 and isinstance(args[0], bool) and callable(args[1])
-        and isinstance(args[2], None | dist_group_type)):
+    if (
+        len(args) > 3
+        and isinstance(args[0], bool)
+        and callable(args[1])
+        and isinstance(args[2], None | dist_group_type)
+    ):
         warnings.warn(
             "Passing non-tensor non-keyword arguments is deprecated and support will be removed in "
             "future releases of TransformerEngine. `distribute_saved_activations`, `tp_group`, and "
             "`get_rng_state_tracker` must be passed as keyword arguments to `checkpoint`.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         distribute_saved_activations = args[0]
         get_rng_state_tracker = args[1]
@@ -633,7 +631,7 @@ def checkpoint(
             context_fn=context_fn,
             determinism_check=determinism_check,
             debug=debug,
-            **kwargs
+            **kwargs,
         )
 
     # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
@@ -680,9 +678,13 @@ def checkpoint(
     torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx = _get_active_autocast_contexts()
 
     def recompute_fn(*args, **kwargs):
-        with (torch.autograd.enable_grad(),
-              te_recompute_ctx, user_recompute_ctx,
-              torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx):
+        with (
+            torch.autograd.enable_grad(),
+            te_recompute_ctx,
+            user_recompute_ctx,
+            torch_gpu_amp_forward_ctx,
+            torch_cpu_amp_forward_ctx,
+        ):
             function(*args, **kwargs)
 
     # Initialize a new checkpoint frame for each new forward pass.
@@ -692,8 +694,7 @@ def checkpoint(
     )
     new_frame.cache_rng_states(forward=True)
 
-    with (_checkpoint_hook(new_frame, args, kwargs),
-          te_forward_ctx, user_forward_ctx):
+    with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
         out = function(*args, **kwargs)
 
     return out
@@ -820,9 +821,7 @@ def reduce_scatter_along_first_dim(
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     handle = torch.distributed.reduce_scatter_tensor(
         output, input_.contiguous(), group=tp_group, async_op=async_op
     )
@@ -842,9 +841,7 @@ def gather_along_first_dim(
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     handle = torch.distributed.all_gather_into_tensor(
         output, input_.contiguous(), group=tp_group, async_op=async_op
     )
@@ -880,8 +877,8 @@ def _fsdp_scatter_tensors(
                 target = t._data if isinstance(t, Float8Tensor) else t
                 shapes.append(target.data.shape)
                 safely_set_viewless_tensor_data(
-                    target, split_tensor_into_1d_equal_chunks(
-                        target.data, fsdp_group, new_buffer=True)
+                    target,
+                    split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True),
                 )
             else:
                 shapes.append(None)
@@ -890,7 +887,7 @@ def _fsdp_scatter_tensors(
 
 def _fsdp_gather_tensors(
     fsdp_group: dist_group_type,
-    shapes: List[Tuple[int,...]],
+    shapes: List[Tuple[int, ...]],
     *tensors: torch.Tensor,
 ):
     if fsdp_group is not None:
@@ -913,6 +910,7 @@ def _is_te_module(module):
     from .module.base import TransformerEngineBaseModule
     from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
     from .transformer import TransformerLayer
+
     te_classes_list = [
         LayerNorm,
         RMSNorm,

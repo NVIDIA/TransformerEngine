@@ -4,19 +4,21 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "ipcsocket.h"
-#include "userbuffers.h"
 #include <assert.h>
-#include <chrono>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#include <iostream>
+#include <inttypes.h>
 #include <math.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <inttypes.h>
+
+#include <chrono>
+#include <iostream>
+
+#include "ipcsocket.h"
+#include "userbuffers.h"
 
 #ifdef UB_MPI_BOOTSTRAP
 #include <mpi.h>
@@ -33,46 +35,46 @@ static char EXT_COMM_INTER[] = "inter";
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-#define CUDACHECK(cmd)                                                                             \
-  do {                                                                                             \
-    cudaError_t e = cmd;                                                                           \
-    if (e != cudaSuccess) {                                                                        \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e));        \
-      exit(EXIT_FAILURE);                                                                          \
-    }                                                                                              \
+#define CUDACHECK(cmd)                                                                      \
+  do {                                                                                      \
+    cudaError_t e = cmd;                                                                    \
+    if (e != cudaSuccess) {                                                                 \
+      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+      exit(EXIT_FAILURE);                                                                   \
+    }                                                                                       \
   } while (0)
 
-#define CUCHECK(cmd)                                                                               \
-  do {                                                                                             \
-    CUresult retval = cmd;                                                                         \
-    if (retval != CUDA_SUCCESS) {                                                                  \
-      const char *error_string;                                                                    \
-      cuGetErrorString(retval, &error_string);                                                     \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string);                 \
-      exit(EXIT_FAILURE);                                                                          \
-    }                                                                                              \
+#define CUCHECK(cmd)                                                               \
+  do {                                                                             \
+    CUresult retval = cmd;                                                         \
+    if (retval != CUDA_SUCCESS) {                                                  \
+      const char *error_string;                                                    \
+      cuGetErrorString(retval, &error_string);                                     \
+      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string); \
+      exit(EXIT_FAILURE);                                                          \
+    }                                                                              \
   } while (0);
 
-#define NVTE_UB_ERROR(x)                                                                           \
-  do {                                                                                             \
-    throw std::runtime_error(std::string(__FILE__ ":") + std::to_string(__LINE__) +                \
-                             " in function " + __func__ + ": " + x);                               \
+#define NVTE_UB_ERROR(x)                                                            \
+  do {                                                                              \
+    throw std::runtime_error(std::string(__FILE__ ":") + std::to_string(__LINE__) + \
+                             " in function " + __func__ + ": " + x);                \
   } while (false)
-#define NCCLCHECK(cmd)                                                                             \
-  do {                                                                                             \
-    ncclResult_t r = cmd;                                                                          \
-    if (r != ncclSuccess) {                                                                        \
-      printf("Failed, NCCL error %s:%d ''\n", __FILE__, __LINE__ /*,ncclGetErrorString(r)*/);      \
-      exit(EXIT_FAILURE);                                                                          \
-    }                                                                                              \
+#define NCCLCHECK(cmd)                                                                        \
+  do {                                                                                        \
+    ncclResult_t r = cmd;                                                                     \
+    if (r != ncclSuccess) {                                                                   \
+      printf("Failed, NCCL error %s:%d ''\n", __FILE__, __LINE__ /*,ncclGetErrorString(r)*/); \
+      exit(EXIT_FAILURE);                                                                     \
+    }                                                                                         \
   } while (0)
 
-#define NCCLCHECKGOTO(call, RES, label)                                                            \
-  do {                                                                                             \
-    RES = call;                                                                                    \
-    if (RES != ncclSuccess && RES != ncclInProgress) {                                             \
-      goto label;                                                                                  \
-    }                                                                                              \
+#define NCCLCHECKGOTO(call, RES, label)                \
+  do {                                                 \
+    RES = call;                                        \
+    if (RES != ncclSuccess && RES != ncclInProgress) { \
+      goto label;                                      \
+    }                                                  \
   } while (0);
 
 int pipe_rank(communicator *comm, int step) {
@@ -89,12 +91,11 @@ int pipe_rank(communicator *comm, int step) {
   return newnode * numlocal + newlocal;
 }
 
-int create_communicator_grouped2(communicator **comm,
-  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(ExtComm)> ext_barrier,
-  std::function<void(void*)> ext_free,
-  int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
+int create_communicator_grouped2(
+    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
+    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
+    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
+    int pipenodes, int tensorgpus, int tensornodes) {
   *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
   (*comm)->comm_world = EXT_COMM_WORLD;
@@ -117,22 +118,20 @@ int create_communicator_grouped2(communicator **comm,
   (*comm)->push = 1;
   (*comm)->use_ce = 0;
   (*comm)->cga_size = 2;
-  for (int i = 0; i < userbuffers_op_types; i++)
-    (*comm)->basecounter[i] = 0;
+  for (int i = 0; i < userbuffers_op_types; i++) (*comm)->basecounter[i] = 0;
   (*comm)->head = 0;
   (*comm)->tail = 0;
   (*comm)->active_nreqs = 0;
-  for (int i = 0; i < userbuffers_op_types; i++)
-    (*comm)->active_req[i].active = -1;
+  for (int i = 0; i < userbuffers_op_types; i++) (*comm)->active_req[i].active = -1;
 
-  int device_clock    = 0;
+  int device_clock = 0;
   // 110 sec wait time by default
   int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
   CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {
-    printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n",
-            sec_timeout, (*comm)->ub_timeout, device_clock);
+    printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n", sec_timeout,
+           (*comm)->ub_timeout, device_clock);
   }
 
   (*comm)->comm_intra = EXT_COMM_INTRA;
@@ -142,22 +141,14 @@ int create_communicator_grouped2(communicator **comm,
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   int core;
-  if (mylocal == 0)
-    core = 50;
-  if (mylocal == 1)
-    core = 58;
-  if (mylocal == 2)
-    core = 18;
-  if (mylocal == 3)
-    core = 26;
-  if (mylocal == 4)
-    core = 114;
-  if (mylocal == 5)
-    core = 122;
-  if (mylocal == 6)
-    core = 82;
-  if (mylocal == 7)
-    core = 90;
+  if (mylocal == 0) core = 50;
+  if (mylocal == 1) core = 58;
+  if (mylocal == 2) core = 18;
+  if (mylocal == 3) core = 26;
+  if (mylocal == 4) core = 114;
+  if (mylocal == 5) core = 122;
+  if (mylocal == 6) core = 82;
+  if (mylocal == 7) core = 90;
 
   CPU_SET(core, &cpuset);
   if (!getenv("NVTE_NODOUBLE")) {
@@ -166,8 +157,7 @@ int create_communicator_grouped2(communicator **comm,
     else
       CPU_SET(core + 128, &cpuset);
   }
-  if (getenv("NVTE_DOPIN"))
-    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+  if (getenv("NVTE_DOPIN")) pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
@@ -248,8 +238,7 @@ int create_communicator_grouped2(communicator **comm,
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
-      for (int i = 0; i < (*comm)->ar2_nvrank; i++)
-        (*comm)->_barrier((*comm)->comm_intra);
+      for (int i = 0; i < (*comm)->ar2_nvrank; i++) (*comm)->_barrier((*comm)->comm_intra);
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
         (*comm)->_barrier((*comm)->comm_intra);
@@ -273,11 +262,9 @@ int create_communicator_grouped2(communicator **comm,
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
     (*comm)->_barrier((*comm)->comm_world);
-    if (!(*comm)->myrank)
-      printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
+    if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
-    if (!(*comm)->myrank)
-      printf("MC NOT initialized and used\n");
+    if (!(*comm)->myrank) printf("MC NOT initialized and used\n");
     (*comm)->mc_maxsize = 0;
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 0;
@@ -318,42 +305,38 @@ int create_communicator_grouped2(communicator **comm,
   pthread_attr_setschedparam(&attr, &param);
 
   if (getenv("NVTE_UBDEBUG"))
-    printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
-           "%dx%d PIPE_ID %d/%d\n",
-           myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
-           (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
-           (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
-           pipegpus * pipenodes);
+    printf(
+        "%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
+        "%dx%d PIPE_ID %d/%d\n",
+        myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
+        (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
+        (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
+        pipegpus * pipenodes);
   fflush(NULL);
 
   return 0;
 }
 
-int create_communicator_grouped(communicator **comm,
-  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(ExtComm)> ext_barrier,
-  std::function<void(void*)> ext_free,
-  int pipegpus, int pipenodes) {
-  return create_communicator_grouped2(
-    comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    ext_alloc_copy_allgather, ext_barrier, ext_free,
-    pipegpus, pipenodes, 1, 1);
+int create_communicator_grouped(
+    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
+    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
+    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
+    int pipenodes) {
+  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+                                      ext_alloc_copy_allgather, ext_barrier, ext_free, pipegpus,
+                                      pipenodes, 1, 1);
 }
 
-int create_communicator(communicator **comm,
-  int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-  std::function<void(void**, void*, size_t, ExtComm)> ext_alloc_copy_allgather,
-  std::function<void(ExtComm)> ext_barrier,
-  std::function<void(void*)> ext_free) {
-  return create_communicator_grouped2(
-    comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    ext_alloc_copy_allgather, ext_barrier, ext_free,
-    1, 1, 1, 1);
+int create_communicator(
+    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
+    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
+    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free) {
+  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+                                      ext_alloc_copy_allgather, ext_barrier, ext_free, 1, 1, 1, 1);
 }
 
-int create_communicator_grouped2_mpi(communicator **comm,
-  int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
+int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
+                                     int tensorgpus, int tensornodes) {
 #ifdef UB_MPI_BOOTSTRAP
   // get global numbers
   int myrank, numranks;
@@ -375,10 +358,8 @@ int create_communicator_grouped2_mpi(communicator **comm,
 
   color = 0;
   for (int n = 0; n < size; n++) {
-    if (n > 0 && strcmp(host_names[n - 1], host_names[n]))
-      color++;
-    if (strcmp(host_name, host_names[n]) == 0)
-      break;
+    if (n > 0 && strcmp(host_names[n - 1], host_names[n])) color++;
+    if (strcmp(host_name, host_names[n]) == 0) break;
   }
   free(host_names);
 
@@ -401,10 +382,9 @@ int create_communicator_grouped2_mpi(communicator **comm,
   MPI_Comm_rank(EXT_COMM_INTER, &mynode);
 
   // finally call the abstracted constructor with MPI info
-  return create_communicator_grouped2(comm,
-    myrank, numranks, mylocal, numlocal, mynode, numnodes,
-    &ub_alloc_copy_allgather, &ub_barrier, &ub_free,
-    pipegpus, pipenodes, tensorgpus, tensornodes);
+  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+                                      &ub_alloc_copy_allgather, &ub_barrier, &ub_free, pipegpus,
+                                      pipenodes, tensorgpus, tensornodes);
 #else
   NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
                 std::string("building Transformer Engine with UB_MPI_BOOTSTRAP=1"));
@@ -466,8 +446,7 @@ void destroy_communicator_mpi(communicator *comm) {
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
-  if (comm->free_region > NVTE_MAX_REGIONS)
-    return -1;
+  if (comm->free_region > NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
   comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
   size_t aligned_size = bytes;
@@ -559,8 +538,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
     CUCHECK(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
 
-    if (hndl == 0)
-      CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
+    if (hndl == 0) CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
     CUDACHECK(
         cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
                    remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
@@ -585,13 +563,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     CUDACHECK(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    comm->_alloc_copy_allgather(
-      reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
-      sizeof(cudaIpcMemHandle_t), comm->comm_intra);
+    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
+                                sizeof(cudaIpcMemHandle_t), comm->comm_intra);
 
     for (int i = 0; i < comm->nvsize; i++) {
       if (i != comm->nvrank) {
-        CUDACHECK(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],   // NOLINT(*)
+        CUDACHECK(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
                                        cudaIpcMemLazyEnablePeerAccess));
       }
     }
