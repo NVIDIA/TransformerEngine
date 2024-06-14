@@ -43,7 +43,6 @@ namespace fused_attn {
 
 static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                         NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
-                        // NOLINTNEXTLINE(runtime/references)
                         std::vector<cudnn_frontend::Operation> &ops) {
     // scale
     int64_t scale_dim[4] = {1, 1, 1, 1};
@@ -72,7 +71,6 @@ static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t
 static cudnn_frontend::Tensor createBMM1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                          NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
                                          bool zero_s,
-                                         // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops) {
     // Creates the necessary tensor descriptors
     int64_t q_dim[4] = {b, h, s_q, d};
@@ -132,7 +130,6 @@ static cudnn_frontend::Tensor createBMM1(int64_t b, int64_t h, int64_t s_q, int6
 
 static cudnn_frontend::Tensor createBias(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                          NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
-                                         // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops,
                                          cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     NVTE_CHECK(ops.size() != 0, "Bias op constructed incorrectly as the first one.");
@@ -165,7 +162,6 @@ static cudnn_frontend::Tensor createBias(int64_t b, int64_t h, int64_t s_q, int6
 static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                          NVTE_QKV_Layout layout, NVTE_Mask_Type mask_type,
                                          cudnnDataType_t tensorType,
-                                         // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops,
                                          cudnn_frontend::Tensor const &prevBlockOutputTensor,
                                          bool is_bprop) {
@@ -328,7 +324,6 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
 static cudnn_frontend::Tensor createSoftmaxForward(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d, NVTE_QKV_Layout layout,
     bool enable_dropout, bool softmax_output_virtual, cudnnDataType_t tensorType,
-    // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
@@ -432,7 +427,6 @@ static cudnn_frontend::Tensor createSoftmaxForward(
 static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                                             int64_t d, double probability,
                                             cudnnDataType_t tensorType,
-                                            // NOLINTNEXTLINE(runtime/references)
                                             std::vector<cudnn_frontend::Operation> &ops,
                                             cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     NVTE_CHECK(ops.size() != 0, "Dropout DAG constructed incorrectly as the first one");
@@ -512,7 +506,6 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
 
 static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                        NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
-                       // NOLINTNEXTLINE(runtime/references)
                        std::vector<cudnn_frontend::Operation> &ops,
                        cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     NVTE_CHECK(ops.size() != 0, "BMM2 op constructed incorrectly as the first one");
@@ -559,7 +552,6 @@ static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t 
 static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                                                     int64_t d, NVTE_QKV_Layout layout,
                                                     cudnnDataType_t tensorType,
-                                                    // NOLINTNEXTLINE(runtime/references)
                                                     std::vector<cudnn_frontend::Operation> &ops,
                                                     cudnn_frontend::Tensor const &yTensor,
                                                     cudnn_frontend::Tensor const &dyTensor) {

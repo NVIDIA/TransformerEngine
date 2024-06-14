@@ -175,21 +175,24 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
   //       wd_after_momentum);
   // }
   // Case 2. fp32, fp32, fp32, No
-  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&  // NOLINT(*)
+  else if (grad_type == at::ScalarType::Float &&  // NOLINT(*)
+           weight_type == at::ScalarType::Float &&
            num_tensors == 3) {
     multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<3, float, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 3. fp16, fp32, fp32, Yes
-  else if (grad_type == at::ScalarType::Half && weight_type == at::ScalarType::Float &&  // NOLINT(*)
+  else if (grad_type == at::ScalarType::Half &&  // NOLINT(*)
+           weight_type == at::ScalarType::Float &&
            num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, at::Half, float>(), wd, momentum, dampening, lr, nesterov,
                           first_run, wd_after_momentum, scale);
   }
   // Case 4. fp32, fp32, fp32, Yes
-  else if (grad_type == at::ScalarType::Float && weight_type == at::ScalarType::Float &&  // NOLINT(*)
+  else if (grad_type == at::ScalarType::Float &&  // NOLINT(*)
+           weight_type == at::ScalarType::Float &&
            num_tensors == 4) {
     multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                           SGDFunctor<4, float, float>(), wd, momentum, dampening, lr, nesterov,

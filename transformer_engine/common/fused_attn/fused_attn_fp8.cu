@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/fused_attn.h"
-
 #include "../common.h"
 #include "utils.h"
 #include "../util/system.h"

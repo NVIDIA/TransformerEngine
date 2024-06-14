@@ -9,6 +9,7 @@
  */
 
 #include "transformer_engine/transformer_engine.h"
+#include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
