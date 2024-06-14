@@ -6,7 +6,7 @@ default_language_version:
   python: python3
 
 ci:
-  autofix_prs: false
+  autofix_prs: true
   autoupdate_commit_msg: '[pre-commit.ci] pre-commit suggestions'
   autoupdate_schedule: quarterly
   submodules: false
