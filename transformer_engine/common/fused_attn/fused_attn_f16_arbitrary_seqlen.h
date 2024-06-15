@@ -11,9 +11,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 
-#include "transformer_engine/fused_attn.h"
 #include <cudnn.h>
+
 #include "common/common.h"
+#include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)

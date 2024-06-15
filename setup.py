@@ -16,7 +16,6 @@ from build_tools.utils import (
     found_ninja,
     found_pybind11,
     remove_dups,
-    userbuffers_enabled,
     get_frameworks,
     install_and_import,
 )
@@ -28,12 +27,13 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
+
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks:
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import('pybind11')
+    install_and_import("pybind11")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
@@ -41,21 +41,13 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 
 
 def setup_common_extension() -> CMakeExtension:
-    """Setup CMake extension for common library
-
-    Also builds JAX or userbuffers support if needed.
-
-    """
-    cmake_flags = []
-    if userbuffers_enabled():
-        cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
-
+    """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
     return CMakeExtension(
         name="transformer_engine",
-        cmake_path=root_path / Path("transformer_engine"),
-        cmake_flags=cmake_flags,
+        cmake_path=root_path / Path("transformer_engine/common"),
+        cmake_flags=[],
     )
 
 
@@ -95,34 +87,45 @@ if __name__ == "__main__":
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
             from build_tools.pytorch import setup_pytorch_extension
+
             ext_modules.append(
                 setup_pytorch_extension(
                     "transformer_engine/pytorch/csrc",
                     current_file_path / "transformer_engine" / "pytorch" / "csrc",
-                    current_file_path / "transformer_engine"))
+                    current_file_path / "transformer_engine",
+                )
+            )
         if "jax" in frameworks:
             from build_tools.jax import setup_jax_extension
+
             ext_modules.append(
                 setup_jax_extension(
                     "transformer_engine/jax/csrc",
                     current_file_path / "transformer_engine" / "jax" / "csrc",
-                    current_file_path / "transformer_engine"))
+                    current_file_path / "transformer_engine",
+                )
+            )
         if "paddle" in frameworks:
             from build_tools.paddle import setup_paddle_extension
+
             ext_modules.append(
                 setup_paddle_extension(
                     "transformer_engine/paddle/csrc",
                     current_file_path / "transformer_engine" / "paddle" / "csrc",
-                    current_file_path / "transformer_engine"))
+                    current_file_path / "transformer_engine",
+                )
+            )
 
     # Configure package
     setuptools.setup(
         name="transformer_engine",
         version=__version__,
         packages=setuptools.find_packages(
-            include=["transformer_engine",
-                     "transformer_engine.*",
-                     "transformer_engine/build_tools"],
+            include=[
+                "transformer_engine",
+                "transformer_engine.*",
+                "transformer_engine/build_tools",
+            ],
         ),
         extras_require={
             "test": test_requires,
@@ -134,5 +137,5 @@ if __name__ == "__main__":
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=True,
-        package_data={"": ["VERSION.txt"]}
+        package_data={"": ["VERSION.txt"]},
     )

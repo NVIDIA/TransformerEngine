@@ -10,7 +10,7 @@ from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
 
-__all__ = ['gemm', 'fp8_gemm']
+__all__ = ["gemm", "fp8_gemm"]
 
 
 def fp8_gemm(
@@ -27,7 +27,7 @@ def fp8_gemm(
     gelu: bool = False,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
-    out_index = None,
+    out_index=None,
     fp8_meta_tensor: tex.FP8TensorMeta = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
@@ -89,22 +89,35 @@ def fp8_gemm(
         workspace,
         workspace.shape[0],
         accumulate,
-        use_split_accumulator)
+        use_split_accumulator,
+    )
     fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
-        assert ub is not None, 'ub object is None!'
+        assert ub is not None, "ub object is None!"
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (1, extra_output_tensor,))
+            args = tuple(
+                args
+                + (
+                    1,
+                    extra_output_tensor,
+                )
+            )
         elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (0, extra_output_tensor,))
+            args = tuple(
+                args
+                + (
+                    0,
+                    extra_output_tensor,
+                )
+            )
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
             fn = ub.split_overlap_ag_p2p
             extra_output_tensor = (
@@ -121,25 +134,35 @@ def fp8_gemm(
             fn = ub.split_overlap_rs
             assert (
                 extra_output_tensor is not None
-            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
-            args = tuple(args + (True, extra_output_tensor,))
+            ), "SPLIT_PIPELINED_RS requires extra output tensor"
+            args = tuple(
+                args
+                + (
+                    True,
+                    extra_output_tensor,
+                )
+            )
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
             fn = ub.split_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
-            ), 'SPLIT_PIPELINED_RS_P2P requires extra output tensor'
+            ), "SPLIT_PIPELINED_RS_P2P requires extra output tensor"
             args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS:
             fn = ub.atomic_gemm_overlap_rs
-            assert (
-                extra_output_tensor is not None
-            ), 'ATOMIC_GEMM_RS requires extra output tensor'
-            args = tuple(args + (True, extra_output_tensor,))
+            assert extra_output_tensor is not None, "ATOMIC_GEMM_RS requires extra output tensor"
+            args = tuple(
+                args
+                + (
+                    True,
+                    extra_output_tensor,
+                )
+            )
         elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P:
             fn = ub.atomic_gemm_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
-            ), 'ATOMIC_GEMM_RS_P2P requires extra output tensor'
+            ), "ATOMIC_GEMM_RS_P2P requires extra output tensor"
             args = tuple(args + (extra_output_tensor,))
     if ub_algo is not None and ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
         out = fn(*args)
@@ -172,7 +195,7 @@ def gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     empty_tensor = torch.Tensor()
-    fp8_index = -1 # dummy index
+    fp8_index = -1  # dummy index
 
     if out is None:
         out = torch.empty(
@@ -196,8 +219,9 @@ def gemm(
     if A.nelement() == 0 or B.nelement() == 0:
         return out, grad_bias, gelu_input
 
-    assert A.dtype == dtype and B.dtype == dtype, \
-        f'Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}'
+    assert (
+        A.dtype == dtype and B.dtype == dtype
+    ), f"Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}"
     input_dtype = TE_DType[dtype]
     output_dtype = TE_DType[out.dtype]
     if use_bias:
@@ -217,9 +241,9 @@ def gemm(
         input_dtype,
         transb,
         out,
-        empty_tensor, # out_scale
+        empty_tensor,  # out_scale
         output_dtype,
-        empty_tensor, # out_amax
+        empty_tensor,  # out_amax
         grad_bias if grad else bias,
         bias_dtype,
         gelu_input,
@@ -231,7 +255,7 @@ def gemm(
     )
     fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
-        assert ub is not None, 'ub object is None!'
+        assert ub is not None, "ub object is None!"
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
             args = tuple(args + (1, empty_tensor))
@@ -248,13 +272,19 @@ def gemm(
             fn = ub.split_overlap_rs
             assert (
                 extra_output_tensor is not None
-            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
-            args = tuple(args + (False, extra_output_tensor,))
+            ), "SPLIT_PIPELINED_RS requires extra output tensor"
+            args = tuple(
+                args
+                + (
+                    False,
+                    extra_output_tensor,
+                )
+            )
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
             fn = ub.split_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
-            ), 'SPLIT_PIPELINED_RS_P2P requires extra output tensor'
+            ), "SPLIT_PIPELINED_RS_P2P requires extra output tensor"
             args = tuple(args + (extra_output_tensor,))
     _ = fn(*args)
 

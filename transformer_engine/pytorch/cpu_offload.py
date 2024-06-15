@@ -11,7 +11,7 @@ import torch
 
 from .float8_tensor import Float8Tensor
 
-__all__ = ['get_cpu_offload_context']
+__all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
 
@@ -69,9 +69,8 @@ class CpuOffloadSavedTensorHook:
 
         self.inside_context = True
         torch._C._autograd._push_saved_tensors_default_hooks(
-            self.on_save_for_backward,
-            self.on_get_saved_tensor
-            )
+            self.on_save_for_backward, self.on_get_saved_tensor
+        )
 
     def __exit__(self, *args: Any):
         global CPUOffloadEnabled
@@ -80,18 +79,21 @@ class CpuOffloadSavedTensorHook:
         self.inside_context = False
         torch._C._autograd._pop_saved_tensors_default_hooks()
 
-
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
         """On save for backward."""
-        raise NotImplementedError("`on_save_for_backward: Callable[[torch.Tensor], Any]`"
-                                  "is not implemented in CpuOffloadHook class. Inherit "
-                                  "this class and implement your custom hooks")
+        raise NotImplementedError(
+            "`on_save_for_backward: Callable[[torch.Tensor], Any]`"
+            "is not implemented in CpuOffloadHook class. Inherit "
+            "this class and implement your custom hooks"
+        )
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
         """On get saved tensor."""
-        raise NotImplementedError("`on_get_saved_tensors: Callable[[Any], torch.Tensor]`"
-                                  "is not implemented in CpuOffloadHook class. Inherit "
-                                  "this class and implement your custom hooks")
+        raise NotImplementedError(
+            "`on_get_saved_tensors: Callable[[Any], torch.Tensor]`"
+            "is not implemented in CpuOffloadHook class. Inherit "
+            "this class and implement your custom hooks"
+        )
 
 
 class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
@@ -101,48 +103,48 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
     and `tensor_pop` interface. How the offload-handler manages the offloading, recovering
     or prefetching timing is transparent to this hook.
     """
+
     def __init__(
         self,
         offload_handler: OffloadHandler,
-        handler_extra_kwargs: Optional[Dict[str,Any]] = None,
+        handler_extra_kwargs: Optional[Dict[str, Any]] = None,
         debug: bool = False,
     ) -> None:
         if handler_extra_kwargs is None:
             handler_extra_kwargs = {}
         self.debug: bool = debug
         self.offload_handler: OffloadHandler = offload_handler
-        self.handler_extra_kwargs: Dict[str,Any] = handler_extra_kwargs
+        self.handler_extra_kwargs: Dict[str, Any] = handler_extra_kwargs
         super().__init__()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        retrieve_identifier = self.offload_handler.tensor_push(
-            tensor,
-            **self.handler_extra_kwargs
-        )
+        retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
         return retrieve_identifier
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
-        tensor = self.offload_handler.tensor_pop(
-            saved_state,
-            **self.handler_extra_kwargs
-        )
+        tensor = self.offload_handler.tensor_pop(saved_state, **self.handler_extra_kwargs)
         return tensor
 
 
 class OffloadHandler:
     """A base class for CPU offload-handler."""
+
     def __init__(self) -> None:
         pass
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
         """Tensor push."""
-        raise NotImplementedError("`tensor_push is not implented in OffloadHandler class. "
-                                  "Inherit this class and implement your custom tensor_push.")
+        raise NotImplementedError(
+            "`tensor_push is not implented in OffloadHandler class. "
+            "Inherit this class and implement your custom tensor_push."
+        )
 
     def tensor_pop(self, tensor_tag: Any, **kwargs):
         """Tensor pop."""
-        raise NotImplementedError("`tensor_pop is not implented in OffloadHandler class. "
-                                  "Inherit this class and implement your custom tensor_pop.")
+        raise NotImplementedError(
+            "`tensor_pop is not implented in OffloadHandler class. "
+            "Inherit this class and implement your custom tensor_pop."
+        )
 
 
 class GroupCommitFunction(torch.autograd.Function):
@@ -151,6 +153,7 @@ class GroupCommitFunction(torch.autograd.Function):
     accomplish all synchronizations. Implementing it as a function is necessary
     because we need to actions in both forward and backward.
     """
+
     @staticmethod
     def forward(ctx, tensor, cpu_offload_handler):
         cpu_offload_handler.on_group_commit_forward()
@@ -173,11 +176,10 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     The device-to-host and host-to-device copying happen in the same stream
     as the computation kernels, thus the copying will block computation.
     """
-    def __init__(self,
-                 num_offload_group,
-                 tensor_need_offloading_checker=(lambda _: True),
-                 debug=False
-                 ) -> None:
+
+    def __init__(
+        self, num_offload_group, tensor_need_offloading_checker=(lambda _: True), debug=False
+    ) -> None:
         super().__init__()
 
         self.num_offload_group = num_offload_group
@@ -199,8 +201,8 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     def on_group_commit_forward(self):
         """On group commit forward."""
         # finishing up with updating current group and tensor count
-        self.current_group += 1             # increment
-        self.tensor_count_current_group = 0 # reset
+        self.current_group += 1  # increment
+        self.tensor_count_current_group = 0  # reset
 
     def on_group_commit_backward(self):
         """On group commit backward."""
@@ -213,8 +215,12 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
         cpu_backup = torch.empty(
-            src_tensor.size(), dtype=torch.uint8 if fp8_offload else src_tensor.dtype,
-            layout=src_tensor.layout, device="cpu", pin_memory=pin_memory)
+            src_tensor.size(),
+            dtype=torch.uint8 if fp8_offload else src_tensor.dtype,
+            layout=src_tensor.layout,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
 
         if fp8_offload:
             cpu_backup = Float8Tensor.make_like(src_tensor, data=cpu_backup)
@@ -237,8 +243,9 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         tensor_tag = (self.current_group, self.tensor_count_current_group)
         self.tensor_count_current_group += 1
         assert tensor_tag not in self.tensor_tag_to_state
-        if (self.current_group < self.num_offload_group
-            and self.tensor_need_offloading_checker(tensor)):
+        if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
+            tensor
+        ):
             state = SynchronizedGroupOffloadHandler.offload(tensor)
             self.tensor_tag_to_state[tensor_tag] = state
         else:
@@ -262,16 +269,20 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
     achieves better performance due to the overlapping. D2h and h2d copying are
     completely hidden behind computation if computation time of a layer is longer
     than host-device communication time. Bulk offloading with delay and bulk reloading
-    with prefetch are implemented. """
-    def __init__(self,
-                 num_offload_group,     # must be <= actual number of groups (number of commits)
-                 num_prefetch_group=1,
-                 tensor_need_offloading_checker=(lambda t: True),
-                 debug=False
-                 ) -> None:
-        super().__init__(num_offload_group=num_offload_group,
-                         tensor_need_offloading_checker=tensor_need_offloading_checker,
-                         debug=debug)
+    with prefetch are implemented."""
+
+    def __init__(
+        self,
+        num_offload_group,  # must be <= actual number of groups (number of commits)
+        num_prefetch_group=1,
+        tensor_need_offloading_checker=(lambda t: True),
+        debug=False,
+    ) -> None:
+        super().__init__(
+            num_offload_group=num_offload_group,
+            tensor_need_offloading_checker=tensor_need_offloading_checker,
+            debug=debug,
+        )
         self.num_prefetch_group = num_prefetch_group
 
         # prepare for tensor buffer
@@ -300,16 +311,18 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         else:
             tensor_buf = id_buf_map[tensor_id]
             allocate_new_buf = (
-                tensor_buf.size() != tensor.size()
-                or tensor_buf.dtype != tensor.dtype
+                tensor_buf.size() != tensor.size() or tensor_buf.dtype != tensor.dtype
             )
 
         if allocate_new_buf:
             # supposed to only execute once
             fp8_offload = isinstance(tensor, Float8Tensor)
             buffer = torch.empty(
-                tensor.size(), dtype=torch.uint8 if fp8_offload else tensor.dtype,
-                layout=tensor.layout, device=tensor.device)
+                tensor.size(),
+                dtype=torch.uint8 if fp8_offload else tensor.dtype,
+                layout=tensor.layout,
+                device=tensor.device,
+            )
 
             if isinstance(tensor, Float8Tensor):
                 id_buf_map[tensor_id] = Float8Tensor.make_like(tensor, data=buffer)
@@ -318,11 +331,15 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         return id_buf_map[tensor_id]
 
-
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
 
-        torch_stray_tensor = isinstance(tensor,(torch._subclasses.fake_tensor.FakeTensor,
-                                        torch._subclasses.functional_tensor.FunctionalTensor))
+        torch_stray_tensor = isinstance(
+            tensor,
+            (
+                torch._subclasses.fake_tensor.FakeTensor,
+                torch._subclasses.functional_tensor.FunctionalTensor,
+            ),
+        )
 
         if not torch_stray_tensor:
             # obtain a unique tensor tag
@@ -330,22 +347,23 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.tensor_count_current_group += 1
             assert tensor_tag not in self.tensor_tag_to_state
 
-            if (self.current_group < self.num_offload_group
-                and self.tensor_need_offloading_checker(tensor)):
+            if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
+                tensor
+            ):
                 # first copy the tensor to tensorbuf,
                 # so that the original tensor will not be deleted
                 tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
                 tensor_buf.copy_(tensor)
-                if hasattr(tensor,"weight_offloading"):
+                if hasattr(tensor, "weight_offloading"):
                     tensor_buf.weight_offloading = True
-                if hasattr(tensor,"activation_offloading"):
+                if hasattr(tensor, "activation_offloading"):
                     tensor_buf.activation_offloading = True
                 # Here we just save it, and at commit, bulk_offload_group will handle it
                 self.tensor_tag_to_state[tensor_tag] = tensor_buf
             else:
                 self.tensor_tag_to_state[tensor_tag] = tensor
         else:
-            tensor_tag = (-1,self.torch_tensor_count)
+            tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
             self.tensor_tag_to_state[tensor_tag] = tensor
 
@@ -371,10 +389,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
                     # if offload, return the reference to cpu copy
                     if self.tensor_need_offloading_checker(tensor_on_device):
-                        if hasattr(tensor_on_device,"weight_offloading"):
-                            delattr(tensor_on_device,"weight_offloading")
-                        if hasattr(tensor_on_device,"activation_offloading"):
-                            delattr(tensor_on_device,"activation_offloading")
+                        if hasattr(tensor_on_device, "weight_offloading"):
+                            delattr(tensor_on_device, "weight_offloading")
+                        if hasattr(tensor_on_device, "activation_offloading"):
+                            delattr(tensor_on_device, "activation_offloading")
                         state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         self.tensor_tag_to_state[tensor_tag] = state
 
@@ -406,7 +424,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         # during forward, the next_group_to_fetch always points to the min of
         # the last commited group, and the last offloaded group
-        self.next_group_to_fetch = min(self.current_group, self.num_offload_group -1)
+        self.next_group_to_fetch = min(self.current_group, self.num_offload_group - 1)
 
         super().on_group_commit_forward()
 
@@ -441,12 +459,13 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         ):
             # record the event in the compute stream, for h2d to wait
             torch.cuda.current_stream().record_event(
-                self.compute_stream_bwd_start_events[group_num_to_prefetch])
+                self.compute_stream_bwd_start_events[group_num_to_prefetch]
+            )
 
             # start of h2d should wait for the compute and the d2h
             self.h2d_stream.wait_event(self.compute_stream_bwd_start_events[group_num_to_prefetch])
 
-            #recover tensors (copy back from host)
+            # recover tensors (copy back from host)
             self.bulk_reload_group(group_num_to_prefetch)
 
             # record an event for the backward of this layer to wait
@@ -464,7 +483,8 @@ def get_cpu_offload_context(
     enabled: bool = False,
     num_layers: int = 1,
     offload_activations: bool = True,
-    offload_weights: bool = True):
+    offload_weights: bool = True,
+):
     """
     This function returns the CPU Offload context and the synchronizer function that needs to be
     used after every transformer layer. Returns `nullcontext()` if offloading is not enabled.
@@ -494,14 +514,14 @@ def get_cpu_offload_context(
     """
 
     def tensor_need_offloading_checker_activations(tensor):
-        return hasattr(tensor,"activation_offloading")
+        return hasattr(tensor, "activation_offloading")
 
     # This includes the Gradient Accumulation Buffer
     def tensor_need_offloading_checker_weights(tensor):
         return hasattr(tensor, "weight_offloading")
 
     def tensor_need_offloading_checker_all(tensor):
-        return (hasattr(tensor,"activation_offloading") or hasattr(tensor, "weight_offloading"))
+        return hasattr(tensor, "activation_offloading") or hasattr(tensor, "weight_offloading")
 
     if offload_activations and offload_weights:
         tensor_need_offloading_checker = tensor_need_offloading_checker_all
@@ -512,16 +532,17 @@ def get_cpu_offload_context(
     else:
         raise ValueError(
             "CPU Offloading is enabled while it is not "
-            "mentioned what to offload (weights/activations)")
+            "mentioned what to offload (weights/activations)"
+        )
 
     cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-                          num_offload_group=num_layers,
-                          num_prefetch_group=1,
-                          tensor_need_offloading_checker=tensor_need_offloading_checker
-                          )
+        num_offload_group=num_layers,
+        num_prefetch_group=1,
+        tensor_need_offloading_checker=tensor_need_offloading_checker,
+    )
 
     def group_prefetch_offload_commit_async(tensor):
-        return group_prefetch_offload_commit(tensor,cpu_offload_handler)
+        return group_prefetch_offload_commit(tensor, cpu_offload_handler)
 
     if enabled:
         return (

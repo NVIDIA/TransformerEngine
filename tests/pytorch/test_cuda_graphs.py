@@ -8,8 +8,15 @@ import pytest
 
 import torch
 from transformer_engine.pytorch import (
-    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear, make_graphed_callables,
-    MultiheadAttention, TransformerLayer, fp8_autocast, fp8_model_init,
+    DotProductAttention,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
+    make_graphed_callables,
+    MultiheadAttention,
+    TransformerLayer,
+    fp8_autocast,
+    fp8_model_init,
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -26,14 +33,17 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+
 @dataclass
 class ModelConfig:
     """Data tensor dimensions within Transformer model"""
+
     sequence_length: int
     batch_size: int
     hidden_size: int
     num_heads: int
     kv_channels: int
+
 
 model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
 
@@ -66,7 +76,9 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None)
     for i, (t1, t2) in enumerate(zip(l1, l2)):
         if not torch.equal(t1, t2):
             failed = True
-            failed_tensors += f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
+            failed_tensors += (
+                f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
+            )
     assert not failed, "Output mismatches in:\n" + failed_tensors
 
 
@@ -157,41 +169,51 @@ def _test_cuda_graphs(
     with fp8_model_init(enabled=fp8_params):
         # Create modules.
         if module == "transformer":
-            modules = [TransformerLayer(
-                            config.hidden_size,
-                            config.hidden_size,
-                            config.num_heads,
-                            hidden_dropout=0.0,
-                            attention_dropout=0.0,
-                            fuse_qkv_params=True,
-                            params_dtype=dtype,
-                       ) for _ in range(num_layers)]
+            modules = [
+                TransformerLayer(
+                    config.hidden_size,
+                    config.hidden_size,
+                    config.num_heads,
+                    hidden_dropout=0.0,
+                    attention_dropout=0.0,
+                    fuse_qkv_params=True,
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
         elif module == "layernorm_mlp":
-            modules = [LayerNormMLP(
-                config.hidden_size, config.hidden_size, params_dtype=dtype
-            ) for _ in range(num_layers)]
+            modules = [
+                LayerNormMLP(config.hidden_size, config.hidden_size, params_dtype=dtype)
+                for _ in range(num_layers)
+            ]
         elif module == "layernorm_linear":
-            modules = [LayerNormLinear(
-                config.hidden_size, config.hidden_size, params_dtype=dtype
-            ) for _ in range(num_layers)]
+            modules = [
+                LayerNormLinear(config.hidden_size, config.hidden_size, params_dtype=dtype)
+                for _ in range(num_layers)
+            ]
         elif module == "mha":
-            modules = [MultiheadAttention(
-                            config.hidden_size,
-                            config.num_heads,
-                            attention_dropout=0.0,
-                            params_dtype=dtype,
-                            fuse_qkv_params=True,
-                       ) for _ in range(num_layers)]
+            modules = [
+                MultiheadAttention(
+                    config.hidden_size,
+                    config.num_heads,
+                    attention_dropout=0.0,
+                    params_dtype=dtype,
+                    fuse_qkv_params=True,
+                )
+                for _ in range(num_layers)
+            ]
         elif dpa:
             assert config.hidden_size % config.num_heads == 0, "Err."
             assert num_layers == 1, "Err."
-            modules = [DotProductAttention(
-                        config.num_heads, config.kv_channels, attention_dropout=0.0
-                        ) for _ in range(num_layers)]
+            modules = [
+                DotProductAttention(config.num_heads, config.kv_channels, attention_dropout=0.0)
+                for _ in range(num_layers)
+            ]
         else:
-            modules = [Linear(
-                config.hidden_size, config.hidden_size, device="cuda", params_dtype=dtype
-            ) for _ in range(num_layers)]
+            modules = [
+                Linear(config.hidden_size, config.hidden_size, device="cuda", params_dtype=dtype)
+                for _ in range(num_layers)
+            ]
 
         # Initialize gradient buffers.
         for module in modules:
@@ -238,7 +260,7 @@ def _test_cuda_graphs(
             with fp8_autocast(enabled=fp8):
                 kwargs = {}
                 if fp8_weight_caching:
-                    kwargs["is_first_microbatch"] = (grad_accumulation_step == 0)
+                    kwargs["is_first_microbatch"] = grad_accumulation_step == 0
                 output = model(*inputs, **kwargs)
             output.backward(grad_output)
         if not dpa:

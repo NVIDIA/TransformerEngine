@@ -26,10 +26,7 @@ def apply_rotary_pos_emb_thd(
     """
     seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     return torch.cat(
-        [
-            apply_rotary_pos_emb(x.unsqueeze(1), freqs[: x.size(0)])
-            for x in torch.split(t, seqlens)
-        ]
+        [apply_rotary_pos_emb(x.unsqueeze(1), freqs[: x.size(0)]) for x in torch.split(t, seqlens)]
     ).squeeze(1)
 
 
@@ -44,6 +41,7 @@ def get_tol(dtype: torch.dtype) -> Dict:
 # Gradient is a broadcasted scalar
 def _overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     return output.sum() * 2
+
 
 # Gradient is a full tensor
 def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
@@ -86,9 +84,7 @@ def test_fused_rope(
     emb = rotary_pos_emb(seq_length)
 
     # unfused
-    output_unfused = apply_rotary_pos_emb(
-        t, emb, tensor_format=tensor_format, fused=False
-    )
+    output_unfused = apply_rotary_pos_emb(t, emb, tensor_format=tensor_format, fused=False)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
     grad_unfused = t.grad.detach().clone()

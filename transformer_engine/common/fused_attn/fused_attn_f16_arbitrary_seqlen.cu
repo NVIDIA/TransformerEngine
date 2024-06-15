@@ -4,19 +4,19 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "fused_attn_f16_arbitrary_seqlen.h"
-
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+
 #include <map>
 #include <vector>
 
 #include "../common.h"
-#include "utils.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
+#include "fused_attn_f16_arbitrary_seqlen.h"
+#include "utils.h"
 
 #if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
@@ -308,38 +308,34 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             return;
         }
 
-        // cuDNN stream check needs to be moved here to support dummy kernel calls with
-        // null streams for sizing the cuDNN workspace.
-        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+    // cuDNN stream check needs to be moved here to support dummy kernel calls with
+    // null streams for sizing the cuDNN workspace.
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
-        // Build variant pack
-        std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
-            {Q, devPtrQ},
-            {K, devPtrK},
-            {V, devPtrV},
-            {attn_scale, &scaling_factor},
-            {O, devPtrO},
-            {Stats, devPtrSoftmaxStats}};
+    // Build variant pack
+    std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void *> variant_pack = {
+        {Q, devPtrQ}, {K, devPtrK},
+        {V, devPtrV}, {attn_scale, &scaling_factor},
+        {O, devPtrO}, {Stats, devPtrSoftmaxStats}};
 
-        if (is_bias) {
-            variant_pack[bias] = devPtrBias;
-        }
+    if (is_bias) {
+      variant_pack[bias] = devPtrBias;
+    }
 
-        if (is_padding) {
-            constexpr size_t nthreads_per_block = 128;
-            const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-            void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-            void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
-            cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-                b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
-                static_cast<const int32_t *>(devPtrCuSeqlensKV),
-                static_cast<int32_t *>(devActualSeqlenQ),
-                static_cast<int32_t *>(devActualSeqlenKV));
-            variant_pack[seq_q]  = devActualSeqlenQ;
-            variant_pack[seq_kv] = devActualSeqlenKV;
-        }
+    if (is_padding) {
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+      void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+          b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
+          static_cast<int32_t *>(devActualSeqlenKV));
+      variant_pack[seq_q] = devActualSeqlenQ;
+      variant_pack[seq_kv] = devActualSeqlenKV;
+    }
 
-        if (is_ragged) {
+    if (is_ragged) {
             constexpr size_t nthreads_per_block = 128;
             const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
             void *devOffsetsQ = static_cast<int8_t *>(workspace)
@@ -359,17 +355,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             variant_pack[offset_k] = devOffsetsK;
             variant_pack[offset_v] = devOffsetsV;
             variant_pack[offset_o] = devOffsetsO;
-        }
+    }
 
-        if (is_dropout) {
+    if (is_dropout) {
             variant_pack[dropout_seed] = devPtrDropoutSeed;
             variant_pack[dropout_offset] = devPtrDropoutOffset;
-        }
-
-        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
-    } catch (cudnn_frontend::cudnnException &e) {
-        NVTE_ERROR(e.what());
     }
+    NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+  } catch (cudnn_frontend::cudnnException &e) {
+        NVTE_ERROR(e.what());
+  }
 }
 
 void fused_attn_arbitrary_seqlen_bwd_impl(
@@ -394,9 +389,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_dropout = (dropout_probability != 0.0f);
     bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
-    if (is_ragged) {
-        NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    }
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
@@ -685,46 +677,45 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             return;
         }
 
-        // cuDNN stream check needs to be moved here to support dummy kernel calls with
-        // null streams for sizing the cuDNN workspace.
-        NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+    // cuDNN stream check needs to be moved here to support dummy kernel calls with
+    // null streams for sizing the cuDNN workspace.
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
-        // build variant pack
-        std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {
-            {q, devPtrQ},
-            {k, devPtrKTranspose},
-            {v, devPtrVTranspose},
-            {o, devPtrO},
-            {dO, devPtrdO},
-            {stats, devPtrSoftmaxStats},
-            {attn_scale, &scaling_factor},
-            {dQ, devPtrdQ},
-            {dK, devPtrdK},
-            {dV, devPtrdV},
-        };
+    // build variant pack
+    std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void *> variant_pack = {
+        {q, devPtrQ},
+        {k, devPtrKTranspose},
+        {v, devPtrVTranspose},
+        {o, devPtrO},
+        {dO, devPtrdO},
+        {stats, devPtrSoftmaxStats},
+        {attn_scale, &scaling_factor},
+        {dQ, devPtrdQ},
+        {dK, devPtrdK},
+        {dV, devPtrdV},
+    };
 
-        if (is_bias) {
-            variant_pack[bias] = devPtrBias;
-            if ((bias_b == 1) && (bias_h == h)) {
-              variant_pack[dBias] = devPtrdBias;
-            } else {
-              variant_pack[dBias] = nullptr;
-            }
-        }
+    if (is_bias) {
+      variant_pack[bias] = devPtrBias;
+      if ((bias_b == 1) && (bias_h == h)) {
+        variant_pack[dBias] = devPtrdBias;
+      } else {
+        variant_pack[dBias] = nullptr;
+      }
+    }
 
-        if (is_padding) {
-            constexpr size_t nthreads_per_block = 128;
-            const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-            void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-            void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
-            cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-                b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
-                static_cast<const int32_t *>(devPtrCuSeqlensKV),
-                static_cast<int32_t *>(devActualSeqlenQ),
-                static_cast<int32_t *>(devActualSeqlenKV));
-            variant_pack[seq_q]  = devActualSeqlenQ;
-            variant_pack[seq_kv] = devActualSeqlenKV;
-        }
+    if (is_padding) {
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+      void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+          b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
+          static_cast<int32_t *>(devActualSeqlenKV));
+      variant_pack[seq_q] = devActualSeqlenQ;
+      variant_pack[seq_kv] = devActualSeqlenKV;
+    }
 
         if (is_ragged) {
             constexpr size_t nthreads_per_block = 128;
@@ -748,15 +739,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             variant_pack[offset_o] = devOffsetsO;
         }
 
-        if (is_dropout) {
-            variant_pack[dropout_seed] = devPtrDropoutSeed;
-            variant_pack[dropout_offset] = devPtrDropoutOffset;
-        }
-
-        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
-    } catch (cudnn_frontend::cudnnException &e) {
-        NVTE_ERROR(e.what());
+    if (is_dropout) {
+      variant_pack[dropout_seed] = devPtrDropoutSeed;
+      variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
+
+    NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+  } catch (cudnn_frontend::cudnnException &e) {
+    NVTE_ERROR(e.what());
+  }
 }
 }  // namespace fused_attn
 
@@ -833,41 +824,37 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         output_rng_state->data.dptr = rng_state->data.dptr;
         Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
         output_bias->data.dptr = devPtrBias;
-    } else {
-        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
+
+  void *devPtrDropoutSeed = rng_state->data.dptr;
+  void *devPtrDropoutOffset =
+      reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
+
+  size_t workspace_size = 0;
+
+  fused_attn_arbitrary_seqlen_fwd_impl(
+      batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim, bias_b, bias_h,
+      is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK,
+      devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
+      devPtrCuSeqlens, devPtrCuSeqlens, devPtrSeqOffsetsQ, devPtrSeqOffsetsK, devPtrSeqOffsetsV,
+      devPtrSeqOffsetsO, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
+      stream, handle);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
     }
-
-    void* devPtrDropoutSeed = rng_state->data.dptr;
-    void* devPtrDropoutOffset = reinterpret_cast<void *>(
-                    reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
-
-    size_t workspace_size = 0;
-
-    fused_attn_arbitrary_seqlen_fwd_impl(batch, num_attn_heads, num_attn_heads,
-                                max_seqlen, max_seqlen, head_dim, bias_b, bias_h,
-                                is_training, attn_scale, p_dropout, qkv_layout,
-                                bias_type, mask_type,
-                                devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO,
-                                devPtrDropoutSeed, devPtrDropoutOffset,
-                                devPtrCuSeqlens, devPtrCuSeqlens,
-                                devPtrSeqOffsets, devPtrSeqOffsets,
-                                get_cudnn_fe_dtype(QKV_type),
-                                workspace->data.dptr, &workspace_size,
-                                stream, handle);
-
-    if (workspace_size > 0) {
-        if (workspace->data.dptr == nullptr) {
-            workspace->data.shape = {workspace_size};
-            workspace->data.dtype = DType::kByte;
-            return;
-        }
-    } else if (workspace_size == 0) {
-        workspace->data.shape = {1};
-        workspace->data.dtype = DType::kByte;
-        return;
-    } else {
-        NVTE_ERROR("Unexpected workspace_size.");
-    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_heads,
@@ -950,7 +937,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_hea
         return;
     } else {
         NVTE_ERROR("Unexpected workspace_size.");
-    }
+  }
 }
 void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
@@ -1030,9 +1017,9 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
         output_rng_state->data.dptr = rng_state->data.dptr;
         Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
         output_bias->data.dptr = devPtrBias;
-    } else {
-        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-    }
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
@@ -1151,7 +1138,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
         return;
     } else {
         NVTE_ERROR("Unexpected workspace_size.");
-    }
+  }
 }
 
 void fused_attn_arbitrary_seqlen_fwd(
@@ -1223,9 +1210,9 @@ void fused_attn_arbitrary_seqlen_fwd(
         output_rng_state->data.dptr = rng_state->data.dptr;
         Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
         output_bias->data.dptr = devPtrBias;
-    } else {
-        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-    }
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
@@ -1257,7 +1244,7 @@ void fused_attn_arbitrary_seqlen_fwd(
         return;
     } else {
         NVTE_ERROR("Unexpected workspace_size.");
-    }
+  }
 }
 
 void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
@@ -1331,7 +1318,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
         return;
     } else {
         NVTE_ERROR("Unexpected workspace_size.");
-    }
+  }
 }
 }  // namespace transformer_engine
 #endif  // CUDNN_VERSION >= 8900

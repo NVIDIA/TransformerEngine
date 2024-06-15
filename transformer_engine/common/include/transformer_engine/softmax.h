@@ -7,8 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_SOFTMAX_H_
 #define TRANSFORMER_ENGINE_SOFTMAX_H_
 
-#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
+
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
@@ -22,13 +23,8 @@ extern "C" {
  *  \param[in]     scale_factor    Scalar for the input tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_softmax_forward(
-    const NVTETensor input,
-    NVTETensor softmax_results,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_softmax_forward(const NVTETensor input, NVTETensor softmax_results,
+                                 float scale_factor, cudaStream_t stream);
 
 /*! \brief Compute the backward of the scaled softmax activation.
  *
@@ -42,14 +38,8 @@ void nvte_scaled_softmax_forward(
  *  \param[in]     scale_factor    Scalar for the output tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_softmax_backward(
-    const NVTETensor incoming_grads,
-    const NVTETensor softmax_results,
-    NVTETensor output_grads,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_softmax_backward(const NVTETensor incoming_grads, const NVTETensor softmax_results,
+                                  NVTETensor output_grads, float scale_factor, cudaStream_t stream);
 
 /*! \brief Compute scaled masked softmax activation on the input.
  *
@@ -59,14 +49,9 @@ void nvte_scaled_softmax_backward(
  *  \param[in]     scale_factor    Scalar for the input tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_masked_softmax_forward(
-    const NVTETensor input,
-    const NVTETensor mask,
-    NVTETensor softmax_results,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_masked_softmax_forward(const NVTETensor input, const NVTETensor mask,
+                                        NVTETensor softmax_results, float scale_factor,
+                                        cudaStream_t stream);
 
 /*! \brief Compute the backward of the scaled masked softmax activation.
  *
@@ -80,14 +65,9 @@ void nvte_scaled_masked_softmax_forward(
  *  \param[in]     scale_factor    Scalar for the output tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_masked_softmax_backward(
-    const NVTETensor incoming_grads,
-    const NVTETensor softmax_results,
-    NVTETensor output_grads,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_masked_softmax_backward(const NVTETensor incoming_grads,
+                                         const NVTETensor softmax_results, NVTETensor output_grads,
+                                         float scale_factor, cudaStream_t stream);
 
 /*! \brief Compute scaled softmax activation using a 2D upper triangular mask on the input.
  *
@@ -96,13 +76,9 @@ void nvte_scaled_masked_softmax_backward(
  *  \param[in]     scale_factor    Scalar for the input tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_upper_triang_masked_softmax_forward(
-    const NVTETensor input,
-    NVTETensor softmax_results,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_upper_triang_masked_softmax_forward(const NVTETensor input,
+                                                     NVTETensor softmax_results, float scale_factor,
+                                                     cudaStream_t stream);
 
 /*! \brief Compute the backward of the scaled softmax activation using a 2D upper triangular mask.
  *
@@ -116,14 +92,10 @@ void nvte_scaled_upper_triang_masked_softmax_forward(
  *  \param[in]     scale_factor    Scalar for the output tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_upper_triang_masked_softmax_backward(
-    const NVTETensor incoming_grads,
-    const NVTETensor softmax_results,
-    NVTETensor output_grads,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_upper_triang_masked_softmax_backward(const NVTETensor incoming_grads,
+                                                      const NVTETensor softmax_results,
+                                                      NVTETensor output_grads, float scale_factor,
+                                                      cudaStream_t stream);
 
 /*! \brief Compute scaled softmax activation using an implicit 2D mask aligned to the bottom right corner of the input matrix.
  *
@@ -132,13 +104,9 @@ void nvte_scaled_upper_triang_masked_softmax_backward(
  *  \param[in]     scale_factor    Scalar for the input tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_aligned_causal_masked_softmax_forward(
-    const NVTETensor input,
-    NVTETensor softmax_results,
-    float scale_factor,
-    cudaStream_t stream
-);
-
+void nvte_scaled_aligned_causal_masked_softmax_forward(const NVTETensor input,
+                                                       NVTETensor softmax_results,
+                                                       float scale_factor, cudaStream_t stream);
 
 /*! \brief Compute the backward pass of the scaled softmax activation using an implicit 2D mask aligned to the bottom right corner of the input matrix.
  *
@@ -152,13 +120,10 @@ void nvte_scaled_aligned_causal_masked_softmax_forward(
  *  \param[in]     scale_factor    Scalar for the output tensor.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_scaled_aligned_causal_masked_softmax_backward(
-    const NVTETensor incoming_grads,
-    const NVTETensor softmax_results,
-    NVTETensor output_grads,
-    float scale_factor,
-    cudaStream_t stream
-);
+void nvte_scaled_aligned_causal_masked_softmax_backward(const NVTETensor incoming_grads,
+                                                        const NVTETensor softmax_results,
+                                                        NVTETensor output_grads, float scale_factor,
+                                                        cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
