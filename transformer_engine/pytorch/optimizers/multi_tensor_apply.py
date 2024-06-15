@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 
 """Multi-tensor apply entry."""
+
+
 class MultiTensorApply:  # pylint: disable=too-few-public-methods
     """Multi-tensor apply entry."""
 

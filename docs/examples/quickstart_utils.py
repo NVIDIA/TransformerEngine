@@ -8,14 +8,15 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import DelayedScaling, dist_group_type
 
+
 def speedometer(
-        module: torch.nn.Module,
-        input: torch.Tensor,
-        output_grad: torch.Tensor,
-        forward_kwargs: dict = {},
-        fp8_autocast_kwargs: Optional[dict] = None,
-        timing_iters: int = 50,
-        warmup_iters: int = 50,
+    module: torch.nn.Module,
+    input: torch.Tensor,
+    output_grad: torch.Tensor,
+    forward_kwargs: dict = {},
+    fp8_autocast_kwargs: Optional[dict] = None,
+    timing_iters: int = 50,
+    warmup_iters: int = 50,
 ) -> None:
     """Measure average run time for a PyTorch module
 
@@ -24,7 +25,7 @@ def speedometer(
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     if fp8_autocast_kwargs is None:
-        fp8_autocast_kwargs = { "enabled": False }
+        fp8_autocast_kwargs = {"enabled": False}
 
     # Warmup runs
     torch.cuda.synchronize()
@@ -51,11 +52,12 @@ class DotProductAttention(torch.nn.Module):
     Built with plain PyTorch modules.
 
     """
+
     def __init__(
-            self,
-            num_attention_heads: int,
-            kv_channels: int,
-            attention_dropout: float,
+        self,
+        num_attention_heads: int,
+        kv_channels: int,
+        attention_dropout: float,
     ) -> None:
         super().__init__()
         self.projection_size = kv_channels * num_attention_heads
@@ -63,21 +65,17 @@ class DotProductAttention(torch.nn.Module):
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
         self.dropout = torch.nn.Dropout(attention_dropout)
 
-    def masked_softmax(
-            self,
-            inp: torch.Tensor,
-            mask: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def masked_softmax(self, inp: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         if mask is not None:
             inp.masked_fill_(mask, -10000.0)
         return torch.nn.Softmax(dim=-1)(inp)
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         b = query.size(1)
         np = query.size(2)
@@ -90,7 +88,9 @@ class DotProductAttention(torch.nn.Module):
         # [sk, b, np, hn] -> [sk, b * np, hn]
         key = key.view(sk, b * np, -1)
 
-        bmm1 = torch.bmm(query.transpose(0, 1), key.transpose(0, 1).transpose(1, 2)) / self.norm_factor
+        bmm1 = (
+            torch.bmm(query.transpose(0, 1), key.transpose(0, 1).transpose(1, 2)) / self.norm_factor
+        )
 
         # change view to [b, np, sq, sk]
         attention_scores = bmm1.view(b, np, sq, sk)
@@ -126,10 +126,11 @@ class BasicMLP(torch.nn.Module):
     Built with plain PyTorch modules.
 
     """
+
     def __init__(
-            self,
-            hidden_size: int,
-            ffn_hidden_size: int,
+        self,
+        hidden_size: int,
+        ffn_hidden_size: int,
     ) -> None:
         super().__init__()
         self.linear1 = torch.nn.Linear(hidden_size, ffn_hidden_size, bias=True)
@@ -137,7 +138,7 @@ class BasicMLP(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear1(x)
-        x = torch.nn.functional.gelu(x, approximate='tanh')
+        x = torch.nn.functional.gelu(x, approximate="tanh")
         x = self.linear2(x)
         return x
 
@@ -148,7 +149,7 @@ def share_parameters_with_basic_te_model(te_model, basic_model):
     Parameter values are copied from pure PyTorch implementation.
 
     """
-    te_model.ln1.weight= basic_model.ln1.weight
+    te_model.ln1.weight = basic_model.ln1.weight
     te_model.ln1.bias = basic_model.ln1.bias
     te_model.qkv_projection.weight = basic_model.qkv_projection.weight
     te_model.qkv_projection.bias = basic_model.qkv_projection.bias
@@ -202,14 +203,15 @@ def share_parameters_with_transformerlayer_te_model(te_model, basic_model):
     te_model.layernorm_mlp.fc2_bias = basic_model.mlp.linear2.bias
 
 
-def cast_to_representable(inp, scale = 1., fp8_format='e4m3'):
+def cast_to_representable(inp, scale=1.0, fp8_format="e4m3"):
     import transformer_engine.pytorch.cpp_extensions as texcpp
     import transformer_engine_torch as tex
     from transformer_engine.pytorch.constants import TE_DType
-    fp8_type = tex.DType.kFloat8E4M3 if fp8_format == 'e4m3' else tex.DType.kFloat8E5M2
+
+    fp8_type = tex.DType.kFloat8E4M3 if fp8_format == "e4m3" else tex.DType.kFloat8E5M2
     input_type = TE_DType[inp.dtype]
     meta = tex.FP8TensorMeta()
-    meta.scale = torch.ones(1,dtype=torch.float32, device="cuda") * scale
+    meta.scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
     meta.scale_inv = torch.ones(1, dtype=torch.float32, device="cuda") / scale
     meta.amax_history = torch.zeros(1, 1, dtype=torch.float32, device="cuda")
     ret = texcpp.cast_to_fp8(inp, meta, tex.FP8FwdTensors.GEMM1_INPUT, fp8_type)

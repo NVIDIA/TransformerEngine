@@ -26,91 +26,91 @@ extern "C" {
  *   different lengths in a batch.
  */
 enum NVTE_QKV_Layout {
-    NVTE_SB3HD          = 0,  /*!< SB3HD layout */
-    NVTE_SBH3D          = 1,  /*!< SBH3D layout */
-    NVTE_SBHD_SB2HD     = 2,  /*!< SBHD_SB2HD layout */
-    NVTE_SBHD_SBH2D     = 3,  /*!< SBHD_SBH2D layout */
-    NVTE_SBHD_SBHD_SBHD = 4,  /*!< SBHD_SBHD_SBHD layout */
-    NVTE_BS3HD          = 5,  /*!< BS3HD layout */
-    NVTE_BSH3D          = 6,  /*!< BSH3D layout */
-    NVTE_BSHD_BS2HD     = 7,  /*!< BSHD_BS2HD layout */
-    NVTE_BSHD_BSH2D     = 8,  /*!< BSHD_BSH2D layout */
-    NVTE_BSHD_BSHD_BSHD = 9,  /*!< BSHD_BSHD_BSHD layout */
-    NVTE_T3HD           = 10,  /*!< T3HD layout */
-    NVTE_TH3D           = 11,  /*!< TH3D layout */
-    NVTE_THD_T2HD       = 12,  /*!< THD_T2HD layout */
-    NVTE_THD_TH2D       = 13,  /*!< THD_TH2D layout */
-    NVTE_THD_THD_THD    = 14,  /*!< THD_THD_THD layout */
+  NVTE_SB3HD = 0,          /*!< SB3HD layout */
+  NVTE_SBH3D = 1,          /*!< SBH3D layout */
+  NVTE_SBHD_SB2HD = 2,     /*!< SBHD_SB2HD layout */
+  NVTE_SBHD_SBH2D = 3,     /*!< SBHD_SBH2D layout */
+  NVTE_SBHD_SBHD_SBHD = 4, /*!< SBHD_SBHD_SBHD layout */
+  NVTE_BS3HD = 5,          /*!< BS3HD layout */
+  NVTE_BSH3D = 6,          /*!< BSH3D layout */
+  NVTE_BSHD_BS2HD = 7,     /*!< BSHD_BS2HD layout */
+  NVTE_BSHD_BSH2D = 8,     /*!< BSHD_BSH2D layout */
+  NVTE_BSHD_BSHD_BSHD = 9, /*!< BSHD_BSHD_BSHD layout */
+  NVTE_T3HD = 10,          /*!< T3HD layout */
+  NVTE_TH3D = 11,          /*!< TH3D layout */
+  NVTE_THD_T2HD = 12,      /*!< THD_T2HD layout */
+  NVTE_THD_TH2D = 13,      /*!< THD_TH2D layout */
+  NVTE_THD_THD_THD = 14,   /*!< THD_THD_THD layout */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
  *  \brief QKV layout groups
  */
 enum NVTE_QKV_Layout_Group {
-    /*! 3HD QKV layouts, i.e. BS3HD, SB3HD, T3HD */
-    NVTE_3HD = 0,
-    /*! H3D QKV layouts, i.e. BSH3D, SBH3D, TH3D */
-    NVTE_H3D = 1,
-    /*! HD_2HD QKV layouts, i.e. BSHD_BS2HD, SBHD_SB2HD, THD_T2HD */
-    NVTE_HD_2HD = 2,
-    /*! HD_H2D QKV layouts, i.e. BSHD_BSH2D, SBHD_SBH2D, THD_TH2D */
-    NVTE_HD_H2D = 3,
-    /*! HD_HD_HD QKV layouts, i.e. BSHD_BSHD_BSHD, SBHD_SBHD_SBHD, THD_THD_THD */
-    NVTE_HD_HD_HD = 4,
+  /*! 3HD QKV layouts, i.e. BS3HD, SB3HD, T3HD */
+  NVTE_3HD = 0,
+  /*! H3D QKV layouts, i.e. BSH3D, SBH3D, TH3D */
+  NVTE_H3D = 1,
+  /*! HD_2HD QKV layouts, i.e. BSHD_BS2HD, SBHD_SB2HD, THD_T2HD */
+  NVTE_HD_2HD = 2,
+  /*! HD_H2D QKV layouts, i.e. BSHD_BSH2D, SBHD_SBH2D, THD_TH2D */
+  NVTE_HD_H2D = 3,
+  /*! HD_HD_HD QKV layouts, i.e. BSHD_BSHD_BSHD, SBHD_SBHD_SBHD, THD_THD_THD */
+  NVTE_HD_HD_HD = 4,
 };
 
 /*! \enum NVTE_QKV_Format
  *  \brief QKV formats
  */
 enum NVTE_QKV_Format {
-    /*! SBHD QKV format, i.e. SB3HD, SBH3D, SBHD_SB2HD, SBHD_SBH2D, SBHD_SBHD_SBHD */
-    NVTE_SBHD = 0,
-    /*! BSHD QKV format, i.e. BS3HD, BSH3D, BSHD_BS2HD, BSHD_BSH2D, BSHD_BSHD_BSHD */
-    NVTE_BSHD = 1,
-    /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD */
-    NVTE_THD = 2,
+  /*! SBHD QKV format, i.e. SB3HD, SBH3D, SBHD_SB2HD, SBHD_SBH2D, SBHD_SBHD_SBHD */
+  NVTE_SBHD = 0,
+  /*! BSHD QKV format, i.e. BS3HD, BSH3D, BSHD_BS2HD, BSHD_BSH2D, BSHD_BSHD_BSHD */
+  NVTE_BSHD = 1,
+  /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD */
+  NVTE_THD = 2,
 };
 
 /*! \enum NVTE_Bias_Type
  *  \brief Bias types
  */
 enum NVTE_Bias_Type {
-    /*! No bias */
-    NVTE_NO_BIAS = 0,
-    /*! Bias before scale */
-    NVTE_PRE_SCALE_BIAS = 1,
-    /*! Bias after scale */
-    NVTE_POST_SCALE_BIAS = 2,
-    /*! ALiBi */
-    NVTE_ALIBI = 3,
+  /*! No bias */
+  NVTE_NO_BIAS = 0,
+  /*! Bias before scale */
+  NVTE_PRE_SCALE_BIAS = 1,
+  /*! Bias after scale */
+  NVTE_POST_SCALE_BIAS = 2,
+  /*! ALiBi */
+  NVTE_ALIBI = 3,
 };
 
 /*! \enum NVTE_Mask_Type
  *  \brief Attention mask types
  */
 enum NVTE_Mask_Type {
-    /*! No masking */
-    NVTE_NO_MASK = 0,
-    /*! Padding attention mask */
-    NVTE_PADDING_MASK = 1,
-    /*! Causal attention mask */
-    NVTE_CAUSAL_MASK = 2,
-    /*! Padding and causal attention mask */
-    NVTE_PADDING_CAUSAL_MASK = 3,
+  /*! No masking */
+  NVTE_NO_MASK = 0,
+  /*! Padding attention mask */
+  NVTE_PADDING_MASK = 1,
+  /*! Causal attention mask */
+  NVTE_CAUSAL_MASK = 2,
+  /*! Padding and causal attention mask */
+  NVTE_PADDING_CAUSAL_MASK = 3,
 };
 
 /*! \enum NVTE_Fused_Attn_Backend
  *  \brief Fused attention backends
  */
 enum NVTE_Fused_Attn_Backend {
-    /*! No supported backend */
-    NVTE_No_Backend = -1,
-    /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
-    NVTE_F16_max512_seqlen = 0,
-    /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
-    NVTE_F16_arbitrary_seqlen = 1,
-    /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
-    NVTE_FP8 = 2,
+  /*! No supported backend */
+  NVTE_No_Backend = -1,
+  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
+  NVTE_F16_max512_seqlen = 0,
+  /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
+  NVTE_F16_arbitrary_seqlen = 1,
+  /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
+  NVTE_FP8 = 2,
 };
 
 /*!  \brief Get QKV layout group for a given QKV layout.
@@ -144,15 +144,9 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     head_dim         The head dimension of Q, K, V.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
-                NVTEDType q_dtype,
-                NVTEDType kv_dtype,
-                NVTE_QKV_Layout qkv_layout,
-                NVTE_Bias_Type bias_type,
-                NVTE_Mask_Type attn_mask_type,
-                float dropout,
-                size_t num_attn_heads, size_t num_gqa_groups,
-                size_t max_seqlen_q, size_t max_seqlen_kv,
-                size_t head_dim);
+    NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim);
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
@@ -211,24 +205,15 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd_qkvpacked(
-            const NVTETensor QKV,
-            const NVTETensor Bias,
-            NVTETensor S,
-            NVTETensor O,
-            NVTETensorPack* Aux_CTX_Tensors,
-            const NVTETensor cu_seqlens,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            const NVTETensor rng_state,
-            size_t max_seqlen,
-            bool is_training, float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, NVTETensor S,
+                                   NVTETensor O, NVTETensorPack* Aux_CTX_Tensors,
+                                   const NVTETensor cu_seqlens, const NVTETensor seq_offsets_q,
+                                   const NVTETensor seq_offsets_k, const NVTETensor seq_offsets_v,
+                                   const NVTETensor seq_offsets_o, const NVTETensor rng_state,
+                                   size_t max_seqlen, bool is_training, float attn_scale,
+                                   float dropout, NVTE_QKV_Layout qkv_layout,
+                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                                   NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
@@ -283,25 +268,12 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_bwd_qkvpacked(
-            const NVTETensor QKV,
-            const NVTETensor O,
-            const NVTETensor dO,
-            const NVTETensor S,
-            NVTETensor dP,
-            const NVTETensorPack* Aux_CTX_Tensors,
-            NVTETensor dQKV,
-            NVTETensor dBias,
-            const NVTETensor cu_seqlens,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            size_t max_seqlen,
-            float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+    const NVTETensor QKV, const NVTETensor O, const NVTETensor dO, const NVTETensor S,
+    NVTETensor dP, const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQKV, NVTETensor dBias,
+    const NVTETensor cu_seqlens, const NVTETensor seq_offsets_q, const NVTETensor seq_offsets_k,
+    const NVTETensor seq_offsets_v, const NVTETensor seq_offsets_o, size_t max_seqlen,
+    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with packed KV input.
  *
@@ -363,26 +335,16 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd_kvpacked(
-            const NVTETensor Q,
-            const NVTETensor KV,
-            const NVTETensor Bias,
-            NVTETensor S,
-            NVTETensor O,
-            NVTETensorPack* Aux_CTX_Tensors,
-            const NVTETensor cu_seqlens_q,
-            const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            const NVTETensor rng_state,
-            size_t max_seqlen_q, size_t max_seqlen_kv,
-            bool is_training, float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias,
+                                  NVTETensor S, NVTETensor O, NVTETensorPack* Aux_CTX_Tensors,
+                                  const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                                  const NVTETensor seq_offsets_q, const NVTETensor seq_offsets_k,
+                                  const NVTETensor seq_offsets_v, const NVTETensor seq_offsets_o,
+                                  const NVTETensor rng_state, size_t max_seqlen_q,
+                                  size_t max_seqlen_kv, bool is_training, float attn_scale,
+                                  float dropout, NVTE_QKV_Layout qkv_layout,
+                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                                  NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
@@ -441,28 +403,13 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_bwd_kvpacked(
-            const NVTETensor Q,
-            const NVTETensor KV,
-            const NVTETensor O,
-            const NVTETensor dO,
-            const NVTETensor S,
-            NVTETensor dP,
-            const NVTETensorPack* Aux_CTX_Tensors,
-            NVTETensor dQ,
-            NVTETensor dKV,
-            NVTETensor dBias,
-            const NVTETensor cu_seqlens_q,
-            const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            size_t max_seqlen_q, size_t max_seqlen_kv,
-            float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+    const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
+    const NVTETensor S, NVTETensor dP, const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQ,
+    NVTETensor dKV, NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor seq_offsets_q, const NVTETensor seq_offsets_k, const NVTETensor seq_offsets_v,
+    const NVTETensor seq_offsets_o, size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale,
+    float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
@@ -538,27 +485,16 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd(
-            const NVTETensor Q,
-            const NVTETensor K,
-            const NVTETensor V,
-            const NVTETensor Bias,
-            NVTETensor S,
-            NVTETensor O,
-            NVTETensorPack* Aux_CTX_Tensors,
-            const NVTETensor cu_seqlens_q,
-            const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            const NVTETensor rng_state,
-            size_t max_seqlen_q, size_t max_seqlen_kv,
-            bool is_training, float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor Bias, NVTETensor S, NVTETensor O,
+                         NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
+                         const NVTETensor cu_seqlens_kv, const NVTETensor seq_offsets_q,
+                         const NVTETensor seq_offsets_k, const NVTETensor seq_offsets_v,
+                         const NVTETensor seq_offsets_o, const NVTETensor rng_state,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -631,31 +567,16 @@ void nvte_fused_attn_fwd(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_bwd(
-            const NVTETensor Q,
-            const NVTETensor K,
-            const NVTETensor V,
-            const NVTETensor O,
-            const NVTETensor dO,
-            const NVTETensor S,
-            NVTETensor dP,
-            const NVTETensorPack* Aux_CTX_Tensors,
-            NVTETensor dQ,
-            NVTETensor dK,
-            NVTETensor dV,
-            NVTETensor dBias,
-            const NVTETensor cu_seqlens_q,
-            const NVTETensor cu_seqlens_kv,
-            const NVTETensor seq_offsets_q,
-            const NVTETensor seq_offsets_k,
-            const NVTETensor seq_offsets_v,
-            const NVTETensor seq_offsets_o,
-            size_t max_seqlen_q, size_t max_seqlen_kv,
-            float attn_scale, float dropout,
-            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type,
-            NVTETensor workspace,
-            cudaStream_t stream);
+void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
+                         const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
+                         NVTETensor dV, NVTETensor dBias, const NVTETensor cu_seqlens_q,
+                         const NVTETensor cu_seqlens_kv, const NVTETensor seq_offsets_q,
+                         const NVTETensor seq_offsets_k, const NVTETensor seq_offsets_v,
+                         const NVTETensor seq_offsets_o, size_t max_seqlen_q, size_t max_seqlen_kv,
+                         float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTETensor workspace, cudaStream_t stream);
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -152,22 +152,26 @@ def _linear_fwd_non_fp8(
 
     if fp8_calibration:
         # amax of input
-        fp8_meta["scaling_fwd"].amax_history[0, inputmat_fp8_index.value] = \
-            paddle.max(paddle.abs(inputmat_total)).item()
+        fp8_meta["scaling_fwd"].amax_history[0, inputmat_fp8_index.value] = paddle.max(
+            paddle.abs(inputmat_total)
+        ).item()
         # amax of weight
-        fp8_meta["scaling_fwd"].amax_history[0, weight_fp8_index.value] = \
-            paddle.max(paddle.abs(weight)).item()
+        fp8_meta["scaling_fwd"].amax_history[0, weight_fp8_index.value] = paddle.max(
+            paddle.abs(weight)
+        ).item()
         fp8_meta["update_amax_and_scale_fwd"] = True
 
-    outputs = gemm(weight,
-                   inputmat_total,
-                   activation_dtype,
-                   get_workspace(),
-                   bias=bias,
-                   use_bias=use_bias,
-                   gelu=(activation == 'gelu'))
+    outputs = gemm(
+        weight,
+        inputmat_total,
+        activation_dtype,
+        get_workspace(),
+        bias=bias,
+        use_bias=use_bias,
+        gelu=(activation == "gelu"),
+    )
 
-    if activation == 'gelu':
+    if activation == "gelu":
         gelu_out, _, out = outputs
         return out, gelu_out
 
@@ -382,7 +386,7 @@ def _linear_bwd_non_fp8(
             activation_dtype,
             get_workspace(),
             layout="NN",
-            gelu=(activation == 'gelu'),
+            gelu=(activation == "gelu"),
             gelu_input=gelu_input,
             grad=True,
         )
@@ -527,8 +531,11 @@ class _Linear(paddle.autograd.PyLayer):
         inputmat_t = None
         if fp8_enabled:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if (not fp8_meta["recipe"].override_linear_precision.wgrad and is_grad_enabled
-                    and not sequence_parallel):
+            if (
+                not fp8_meta["recipe"].override_linear_precision.wgrad
+                and is_grad_enabled
+                and not sequence_parallel
+            ):
                 inputmat, inputmat_t = cast_transpose(
                     inputmat,
                     fp8_meta["scaling_fwd"],
@@ -599,13 +606,11 @@ class _Linear(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
-        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
-                                                         ctx.fp8_meta,
-                                                         ctx.tp_group,
-                                                         ctx.tp_size,
-                                                         name="_Linear"):
+        with TransformerEngineBaseLayer.prepare_backward(
+            ctx.fp8_enabled, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_Linear"
+        ):
 
-            (    # pylint: disable=unbalanced-tuple-unpacking
+            (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 inputmat_t,
                 weight,
@@ -618,11 +623,13 @@ class _Linear(paddle.autograd.PyLayer):
                 grad_output_c,
                 grad_output_t,
                 bgrad,
-            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_output,
-                                                                  ctx.parallel_mode == "row")
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(
+                ctx, grad_output, ctx.parallel_mode == "row"
+            )
             if ctx.is_first_microbatch is not None:
-                accumulate_wgrad_into_param_main_grad = (ctx.fuse_wgrad_accumulation
-                                                         and not ctx.is_first_microbatch)
+                accumulate_wgrad_into_param_main_grad = (
+                    ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
+                )
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
@@ -730,7 +737,7 @@ class Linear(TransformerEngineBaseLayer):
         sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
         fuse_wgrad_accumulation: bool = False,
-        backend: str = 'transformer_engine',
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -741,13 +748,14 @@ class Linear(TransformerEngineBaseLayer):
         self._dtype = self._helper.get_default_dtype()
 
         # Set parallel configs
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
-                                                                  enable_tp=parallel_mode
-                                                                  is not None)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(
+            tp_group, enable_tp=parallel_mode is not None
+        )
         self.tensor_parallel = self.tp_size > 1
         self.parallel_mode = parallel_mode
-        assert (self.parallel_mode
-                in GemmParallelModes), f"parallel_mode {parallel_mode} not supported"
+        assert (
+            self.parallel_mode in GemmParallelModes
+        ), f"parallel_mode {parallel_mode} not supported"
 
         if self.parallel_mode == "column":
             self.out_features = divide(self.out_features, self.tp_size)
@@ -762,14 +770,18 @@ class Linear(TransformerEngineBaseLayer):
         with track_rng_state(enable=self.tensor_parallel):
             # TE linear weight is in column major
             self.weight = self.create_parameter(
-                shape=[self.out_features, self.in_features]
-                if self.backend == 'transformer_engine' else [self.in_features, self.out_features],
+                shape=(
+                    [self.out_features, self.in_features]
+                    if self.backend == "transformer_engine"
+                    else [self.in_features, self.out_features]
+                ),
                 attr=self._weight_attr,
                 dtype=self._dtype,
                 is_bias=False,
             )
-        set_weight_tensor_dist_attr(self.weight, self.tensor_parallel, self.parallel_mode,
-                                    self.backend)
+        set_weight_tensor_dist_attr(
+            self.weight, self.tensor_parallel, self.parallel_mode, self.backend
+        )
 
         # Initialize bias parameter
         self.has_bias = self._bias_attr is not False
@@ -777,8 +789,11 @@ class Linear(TransformerEngineBaseLayer):
         if self.has_bias:
             self.bias = self.create_parameter(
                 shape=[self.out_features],
-                attr=self._bias_attr if not use_default_bias else paddle.ParamAttr(
-                    initializer=Constant(value=0.0)),
+                attr=(
+                    self._bias_attr
+                    if not use_default_bias
+                    else paddle.ParamAttr(initializer=Constant(value=0.0))
+                ),
                 dtype=self._dtype,
                 is_bias=True,
             )
@@ -849,11 +864,12 @@ class Linear(TransformerEngineBaseLayer):
         """Calls Paddle OP"""
         if is_first_microbatch is not None:
             warnings.warn(
-                "`is_first_microbatch` is not supported for paddle backend and is ignored.")
-        if self.parallel_mode == 'column' and self.tensor_parallel:
+                "`is_first_microbatch` is not supported for paddle backend and is ignored."
+            )
+        if self.parallel_mode == "column" and self.tensor_parallel:
             inp = identity(inp, self.tp_group)
         out = F.linear(inp, self.weight, self.bias if self.gemm_bias_fused_add else None)
-        if self.parallel_mode == 'row' and self.tensor_parallel:
+        if self.parallel_mode == "row" and self.tensor_parallel:
             out, _ = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out
         return out
@@ -877,8 +893,8 @@ class Linear(TransformerEngineBaseLayer):
                              * during FP8 training, it allows caching of the FP8 versions of
                                the weights
         """
-        if self.backend == 'transformer_engine':
+        if self.backend == "transformer_engine":
             return self._te_forward(*args, **kwargs)
-        if self.backend == 'paddle':
+        if self.backend == "paddle":
             return self._pd_forward(*args, **kwargs)
         raise AttributeError(f"Backend {self.backend} is not supported.")

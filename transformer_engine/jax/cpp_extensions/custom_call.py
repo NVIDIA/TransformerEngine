@@ -27,19 +27,23 @@ class CustomCallArgsWrapper:
     wrapper of XLA custom call args
     """
 
-    def __init__(self,
-                 output_types,
-                 operands,
-                 operand_shapes,
-                 operand_specific_layouts=None,
-                 output_specific_layouts=None):
+    def __init__(
+        self,
+        output_types,
+        operands,
+        operand_shapes,
+        operand_specific_layouts=None,
+        output_specific_layouts=None,
+    ):
         self.output_types = output_types
         self.operands = operands
-        self.operand_layouts = CustomCallArgsWrapper.generate_layouts(operand_shapes,
-                                                                      operand_specific_layouts)
+        self.operand_layouts = CustomCallArgsWrapper.generate_layouts(
+            operand_shapes, operand_specific_layouts
+        )
         output_shapes = [x.shape for x in output_types]
-        self.output_layouts = CustomCallArgsWrapper.generate_layouts(output_shapes,
-                                                                     output_specific_layouts)
+        self.output_layouts = CustomCallArgsWrapper.generate_layouts(
+            output_shapes, output_specific_layouts
+        )
 
     @staticmethod
     def generate_layouts(shapes, specific_layouts):
@@ -67,19 +71,21 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
     XLA custom call warpper
     """
     if hasattr(mlir, "custom_call"):
-        out = mlir.custom_call(name,
-                               result_types=args.output_types,
-                               operands=args.operands,
-                               operand_layouts=args.operand_layouts,
-                               result_layouts=args.output_layouts,
-                               backend_config=opaque,
-                               has_side_effect=has_side_effect,
-                               **kwargs).results
+        out = mlir.custom_call(
+            name,
+            result_types=args.output_types,
+            operands=args.operands,
+            operand_layouts=args.operand_layouts,
+            result_layouts=args.output_layouts,
+            backend_config=opaque,
+            has_side_effect=has_side_effect,
+            **kwargs
+        ).results
     else:
         # Need to disable one pylint error as the second function
         # parameter name recenctly in JAX. Otherwise we won't be
         # compatible with multiple JAX version.
-        out = custom_call(    # pylint: disable=too-many-function-args
+        out = custom_call(  # pylint: disable=too-many-function-args
             name,
             args.output_types,
             operands=args.operands,
@@ -87,5 +93,6 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
             result_layouts=args.output_layouts,
             backend_config=opaque,
             has_side_effect=has_side_effect,
-            **kwargs)
+            **kwargs
+        )
     return out

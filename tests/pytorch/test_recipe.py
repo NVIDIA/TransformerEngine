@@ -21,6 +21,7 @@ import transformer_engine_torch as tex
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFP8Recipe:
 
@@ -97,8 +98,8 @@ class TestFP8Recipe:
             ref_amax_backward = amax_history_backward[-1]
         else:
             raise ValueError(f"{amax_compute_algo=} is not supported")
-        ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2 ** margin)
-        ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2 ** margin)
+        ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2**margin)
+        ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2**margin)
         ref_scale_inv_forward = torch.reciprocal(ref_scale_forward)
         update_weight_amax = is_first_microbatch is None or is_first_microbatch
         if not update_weight_amax:
@@ -130,8 +131,8 @@ class TestFP8Recipe:
             ref_amax_backward = amax_history_backward[-1]
         else:
             raise ValueError(f"{amax_compute_algo=} is not supported")
-        ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2 ** margin)
-        ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2 ** margin)
+        ref_scale_forward = (fp8_format.value.max_fwd / ref_amax_forward) / (2**margin)
+        ref_scale_backward = (fp8_format.value.max_bwd / ref_amax_backward) / (2**margin)
         ref_scale_inv_forward = torch.reciprocal(ref_scale_forward)
         ref_scale_inv_backward = torch.reciprocal(ref_scale_backward)
 
@@ -306,8 +307,9 @@ class TestFP8Recipe:
         scaling_factor_compute_algo = None
         if fused_update:
             scaling_factor_compute_algo = (
-                lambda amax, scale, fp8_max, recipe:
-                te.fp8._default_sf_compute(amax, scale, fp8_max, recipe.margin)
+                lambda amax, scale, fp8_max, recipe: te.fp8._default_sf_compute(
+                    amax, scale, fp8_max, recipe.margin
+                )
             )
         recipe = transformer_engine.common.recipe.DelayedScaling(
             fp8_format=fp8_format, scaling_factor_compute_algo=scaling_factor_compute_algo
@@ -331,7 +333,9 @@ class TestFP8Recipe:
 
         # test different scenarios
         if amax_case == "zero":
-            fp8_meta[forward_key].amax_history = torch.tensor([[0]], dtype=torch.float32, device="cuda")
+            fp8_meta[forward_key].amax_history = torch.tensor(
+                [[0]], dtype=torch.float32, device="cuda"
+            )
             expected_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
         elif amax_case == "tiny":
             # calculate the minimum amax value that results in a FP32 maximum scale
@@ -380,4 +384,6 @@ class TestFP8Recipe:
             )
 
         torch.testing.assert_close(fp8_meta[forward_key].scale, expected_scale)
-        torch.testing.assert_close(fp8_meta[forward_key].scale_inv, torch.reciprocal(expected_scale))
+        torch.testing.assert_close(
+            fp8_meta[forward_key].scale_inv, torch.reciprocal(expected_scale)
+        )

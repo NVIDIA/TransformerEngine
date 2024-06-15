@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
- )
+)
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
@@ -51,27 +51,30 @@ class _LayerNorm(torch.autograd.Function):
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if is_grad_enabled:
-            ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
-                ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
+            ln_out, mu, rsigma = tex.layernorm_fwd(
+                inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
+            )
             ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
-            ln_out, mu, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
-                ln_bias, eps, inf_ln_sm_margin, zero_centered_gamma), None, None
+            ln_out, mu, rsigma = (
+                layernorm_fwd_inf(
+                    inputmat, ln_weight, ln_bias, eps, inf_ln_sm_margin, zero_centered_gamma
+                ),
+                None,
+                None,
+            )
         return ln_out.view_as(inp)
 
     @staticmethod
-    def backward(
-        ctx, grad_output: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
-            d_ln_out, inputmat, mu, rsigma, ln_weight,
-            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+            d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
         return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
 
@@ -141,7 +144,7 @@ class LayerNorm(torch.nn.Module):
         )
         self.sequence_parallel = sequence_parallel
 
-        self.reset_parameters(defer_init=(device == 'meta'))
+        self.reset_parameters(defer_init=(device == "meta"))
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -154,10 +157,10 @@ class LayerNorm(torch.nn.Module):
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
-            ("This method will be deprecated in an upcoming release. "
-             "Update your code to use LayerNorm.reset_parameters() instead."),
+            "This method will be deprecated in an upcoming release. "
+            "Update your code to use LayerNorm.reset_parameters() instead.",
             DeprecationWarning,
-            stacklevel=2
+            stacklevel=2,
         )
         if not self.zero_centered_gamma:
             init.ones_(self.weight)
@@ -170,13 +173,13 @@ class LayerNorm(torch.nn.Module):
         if defer_init:
             return
 
-        if self.weight.device == torch.device('meta'):
-            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device='cuda'))
+        if self.weight.device == torch.device("meta"):
+            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device="cuda"))
         setattr(self.weight, "sequence_parallel", self.sequence_parallel)
         init.constant_(self.weight, float(not self.zero_centered_gamma))
 
-        if self.bias.device == torch.device('meta'):
-            self.bias = torch.nn.Parameter(torch.empty_like(self.bias, device='cuda'))
+        if self.bias.device == torch.device("meta"):
+            self.bias = torch.nn.Parameter(torch.empty_like(self.bias, device="cuda"))
         setattr(self.bias, "sequence_parallel", self.sequence_parallel)
         init.zeros_(self.bias)
 

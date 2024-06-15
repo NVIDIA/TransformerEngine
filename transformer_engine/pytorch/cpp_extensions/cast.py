@@ -8,8 +8,7 @@ import torch
 import transformer_engine_torch as tex
 
 
-__all__ = ['cast_to_fp8',
-           'cast_from_fp8']
+__all__ = ["cast_to_fp8", "cast_from_fp8"]
 
 
 def cast_to_fp8(
@@ -30,7 +29,7 @@ def cast_to_fp8(
                 fp8_meta_tensor.amax_history,
                 fp8_meta_tensor.scale_inv,
                 fp8_tensor,
-                otype
+                otype,
             )
         return None
 
@@ -42,6 +41,7 @@ def cast_to_fp8(
         fp8_tensor,
         otype,
     )
+
 
 def cast_from_fp8(
     inp: torch.Tensor,
