@@ -1292,8 +1292,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=
-                            None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2,
+                            cu_seqlens_kv_padded=(
+                                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
+                            ),
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
@@ -1378,8 +1379,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=
-                            None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2,
+                            cu_seqlens_kv_padded=(
+                                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
+                            ),
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
