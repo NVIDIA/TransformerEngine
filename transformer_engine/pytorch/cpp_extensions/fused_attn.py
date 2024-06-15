@@ -83,7 +83,7 @@ def fused_attn_fwd_qkvpacked(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    cu_seqlens_with_offset: torch.Tensor = None,
+    cu_seqlens_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -119,7 +119,7 @@ def fused_attn_fwd_qkvpacked(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen, max_seqlen], same data type as qkv
-    cu_seqlens_with_offset: torch.Tensor, default = None
+    cu_seqlens_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
@@ -228,7 +228,7 @@ def fused_attn_fwd_qkvpacked(
             max_seqlen, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, qkv_dtype,
-            cu_seqlens_with_offset,
+            cu_seqlens_with_padding,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o, attn_bias,
             rng_gen, rng_elts_per_thread,
     )
@@ -247,7 +247,7 @@ def fused_attn_bwd_qkvpacked(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    cu_seqlens_with_offset: torch.Tensor = None,
+    cu_seqlens_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -291,7 +291,7 @@ def fused_attn_bwd_qkvpacked(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    cu_seqlens_with_offset: torch.Tensor, default = None
+    cu_seqlens_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
@@ -368,7 +368,7 @@ def fused_attn_bwd_qkvpacked(
             max_seqlen, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens, qkv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            cu_seqlens_with_offset,
+            cu_seqlens_with_padding,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -387,8 +387,8 @@ def fused_attn_fwd_kvpacked(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    cu_seqlens_q_with_offset: torch.Tensor = None,
-    cu_seqlens_kv_with_offset: torch.Tensor = None,
+    cu_seqlens_q_with_padding: torch.Tensor = None,
+    cu_seqlens_kv_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -431,9 +431,9 @@ def fused_attn_fwd_kvpacked(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q and kv
-    cu_seqlens_q_with_offset: torch.Tensor, default = None
+    cu_seqlens_q_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    cu_seqlens_kv_with_offset: torch.Tensor, default = None
+    cu_seqlens_kv_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
@@ -543,7 +543,7 @@ def fused_attn_fwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, qkv_dtype,
-            cu_seqlens_q_with_offset, cu_seqlens_kv_with_offset,
+            cu_seqlens_q_with_padding, cu_seqlens_kv_with_padding,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -565,8 +565,8 @@ def fused_attn_bwd_kvpacked(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    cu_seqlens_q_with_offset: torch.Tensor = None,
-    cu_seqlens_kv_with_offset: torch.Tensor = None,
+    cu_seqlens_q_with_padding: torch.Tensor = None,
+    cu_seqlens_kv_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -617,9 +617,9 @@ def fused_attn_bwd_kvpacked(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    cu_seqlens_q_with_offset: torch.Tensor, default = None
+    cu_seqlens_q_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    cu_seqlens_kv_with_offset: torch.Tensor, default = None
+    cu_seqlens_kv_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
@@ -700,7 +700,7 @@ def fused_attn_bwd_kvpacked(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            cu_seqlens_q_with_offset, cu_seqlens_kv_with_offset,
+            cu_seqlens_q_with_padding, cu_seqlens_kv_with_padding,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
@@ -720,8 +720,8 @@ def fused_attn_fwd(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    cu_seqlens_q_with_offset: torch.Tensor = None,
-    cu_seqlens_kv_with_offset: torch.Tensor = None,
+    cu_seqlens_q_with_padding: torch.Tensor = None,
+    cu_seqlens_kv_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -768,9 +768,9 @@ def fused_attn_fwd(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q, k and v
-    cu_seqlens_q_with_offset: torch.Tensor, default = None
+    cu_seqlens_q_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    cu_seqlens_kv_with_offset: torch.Tensor, default = None
+    cu_seqlens_kv_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of Q, K and V in FP8 computations
@@ -882,7 +882,7 @@ def fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
-            cu_seqlens_q_with_offset, cu_seqlens_kv_with_offset,
+            cu_seqlens_q_with_padding, cu_seqlens_kv_with_padding,
             d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -905,8 +905,8 @@ def fused_attn_bwd(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    cu_seqlens_q_with_offset: torch.Tensor = None,
-    cu_seqlens_kv_with_offset: torch.Tensor = None,
+    cu_seqlens_q_with_padding: torch.Tensor = None,
+    cu_seqlens_kv_with_padding: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -960,9 +960,9 @@ def fused_attn_bwd(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    cu_seqlens_q_with_offset: torch.Tensor, default = None
+    cu_seqlens_q_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    cu_seqlens_kv_with_offset: torch.Tensor, default = None
+    cu_seqlens_kv_with_padding: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of Q, K and V in FP8 computations
@@ -1047,7 +1047,7 @@ def fused_attn_bwd(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            cu_seqlens_q_with_offset, cu_seqlens_kv_with_offset,
+            cu_seqlens_q_with_padding, cu_seqlens_kv_with_padding,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )

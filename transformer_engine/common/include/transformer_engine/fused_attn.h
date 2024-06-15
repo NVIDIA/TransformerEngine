@@ -172,7 +172,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *
  * Notes:
  *
- * Tensor `cu_seqlens_with_offset` helps identify the correct offsets of different sequences
+ * Tensor `cu_seqlens_with_padding` helps identify the correct offsets of different sequences
  * in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * the offset tensor is not used in the attention calculation and can be set to empty `NVTETensor`.
@@ -180,7 +180,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  * When there is no padding between sequences, the offset tensor should be equal to `cu_seqlens`,
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
  *  \param[in]     Bias                     The Bias tensor.
@@ -189,7 +189,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
  *                                          e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_with_offset   Cumulative sequence offsets for QKV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_with_padding   Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen               Max sequence length used for computing,
  *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
@@ -209,7 +209,7 @@ void nvte_fused_attn_fwd_qkvpacked(
             NVTETensor O,
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens,
-            const NVTETensor cu_seqlens_with_offset,
+            const NVTETensor cu_seqlens_with_padding,
             const NVTETensor rng_state,
             size_t max_seqlen,
             bool is_training, float attn_scale, float dropout,
@@ -230,7 +230,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *
  * Notes:
  *
- * Tensor `cu_seqlens_with_offset` helps identify the correct offsets of different sequences
+ * Tensor `cu_seqlens_with_padding` helps identify the correct offsets of different sequences
  * in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * the offset tensor is not used in the attention calculation and can be set to empty `NVTETensor`.
@@ -238,7 +238,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  * When there is no padding between sequences, the offset tensor should be equal to `cu_seqlens`,
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
  *  \param[in]     O                        The O tensor from forward.
@@ -250,7 +250,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_with_offset   Cumulative sequence offsets for QKV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_with_padding   Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,
  *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
@@ -271,7 +271,7 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTETensor dQKV,
             NVTETensor dBias,
             const NVTETensor cu_seqlens,
-            const NVTETensor cu_seqlens_with_offset,
+            const NVTETensor cu_seqlens_with_padding,
             size_t max_seqlen,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -296,7 +296,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  *
  * Notes:
  *
- * Tensors `cu_seqlens_q_with_offset` and `cu_seqlens_kv_with_offset`
+ * Tensors `cu_seqlens_q_with_padding` and `cu_seqlens_kv_with_padding`
  * help identify the correct offsets of different sequences in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
@@ -305,7 +305,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     Q                         The Q tensor, in HD layouts.
  *  \param[in]     KV                        The KV tensor, in 2HD or H2D layouts.
@@ -316,8 +316,8 @@ void nvte_fused_attn_bwd_qkvpacked(
  *                                           e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_with_offset  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_with_offset Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_with_padding  Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_with_padding Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
@@ -341,8 +341,8 @@ void nvte_fused_attn_fwd_kvpacked(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor cu_seqlens_q_with_offset,
-            const NVTETensor cu_seqlens_kv_with_offset,
+            const NVTETensor cu_seqlens_q_with_padding,
+            const NVTETensor cu_seqlens_kv_with_padding,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -362,7 +362,7 @@ void nvte_fused_attn_fwd_kvpacked(
  *
  * Notes:
  *
- * Tensors `cu_seqlens_q_with_offset` and `cu_seqlens_kv_with_offset`
+ * Tensors `cu_seqlens_q_with_padding` and `cu_seqlens_kv_with_padding`
  * help identify the correct offsets of different sequences in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
@@ -371,7 +371,7 @@ void nvte_fused_attn_fwd_kvpacked(
  * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     Q                         The Q tensor, in HD layouts.
  *  \param[in]     KV                        The KV tensor, in H2D or 2HD layouts.
@@ -386,8 +386,8 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dBias                     The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_with_offset  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_with_offset Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_with_padding  Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_with_padding Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for KV.
@@ -413,8 +413,8 @@ void nvte_fused_attn_bwd_kvpacked(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor cu_seqlens_q_with_offset,
-            const NVTETensor cu_seqlens_kv_with_offset,
+            const NVTETensor cu_seqlens_q_with_padding,
+            const NVTETensor cu_seqlens_kv_with_padding,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -442,7 +442,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *
  * Notes:
  *
- * Tensors `cu_seqlens_q_with_offset` and `cu_seqlens_kv_with_offset`
+ * Tensors `cu_seqlens_q_with_padding` and `cu_seqlens_kv_with_padding`
  * help identify the correct offsets of different sequences in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
@@ -451,7 +451,7 @@ void nvte_fused_attn_bwd_kvpacked(
  * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     Q                         The Q tensor.
  *  \param[in]     K                         The K tensor.
@@ -463,8 +463,8 @@ void nvte_fused_attn_bwd_kvpacked(
  *                                           e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_with_offset  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_with_offset Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_with_padding  Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_with_padding Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
@@ -489,8 +489,8 @@ void nvte_fused_attn_fwd(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor cu_seqlens_q_with_offset,
-            const NVTETensor cu_seqlens_kv_with_offset,
+            const NVTETensor cu_seqlens_q_with_padding,
+            const NVTETensor cu_seqlens_kv_with_padding,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -513,7 +513,7 @@ void nvte_fused_attn_fwd(
  *
  * Notes:
  *
- * Tensors `cu_seqlens_q_with_offset` and `cu_seqlens_kv_with_offset`
+ * Tensors `cu_seqlens_q_with_padding` and `cu_seqlens_kv_with_padding`
  * help identify the correct offsets of different sequences in tensors Q, K, V and O.
  * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
  * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
@@ -522,7 +522,7 @@ void nvte_fused_attn_fwd(
  * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
  * When there is padding between sequences, users are responsible to adjust the offsets as needed.
  * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_offset= [0, 2, 4, 7, 9]`.
+ * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_with_padding= [0, 2, 4, 7, 9]`.
  *
  *  \param[in]     Q                         The Q tensor.
  *  \param[in]     K                         The K tensor.
@@ -539,8 +539,8 @@ void nvte_fused_attn_fwd(
  *  \param[out]    dBias                     The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_with_offset  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_with_offset Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_with_padding  Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_with_padding Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
@@ -568,8 +568,8 @@ void nvte_fused_attn_bwd(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor cu_seqlens_q_with_offset,
-            const NVTETensor cu_seqlens_kv_with_offset,
+            const NVTETensor cu_seqlens_q_with_padding,
+            const NVTETensor cu_seqlens_kv_with_padding,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
