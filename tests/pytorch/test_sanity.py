@@ -1040,13 +1040,13 @@ def test_sanity_attention_extra_state(model, dtype):
     # call state_dict()
     sd = block.state_dict()
 
-    # check core_attention._extra_state (saved by FusedAttention)
+    # check core_attention._extra_state
     attn_extra_state = sd["self_attention.core_attention._extra_state"]
     attn_extra_state.seek(0)
     attn_extra_state = torch.load(attn_extra_state, map_location="cuda")
 
     # add random core_attention.fused_attention._extra_state
-    # it should not be loaded by FusedAttention's _load_from_state_dict()
+    # it should not be loaded or cause any 'unexpected key' errors
     random_state = {"a": 1, "b": 2}
     fused_attn_extra_state = io.BytesIO()
     torch.save(random_state, fused_attn_extra_state)
@@ -1083,19 +1083,3 @@ def test_sanity_attention_extra_state(model, dtype):
         else:
             for ek, ev in attn_extra_state_new["extra_fp8_variables"].items():
                 assert ev == attn_extra_state["extra_fp8_variables"][ek], f"{ek} is not equal"
-
-    fused_attn_state = block_new.self_attention.core_attention.fused_attention.fp8_meta
-    for k, v in attn_extra_state.items():
-        if k != "extra_fp8_variables":
-            kk = "scaling_fwd" if "fwd" in k else "scaling_bwd"
-            state_tmp = None
-            if "scale_inv" in k:
-                state_tmp = fused_attn_state[kk].scale_inv
-            elif "scale" in k:
-                state_tmp = fused_attn_state[kk].scale
-            else:
-                state_tmp = fused_attn_state[kk].amax_history
-            assert torch.equal(v, state_tmp), f"{k} is not equal"
-        else:
-            for ek, ev in attn_extra_state["extra_fp8_variables"].items():
-                assert ev == fused_attn_state[ek], f"{ek} is not equal"
