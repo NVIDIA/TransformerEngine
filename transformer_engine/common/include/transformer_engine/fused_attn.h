@@ -183,7 +183,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
  *                                          e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_padded   Cumulative sequence offsets for QKV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen               Max sequence length used for computing,
  *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
@@ -236,7 +236,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_padded   Cumulative sequence offsets for QKV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,
  *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
@@ -293,8 +293,8 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *                                           e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
@@ -354,8 +354,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
  *  \param[out]    dBias                     The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for KV.
@@ -418,8 +418,8 @@ void nvte_fused_attn_bwd_kvpacked(
  *                                           e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
@@ -484,8 +484,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[out]    dBias                     The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded  Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
