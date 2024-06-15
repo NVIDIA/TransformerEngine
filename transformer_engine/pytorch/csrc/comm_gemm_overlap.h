@@ -214,9 +214,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
-    <
-        // Get the current userbuf offset
-        char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
+    // Get the current userbuf offset
+    char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
     COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
     if (_comm_type == COMM_TYPE::RS) {
