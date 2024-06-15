@@ -899,22 +899,26 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-    out = block(q, k, v,
-            window_size=window_size,
-            attention_mask=attention_mask,
-            qkv_format=qkv_format,
-            max_seqlen_q=config.max_seqlen_q,
-            max_seqlen_kv=config.max_seqlen_kv,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
-            cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
-            attn_mask_type=config.attn_mask_type,
-            checkpoint_core_attention=ckpt_attn,
-            core_attention_bias_type=config.attn_bias_type,
-            core_attention_bias=bias,
-            alibi_slopes=alibi_slopes,
-            fast_zero_fill=True)
+    out = block(
+        q,
+        k,
+        v,
+        window_size=window_size,
+        attention_mask=attention_mask,
+        qkv_format=qkv_format,
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_kv=cu_seqlens_kv,
+        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
+        attn_mask_type=config.attn_mask_type,
+        checkpoint_core_attention=ckpt_attn,
+        core_attention_bias_type=config.attn_bias_type,
+        core_attention_bias=bias,
+        alibi_slopes=alibi_slopes,
+        fast_zero_fill=True,
+    )
     if is_training:
         out.backward(d_out)
 
