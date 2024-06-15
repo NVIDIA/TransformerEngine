@@ -371,35 +371,35 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
   }
 }
 
-// convert cu_seqlens_with_padding to offsets
-__global__ void cu_seqlens_with_padding_to_offsets(
+// convert cu_seqlens_padded to offsets
+__global__ void cu_seqlens_padded_to_offsets(
                 NVTE_QKV_Layout_Group layout_group,
                 size_t b, size_t h, size_t hg, size_t d,
-                int32_t *cu_seqlens_q_with_padding,
-                int32_t *cu_seqlens_kv_with_padding,
+                int32_t *cu_seqlens_q_padded,
+                int32_t *cu_seqlens_kv_padded,
                 int32_t *offsets_q,
                 int32_t *offsets_k,
                 int32_t *offsets_v,
                 int32_t *offsets_o) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < b+1) {
-    offsets_o[tid] = h * d * cu_seqlens_q_with_padding[tid];
+    offsets_o[tid] = h * d * cu_seqlens_q_padded[tid];
     switch (layout_group) {
         case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-            offsets_q[tid] = h * d * cu_seqlens_q_with_padding[tid];
-            offsets_k[tid] = hg * d * cu_seqlens_kv_with_padding[tid];
+            offsets_q[tid] = h * d * cu_seqlens_q_padded[tid];
+            offsets_k[tid] = hg * d * cu_seqlens_kv_padded[tid];
             offsets_v[tid] = offsets_k[tid];
             break;
         case NVTE_QKV_Layout_Group::NVTE_3HD:
         case NVTE_QKV_Layout_Group::NVTE_H3D:
-            offsets_q[tid] = 3 * h * d * cu_seqlens_q_with_padding[tid];
+            offsets_q[tid] = 3 * h * d * cu_seqlens_q_padded[tid];
             offsets_k[tid] = offsets_q[tid];
             offsets_v[tid] = offsets_q[tid];
             break;
         case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
         case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-            offsets_q[tid] = h * d * cu_seqlens_q_with_padding[tid];
-            offsets_k[tid] = 2 * hg * d * cu_seqlens_kv_with_padding[tid];
+            offsets_q[tid] = h * d * cu_seqlens_q_padded[tid];
+            offsets_k[tid] = 2 * hg * d * cu_seqlens_kv_padded[tid];
             offsets_v[tid] = offsets_k[tid];
             break;
     }
