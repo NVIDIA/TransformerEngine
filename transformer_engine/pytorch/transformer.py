@@ -10,7 +10,6 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention import (
     InferenceParams,
