@@ -27,21 +27,28 @@ class TestFP8Helper(unittest.TestCase):
         fp8_format = FP8Format.E4M3
         amax_history_len = 10
 
-        FP8Helper.initialize(margin=margin,
-                             fp8_format=fp8_format,
-                             amax_history_len=amax_history_len)
+        FP8Helper.initialize(
+            margin=margin, fp8_format=fp8_format, amax_history_len=amax_history_len
+        )
 
         self.assertEqual(
-            FP8Helper.MARGIN, margin, f"FP8Helper.MARGIN initialization failed, should be {margin}"
-            f" but got {FP8Helper.MARGIN}.")
+            FP8Helper.MARGIN,
+            margin,
+            f"FP8Helper.MARGIN initialization failed, should be {margin}"
+            f" but got {FP8Helper.MARGIN}.",
+        )
         self.assertEqual(
-            FP8Helper.FP8_FORMAT, fp8_format,
+            FP8Helper.FP8_FORMAT,
+            fp8_format,
             f"FP8Helper.FP8_FORMAT initialization failed, should be {fp8_format}"
-            f" but got {FP8Helper.FP8_FORMAT}.")
+            f" but got {FP8Helper.FP8_FORMAT}.",
+        )
         self.assertEqual(
-            FP8Helper.AMAX_HISTORY_LEN, amax_history_len,
+            FP8Helper.AMAX_HISTORY_LEN,
+            amax_history_len,
             f"FP8Helper.AMAX_HISTORY_LEN initialization failed, should be {amax_history_len}"
-            f" but got {FP8Helper.AMAX_HISTORY_LEN}.")
+            f" but got {FP8Helper.AMAX_HISTORY_LEN}.",
+        )
 
         FP8Helper.finalize()
 
@@ -77,7 +84,7 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast(self):
-        FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
+        FP8Helper.finalize()  # Ensure the testing not affect by previous tests.
         self._check_defult_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
@@ -102,21 +109,21 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_with_sharding_resource(self):
-        FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
+        FP8Helper.finalize()  # Ensure the testing not affect by previous tests.
         self._check_defult_state()
 
         ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
 
         mesh_s = (
             (MeshResource(None, None)),
-            (MeshResource('dp', None)),
-            (MeshResource(None, 'tp')),
-            (MeshResource('dp', 'tp')),
+            (MeshResource("dp", None)),
+            (MeshResource(None, "tp")),
+            (MeshResource("dp", "tp")),
         )
         # TODO (Ming Huang): Support multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
-        with jax.sharding.Mesh(devices, ('dp', 'tp')):
+        with jax.sharding.Mesh(devices, ("dp", "tp")):
             for sr in mesh_s:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=sr):
                     self.assertTrue(FP8Helper.is_fp8_enabled())

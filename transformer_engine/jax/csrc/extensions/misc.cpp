@@ -10,7 +10,7 @@ namespace transformer_engine {
 namespace jax {
 
 std::vector<size_t> MakeShapeVector(NVTEShape shape) {
-    return std::vector<size_t>(shape.data, shape.data + shape.ndim);
+  return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
 void Shape::from_vector(const std::vector<size_t> &shape) {

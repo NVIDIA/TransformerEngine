@@ -20,12 +20,14 @@ class TestLoRA:
         out = jnp.einsum(pattern, x, la, lb)
         return out * scale
 
-    @pytest.mark.parametrize('shape', [(32, 1024), (32, 128, 1024)])
-    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.bfloat16])
-    @pytest.mark.parametrize('axis_features_pattern', [((-1,), (1024,), '...h,hr,rk->...k'),
-                                                       ((-1,), (3, 1024), '...h,hkr,krz->...kz')])
-    @pytest.mark.parametrize('rank', [32, 16])
-    @pytest.mark.parametrize('alpha', [None, 4, 8])
+    @pytest.mark.parametrize("shape", [(32, 1024), (32, 128, 1024)])
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    @pytest.mark.parametrize(
+        "axis_features_pattern",
+        [((-1,), (1024,), "...h,hr,rk->...k"), ((-1,), (3, 1024), "...h,hkr,krz->...kz")],
+    )
+    @pytest.mark.parametrize("rank", [32, 16])
+    @pytest.mark.parametrize("alpha", [None, 4, 8])
     def test_lora(self, shape, dtype, axis_features_pattern, rank, alpha):
         axis, features, pattern = axis_features_pattern
         axis = _normalize_axes(axis, len(shape))
@@ -49,16 +51,20 @@ class TestLoRA:
 
         assert_allclose(out_target, out_ref, dtype=dtype)
 
-    @pytest.mark.parametrize('scope_ref_assert',
-                             [('none', LoRAScope(False, False, False), False),
-                              ('all', LoRAScope(True, True, True), False),
-                              ('qkv_proj', LoRAScope(True, False, False), False),
-                              ('output_proj', LoRAScope(False, True, False), False),
-                              ('mlp', LoRAScope(False, False, True), False),
-                              ('exclude_qkv_proj', LoRAScope(False, True, True), False),
-                              ('exclude_output_proj', LoRAScope(True, False, True), False),
-                              ('exclude_mlp', LoRAScope(True, True, False), False),
-                              ('messing_up', LoRAScope(), True)])
+    @pytest.mark.parametrize(
+        "scope_ref_assert",
+        [
+            ("none", LoRAScope(False, False, False), False),
+            ("all", LoRAScope(True, True, True), False),
+            ("qkv_proj", LoRAScope(True, False, False), False),
+            ("output_proj", LoRAScope(False, True, False), False),
+            ("mlp", LoRAScope(False, False, True), False),
+            ("exclude_qkv_proj", LoRAScope(False, True, True), False),
+            ("exclude_output_proj", LoRAScope(True, False, True), False),
+            ("exclude_mlp", LoRAScope(True, True, False), False),
+            ("messing_up", LoRAScope(), True),
+        ],
+    )
     def test_lora_scope_generator(self, scope_ref_assert):
         scope, reference, need_assert = scope_ref_assert
         try:

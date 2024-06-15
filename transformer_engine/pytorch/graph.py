@@ -78,19 +78,16 @@ def _make_graphed_callables(
         num_model_chunks = max(_order)
         num_microbatches = len(_order) // num_model_chunks // 2
         assert num_model_chunks * num_microbatches * 2 == len(_order)
-        assert (
-            len(sample_args)*2 >= len(_order)
-            and (len(sample_args)*2 % len(_order) == 0)
-        ), f'{len(sample_args)} >= {len(_order)} and {len(sample_args)} % {len(_order)} == 0'
+        assert len(sample_args) * 2 >= len(_order) and (
+            len(sample_args) * 2 % len(_order) == 0
+        ), f"{len(sample_args)} >= {len(_order)} and {len(sample_args)} % {len(_order)} == 0"
         num_layers = len(sample_args) // num_model_chunks // num_microbatches
-        assert (
-            len(callables) == num_model_chunks*num_layers
-        ), (f"Callables should have ({num_model_chunks * num_layers}) "
+        assert len(callables) == num_model_chunks * num_layers, (
+            f"Callables should have ({num_model_chunks * num_layers}) "
             + f"entries when order input is provided but got {len(callables)}."
         )
-        assert (
-            len(sample_args) == num_model_chunks * num_microbatches * num_layers
-        ), (f"Expected {num_model_chunks * num_microbatches}"
+        assert len(sample_args) == num_model_chunks * num_microbatches * num_layers, (
+            f"Expected {num_model_chunks * num_microbatches}"
             + f"args tuple, but got {len(sample_args)}."
         )
 
@@ -126,12 +123,10 @@ def _make_graphed_callables(
     per_callable_len_user_args = [len(args) for args in flatten_sample_args]
     if _order is None:
         per_callable_module_params = [
-            tuple(c.parameters()) if isinstance(c, torch.nn.Module) else ()
-            for c in callables
+            tuple(c.parameters()) if isinstance(c, torch.nn.Module) else () for c in callables
         ]
         per_callable_static_input_surfaces = [
-            flatten_sample_args[i] + per_callable_module_params[i]
-            for i in range(len(callables))
+            flatten_sample_args[i] + per_callable_module_params[i] for i in range(len(callables))
         ]
     else:
         per_callable_module_params = []
@@ -171,9 +166,7 @@ def _make_graphed_callables(
                 grad_inputs = torch.autograd.grad(
                     outputs=tuple(o for o in outputs if o.requires_grad),
                     inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                    grad_outputs=tuple(
-                        torch.empty_like(o) for o in outputs if o.requires_grad
-                    ),
+                    grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
                     only_inputs=True,
                     allow_unused=allow_unused_input,
                 )
@@ -184,7 +177,7 @@ def _make_graphed_callables(
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
 
-    if _order is not None: # pylint: disable=too-many-nested-blocks
+    if _order is not None:  # pylint: disable=too-many-nested-blocks
         per_callable_static_outputs = [None] * len(flatten_sample_args)
         per_callable_output_unflatten_spec = [None] * len(flatten_sample_args)
         per_callable_static_grad_outputs = [None] * len(flatten_sample_args)
@@ -194,11 +187,12 @@ def _make_graphed_callables(
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
-                m_chunk = c_id-1
+                m_chunk = c_id - 1
                 for l_no in range(num_layers):
-                    func = callables[m_chunk*num_layers + l_no]
-                    per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) \
-                                        + (fwd_idx[m_chunk] * num_layers + l_no)
+                    func = callables[m_chunk * num_layers + l_no]
+                    per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) + (
+                        fwd_idx[m_chunk] * num_layers + l_no
+                    )
                     args = sample_args[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
                     with torch.cuda.graph(fwd_graph, pool=mempool):
@@ -210,10 +204,11 @@ def _make_graphed_callables(
                 fwd_idx[m_chunk] += 1
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
-                m_chunk = -c_id-1
+                m_chunk = -c_id - 1
                 for l_no in list(reversed(range(num_layers))):
-                    per_callable_bwd_idx = (m_chunk * num_microbatches * num_layers) \
-                                        + (bwd_idx[m_chunk] * num_layers + l_no)
+                    per_callable_bwd_idx = (m_chunk * num_microbatches * num_layers) + (
+                        bwd_idx[m_chunk] * num_layers + l_no
+                    )
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
@@ -314,6 +309,7 @@ def _make_graphed_callables(
     ):
         class Graphed(torch.autograd.Function):
             """Autograd function for graph replay."""
+
             @staticmethod
             def forward(ctx, skip_fp8_weight_update, *inputs):
                 # At this stage, only the user args may (potentially) be new tensors.
@@ -356,9 +352,8 @@ def _make_graphed_callables(
             # Assumes module params didn't change since capture.
             skip_fp8_weight_update = None
             if fp8_weight_caching:
-                assert (
-                    ("is_first_microbatch" in user_kwargs
-                     and isinstance(user_kwargs["is_first_microbatch"], bool))
+                assert "is_first_microbatch" in user_kwargs and isinstance(
+                    user_kwargs["is_first_microbatch"], bool
                 ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
@@ -394,14 +389,18 @@ def _make_graphed_callables(
                     if func.training == graph_training_state:
                         # Set the FP8 group from global amax reduction.
                         for m in func.modules():
-                            if (isinstance(m, TransformerEngineBaseModule)
-                                and FP8GlobalStateManager.is_fp8_enabled()):
+                            if (
+                                isinstance(m, TransformerEngineBaseModule)
+                                and FP8GlobalStateManager.is_fp8_enabled()
+                            ):
                                 m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
                                 m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
                                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                                    m.fp8_meta, fp8_weights=m._get_fp8_params())
+                                    m.fp8_meta, fp8_weights=m._get_fp8_params()
+                                )
                         return graphed(*user_args, **user_kwargs)
                     return orig_fwd(*user_args, **user_kwargs)
+
                 return new_fwd
 
             forward = make_graphed_forward(func, func.training, graphed, func.forward)
@@ -496,13 +495,14 @@ def make_graphed_callables(
     # FP8 wrapper.
     def wrap_autocast(block):
         old_forward = block.forward
+
         def forward_func(*args, **kwargs):
-            with fp8_autocast(enabled=fp8_enabled,
-                              calibrating=fp8_calibrating,
-                              fp8_recipe=fp8_recipe,
-                              _graph=True):
+            with fp8_autocast(
+                enabled=fp8_enabled, calibrating=fp8_calibrating, fp8_recipe=fp8_recipe, _graph=True
+            ):
                 outputs = old_forward(*args, **kwargs)
             return outputs
+
         block.forward = forward_func
 
     forward_funcs = []
@@ -518,16 +518,22 @@ def make_graphed_callables(
 
     # Save RNG state.
     if graph_safe_rng_available():
-        generators = [torch.cuda.default_generators[torch.cuda.current_device()],
-                    *get_all_rng_states().values()]
+        generators = [
+            torch.cuda.default_generators[torch.cuda.current_device()],
+            *get_all_rng_states().values(),
+        ]
         original_rng_states = [state.get_state() for state in generators]
     else:
         original_rng_states = torch.cuda.get_rng_state()
 
     graphed_callables = _make_graphed_callables(
-        forward_funcs, sample_args, num_warmup_iters=num_warmup_iters,
+        forward_funcs,
+        sample_args,
+        num_warmup_iters=num_warmup_iters,
         allow_unused_input=allow_unused_input,
-        fp8_weight_caching=fp8_weight_caching, _order=_order)
+        fp8_weight_caching=fp8_weight_caching,
+        _order=_order,
+    )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
     if graph_safe_rng_available():

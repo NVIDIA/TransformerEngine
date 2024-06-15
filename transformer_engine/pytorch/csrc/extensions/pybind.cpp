@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <pybind11/functional.h>
+
+#include "../comm_gemm_overlap.h"
 #include "../extensions.h"
-#ifdef NVTE_WITH_USERBUFFERS
-#include "comm_gemm_overlap.h"
-#endif  // NVTE_WITH_USERBUFFERS
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
@@ -122,7 +122,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
-  m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
@@ -165,7 +164,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-#ifdef NVTE_WITH_USERBUFFERS
+  // comm+GEMM overlap w/ userbuffers
+  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks);
+
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
       .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
       .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
@@ -177,7 +178,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("ATOMIC_GEMM_RS_P2P", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS_P2P);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int, bool, torch::Tensor>())
+      .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool,
+                    torch::Tensor>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
       .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
       .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
@@ -189,7 +191,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, bool, bool, int, bool, bool, bool,
+      .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
                     torch::Tensor>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
       .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
@@ -201,11 +203,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("is_atomic_gemm", &ubuf::UbufP2PCommOverlap::is_atomic_gemm)
       .def("is_p2p_overlap", &ubuf::UbufP2PCommOverlap::is_p2p_overlap)
       .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv);
-#else   // NVTE_WITH_USERBUFFERS
-  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
-#endif  // NVTE_WITH_USERBUFFERS
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
       .value("kByte", transformer_engine::DType::kByte)

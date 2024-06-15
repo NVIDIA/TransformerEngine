@@ -20,25 +20,25 @@ from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
-    get_padded_spec
+    get_padded_spec,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
-__all__ = ['act_lu', 'dact_lu', 'act_lu_fp8']
+__all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
 
 
 ActivationEnum = {
-    ('gelu',): NVTE_Activation_Type.GELU,
-    ('gelu', 'linear'): NVTE_Activation_Type.GEGLU,
-    ('silu',): NVTE_Activation_Type.SILU,
-    ('silu', 'linear'): NVTE_Activation_Type.SWIGLU,
-    ('relu',): NVTE_Activation_Type.RELU,
-    ('relu', 'linear'): NVTE_Activation_Type.REGLU,
-    ('quick_gelu',): NVTE_Activation_Type.QGELU,
-    ('quick_gelu', 'linear'): NVTE_Activation_Type.QGEGLU,
-    ('squared_relu',): NVTE_Activation_Type.SRELU,
-    ('squared_relu', 'linear'): NVTE_Activation_Type.SREGLU,
+    ("gelu",): NVTE_Activation_Type.GELU,
+    ("gelu", "linear"): NVTE_Activation_Type.GEGLU,
+    ("silu",): NVTE_Activation_Type.SILU,
+    ("silu", "linear"): NVTE_Activation_Type.SWIGLU,
+    ("relu",): NVTE_Activation_Type.RELU,
+    ("relu", "linear"): NVTE_Activation_Type.REGLU,
+    ("quick_gelu",): NVTE_Activation_Type.QGELU,
+    ("quick_gelu", "linear"): NVTE_Activation_Type.QGEGLU,
+    ("squared_relu",): NVTE_Activation_Type.SRELU,
+    ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
 }
 
 
@@ -46,6 +46,7 @@ class ActLuPrimitive(BasePrimitive):
     """
     Activation Forward Primitive
     """
+
     name = "te_act_lu"
     multiple_results = False
     inner_primitive = None
@@ -61,7 +62,7 @@ class ActLuPrimitive(BasePrimitive):
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
 
         x_shape = x_aval.shape
-        assert (x_shape[-2] == 2 or x_shape[-2] == 1)
+        assert x_shape[-2] == 2 or x_shape[-2] == 1
         hidden_size = x_shape[-1]
         batch_shapes = x_shape[:-2]
         out_aval = core.raise_to_shaped(x_aval)
@@ -92,7 +93,8 @@ class ActLuPrimitive(BasePrimitive):
         batch_size = reduce(operator.mul, ir_x_shape[:-2])
         in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
         opaque = transformer_engine_jax.pack_common_descriptor(
-            (batch_size, hidden_size), in_dtype, in_dtype, act_enum)
+            (batch_size, hidden_size), in_dtype, in_dtype, act_enum
+        )
 
         out = custom_caller(ActLuPrimitive.name, args, opaque, False)
 
@@ -111,8 +113,8 @@ class ActLuPrimitive(BasePrimitive):
         """
         check_valid_batch_dims(batch_dims)
         assert ActLuPrimitive.outer_primitive is not None
-        inputs, = batched_args
-        inputs_bdim, = batch_dims
+        (inputs,) = batched_args
+        (inputs_bdim,) = batch_dims
 
         out_bdims = inputs_bdim
         return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_enum), out_bdims
@@ -122,7 +124,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         act_lu infer_sharding_from_operands
         """
-        del result_infos, act_enum    # Unused.
+        del result_infos, act_enum  # Unused.
         x_spec = get_padded_spec(arg_infos[0])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
         return out_sharding
@@ -161,6 +163,7 @@ class DActLuPrimitive(BasePrimitive):
     """
     Dgated ActLu Primitive
     """
+
     name = "te_dact_lu"
     multiple_results = False
     inner_primitive = None
@@ -177,7 +180,7 @@ class DActLuPrimitive(BasePrimitive):
         assert x_aval.dtype == dtype
         for axis in range(len(dz_aval.shape) - 1):
             assert dz_aval.shape[axis] == x_aval.shape[axis]
-        assert (x_aval.shape[-2] == 2 or x_aval.shape[-2] == 1)
+        assert x_aval.shape[-2] == 2 or x_aval.shape[-2] == 1
 
         i_hidden_size = dz_aval.shape[-1]
         g_hidden_size = x_aval.shape[-1]
@@ -198,7 +201,7 @@ class DActLuPrimitive(BasePrimitive):
         ir_in_shape = ir_in_type.shape
         gi_type = ir.RankedTensorType(x.type)
         gi_shape = gi_type.shape
-#        assert ir_in_shape == gi_shape
+        #        assert ir_in_shape == gi_shape
         for axis in range(len(ir_in_shape) - 1):
             assert ir_in_shape[axis] == gi_shape[axis]
 
@@ -217,8 +220,9 @@ class DActLuPrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor((ir_batch_size, i_hidden_size),
-                                                               in_dtype, in_dtype, act_enum)
+        opaque = transformer_engine_jax.pack_common_descriptor(
+            (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
+        )
 
         out = custom_caller(DActLuPrimitive.name, args, opaque, False)
 
@@ -251,7 +255,7 @@ class DActLuPrimitive(BasePrimitive):
         """
         dact_lu infer_sharding_from_operands
         """
-        del result_infos, act_enum    # Unused.
+        del result_infos, act_enum  # Unused.
         act_lu_out_spec = get_padded_spec(arg_infos[1])
         dx_sharding = NamedSharding(mesh, PartitionSpec(*act_lu_out_spec))
         return dx_sharding
@@ -275,8 +279,9 @@ class DActLuPrimitive(BasePrimitive):
 register_primitive(DActLuPrimitive)
 
 
-def dact_lu(inputs: jnp.ndarray, act_lu_inputs: jnp.ndarray,
-            activation_type: Sequence[Union[str, Callable]]) -> jnp.ndarray:
+def dact_lu(
+    inputs: jnp.ndarray, act_lu_inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]
+) -> jnp.ndarray:
     """
     dact_lu fusion wrapper
     Return dgated_act_lu(inputs)
@@ -289,15 +294,17 @@ class ActLuFp8Primitive(BasePrimitive):
     """
     ActLu FP8 Primitive
     """
+
     name = "te_act_lu_fp8"
     multiple_results = True
-    impl_static_args = (4, 5)    #out_dtype, act_enum
+    impl_static_args = (4, 5)  # out_dtype, act_enum
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
-                 act_enum):  # pylint: disable=unused-argument
+    def abstract(
+        x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype, act_enum
+    ):  # pylint: disable=unused-argument
         """
         te_act_lu_p abstract
         """
@@ -309,7 +316,7 @@ class ActLuFp8Primitive(BasePrimitive):
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
 
-        assert (x_aval.shape[-2] == 1 or x_aval.shape[-2] == 2)
+        assert x_aval.shape[-2] == 1 or x_aval.shape[-2] == 2
         hidden_size = x_aval.shape[-1]
         batch_shape = x_aval.shape[:-2]
         out_shape = (batch_shape) + (hidden_size,)
@@ -349,17 +356,16 @@ class ActLuFp8Primitive(BasePrimitive):
         operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor((
-            batch_size, hidden_size),
+        opaque = transformer_engine_jax.pack_common_descriptor(
+            (batch_size, hidden_size),
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(out_dtype),
-            act_enum)
+            act_enum,
+        )
 
-        out = custom_caller(ActLuFp8Primitive.name,
-                            args,
-                            opaque,
-                            False,
-                            operand_output_aliases={1: 1})
+        out = custom_caller(
+            ActLuFp8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
+        )
 
         return out
 
@@ -369,12 +375,9 @@ class ActLuFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert ActLuFp8Primitive.inner_primitive is not None
-        out, updated_amax = ActLuFp8Primitive.inner_primitive.bind(x,
-                                                                   amax,
-                                                                   scale,
-                                                                   scale_inv,
-                                                                   out_dtype=out_dtype,
-                                                                   act_enum=act_enum)
+        out, updated_amax = ActLuFp8Primitive.inner_primitive.bind(
+            x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
+        )
         return out, updated_amax
 
     @staticmethod
@@ -388,9 +391,12 @@ class ActLuFp8Primitive(BasePrimitive):
         x_bdim, amax_bdim, _, _ = batch_dims
 
         out_bdims = x_bdim, amax_bdim
-        return ActLuFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv,
-                                                      out_dtype=out_dtype,
-                                                      act_enum=act_enum), out_bdims
+        return (
+            ActLuFp8Primitive.outer_primitive.bind(
+                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
+            ),
+            out_bdims,
+        )
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, act_enum, mesh, arg_infos, result_infos):
@@ -410,12 +416,9 @@ class ActLuFp8Primitive(BasePrimitive):
         out_shardings = (out_sharding, amax_sharding)
 
         def sharded_impl(x, amax, scale, scale_inv):
-            local_x, local_amax = ActLuFp8Primitive.impl(x,
-                                                         amax,
-                                                         scale,
-                                                         scale_inv,
-                                                         out_dtype=out_dtype,
-                                                         act_enum=act_enum)
+            local_x, local_amax = ActLuFp8Primitive.impl(
+                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
+            )
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
 
             return local_x, global_updated_amax
@@ -426,9 +429,14 @@ class ActLuFp8Primitive(BasePrimitive):
 register_primitive(ActLuFp8Primitive)
 
 
-def act_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
-             out_dtype: jnp.dtype, activation_type: Sequence[Union[str, Callable]]
-               ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def act_lu_fp8(
+    x: jnp.ndarray,
+    amax: jnp.ndarray,
+    scale: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    out_dtype: jnp.dtype,
+    activation_type: Sequence[Union[str, Callable]],
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     act wrapper
     Return FP8(act_lu(x))
@@ -436,5 +444,6 @@ def act_lu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv:
                  (N, 2, H) for gated activations
     """
     act_type_id = ActivationEnum[activation_type]
-    return ActLuFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype,
-                                                  act_enum = act_type_id)
+    return ActLuFp8Primitive.outer_primitive.bind(
+        x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
+    )

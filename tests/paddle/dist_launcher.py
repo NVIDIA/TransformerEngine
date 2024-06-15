@@ -21,15 +21,15 @@ from paddle.distributed.utils.launch_utils import (
     watch_local_trainers,
 )
 
-__all__ = ['TestDistributed']
+__all__ = ["TestDistributed"]
 
 
 def get_cluster_from_args(selected_gpus):
     """Get node information from selected GPUs"""
-    cluster_node_ips = '127.0.0.1'
-    node_ip = '127.0.0.1'
+    cluster_node_ips = "127.0.0.1"
+    node_ip = "127.0.0.1"
 
-    node_ips = [x.strip() for x in cluster_node_ips.split(',')]
+    node_ips = [x.strip() for x in cluster_node_ips.split(",")]
 
     node_ips.index(node_ip)
 
@@ -47,7 +47,7 @@ def get_cluster_from_args(selected_gpus):
 
 def get_gpus(selected_gpus):
     """Get selected GPU string"""
-    selected_gpus = [x.strip() for x in selected_gpus.split(',')]
+    selected_gpus = [x.strip() for x in selected_gpus.split(",")]
     return selected_gpus
 
 
@@ -86,7 +86,7 @@ def start_local_trainers(
 
         print(f"trainer proc env:{current_env}")
 
-        if os.getenv('WITH_COVERAGE', 'OFF') == 'ON':
+        if os.getenv("WITH_COVERAGE", "OFF") == "ON":
             cmd = "python -m coverage run --branch -p " + training_script
         else:
             cmd = "python -u " + training_script
@@ -95,7 +95,9 @@ def start_local_trainers(
 
         fn = None
 
-        proc = subprocess.Popen(cmd.split(" ") + training_script_args, env=current_env)    # pylint: disable=consider-using-with
+        proc = subprocess.Popen(
+            cmd.split(" ") + training_script_args, env=current_env
+        )  # pylint: disable=consider-using-with
 
         tp = TrainerProc()
         tp.proc = proc
@@ -117,10 +119,10 @@ class TestDistributed(unittest.TestCase):
         allocator_strategy="auto_growth",
     ):
         """Run target file in subprocesses"""
-        if (not core.is_compiled_with_cuda() or core.get_cuda_device_count() == 0):
+        if not core.is_compiled_with_cuda() or core.get_cuda_device_count() == 0:
             return
 
-        selected_gpus = get_gpus('0,1')
+        selected_gpus = get_gpus("0,1")
         cluster = None
         pod = None
 
