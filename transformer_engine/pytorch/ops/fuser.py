@@ -20,6 +20,7 @@ from transformer_engine.pytorch.ops.fused_forward import (
     fuse_forward_linear_bias_activation,
 )
 
+
 class _OperationFuserAutogradFunction(torch.autograd.Function):
     """Autograd function for a pipeline of operations
 
@@ -73,13 +74,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for op, basic_op_idxs in forward_ops:
 
             # Forward op
-            prev_ops = [
-                basic_ops[idx-1] if idx > 0 else None
-                for idx in basic_op_idxs
-            ]
+            prev_ops = [basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
             next_ops = [
-                basic_ops[idx+1] if (idx < len(basic_ops) - 1) else None
-                for idx in basic_op_idxs
+                basic_ops[idx + 1] if (idx < len(basic_ops) - 1) else None for idx in basic_op_idxs
             ]
             x = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
@@ -91,9 +88,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
             # Check if backward op is required
             if not requires_grad:
-                requires_grad = any(
-                    param.requires_grad for param in op.parameters()
-                )
+                requires_grad = any(param.requires_grad for param in op.parameters())
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx]._requires_grad = requires_grad
             x.requires_grad_(requires_grad=requires_grad)
@@ -143,10 +138,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for op, basic_op_idxs in backward_ops:
 
             # Stop if no more gradients are required
-            if all(
-                not basic_op_ctxs[idx]._requires_grad
-                for idx in basic_op_idxs
-            ):
+            if all(not basic_op_ctxs[idx]._requires_grad for idx in basic_op_idxs):
                 dx = None
                 break
 
@@ -179,13 +171,14 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
-            dx,    # input_
+            dx,  # input_
             None,  # forward_ops
             None,  # backward_ops
             None,  # basic_ops
             None,  # basic_op_kwargs
             *grad_params_flat,  # params
         )
+
 
 class OperationFuser:
     """Manages forward and backward passes for a pipeline of operations
@@ -218,10 +211,7 @@ class OperationFuser:
         # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusableOperation, list[int]]]
         self._backward_ops: list[tuple[FusableOperation, list[int]]]
-        self._forward_ops = [
-            (op, (idx,))
-            for idx, op in enumerate(self._basic_ops)
-        ]
+        self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
 
         # Fuse ops if needed

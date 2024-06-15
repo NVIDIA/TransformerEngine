@@ -11,6 +11,7 @@ import torch
 
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
+
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     """Canonicalize PyTorch device
 
@@ -28,6 +29,7 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
         device = torch.device("cuda", torch.cuda.current_device())
     return device
 
+
 def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
     """Canonicalize PyTorch datatype
 
@@ -38,6 +40,7 @@ def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
         # Use default dtype
         dtype = torch.get_default_dtype()
     return dtype
+
 
 def devices_match(device1: torch.device, device2: torch.device) -> bool:
     """Whether two devices are the same"""
@@ -55,9 +58,11 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
         return index1 == index2
     return device1 == device2
 
+
 def is_float8_tensor(tensor: Any) -> bool:
     """Check if object is a `Float8Tensor`"""
     return isinstance(tensor, Float8Tensor)
+
 
 def convert_tensor(
     tensor: torch.Tensor | Float8Tensor,
@@ -80,9 +85,8 @@ def convert_tensor(
 
     # Return immediately if tensor already has desired attributes
     if devices_match(device, tensor.device) and dtype == tensor.dtype:
-        if (
-            memory_format == torch.preserve_format
-            or tensor.is_contiguous(memory_format=memory_format)
+        if memory_format == torch.preserve_format or tensor.is_contiguous(
+            memory_format=memory_format
         ):
             return tensor
 
@@ -98,6 +102,7 @@ def convert_tensor(
 
     # Convert standard PyTorch tensor
     return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+
 
 def reshape(
     tensor: torch.Tensor | Float8Tensor,

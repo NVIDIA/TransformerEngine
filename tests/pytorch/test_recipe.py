@@ -241,8 +241,8 @@ class TestFP8Recipe:
                 test_amax_history = fp8_meta.amax_history[:, 0]
                 tols = dict(rtol=0, atol=0)
                 torch.testing.assert_close(
-                    test_amax_history[-(step+1):],
-                    ref_amax_history[:(step+1)],
+                    test_amax_history[-(step + 1) :],
+                    ref_amax_history[: (step + 1)],
                     **tols,
                 )
 
@@ -255,7 +255,7 @@ class TestFP8Recipe:
 
                 # Compute amax
                 if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-(amax_history_len+1):]
+                    ref_amax_history = ref_amax_history[-(amax_history_len + 1) :]
                 if amax_compute_algo == "max":
                     ref_amax = max(ref_amax_history)
                 elif amax_compute_algo == "most_recent":
@@ -264,11 +264,11 @@ class TestFP8Recipe:
                     raise RuntimeError(f"{amax_compute_algo=} is not supported")
 
                 # Compute scale
-                max_val ={
+                max_val = {
                     "forward": 448.0,
                     "backward": 57344.0,
                 }[stage]
-                ref_scale = (max_val / ref_amax) / (2 ** margin)
+                ref_scale = (max_val / ref_amax) / (2**margin)
 
                 # Check values in FP8 meta tensors
                 torch.testing.assert_close(

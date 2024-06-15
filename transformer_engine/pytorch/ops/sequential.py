@@ -56,10 +56,7 @@ class Sequential(torch.nn.Module):
             return list(self._modules.keys())[idx]
         size = len(self._modules)
         if not -size <= idx < size:
-            raise IndexError(
-                f"Attempted to access index {idx}, "
-                f"but there are {size} entries"
-            )
+            raise IndexError(f"Attempted to access index {idx}, but there are {size} entries")
         if idx < 0:
             idx += size
         for i, key in enumerate(self._modules.keys()):
@@ -85,10 +82,7 @@ class Sequential(torch.nn.Module):
     ) -> Sequential | torch.nn.Module:
         keys = self._get_keys_by_idx(idx)
         if isinstance(idx, slice):
-            modules = OrderedDict(
-                (str(i), self._modules[key])
-                for i, key in enumerate(keys)
-            )
+            modules = OrderedDict((str(i), self._modules[key]) for i, key in enumerate(keys))
             return self.__class__(modules)
         return self._modules[keys[0]]
 
@@ -125,7 +119,7 @@ class Sequential(torch.nn.Module):
         keys = self._get_keys_by_idx(slice(idx, None))
         keys.append(self._next_key())
         for i in reversed(range(1, len(keys))):
-            self._modules[keys[i]] = self._modules[keys[i-1]]
+            self._modules[keys[i]] = self._modules[keys[i - 1]]
         self._modules[keys[0]] = module
         return self
 
@@ -151,11 +145,13 @@ class Sequential(torch.nn.Module):
         """Make list of modules, with fusable operations grouped together"""
         module_groups = []
         fusable_ops = []
+
         def maybe_add_fuser():
             nonlocal fusable_ops
             if fusable_ops:
                 module_groups.append(OperationFuser(fusable_ops, fuse_ops=True))
                 fusable_ops = []
+
         for module in modules:
             if isinstance(module, FusableOperation):
                 fusable_ops.append(module)

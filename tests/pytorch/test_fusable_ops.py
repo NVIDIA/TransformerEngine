@@ -32,6 +32,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 # Supported devices
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
+
 def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
@@ -64,6 +65,7 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
         return dict(rtol=1e-7, atol=1e-7)
     raise ValueError(f"Unsupported dtype ({dtype})")
 
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
@@ -84,7 +86,7 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
     if test_is_fp8:
         test = Float8Tensor.to_float8(ref)
-        test._transpose = test._data.reshape(-1, test.size(-1)).transpose(0,1)
+        test._transpose = test._data.reshape(-1, test.size(-1)).transpose(0, 1)
         test._transpose = test._transpose.contiguous()
         test._transpose_invalid = False
     else:
@@ -122,7 +124,7 @@ class TestSequential:
         # Index by int
         for i, module in enumerate(modules):
             assert model[i] is module
-            assert model[i-len(modules)] is module
+            assert model[i - len(modules)] is module
 
         # Index by slice
         model_subset = model[1:-1]
@@ -274,7 +276,7 @@ class TestFuser:
                 y = model(x)
             y.backward(dy)
             with torch.no_grad():
-                model.weight.fill_(w_vals[step+1])
+                model.weight.fill_(w_vals[step + 1])
 
             # Check that output tensors match expected
             tols = dict(rtol=0, atol=0)
@@ -292,12 +294,12 @@ class TestFuser:
             )
 
             # Check that scaling factors match expected
-            w_amax_ref = max(w_vals[:step+2])
-            x_amax_ref = max(x_vals[:step+1])
-            dy_amax_ref = max(dy_vals[:step+1])
-            w_scale_ref = (fp8_format.value.max_fwd / w_amax_ref) / (2 ** margin)
-            x_scale_ref = (fp8_format.value.max_fwd / x_amax_ref) / (2 ** margin)
-            dy_scale_ref = (fp8_format.value.max_bwd / dy_amax_ref) / (2 ** margin)
+            w_amax_ref = max(w_vals[: step + 2])
+            x_amax_ref = max(x_vals[: step + 1])
+            dy_amax_ref = max(dy_vals[: step + 1])
+            w_scale_ref = (fp8_format.value.max_fwd / w_amax_ref) / (2**margin)
+            x_scale_ref = (fp8_format.value.max_fwd / x_amax_ref) / (2**margin)
+            dy_scale_ref = (fp8_format.value.max_bwd / dy_amax_ref) / (2**margin)
             forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
             backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
             w_scale = model.get_fp8_meta("param")[forward_key].scale
@@ -306,6 +308,7 @@ class TestFuser:
             torch.testing.assert_close(w_scale, torch.full_like(w_scale, w_scale_ref))
             torch.testing.assert_close(x_scale, torch.full_like(x_scale, x_scale_ref))
             torch.testing.assert_close(dy_scale, torch.full_like(dy_scale, dy_scale_ref))
+
 
 class TestBasicOps:
     """Tests for individual operations"""
@@ -375,10 +378,10 @@ class TestBasicOps:
     @pytest.mark.parametrize(
         "shapes",
         (
-            ((1,2,3,4), (2,12)),
-            ((5,4,3,2), (-1,6)),
+            ((1, 2, 3, 4), (2, 12)),
+            ((5, 4, 3, 2), (-1, 6)),
             ((30,), (2, 3, -1)),
-            ((6,7), (3, -1, 7)),
+            ((6, 7), (3, -1, 7)),
         ),
     )
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -601,9 +604,7 @@ class TestBasicOps:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if fp8_compute:
             tols = dtype_tols(
-                op.weight._fp8_dtype
-                if is_float8_tensor(op.weight)
-                else tex.DType.kFloat8E4M3
+                op.weight._fp8_dtype if is_float8_tensor(op.weight) else tex.DType.kFloat8E4M3
             )
 
         # Check results
@@ -722,9 +723,7 @@ class TestBasicOps:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if fp8_compute:
             tols = dtype_tols(
-                op.weight._fp8_dtype
-                if is_float8_tensor(op.weight)
-                else tex.DType.kFloat8E4M3
+                op.weight._fp8_dtype if is_float8_tensor(op.weight) else tex.DType.kFloat8E4M3
             )
 
         # Check results
@@ -737,6 +736,7 @@ class TestBasicOps:
         if bias:
             db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
 
 class TestFusedOps:
     """Tests for fused operations"""
@@ -788,8 +788,7 @@ class TestFusedOps:
                 pytest.skip("FP8 GEMMs require dims that are divisible by 16")
         if dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(
-                "FP8 fused linear-bias-activation "
-                "is only supported with FP16 or BF16 output"
+                "FP8 fused linear-bias-activation is only supported with FP16 or BF16 output"
             )
 
         # Random data

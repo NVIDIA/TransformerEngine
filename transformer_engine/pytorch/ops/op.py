@@ -103,8 +103,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError(
-            "Forward pass is not implemented for operation "
-            f"({self.__class__.__name__})"
+            f"Forward pass is not implemented for operation ({self.__class__.__name__})"
         )
 
     def fuser_backward(
@@ -145,8 +144,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError(
-            "Backward pass is not implemented for operation "
-            f"({self.__class__.__name__})"
+            f"Backward pass is not implemented for operation ({self.__class__.__name__})"
         )
 
 
@@ -274,7 +272,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas = self._make_fp8_metas()
 
             # Make sure FP8 metadata matches FP8 autocast context
-            #if any(fp8_meta is not None for fp8_meta in self._fp8_metas):
+            # if any(fp8_meta is not None for fp8_meta in self._fp8_metas):
             for fp8_meta in self._fp8_metas.values():
                 self._check_fp8_meta(fp8_meta)
 
@@ -375,6 +373,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
     ) -> torch.Tensor:
         """Apply operation"""
         from .fuser import OperationFuser
+
         return OperationFuser([self], fuse_ops=False)(input, [kwargs])
 
 
@@ -425,4 +424,5 @@ class FusedOperation(FusableOperation):
         if basic_op_kwargs is None:
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
+
         return OperationFuser([self], fuse_ops=False)(input, basic_op_kwargs)

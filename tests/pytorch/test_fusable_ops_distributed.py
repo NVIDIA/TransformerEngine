@@ -27,11 +27,12 @@ import transformer_engine_torch as tex
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 @functools.cache
 def world_group() -> torch.distributed.ProcessGroup:
     """Get NCCL process group, initializing if needed"""
-    world_size = int(os.environ['WORLD_SIZE'])
-    rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ["WORLD_SIZE"])
+    rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
     group = torch.distributed.init_process_group(
         "nccl",
@@ -41,10 +42,12 @@ def world_group() -> torch.distributed.ProcessGroup:
     )
     return group
 
+
 def reset_rng(seed: int = 1234) -> None:
     """Reset random number generators"""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+
 
 @torch.no_grad()
 def make_reference_and_test_tensors(
@@ -83,6 +86,7 @@ def make_reference_and_test_tensors(
     test.requires_grad_(requires_grad)
     return ref, test
 
+
 def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
@@ -114,6 +118,7 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     if dtype == torch.float64:
         return dict(rtol=1e-7, atol=1e-7)
     raise ValueError(f"Unsupported dtype ({dtype})")
+
 
 def _test_all_reduce(
     *,
@@ -168,6 +173,7 @@ def _test_all_reduce(
     dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
     torch.testing.assert_close(y_test, y_ref, **dtype_tols(dtype))
     torch.testing.assert_close(dx_test, dx_ref, rtol=0, atol=0)
+
 
 def _test_all_gather(
     *,
@@ -226,6 +232,7 @@ def _test_all_gather(
     torch.testing.assert_close(y_test, y_ref, rtol=0, atol=0)
     torch.testing.assert_close(dx_test, dx_ref, **dtype_tols(dtype))
 
+
 def _test_reduce_scatter(
     *,
     local_size: int = 11,
@@ -282,6 +289,7 @@ def _test_reduce_scatter(
     dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
     torch.testing.assert_close(y_test, y_ref, **dtype_tols(dtype))
     torch.testing.assert_close(dx_test, dx_ref, rtol=0, atol=0)
+
 
 def _test_basic_linear(
     *,
@@ -346,7 +354,7 @@ def _test_basic_linear(
             local_out_features = out_features // world_size
             local_slice = slice(
                 rank * local_out_features,
-                (rank+1) * local_out_features,
+                (rank + 1) * local_out_features,
             )
             w_ref = w_ref[local_slice, :]
             dw_ref = dw_ref[local_slice, :]
@@ -358,7 +366,7 @@ def _test_basic_linear(
             local_in_features = in_features // world_size
             local_slice = slice(
                 rank * local_in_features,
-                (rank+1) * local_in_features,
+                (rank + 1) * local_in_features,
             )
             w_ref = w_ref[:, local_slice]
             dw_ref = dw_ref[:, local_slice]
@@ -370,7 +378,7 @@ def _test_basic_linear(
             local_batch_size = batch_size // world_size
             local_slice = slice(
                 rank * local_batch_size,
-                (rank+1) * local_batch_size,
+                (rank + 1) * local_batch_size,
             )
             if tensor_parallel_mode == "column":
                 x_ref = x_ref[local_slice, ...]
@@ -406,9 +414,7 @@ def _test_basic_linear(
         tols = dtype_tols(torch.float16)  # TF32 GEMM
     if fp8_compute:
         tols = dtype_tols(
-            op.weight._fp8_dtype
-            if is_float8_tensor(op.weight)
-            else tex.DType.kFloat8E4M3
+            op.weight._fp8_dtype if is_float8_tensor(op.weight) else tex.DType.kFloat8E4M3
         )
 
     # Check results
@@ -418,6 +424,7 @@ def _test_basic_linear(
     torch.testing.assert_close(y_test, y_ref, **tols)
     torch.testing.assert_close(dx_test, dx_ref, **tols)
     torch.testing.assert_close(dw_test, dw_ref, **tols)
+
 
 def _test_linear(
     *,
@@ -500,7 +507,7 @@ def _test_linear(
             local_out_features = out_features // world_size
             local_slice = slice(
                 rank * local_out_features,
-                (rank+1) * local_out_features,
+                (rank + 1) * local_out_features,
             )
             w_ref = w_ref[local_slice, :]
             dw_ref = dw_ref[local_slice, :]
@@ -516,7 +523,7 @@ def _test_linear(
             local_in_features = in_features // world_size
             local_slice = slice(
                 rank * local_in_features,
-                (rank+1) * local_in_features,
+                (rank + 1) * local_in_features,
             )
             w_ref = w_ref[:, local_slice]
             dw_ref = dw_ref[:, local_slice]
@@ -532,7 +539,7 @@ def _test_linear(
             local_batch_size = batch_size // world_size
             local_slice = slice(
                 rank * local_batch_size,
-                (rank+1) * local_batch_size,
+                (rank + 1) * local_batch_size,
             )
             if tensor_parallel_mode == "column":
                 x_ref = x_ref[local_slice, ...]
@@ -590,6 +597,7 @@ def _test_linear(
         db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(db_test, db_ref, **tols)
 
+
 def _test_fp8_scale_update(
     *,
     amax_history_len: int = 31,
@@ -642,11 +650,11 @@ def _test_fp8_scale_update(
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Expected absmax and FP8 scale"""
         amax = ref.abs().amax()
-        max_val ={
+        max_val = {
             "forward": 448.0,
             "backward": 57344.0,
         }[stage]
-        scale = (max_val / amax) / (2 ** margin)
+        scale = (max_val / amax) / (2**margin)
         amax = amax.to(dtype=torch.float32, device="cpu")
         scale = scale.to(dtype=torch.float32, device="cpu")
         return amax, scale
@@ -662,7 +670,7 @@ def _test_fp8_scale_update(
             local_out_features = out_features // world_size
             local_slice = slice(
                 rank * local_out_features,
-                (rank+1) * local_out_features,
+                (rank + 1) * local_out_features,
             )
             w_ref = w_ref[local_slice, :]
             w_test = w_test[local_slice, :]
@@ -672,7 +680,7 @@ def _test_fp8_scale_update(
             local_in_features = in_features // world_size
             local_slice = slice(
                 rank * local_in_features,
-                (rank+1) * local_in_features,
+                (rank + 1) * local_in_features,
             )
             w_ref = w_ref[:, local_slice]
             w_test = w_test[:, local_slice]
@@ -724,6 +732,7 @@ def _test_fp8_scale_update(
     torch.testing.assert_close(x_scale_test, x_scale_ref)
     torch.testing.assert_close(w_scale_test, w_scale_ref)
     torch.testing.assert_close(dy_scale_test, dy_scale_ref)
+
 
 def run_parallel_tests() -> None:
     """Run parallel tests"""
@@ -795,6 +804,7 @@ if 1 not in _world_sizes:
 if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
     _world_sizes.append(2)
 
+
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
@@ -813,12 +823,14 @@ def test_distributed_fuser_ops(world_size: int) -> None:
         check=True,
     )
 
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--parallel', action="store_true", help="Run parallel tests")
+    parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
     args = parser.parse_args()
     if args.parallel:
         run_parallel_tests()
+
 
 if __name__ == "__main__":
     main()

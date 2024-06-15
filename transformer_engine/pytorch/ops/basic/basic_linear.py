@@ -37,6 +37,7 @@ from .._common import (
 )
 from ...utils import clear_tensor_data
 
+
 def _wait_async(handle: Optional[Any]) -> None:
     """Wait for asynchronous communication to finish, if needed"""
     if handle is not None:
@@ -112,9 +113,7 @@ class BasicLinear(BasicOperation):
         # Weight tensor datatype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            raise ValueError(
-                f"Supported dtypes are float32, float16, bfloat16 (got {dtype})"
-            )
+            raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
         self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
         # Tensor parallel configuration
@@ -317,9 +316,9 @@ class BasicLinear(BasicOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         with_fp8_compute: bool = False,
-        input_fp8_meta: Optional[dict[str,Any]] = None,
-        weight_fp8_meta: Optional[dict[str,Any]] = None,
-        output_fp8_meta: Optional[dict[str,Any]] = None,
+        input_fp8_meta: Optional[dict[str, Any]] = None,
+        weight_fp8_meta: Optional[dict[str, Any]] = None,
+        output_fp8_meta: Optional[dict[str, Any]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Functional API for forward pass
 
@@ -380,9 +379,7 @@ class BasicLinear(BasicOperation):
             dtype = weight.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            raise ValueError(
-                f"Supported dtypes are float32, float16, bfloat16 (got {dtype})"
-            )
+            raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
 
         # Check tensor dims
         input_dims = tuple(input.size())
@@ -399,21 +396,15 @@ class BasicLinear(BasicOperation):
         # Check if FP8 is enabled
         if with_fp8_compute:
             if input_fp8_meta is None and not is_float8_tensor(input):
-                raise ValueError(
-                    "No FP8 metadata was provided for casting input to FP8"
-                )
+                raise ValueError("No FP8 metadata was provided for casting input to FP8")
             if weight_fp8_meta is None and not is_float8_tensor(weight):
-                raise ValueError(
-                    "No FP8 metadata was provided for casting weight to FP8"
-                )
+                raise ValueError("No FP8 metadata was provided for casting weight to FP8")
         else:
             input_fp8_meta = None
             weight_fp8_meta = None
             output_fp8_meta = None
         with_fp8_output = (
-            with_fp8_compute
-            and tensor_parallel_mode != "row"
-            and output_fp8_meta is not None
+            with_fp8_compute and tensor_parallel_mode != "row" and output_fp8_meta is not None
         )
 
         # Check input tensor
@@ -590,10 +581,10 @@ class BasicLinear(BasicOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         with_fp8_compute: bool = False,
-        input_fp8_meta: Optional[dict[str,Any]] = None,
-        weight_fp8_meta: Optional[dict[str,Any]] = None,
-        grad_output_fp8_meta: Optional[dict[str,Any]] = None,
-        grad_input_fp8_meta: Optional[dict[str,Any]] = None,
+        input_fp8_meta: Optional[dict[str, Any]] = None,
+        weight_fp8_meta: Optional[dict[str, Any]] = None,
+        grad_output_fp8_meta: Optional[dict[str, Any]] = None,
+        grad_input_fp8_meta: Optional[dict[str, Any]] = None,
         accumulate_into_grad_weight: bool = False,
         grad_weight: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -671,9 +662,7 @@ class BasicLinear(BasicOperation):
             dtype = weight.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            raise ValueError(
-                f"Supported dtypes are float32, float16, bfloat16 (got {dtype})"
-            )
+            raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
 
         # Check tensor dims
         output_dims = tuple(grad_output.size())
@@ -697,9 +686,7 @@ class BasicLinear(BasicOperation):
         # Check if FP8 is enabled
         if with_fp8_compute:
             if grad_output_fp8_meta is None and not is_float8_tensor(grad_output):
-                raise ValueError(
-                    "No FP8 metadata was provided for casting output gradient to FP8"
-                )
+                raise ValueError("No FP8 metadata was provided for casting output gradient to FP8")
         else:
             input_fp8_meta = None
             weight_fp8_meta = None
@@ -756,9 +743,7 @@ class BasicLinear(BasicOperation):
         x_async = None
         if weight_requires_grad:
             if input is None:
-                raise ValueError(
-                    "Input tensor is required to compute weight grad"
-                )
+                raise ValueError("Input tensor is required to compute weight grad")
             x_local = reshape(
                 input,
                 (-1, input_dims[-1]),
@@ -798,9 +783,7 @@ class BasicLinear(BasicOperation):
 
             # Check weight tensor
             if weight is None:
-                raise ValueError(
-                    "Weight tensor is required to compute input grad"
-                )
+                raise ValueError("Weight tensor is required to compute input grad")
             w = convert_tensor(
                 weight,
                 device=device,
@@ -951,7 +934,7 @@ class BasicLinear(BasicOperation):
                     accumulate=accumulate_into_grad_weight,
                     layout="NT",
                     out=grad_weight,
-            )
+                )
 
         # Clean up and return grads
         _wait_async(dy_async)
@@ -1021,7 +1004,7 @@ class BasicLinear(BasicOperation):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
         # Saved tensors from forward pass
-        x_local, = ctx.saved_tensors
+        (x_local,) = ctx.saved_tensors
 
         # wgrad fusion
         accumulate_into_main_grad = self._accumulate_into_main_grad
