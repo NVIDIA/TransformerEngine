@@ -1075,9 +1075,9 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                   const Tensor *input_Q, const Tensor *input_KV,
                                   const Tensor *input_O, const Tensor *input_dO,
                                   const Tensor *input_Bias, Tensor *output_S,
-                                  Tensor *output_dQ, Tensor *output_dKV,
-                                  Tensor *output_dBias, const Tensor *cu_seqlens_q,
-                                  const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_with_offset,
+                                  Tensor *output_dQ, Tensor *output_dKV, Tensor *output_dBias,
+                                  const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+                                  const Tensor *cu_seqlens_q_with_offset,
                                   const Tensor *cu_seqlens_kv_with_offset, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
@@ -1267,10 +1267,10 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
                                   const Tensor *input_Q, const Tensor *input_K,
                                   const Tensor *input_V, const Tensor *input_O,
                                   const Tensor *input_dO, const Tensor *input_Bias,
-                                  Tensor *output_S,
-                                  Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
-                                  Tensor *output_dBias, const Tensor *cu_seqlens_q,
-                                  const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_with_offset,
+                                  Tensor *output_S, Tensor *output_dQ,
+                                  Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
+                                  const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+                                  const Tensor *cu_seqlens_q_with_offset,
                                   const Tensor *cu_seqlens_kv_with_offset, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
