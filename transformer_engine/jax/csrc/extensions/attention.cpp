@@ -146,7 +146,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     nvte_fused_attn_fwd_qkvpacked(
         qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), dummy_rng_state_tensor.data(), q_max_seqlen, is_training,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         query_workspace_tensor.data(), nullptr);
@@ -155,7 +154,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, scaling_factor,
         dropout_probability, qkv_layout, bias_type, mask_type, query_workspace_tensor.data(),
         nullptr);
@@ -163,7 +161,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
                         s_tensor.data(), o_tensor.data(), &aux_output_tensors,
                         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training,
                         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
@@ -213,7 +210,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
         s_tensor.data(),  // not used for F16
         s_tensor.data(),  // not used for F16
         &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(), q_max_seqlen,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         query_workspace_tensor.data(), nullptr);
@@ -230,7 +226,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
         s_tensor.data(),  // not used for F16
         &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
         dropout_probability, qkv_layout, bias_type, mask_type, query_workspace_tensor.data(),
         nullptr);
@@ -251,7 +246,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                         &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
                         dbias_tensor.data(), q_cu_seqlens_tensor.data(),
                         kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen,
                         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
                         query_workspace_tensor.data(), nullptr);
@@ -340,7 +334,6 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     nvte_fused_attn_fwd_qkvpacked(
         qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), rng_state_tensor.data(), q_max_seqlen,
         descriptor.is_training, descriptor.scaling_factor, dropout_probability, qkv_layout,
         bias_type, mask_type, workspace_tensor.data(), stream);
@@ -354,7 +347,6 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
@@ -372,7 +364,6 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
                         s_tensor.data(), o_tensor.data(), &aux_output_tensors,
                         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
                         descriptor.is_training, scaling_factor, dropout_probability, qkv_layout,
@@ -425,7 +416,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                       s_tensor.data(),  // not used for F16
                       &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
                       dbias_tensor.data(), q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                      dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                       dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                       q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout,
                       bias_type, mask_type, query_workspace_tensor.data(), nullptr);
@@ -512,7 +502,6 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
         s_tensor.data(),  // not used for F16
         s_tensor.data(),  // not used for F16
         &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(), q_max_seqlen,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         workspace_tensor.data(), stream);
@@ -533,7 +522,6 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
         s_tensor.data(),  // not used for F16
         &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
         dropout_probability, qkv_layout, bias_type, mask_type, workspace_tensor.data(), stream);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
@@ -559,7 +547,6 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
                         &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
                         dbias_tensor.data(), q_cu_seqlens_tensor.data(),
                         kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen,
                         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
                         workspace_tensor.data(), stream);
