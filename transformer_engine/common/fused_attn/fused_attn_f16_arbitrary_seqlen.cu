@@ -824,8 +824,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
       is_training, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK,
       devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
       devPtrCuSeqlens, devPtrCuSeqlens, devPtrSeqOffsets, devPtrSeqOffsets,
-      get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
-      stream, handle);
+      get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
