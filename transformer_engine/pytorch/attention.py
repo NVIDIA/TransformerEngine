@@ -2684,6 +2684,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8,
         fp8_meta,
     ):
+        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
             logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
@@ -3048,6 +3049,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8,
         fp8_meta,
     ):
+        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
             logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
@@ -3470,6 +3472,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8,
         fp8_meta,
     ):
+        logger = logging.getLogger("FusedAttnFunc")
         if fp8:
             logger.debug("Running forward in FP8")
             fused_attention_backend = FusedAttnBackend["FP8"]
