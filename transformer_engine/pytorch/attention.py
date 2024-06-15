@@ -4343,11 +4343,13 @@ class FusedAttention(torch.nn.Module):
         else:
             with self.attention_dropout_ctx():
                 if fp8:
+                    assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
+                        f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
+                        " is required for FP8 attention!"
+                    )
                     assert (
-                        fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8
-                    ), f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}" \
-                    " is required for FP8 attention!"
-                    assert fp8_meta is not None, "FP8 metadata fp8_meta is required for FP8 attention!"
+                        fp8_meta is not None
+                    ), "FP8 metadata fp8_meta is required for FP8 attention!"
                 output = FusedAttnFunc.apply(
                     self.training,
                     max_seqlen_q,
@@ -4827,10 +4829,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
-                assert (
-                    forward_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
-                    and backward_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
-                ), """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
+                assert forward_dtype in [
+                    tex.DType.kFloat8E4M3,
+                    tex.DType.kFloat8E5M2,
+                ] and backward_dtype in [
+                    tex.DType.kFloat8E4M3,
+                    tex.DType.kFloat8E5M2,
+                ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
 
             assert (
                 query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
@@ -5028,9 +5033,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # Filter: Execution type.
             if use_flash_attention and self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
-                self.logger.debug(
-                    "Disabling FlashAttention as it does not support FP8 execution."
-                )
+                self.logger.debug("Disabling FlashAttention as it does not support FP8 execution.")
                 use_flash_attention = False
             if use_unfused_attention and self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 self.logger.debug(
@@ -5142,14 +5145,19 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_bias_require_update"] = True
 
             if use_flash_attention and (
-                core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias is not None
+                core_attention_bias_type not in ["no_bias", "alibi"]
+                or core_attention_bias is not None
             ):
                 self.logger.debug("Disabling FlashAttention for pre/post_scale_bias")
                 use_flash_attention = False
 
             fu_core_attention_bias_type = core_attention_bias_type
             fu_core_attention_bias = core_attention_bias
-            if core_attention_bias_type == "alibi" and use_fused_attention and alibi_slopes is not None:
+            if (
+                core_attention_bias_type == "alibi"
+                and use_fused_attention
+                and alibi_slopes is not None
+            ):
                 fu_core_attention_bias_type = "post_scale_bias"
                 _, fu_core_attention_bias = get_alibi(
                     query_layer.shape[-2],
@@ -5179,8 +5187,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 q_type = TE_DType[query_layer.dtype]
                 kv_type = TE_DType[key_layer.dtype]
                 if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
-                    if (isinstance(query_layer, Float8Tensor)
-                        and isinstance(key_layer, Float8Tensor)):
+                    if isinstance(query_layer, Float8Tensor) and isinstance(
+                        key_layer, Float8Tensor
+                    ):
                         q_type = query_layer._fp8_dtype
                         kv_type = value_layer._fp8_dtype
                     else:
@@ -5277,7 +5286,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "qkv_layout": qkv_layout,
                 "mask_type": attn_mask_type,
                 "bias_type": core_attention_bias_type,
-                "bias_shape": core_attention_bias.shape if core_attention_bias is not None else None,
+                "bias_shape": (
+                    core_attention_bias.shape if core_attention_bias is not None else None
+                ),
                 "dropout": self.attention_dropout,
                 "context_parallel": context_parallel,
                 "is_training": self.training,
@@ -5291,7 +5302,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.logger.debug("Running with config=%s", run_config)
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(
-                        query_layer.shape[-2], max_seqlen_q, max_seqlen_kv, alibi_slopes=alibi_slopes
+                        query_layer.shape[-2],
+                        max_seqlen_q,
+                        max_seqlen_kv,
+                        alibi_slopes=alibi_slopes,
                     )
                 return self.flash_attention(
                     query_layer,
@@ -5313,7 +5327,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if use_fused_attention:
                 self.logger.info(
-                    "Running with FusedAttention backend (sub-backend %s)", int(fused_attention_backend)
+                    "Running with FusedAttention backend (sub-backend %s)",
+                    int(fused_attention_backend),
                 )
                 if self.fp8:
                     self.logger.debug(
