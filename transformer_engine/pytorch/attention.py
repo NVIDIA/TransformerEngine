@@ -4867,28 +4867,28 @@ class DotProductAttention(TransformerEngineBaseModule):
             # certain asserts before executing the forward pass.
 
             # Filter: QKV layout.
-            if use_unfused_attention and qkv_format == "thd":
-                self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
-                use_unfused_attention = False
-            if (
-                use_fused_attention
-                and qkv_format == "thd"
-                and (
-                    (
-                        cu_seqlens_q_padded is not None
-                        and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+            if qkv_format == "thd":
+                if use_unfused_attention:
+                    self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
+                    use_unfused_attention = False
+                if (
+                    use_fused_attention
+                    and (
+                        (
+                            cu_seqlens_q_padded is not None
+                            and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+                        )
+                        or (
+                            cu_seqlens_kv_padded is not None
+                            and torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+                        )
                     )
-                    or (
-                        cu_seqlens_kv_padded is not None
-                        and torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+                ):
+                    self.logger.debug(
+                        "Disabling FlashAttention for qkv_format = thd "
+                        "when there is padding between sequences."
                     )
-                )
-            ):
-                self.logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd "
-                    "when there is padding between sequences."
-                )
-                use_flash_attention = False
+                    use_flash_attention = False
 
             # Filter: ONNX export.
             if is_in_onnx_export_mode():
