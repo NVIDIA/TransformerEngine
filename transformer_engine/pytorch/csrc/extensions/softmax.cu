@@ -435,7 +435,7 @@ void __global__ CrossEntropyFwdMeanLogKernel(float* mean_log_probs_ptr,
 
 
 float __device__ __forceinline__ compute_exp_bwd_smooth(float row, float logits_max, float sum_exp_logits, 
-    size_t i, int masked_target_1d, float softmax_update, float label_smoothing, 
+    size_t i, long masked_target_1d, float softmax_update, float label_smoothing, 
     float smoothing, float average_grad, float grad_output) {
         row = __expf(row - logits_max);
         row /= sum_exp_logits;
@@ -454,7 +454,7 @@ void __global__  CrossEntropyBwdKernel(dtype* grad_input_ptr, // grad_input_ptr 
                                        float * grad_output_ptr, //[4096]
                                        dtype* input_ptr,//[4096, 256k]
                                        float * target_mask_ptr,//[4096]
-                                       int * masked_target_1d_ptr, //[4096]
+                                       long * masked_target_1d_ptr, //[4096]
                                        float* logits_max_ptr,//[4096]
                                        float* sum_exp_logits_ptr, //[4096]
                                        size_t n_dim,
@@ -467,7 +467,7 @@ void __global__  CrossEntropyBwdKernel(dtype* grad_input_ptr, // grad_input_ptr 
 
         float grad_output = grad_output_ptr[rowIdx];
         float target_mask = target_mask_ptr[rowIdx];
-        int masked_target_1d = masked_target_1d_ptr[rowIdx];
+        long masked_target_1d = masked_target_1d_ptr[rowIdx];
         float logits_max = logits_max_ptr[rowIdx];
         float sum_exp_logits = sum_exp_logits_ptr[rowIdx];        
 
@@ -602,15 +602,18 @@ at::Tensor cross_entropy_bwd(const at::Tensor &grad_output_ptr,
     float label_smoothing,
     size_t vocab_size
 ) {
+    NVTE_CHECK(grad_output_ptr.scalar_type() == at::ScalarType::Float);
     NVTE_CHECK(input_ptr.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(target_mask_ptr.scalar_type() == at::ScalarType::Bool);//bool
+    NVTE_CHECK(masked_target_1d_ptr.scalar_type() == at::ScalarType::Long); //int64
     NVTE_CHECK(logits_max_ptr.scalar_type() == at::ScalarType::Float);
     NVTE_CHECK(sum_exp_logits_ptr.scalar_type() == at::ScalarType::Float);
-    NVTE_CHECK(masked_target_1d_ptr.scalar_type() == at::ScalarType::Int);
+    
 
-    NVTE_CHECK(grad_output_ptr.dim() == 2); //TODO need check if this is 2
+    NVTE_CHECK(grad_output_ptr.dim() == 2);
     NVTE_CHECK(input_ptr.dim() == 3);
-    NVTE_CHECK(target_mask_ptr.dim() == 2);//TODO need check if this is 2
-    NVTE_CHECK(masked_target_1d_ptr.dim() == 1);//TODO need check if this is 2
+    NVTE_CHECK(target_mask_ptr.dim() == 2);
+    NVTE_CHECK(masked_target_1d_ptr.dim() == 1);
     NVTE_CHECK(logits_max_ptr.dim() == 2);
     NVTE_CHECK(sum_exp_logits_ptr.dim() == 2);
 
@@ -626,8 +629,8 @@ at::Tensor cross_entropy_bwd(const at::Tensor &grad_output_ptr,
     CrossEntropyBwdKernel<at::BFloat16, 128><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(grad_input_ptr.data_ptr<at::BFloat16>(),
                                                                                                     grad_output_ptr.data_ptr<float>(), 
                                                                                                     input_ptr.data_ptr<at::BFloat16>(),
-                                                                                                    target_mask_ptr.data_ptr<float>(), //TODO is float type ?
-                                                                                                    masked_target_1d_ptr.data_ptr<int>(),//TODO is int type ?
+                                                                                                    target_mask_ptr.data_ptr<bool>(), //bool
+                                                                                                    masked_target_1d_ptr.data_ptr<long>(),//TODO is int type ?
                                                                                                     logits_max_ptr.data_ptr<float>(),
                                                                                                     sum_exp_logits_ptr.data_ptr<float>(),
                                                                                                     cols,
