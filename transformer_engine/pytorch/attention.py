@@ -1096,8 +1096,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         (q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k) = ctx.saved_tensors[:6]
         (cu_seqlens_q_padded, cu_seqlens_kv_padded) = ctx.saved_tensors[6:8]
         cp_size = get_distributed_world_size(ctx.cp_group)
-        rng_states = ctx.saved_tensors[10 : 10 + cp_size]
-        attn_biases = ctx.saved_tensors[10 + cp_size : 10 + cp_size * 2]
+        rng_states = ctx.saved_tensors[8 : 8 + cp_size]
+        attn_biases = ctx.saved_tensors[8 + cp_size : 8 + cp_size * 2]
 
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
