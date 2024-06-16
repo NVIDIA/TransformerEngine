@@ -1642,8 +1642,6 @@ class AttnFuncWithCP(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
             attn_dbias,
             None,
             None,
