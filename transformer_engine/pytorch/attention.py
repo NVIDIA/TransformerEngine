@@ -4870,18 +4870,23 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_unfused_attention and qkv_format == "thd":
                 self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
                 use_unfused_attention = False
-            if (use_fused_attention
-                and qkv_format == "thd" 
-                and ((
-                  cu_seqlens_q_padded is not None
-                  and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
-                ) or (
-                  cu_seqlens_kv_padded is not None
-                  and torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
-                ))):
+            if (
+                use_fused_attention
+                and qkv_format == "thd"
+                and (
+                    (
+                        cu_seqlens_q_padded is not None
+                        and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+                    )
+                    or (
+                        cu_seqlens_kv_padded is not None
+                        and torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+                    )
+                )
+            ):
                 self.logger.debug(
-                  "Disabling FlashAttention for qkv_format = thd "
-                  "when there is padding between sequences."
+                    "Disabling FlashAttention for qkv_format = thd "
+                    "when there is padding between sequences."
                 )
                 use_flash_attention = False
 
