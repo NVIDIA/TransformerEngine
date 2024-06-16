@@ -857,12 +857,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         attn_mask_type="padding" if padding else "no_mask",
                                         attn_bias_type=attn_bias_type,
                                         attn_bias=attn_bias_inputs[i % 2],
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=(
+                                        cu_seqlens_q_padded=(
                                             None
-                                            if cu_seqlens_kv_padded is None
-                                            else cu_seqlens_kv_padded // 2
+                                            if cu_seqlens_q_padded is None
+                                            else cu_seqlens_q_padded // 2
                                         ),
+                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                                 if len(rest) > 0:
@@ -1378,10 +1378,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             TE_DType[kv.dtype],
                             aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=(
-                                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
+                            cu_seqlens_q_padded=(
+                                None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
                             ),
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
