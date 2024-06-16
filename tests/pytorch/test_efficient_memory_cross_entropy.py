@@ -104,11 +104,11 @@ def check_cross_entropy_bwd_cuda():
     grad_output_ptr = torch.empty_like(logits_max)
     grad_output_ptr.fill_(0.88).to(torch.float32)
 
-    target_mask_ptr = torch.empty_like(logits_max)
-    target_mask_ptr.fill_(0.12).to(torch.float32)
+    target_mask_ptr = torch.empty_like(logits_max, dtype = torch.bool)
+    target_mask_ptr.fill_(0).to(torch.bool)
 
-    masked_target_1d_ptr = torch.empty_like(logits_max, dtype=torch.int32)
-    masked_target_1d_ptr.fill_(1).to(torch.int32)
+    masked_target_1d_ptr = torch.empty_like(logits_max, dtype=torch.int64)
+    masked_target_1d_ptr.fill_(1).to(torch.int64)
     masked_target_1d_ptr = masked_target_1d_ptr.view(-1)
 
     n_dim = input_ptr.size(-1)

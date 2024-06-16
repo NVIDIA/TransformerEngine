@@ -453,7 +453,7 @@ template<typename dtype, int BlockSize>
 void __global__  CrossEntropyBwdKernel(dtype* grad_input_ptr, // grad_input_ptr as output [4096, 256k]
                                        float * grad_output_ptr, //[4096]
                                        dtype* input_ptr,//[4096, 256k]
-                                       float * target_mask_ptr,//[4096]
+                                       bool * target_mask_ptr,//[4096]
                                        long * masked_target_1d_ptr, //[4096]
                                        float* logits_max_ptr,//[4096]
                                        float* sum_exp_logits_ptr, //[4096]
@@ -466,7 +466,7 @@ void __global__  CrossEntropyBwdKernel(dtype* grad_input_ptr, // grad_input_ptr 
         size_t cur_input_ptr_begin = rowIdx * n_dim;
 
         float grad_output = grad_output_ptr[rowIdx];
-        float target_mask = target_mask_ptr[rowIdx];
+        bool target_mask = target_mask_ptr[rowIdx];
         long masked_target_1d = masked_target_1d_ptr[rowIdx];
         float logits_max = logits_max_ptr[rowIdx];
         float sum_exp_logits = sum_exp_logits_ptr[rowIdx];        
