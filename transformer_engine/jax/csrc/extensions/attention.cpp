@@ -146,7 +146,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     nvte_fused_attn_fwd_qkvpacked(
         qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), dummy_rng_state_tensor.data(), q_max_seqlen, is_training,
+        dummy_rng_state_tensor.data(), q_max_seqlen, is_training,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         query_workspace_tensor.data(), nullptr);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
@@ -210,7 +210,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                                   s_tensor.data(),  // not used for F16
                                   &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(),
                                   q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-                                  dummy_ragged_offset_tensor.data(), q_max_seqlen, scaling_factor,
+                                  q_max_seqlen, scaling_factor,
                                   dropout_probability, qkv_layout, bias_type, mask_type,
                                   query_workspace_tensor.data(), nullptr);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
@@ -333,7 +333,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
     nvte_fused_attn_fwd_qkvpacked(
         qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
-        &aux_output_tensors, q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
+        &aux_output_tensors, q_cu_seqlens_tensor.data(),
         dummy_ragged_offset_tensor.data(), rng_state_tensor.data(), q_max_seqlen,
         descriptor.is_training, descriptor.scaling_factor, dropout_probability, qkv_layout,
         bias_type, mask_type, workspace_tensor.data(), stream);
@@ -502,7 +502,7 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
                                   s_tensor.data(),  // not used for F16
                                   &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(),
                                   q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-                                  dummy_ragged_offset_tensor.data(), q_max_seqlen, scaling_factor,
+                                  q_max_seqlen, scaling_factor,
                                   dropout_probability, qkv_layout, bias_type, mask_type,
                                   workspace_tensor.data(), stream);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) {
