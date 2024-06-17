@@ -191,7 +191,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool,
+      .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
                     torch::Tensor>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
       .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
