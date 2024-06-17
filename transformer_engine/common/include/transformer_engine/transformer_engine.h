@@ -361,7 +361,7 @@ class TensorWrapper {
    *
    *  \return A raw pointer to tensor's data.
    */
-  void * dptr() const noexcept {
+  void *dptr() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_data(tensor_);
   }
@@ -370,7 +370,7 @@ class TensorWrapper {
    *
    *  \return A pointer to tensor's amax data.
    */
-  float * amax() const noexcept {
+  float *amax() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_amax(tensor_);
   }
@@ -379,7 +379,7 @@ class TensorWrapper {
    *
    *  \return A pointer to tensor's scale data.
    */
-  float * scale() const noexcept {
+  float *scale() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_scale(tensor_);
   }
@@ -388,7 +388,7 @@ class TensorWrapper {
    *
    *  \return A pointer to tensor's inverse of scale data.
    */
-  float * scale_inv() const noexcept {
+  float *scale_inv() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_scale_inv(tensor_);
   }

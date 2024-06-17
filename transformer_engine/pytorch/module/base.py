@@ -248,7 +248,7 @@ def initialize_ub(
                 atomic_gemm,
                 aggregate,
                 is_reduce_scatter,
-                fp8_buf
+                fp8_buf,
             )
         else:
             method = get_method(name)

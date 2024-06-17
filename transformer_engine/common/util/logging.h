@@ -7,10 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
+#include <cublas_v2.h>
 #include <cuda.h>
-#include <cublas_v2.h>
 #include <cuda_runtime_api.h>
-#include <cublas_v2.h>
 #include <cudnn.h>
 #include <nvrtc.h>
 

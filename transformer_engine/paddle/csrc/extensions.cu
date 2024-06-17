@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "common.h"
-
 #include "common/util/pybind_helper.h"
 
 namespace transformer_engine {

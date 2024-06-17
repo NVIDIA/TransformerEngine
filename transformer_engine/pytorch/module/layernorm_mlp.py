@@ -359,7 +359,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 get_workspace(),
                 bias=fc1_bias,
                 use_bias=(not bias_gelu_nvfusion) and use_fc1_bias,
-                gelu=not bias_gelu_nvfusion and (activation == 'gelu'),
+                gelu=not bias_gelu_nvfusion and (activation == "gelu"),
                 ub_algo=(
                     tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None
                 ),
@@ -785,7 +785,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     rs_out = torch.empty(dim_size, dtype=ctx.activation_dtype, device=dgelu.device)
                     if ub_obj_dgrad.is_p2p_overlap():
                         if ub_obj_dgrad.is_atomic_gemm():
-                            ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P
+                            ub_algo = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P
                         else:
                             ub_algo = tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS_P2P
                     else:
@@ -1009,7 +1009,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             if ctx.ub_bulk_wgrad
                             else None
                         ),
-                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
+                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                     )
                     clear_tensor_data(ln_out_total, dgelu)
 

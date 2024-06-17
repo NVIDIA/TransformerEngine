@@ -7,8 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_USERBUFFERS_H_
 #define TRANSFORMER_ENGINE_COMMON_USERBUFFERS_H_
 
-#include "ipcsocket.h"
-
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <pthread.h>
@@ -16,24 +14,26 @@
 #include <chrono>
 #include <functional>
 #include <stdexcept>
-#include <functional>
+
+#include "ipcsocket.h"
 
 #ifdef UB_MPI_BOOTSTRAP
-#include <stdexcept>
 #include <mpi.h>
 
-#define UB_MPI_CHECK(expr)                                                                       \
-  do {                                                                                           \
-    const int mpicode = (expr);                                                                  \
-    if (mpicode != MPI_SUCCESS) {                                                                \
-      char mpimsg[MPI_MAX_ERROR_STRING];                                                         \
-      int mpilen;                                                                                \
-      MPI_Error_string(mpicode, mpimsg, &mpilen);                                                \
-      std::vector<char> errmsg(1024);  \
-      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s",  \
-               __FILE__, __LINE__, __func__, mpimsg);  \
-      throw std::runtime_error(errmsg.data());  \
-    }                                                                                            \
+#include <stdexcept>
+
+#define UB_MPI_CHECK(expr)                                                                   \
+  do {                                                                                       \
+    const int mpicode = (expr);                                                              \
+    if (mpicode != MPI_SUCCESS) {                                                            \
+      char mpimsg[MPI_MAX_ERROR_STRING];                                                     \
+      int mpilen;                                                                            \
+      MPI_Error_string(mpicode, mpimsg, &mpilen);                                            \
+      std::vector<char> errmsg(1024);                                                        \
+      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s", __FILE__, __LINE__, \
+               __func__, mpimsg);                                                            \
+      throw std::runtime_error(errmsg.data());                                               \
+    }                                                                                        \
   } while (false)
 
 typedef MPI_Comm ExtComm;
@@ -52,15 +52,11 @@ void ub_bcast(void *data, size_t bytes, int src, ExtComm comm) {
   UB_MPI_CHECK(MPI_Bcast(data, bytes, MPI_BYTE, src, comm));
 }
 
-void ub_barrier(ExtComm comm) {
-  UB_MPI_CHECK(MPI_Barrier(comm));
-}
+void ub_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
 
-void ub_free(void *ptr) {
-  free(ptr);
-}
+void ub_free(void *ptr) { free(ptr); }
 #else
-typedef char* ExtComm;
+typedef char *ExtComm;
 #endif
 
 #ifdef UB_MPI_BOOTSTRAP
