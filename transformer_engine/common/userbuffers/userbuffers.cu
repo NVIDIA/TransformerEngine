@@ -24,26 +24,27 @@
 
 #define MAX_THREADS 1024
 
-#define ATOMIC_CONSUMER(chunk)                                             \
-  if (counters) {                                                          \
-    if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
-      while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
-      }                                                                    \
-      ((unsigned int *)counters)[chunk] = 1;                               \
-      asm volatile("fence.sc.gpu;\n");                                     \
-    }                                                                      \
-    if (blockIdx.x == 0)                                                   \
-      __syncthreads();                                                     \
+#define ATOMIC_CONSUMER(chunk)                                                        \
+  if (counters) {                                                                     \
+    if (threadIdx.x == 0 && blockIdx.x == 0) {                                        \
+      while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + chunk, 0, 0))) { \
+      }                                                                               \
+      static_cast<unsigned int *>(counters)[chunk] = 1;                               \
+      asm volatile("fence.sc.gpu;\n");                                                \
+    }                                                                                 \
+    if (blockIdx.x == 0)                                                              \
+      __syncthreads();                                                                \
   }
 
-#define ATOMIC_PRODUCER(chunk)             \
-  if (counters) {                          \
-    ((unsigned int *)counters)[chunk] = 0; \
+#define ATOMIC_PRODUCER(chunk)                        \
+  if (counters) {                                     \
+    static_cast<unsigned int *>(counters)[chunk] = 0; \
   }
 
 // Return true if producer > consumer, otherwise false while preventing integer overflow
 // If we expect that producer will be 2B+ messages behind consumer
-#define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
+#define CHECK_IDS(producer, consumer) \
+  ((static_cast<unsigned>(producer) - static_cast<unsigned>(consumer)) & (~INT_MAX))
 
 // Strip the path from a full filename
 #define FILENAME(file)                                      \
@@ -1015,16 +1016,16 @@ __global__ void __launch_bounds__(MAX_THREADS)
   if (counters) {
     if (threadIdx.x == 0) {
       // spin-lock on counter from producer
-      while (0 != (atomicCAS(((unsigned int *)counters), 0, 0))) {
+      while (0 != (atomicCAS(static_cast<unsigned int *>(counters), 0, 0))) {
       }
 
       // make sure all threadblocks have read/waited on counters.
-      atomicInc(((unsigned int *)counters) + numchunks, gridDim.x - 1);
-      while (0 != (atomicCAS(((unsigned int *)counters) + numchunks, 0, 0))) {
+      atomicInc(static_cast<unsigned int *>(counters) + numchunks, gridDim.x - 1);
+      while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + numchunks, 0, 0))) {
       }
 
       // reset counter for next producer.
-      ((unsigned int *)counters)[0] = 1;
+      static_cast<unsigned int *>(counters)[0] = 1;
       asm volatile("fence.sc.gpu;\n");
     }
   }
@@ -1106,16 +1107,17 @@ __global__ void __launch_bounds__(MAX_THREADS)
     if (counters) {
       if (threadIdx.x == 0) {
         // spin-lock on counter from producer
-        while (0 != (atomicCAS(((unsigned int *)counters) + chunk_i, 0, 0))) {
+        while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + chunk_i, 0, 0))) {
         }
 
         // make sure all threadblocks have read/waited on counters.
-        atomicInc(((unsigned int *)counters) + numchunks + chunk_i, gridDim.x - 1);
-        while (0 != (atomicCAS(((unsigned int *)counters) + numchunks + chunk_i, 0, 0))) {
+        atomicInc(static_cast<unsigned int *>(counters) + numchunks + chunk_i, gridDim.x - 1);
+        while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + numchunks + chunk_i,
+                               0, 0))) {
         }
 
         // reset counter for next producer.
-        ((unsigned int *)counters)[chunk_i] = 1;
+        static_cast<unsigned int *>(counters)[chunk_i] = 1;
         asm volatile("fence.sc.gpu;\n");
       }
     }
@@ -2106,7 +2108,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
     // Decrement atomic val to signal current output tile finish
     if (counters) {
-      ((unsigned int *)counters)[0] = 0;
+      static_cast<unsigned int *>(counters)[0] = 0;
       asm volatile("fence.sc.gpu;\n");
     }
   }
@@ -2177,15 +2179,15 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
     if (blockIdx.x == 0 && threadIdx.x == 0) {
       // Decrement atomic val to signal current output tile finish
       if (counters) {
-        ((unsigned int *)counters)[recv_chunk_id /* chunk_i + 1 */] = 0;
+        static_cast<unsigned int *>(counters)[recv_chunk_id /* chunk_i + 1 */] = 0;
         asm volatile("fence.sc.gpu;\n");
       }
     }
 
     // sync all CTAs before moving to next chunk.
     if (threadIdx.x == 0) {
-      atomicInc(((unsigned int *)counters) + nchunks + chunk_i, gridDim.x - 1);
-      while (0 != (atomicCAS(((unsigned int *)counters) + nchunks + chunk_i, 0, 0))) {
+      atomicInc(static_cast<unsigned int *>(counters) + nchunks + chunk_i, gridDim.x - 1);
+      while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + nchunks + chunk_i, 0, 0))) {
       }
     }
     __syncthreads();
@@ -2323,16 +2325,10 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   void *send_dstptr =
       reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
   if (comm->use_ce) {
-<<<<<<< HEAD:transformer_engine/common/userbuffers/userbuffers.cu
-    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
+    // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     NVTE_CHECK_CUDA(
       cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
-=======
-    // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-    CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
->>>>>>> main:transformer_engine/pytorch/csrc/userbuffers/userbuffers.cu
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2457,7 +2453,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
   // Decrement atomic val to signal current output tile finish
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    ((int *)atomic_ptr)[chunk_i] = 0;
+    reinterpret_cast<int *>(atomic_ptr)[chunk_i] = 0;
   }
 
   // COMM kernel need to explicitely flash gmem.
@@ -2470,9 +2466,9 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
 static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
   // Wait for producer to change the val to 0, which signal producer ready
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    while (0 != (atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
+    while (0 != (atomicCAS(reinterpret_cast<unsigned int *>(atomic_ptr) + chunk_i, 0, 0))) {
     }
-    ((unsigned int *)atomic_ptr)[chunk_i] = 1;
+    static_cast<unsigned int *>(atomic_ptr)[chunk_i] = 1;
     asm volatile("fence.sc.gpu;\n");
   }
 }
@@ -2482,9 +2478,9 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
   // Wait for producer to change the val to 0, which signal producer ready
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     for (int i = first_chunk_i; i < num_chunks; i++) {
-      while (0 != (atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
+      while (0 != (atomicCAS(reinterpret_cast<unsigned int *>(atomic_ptr) + i, 0, 0))) {
       }
-      ((unsigned int *)atomic_ptr)[i] = 1;
+      static_cast<unsigned int *>(atomic_ptr)[i] = 1;
       asm volatile("fence.sc.gpu;\n");
     }
   }

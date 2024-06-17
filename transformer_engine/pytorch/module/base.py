@@ -199,10 +199,18 @@ def initialize_ub(
 
     def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
         pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
+        use_nccl = torch.distributed.get_backend(pg) == 'nccl'
+        global_data = torch.zeros(
+            local_data.numel() * torch.distributed.get_world_size(pg),
+            dtype=local_data.dtype,
+            device='cuda' if use_nccl else 'cpu'
+        )
+        torch.distributed.all_gather_into_tensor(
+            global_data,
+            local_data.cuda() if use_nccl else local_data,
+            group=pg
+        )
+        return global_data.cpu() if use_nccl else global_data
 
     def barrier_callback(group: str) -> None:
         pg = None if group == "world" else tp_group
@@ -232,7 +240,7 @@ def initialize_ub(
             use_ce = ub_cfg.get("use_ce", True)
             aggregate = ub_cfg.get("aggregate", False)
             atomic_gemm = ub_cfg.get("atomic_gemm", False)
-            is_reduce_scatter = True if name in layers_reduce_scatter_overlap else False
+            is_reduce_scatter = name in layers_reduce_scatter_overlap
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
                 ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
@@ -255,7 +263,7 @@ def initialize_ub(
             add_ub(
                 name,
                 method=method,
-                is_reduce_scatter=True if name in layers_reduce_scatter_overlap else False,
+                is_reduce_scatter=name in layers_reduce_scatter_overlap,
                 num_splits=4 if method == "pipeline" else 0,
                 fp8_buf=name in layers_all_gather_overlap,
             )
