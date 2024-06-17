@@ -640,11 +640,11 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
 
   auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_fwd_qkvpacked(
-      te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
-      te_cu_seqlens.data(), dummy_seq_offsets.data(), te_rng_state.data(),
-      max_seqlen, is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-      attn_mask_type_enum, workspace.data(), QKV.stream());
+  nvte_fused_attn_fwd_qkvpacked(te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(),
+                                &nvte_aux_tensor_pack, te_cu_seqlens.data(),
+                                dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen,
+                                is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                                attn_mask_type_enum, workspace.data(), QKV.stream());
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
@@ -654,11 +654,11 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
   output_s->data.dptr = GetOptionalDataPtr(softmax_aux);
 
   // execute the kernel
-  nvte_fused_attn_fwd_qkvpacked(
-      te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
-      te_cu_seqlens.data(), dummy_seq_offsets.data(), te_rng_state.data(),
-      max_seqlen, is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-      attn_mask_type_enum, workspace.data(), QKV.stream());
+  nvte_fused_attn_fwd_qkvpacked(te_QKV.data(), te_Bias.data(), te_S.data(), te_O.data(),
+                                &nvte_aux_tensor_pack, te_cu_seqlens.data(),
+                                dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen,
+                                is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                                attn_mask_type_enum, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -725,22 +725,22 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
 
   auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_bwd_qkvpacked(
-      te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
-      te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(),
-      max_seqlen, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-      attn_mask_type_enum, workspace.data(), QKV.stream());
+  nvte_fused_attn_bwd_qkvpacked(te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
+                                &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
+                                te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
+                                attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                                attn_mask_type_enum, workspace.data(), QKV.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
 
   // execute kernel
-  nvte_fused_attn_bwd_qkvpacked(
-      te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
-      te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(),
-      max_seqlen, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-      attn_mask_type_enum, workspace.data(), QKV.stream());
+  nvte_fused_attn_bwd_qkvpacked(te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
+                                &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
+                                te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
+                                attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
+                                attn_mask_type_enum, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
