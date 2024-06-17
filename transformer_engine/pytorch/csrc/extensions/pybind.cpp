@@ -10,6 +10,11 @@
 #include "../extensions.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // Permutation functions
+  m.def("moe_permute_topK_op", moe_permute_topK_op);
+  m.def("moe_recover_topK_op", moe_recover_topK_op);
+  m.def("moe_recover_topK_bwd_op", moe_recover_topK_bwd_op);
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
