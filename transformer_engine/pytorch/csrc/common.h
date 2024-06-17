@@ -28,6 +28,7 @@
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
+#include <transformer_engine/permutation.h>
 #include <transformer_engine/recipe.h>
 #include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/softmax.h>
@@ -165,5 +166,11 @@ at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype);
 at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 
 void* getDataPtr(at::Tensor tensor, int offset = 0);
+
+template <typename T>
+inline T *get_ptr(torch::Tensor &t)
+{
+    return reinterpret_cast<T *>(t.data_ptr());
+}
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
