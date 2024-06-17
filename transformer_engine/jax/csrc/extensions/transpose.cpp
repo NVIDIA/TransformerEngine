@@ -43,7 +43,7 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
   auto *input_cast = buffers[4];
   auto *input_cast_trans = buffers[5];
   float *amax_out = reinterpret_cast<float *>(buffers[6]);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX CastTranspose primitive.");
 
   const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
   if (!use_fp8(desc.out_dtype)) {
@@ -100,7 +100,8 @@ void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
   void *workspace_ptr = buffers[8];
 
   const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out,
+             "amax not bound to amax_out in TE/JAX DBiasCastTranspose primitive.");
   if (!use_fp8(desc.out_dtype)) {
     scale = nullptr;
     scale_inv = nullptr;
