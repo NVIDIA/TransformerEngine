@@ -4504,8 +4504,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.window_size = check_set_window_size(attn_mask_type, self.window_size)
-        self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
-        self.tp_group = tp_group
+        if tp_group is None:
+            self.tp_size = tp_size
+            if tp_size == 1:
+                self.set_tensor_parallel_group(tp_group)
+        else:
+            self.tp_size = get_distributed_world_size(tp_group)
+            self.set_tensor_parallel_group(tp_group)
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
         self.layer_number = 1 if layer_number is None else layer_number
