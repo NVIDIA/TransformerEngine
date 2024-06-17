@@ -214,7 +214,8 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
   auto *amax_out = buffers[9];
   auto *workspace = buffers[10];
   auto *barrier = buffers[11];
-  assert(amax_out == amax);
+  NVTE_CHECK(amax_out == amax,
+             "amax not bound to amax_out in TE/JAX LayerNormForwardFP8 primitive");
 
   const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
   auto batch_size = desc.batch_size;
@@ -227,7 +228,6 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
 
   auto out_dtype = DType::kFloat8E4M3;
 
@@ -263,7 +263,6 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
   auto eps = desc.eps;
   auto out_dtype = in_dtype;
   auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                        eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
@@ -288,7 +287,6 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
   auto dbeta_part_dtype = desc.dbeta_part_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
 
   auto *ograd = buffers[0];
   auto *mu = buffers[1];
@@ -321,7 +319,7 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
   auto *amax_out = buffers[7];
   auto *workspace = buffers[8];
   auto *barrier = buffers[9];
-  assert(amax_out == amax);
+  NVTE_CHECK(amax_out == amax, "amax not bound to amax_out in TE/JAX RSMNormForwardFP8 primitive.");
 
   void *bias = nullptr;
   void *mu = nullptr;
@@ -337,7 +335,6 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
   auto out_dtype = DType::kFloat8E4M3;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
@@ -371,7 +368,6 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
   auto out_dtype = in_dtype;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
