@@ -76,7 +76,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, true, 4>(
+        moe_permute_topK_kernel_launcher<float, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -92,7 +92,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, true, 8>(
+        moe_permute_topK_kernel_launcher<half, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -106,10 +106,9 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 
         break;
     }
-#ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, true, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -123,11 +122,9 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 
         break;
     }
-#endif
-#ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -143,7 +140,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -157,7 +154,6 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 
         break;
     }
-#endif
     default:
         throw std::runtime_error("Wrong activation tensor type.");
     }
@@ -183,7 +179,7 @@ Tensor moe_recover_topK_op(
         torch::empty({num_tokens, num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
 
     int *row_id_map_ptr = get_ptr<int>(row_id_map);
-    float *prob_ptr = (prob.defined()) ? get_ptr<float>(prob) : nullptr;
+    float *prob_ptr = (prob.numel() > 0) ? get_ptr<float>(prob) : nullptr;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
     void *input_ptr = getDataPtr(input, 0);
@@ -193,7 +189,7 @@ Tensor moe_recover_topK_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, false, 4>(
+        moe_permute_topK_kernel_launcher<float, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -209,7 +205,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, false, 8>(
+        moe_permute_topK_kernel_launcher<half, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -223,10 +219,9 @@ Tensor moe_recover_topK_op(
 
         break;
     }
-#ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, false, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -240,11 +235,9 @@ Tensor moe_recover_topK_op(
 
         break;
     }
-#endif
-#ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, false, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -260,7 +253,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, false, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -274,7 +267,6 @@ Tensor moe_recover_topK_op(
 
         break;
     }
-#endif
     default:
         throw std::runtime_error("Wrong activation tensor type.");
     }
@@ -288,12 +280,12 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     Tensor  row_id_map,
     Tensor  prob)
 {
-    const int num_topK = (prob.defined()) ? prob.size(1) : 1;
-    const int num_tokens = (prob.defined()) ? prob.size(0) : row_id_map.size(0);
+    const int num_topK = (prob.numel() > 0) ? prob.size(1) : 1;
+    const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
     const int num_cols = input_bwd.size(1);
 
     int *row_id_map_ptr = get_ptr<int>(row_id_map);
-    float *prob_ptr = (prob.defined()) ? get_ptr<float>(prob) : nullptr;
+    float *prob_ptr = (prob.numel() > 0) ? get_ptr<float>(prob) : nullptr;
 
     // activations type
     const at::ScalarType _st = input_bwd.scalar_type();
@@ -315,7 +307,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, true, 4>(
+        moe_permute_topK_kernel_launcher<float, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -333,7 +325,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, true, 8>(
+        moe_permute_topK_kernel_launcher<half, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -349,10 +341,9 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 
         break;
     }
-#ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, true, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -368,11 +359,9 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 
         break;
     }
-#endif
-#ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -390,7 +379,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -406,7 +395,6 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 
         break;
     }
-#endif
     default:
         throw std::runtime_error("Wrong activation tensor type.");
     }
