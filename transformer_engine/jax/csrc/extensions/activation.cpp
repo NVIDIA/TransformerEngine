@@ -108,7 +108,7 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
   float *scale_inv = reinterpret_cast<float *>(buffers[3]);
   auto *output = buffers[4];
   float *amax_out = reinterpret_cast<float *>(buffers[5]);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX ActLuFP8 primitive.");
 
   const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
   if (!use_fp8(desc.out_dtype)) {
@@ -221,7 +221,8 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
   void *workspace_ptr = buffers[9];
 
   const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out,
+             "amax not bound to amax_out in TE/JAX DActLuDBiasCastTranspose primitive.");
   if (!use_fp8(desc.out_dtype)) {
     scale = nullptr;
     scale_inv = nullptr;
@@ -291,7 +292,8 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
   float *amax_out = reinterpret_cast<float *>(buffers[7]);
 
   const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out,
+             "amax not bound to amax_out in TE/JAX DGatedActLuCastTranspose primitive.");
   if (!use_fp8(desc.out_dtype)) {
     scale = nullptr;
     scale_inv = nullptr;

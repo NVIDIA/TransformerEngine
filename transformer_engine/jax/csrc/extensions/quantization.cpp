@@ -17,7 +17,7 @@ void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t op
   auto *scale_inv = reinterpret_cast<float *>(buffers[3]);
   auto *output = buffers[4];
   auto *amax_out = reinterpret_cast<float *>(buffers[5]);
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX Quantize primitive.");
 
   const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
   auto shape = desc.shape.to_vector();
