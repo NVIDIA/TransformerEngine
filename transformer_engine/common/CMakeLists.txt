@@ -57,6 +57,7 @@ list(APPEND transformer_engine_SOURCES
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
      layer_norm/ln_fwd_cuda_kernel.cu
+     permutation/permutation.cu
      rmsnorm/rmsnorm_api.cpp
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu

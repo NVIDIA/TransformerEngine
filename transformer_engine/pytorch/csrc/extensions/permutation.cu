@@ -69,17 +69,14 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     int *row_id_map_ptr = get_ptr<int>(row_id_map);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
+    void *input_ptr = getDataPtr(input, 0);
+    void *permuted_output_ptr = getDataPtr(permuted_output, 0);
+
     switch (_st)
     {
     case at::ScalarType::Float:
     {
-        using dType = float;
-        using dTypeCompute = float;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *permuted_output_ptr = get_ptr<dType>(permuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 4>(
+        moe_permute_topK_kernel_launcher<float, true, 4>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -95,13 +92,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Half:
     {
-        using dType = cutlass::half_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *permuted_output_ptr = get_ptr<dType>(permuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 8>(
+        moe_permute_topK_kernel_launcher<half, true, 8>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -118,13 +109,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 #ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        using dType = cutlass::bfloat16_t;
-        using dTypeCompute = cutlass::bfloat16_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *permuted_output_ptr = get_ptr<dType>(permuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, true, 8>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -142,13 +127,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 #ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        using dType = cutlass::float_e5m2_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *permuted_output_ptr = get_ptr<dType>(permuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true, 16>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -164,13 +143,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        using dType = cutlass::float_e4m3_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *permuted_output_ptr = get_ptr<dType>(permuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true, 16>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -213,17 +186,14 @@ Tensor moe_recover_topK_op(
     float *prob_ptr = (prob.defined()) ? get_ptr<float>(prob) : nullptr;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
+    void *input_ptr = getDataPtr(input, 0);
+    void *unpermuted_output_ptr = getDataPtr(unpermuted_output, 0);
+
     switch (_st)
     {
     case at::ScalarType::Float:
     {
-        using dType = float;
-        using dTypeCompute = float;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *unpermuted_output_ptr = get_ptr<dType>(unpermuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, false, 4>(
+        moe_permute_topK_kernel_launcher<float, false, 4>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -239,13 +209,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Half:
     {
-        using dType = cutlass::half_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *unpermuted_output_ptr = get_ptr<dType>(unpermuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, false, 8>(
+        moe_permute_topK_kernel_launcher<half, false, 8>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -262,13 +226,7 @@ Tensor moe_recover_topK_op(
 #ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        using dType = cutlass::bfloat16_t;
-        using dTypeCompute = cutlass::bfloat16_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *unpermuted_output_ptr = get_ptr<dType>(unpermuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, false, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, false, 8>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -286,13 +244,7 @@ Tensor moe_recover_topK_op(
 #ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        using dType = cutlass::float_e5m2_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *unpermuted_output_ptr = get_ptr<dType>(unpermuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, false, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, false, 16>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -308,13 +260,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        using dType = cutlass::float_e4m3_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_ptr = get_ptr<dType>(input);
-        dType *unpermuted_output_ptr = get_ptr<dType>(unpermuted_output);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, false, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, false, 16>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -361,18 +307,15 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
+    void *input_bwd_ptr = getDataPtr(input_bwd, 0);
+    void *input_fwd_ptr = getDataPtr(input_fwd, 0);
+    void *act_grad_ptr = getDataPtr(act_grad, 0);
+
     switch (_st)
     {
     case at::ScalarType::Float:
     {
-        using dType = float;
-        using dTypeCompute = float;
-
-        dType *input_bwd_ptr = get_ptr<dType>(input_bwd);
-        dType *input_fwd_ptr = get_ptr<dType>(input_fwd);
-        dType *act_grad_ptr = get_ptr<dType>(act_grad);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 4>(
+        moe_permute_topK_kernel_launcher<float, true, 4>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -390,14 +333,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Half:
     {
-        using dType = cutlass::half_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_bwd_ptr = get_ptr<dType>(input_bwd);
-        dType *input_fwd_ptr = get_ptr<dType>(input_fwd);
-        dType *act_grad_ptr = get_ptr<dType>(act_grad);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 8>(
+        moe_permute_topK_kernel_launcher<half, true, 8>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -416,14 +352,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 #ifdef ENABLE_BF16
     case at::ScalarType::BFloat16:
     {
-        using dType = cutlass::bfloat16_t;
-        using dTypeCompute = cutlass::bfloat16_t;
-
-        dType *input_bwd_ptr = get_ptr<dType>(input_bwd);
-        dType *input_fwd_ptr = get_ptr<dType>(input_fwd);
-        dType *act_grad_ptr = get_ptr<dType>(act_grad);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 8>(
+        moe_permute_topK_kernel_launcher<__nv_bfloat16, true, 8>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -443,14 +372,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
 #ifdef ENABLE_FP8
     case at::ScalarType::Float8_e5m2:
     {
-        using dType = cutlass::float_e5m2_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_bwd_ptr = get_ptr<dType>(input_bwd);
-        dType *input_fwd_ptr = get_ptr<dType>(input_fwd);
-        dType *act_grad_ptr = get_ptr<dType>(act_grad);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true, 16>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -468,14 +390,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        using dType = cutlass::float_e4m3_t;
-        using dTypeCompute = cutlass::half_t;
-
-        dType *input_bwd_ptr = get_ptr<dType>(input_bwd);
-        dType *input_fwd_ptr = get_ptr<dType>(input_fwd);
-        dType *act_grad_ptr = get_ptr<dType>(act_grad);
-
-        moe_permute_topK_kernel_launcher<dType, dTypeCompute, true, 16>(
+        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true, 16>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
