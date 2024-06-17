@@ -236,10 +236,10 @@ __global__ void moe_permute_topK_kernel(const T *input_bwd,
     }
 }
 
-template <typename TInput, bool FWD, int kElementsPerAccess>
+template <typename TInput, bool FWD>
 void moe_permute_topK_kernel_launcher(
-    const void *input,
-    void *output,
+    const void *input_,
+    void *output_,
     const int *sorted_row_id,
     int *row_id_map,
     const float *prob,
@@ -249,7 +249,7 @@ void moe_permute_topK_kernel_launcher(
     const int num_out_tokens,
     cudaStream_t stream,
     float *prob_grad,
-    const void *input_fwd)
+    const void *input_fwd_)
 {
     // Convert to cutlass type
     using T_fp16 = typename cutlass::platform::conditional<
@@ -270,6 +270,12 @@ void moe_permute_topK_kernel_launcher(
         (cutlass::platform::is_same<T, cutlass::float_e5m2_t>::value ||
         cutlass::platform::is_same<T, cutlass::float_e4m3_t>::value),
         cutlass::half_t, T>::type;
+
+    static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<T>::value;
+
+    const T* input = reinterpret_cast<const T *>(input_);
+    T* output = reinterpret_cast<T *>(output_);
+    const T* input_fwd = reinterpret_cast<const T *>(input_fwd_);
 
     if (FWD)
     {
@@ -429,3 +435,31 @@ void moe_permute_topK_kernel_launcher(
         }
     }
 }
+
+
+
+#define FUNCTION_INSTANTIATION(T, FWD)                                                             \
+template void moe_permute_topK_kernel_launcher<T, FWD>(                                            \
+    const void *input,                                                                             \
+    void *output,                                                                                  \
+    const int *sorted_row_id,                                                                      \
+    int *row_id_map,                                                                               \
+    const float *prob,                                                                             \
+    const int num_rows,                                                                            \
+    const int num_topK,                                                                            \
+    const int num_cols,                                                                            \
+    const int num_out_tokens,                                                                      \
+    cudaStream_t stream,                                                                           \
+    float *prob_grad,                                                                              \
+    const void *input_fwd);
+
+FUNCTION_INSTANTIATION(float, true)
+FUNCTION_INSTANTIATION(float, false)
+FUNCTION_INSTANTIATION(half, true)
+FUNCTION_INSTANTIATION(half, false)
+FUNCTION_INSTANTIATION(__nv_bfloat16, true)
+FUNCTION_INSTANTIATION(__nv_bfloat16, false)
+FUNCTION_INSTANTIATION(__nv_fp8_e5m2, true)
+FUNCTION_INSTANTIATION(__nv_fp8_e5m2, false)
+FUNCTION_INSTANTIATION(__nv_fp8_e4m3, true)
+FUNCTION_INSTANTIATION(__nv_fp8_e4m3, false)

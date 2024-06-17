@@ -8,5 +8,6 @@ from .linear import Linear
 from .grouped_linear import GroupedLinear
 from .layernorm_mlp import LayerNormMLP
 from .layernorm import LayerNorm
+from .permutation import permute, unpermute
 from .rmsnorm import RMSNorm
 from .base import initialize_ub, destroy_ub
