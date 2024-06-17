@@ -139,6 +139,7 @@ class TransformerLayer(paddle.nn.Layer):
         attention_dropout_rng_state_name: str = "local_seed",
         hidden_dropout_rng_state_name: str = "global_seed",
         backend: str = "transformer_engine",
+        assume_static_shape: bool = True,
     ) -> None:
         super().__init__()
 
@@ -154,6 +155,7 @@ class TransformerLayer(paddle.nn.Layer):
         self.tensor_parallel = self.tp_size > 1
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
+        self.assume_static_shape = assume_static_shape
         # SP needs local seed for hidden dropout
         if self.sequence_parallel and self.hidden_dropout_rng_state_name == "global_seed":
             warnings.warn(
@@ -196,6 +198,7 @@ class TransformerLayer(paddle.nn.Layer):
             attn_mask_type=self_attn_mask_type,
             input_layernorm=not output_layernorm,
             attention_type="self",
+            assume_static_shape=self.assume_static_shape,
         )
 
         if layer_type == "decoder":
@@ -205,6 +208,7 @@ class TransformerLayer(paddle.nn.Layer):
                 attn_mask_type="padding",
                 input_layernorm=True,
                 attention_type="cross",
+                assume_static_shape=self.assume_static_shape,
             )
 
         self.layernorm_mlp = LayerNormMLP(

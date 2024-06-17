@@ -13,6 +13,11 @@ import paddle
 import paddle.distributed.fleet.base.topology as tp
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 from paddle.distributed.fleet.layers.mpu import mp_ops
+from paddle.distributed.fleet.meta_parallel import (
+    PipelineParallel,
+    PipelineParallelMicroStepLocations,
+    register_global_pipeline_parallel_hook,
+)
 
 from .constants import dist_group_type
 
@@ -52,6 +57,19 @@ def get_tp_group_and_world_size(
         )
 
     return model_parallel_group, world_size
+
+
+def get_pp_degree() -> int:
+    if not (paddle.distributed.is_initialized()):
+        return 1
+
+    return tp._HYBRID_PARALLEL_GROUP.get_pipe_parallel_world_size()
+
+
+def register_pp_fwd_begin_hook(forward_begin_hook):
+    register_global_pipeline_parallel_hook(
+        PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
+    )
 
 
 @contextmanager

@@ -65,6 +65,10 @@ class FP8State:
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
         self._fp8_recompute_buffer = FP8RecomputeBuffer()
+        self._fp8_first_module_fp8_meta = None
+        self._fp8_first_module_tp_group = None
+        self._fp8_first_module_tp_size = 1
+        self._bwd_finalize = True
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -115,6 +119,35 @@ class FP8State:
     def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
         """Returns global fp8 recompute buffer."""
         return self._fp8_recompute_buffer
+
+    def set_first_module_state(
+        self, fp8_meta: Dict[str, Any], tp_group: dist_group_type, tp_size: int
+    ):
+        """Set fp8 first module state for finalizing fp8"""
+        self._fp8_first_module_fp8_meta = fp8_meta
+        self._fp8_first_module_tp_group = tp_group
+        self._fp8_first_module_tp_size = tp_size
+
+    def get_first_module_state(self) -> (Dict[str, Any], dist_group_type, int):
+        """Get fp8 first module state for finalizing fp8"""
+        return (
+            self._fp8_first_module_fp8_meta,
+            self._fp8_first_module_tp_group,
+            self._fp8_first_module_tp_size,
+        )
+
+    def finalize_fp8_bwd_buffer(self):
+        return self._fp8_bwd_buffer.finalize(
+            self._fp8_first_module_fp8_meta,
+            self._fp8_first_module_tp_group,
+            self._fp8_first_module_tp_size,
+        )
+
+    def disable_bwd_finalize(self):
+        self._bwd_finalize = False
+
+    def is_bwd_finalize(self):
+        return self._bwd_finalize
 
     def enter(
         self,
@@ -235,6 +268,7 @@ def amax_and_scale_update(
     fp8_meta: Dict[str, Any],
     fwd_update: bool,
     update_weight_scale_inv: bool = True,
+    current_step_id_tensor: Optional[Any] = None,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
@@ -251,6 +285,9 @@ def amax_and_scale_update(
             _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
             non_weight_mask=non_weight_mask,
             fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
+            current_step_id_tensor=current_step_id_tensor,
+            update_weight_scale_inv=update_weight_scale_inv,
+            fp8_max=fp8_meta[fp8_max_key],
             margin=float(fp8_meta["recipe"].margin),
             amax_compute=amax_compute,
         )

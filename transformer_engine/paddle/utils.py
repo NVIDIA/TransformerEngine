@@ -10,6 +10,24 @@ import paddle.nn.functional as F
 from .cpp_extensions import swiglu_pd
 
 
+class _cudaGraphEmptyTensorManager:
+
+    def __init__(self):
+        self.tensor = {}
+
+    def __contains__(self, key):
+        return self.tensor.__contains__(key)
+
+    def __setitem__(self, key, value):
+        return self.tensor.__setitem__(key, value)
+
+    def __getitem__(self, key):
+        return self.tensor[key].zero_()
+
+
+cudagraph_fp8_meta_update_manager = _cudaGraphEmptyTensorManager()
+
+
 def cast_if_needed(
     tensor: Union[paddle.Tensor, None], dtype: paddle.dtype
 ) -> Union[paddle.Tensor, None]:
@@ -84,11 +102,6 @@ def mask_to_cu_seqlens(mask: paddle.Tensor, need_kv: bool = False) -> paddle.Ten
         return q_cu_seqlens, None
     kv_actual_seqlens = paddle.sum(mask[:, :, 0, :].logical_not(), axis=(-1, -2), dtype="int32")
     kv_cu_seqlens = paddle.cumsum(kv_actual_seqlens)
-    kv_cu_seqlens = paddle.concat([paddle.zeros([1], dtype=paddle.int32), kv_cu_seqlens], axis=0)
-    return q_cu_seqlens, kv_cu_seqlens
-
-
-def divide(numerator: int, denominator: int) -> int:
     """Ensure that numerator is divisible by the denominator and return
     the division value."""
     assert numerator % denominator == 0, f"{numerator} is not divisible by {denominator}"

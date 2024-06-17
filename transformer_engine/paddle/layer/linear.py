@@ -74,29 +74,7 @@ def _linear_fwd_fp8(
     else:
         inputmat_total = inputmat
 
-    update_fp8_weights = is_first_microbatch is None or is_first_microbatch
-    if is_grad_enabled:
-        if update_fp8_weights:
-            weight_fp8, weight_t_fp8 = cast_transpose(
-                weight,
-                fp8_meta["scaling_fwd"],
-                weight_fp8_index,
-                fp8_dtype_forward,
-                cast_out=weight_fp8,
-                transpose_out=weight_t_fp8,
-            )
-    else:
-        weight_t_fp8 = None
-        if update_fp8_weights:
-            weight_fp8 = cast_to_fp8(
-                weight,
-                fp8_meta["scaling_fwd"],
-                weight_fp8_index,
-                fp8_dtype_forward,
-                out=weight_fp8,
-            )
-
-    out, _ = fp8_gemm(
+    out = fp8_gemm(
         weight_fp8,
         fp8_meta["scaling_fwd"].scale_inv,
         weight_fp8_index,
@@ -301,9 +279,11 @@ def _linear_bwd_fp8(
         if parallel_mode == "column" and sequence_parallel:
             if handle is not None:
                 handle.wait()
-            dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
+            reduced_dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
         elif parallel_mode == "column" and tensor_parallel:
-            dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
+            reduced_dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
+        else:
+            reduced_dgrad = dgrad
 
     if requires_wgrad:
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
@@ -346,8 +326,10 @@ def _linear_bwd_fp8(
 
     if parallel_mode == "column" and tensor_parallel and handle is not None:
         handle.wait()
+    if parallel_mode == "column" and sequence_parallel:
+        handle.wait()
 
-    return dgrad, wgrad
+    return reduced_dgrad, wgrad
 
 
 def _linear_bwd_non_fp8(
@@ -416,8 +398,9 @@ def _linear_bwd_non_fp8(
 
     elif requires_bgrad:
         bgrad = grad_output.sum(axis=0)
-
     if parallel_mode == "column" and tensor_parallel and handle is not None:
+        handle.wait()
+    if parallel_mode == "column" and sequence_parallel and handle is not None:
         handle.wait()
 
     return dgrad, wgrad, bgrad
@@ -626,6 +609,7 @@ class _Linear(paddle.autograd.PyLayer):
             ) = TransformerEngineBaseLayer.grad_output_preprocess(
                 ctx, grad_output, ctx.parallel_mode == "row"
             )
+            
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
@@ -804,7 +788,7 @@ class Linear(TransformerEngineBaseLayer):
         else:
             self.bias = None
 
-        self.fp8_weight_shapes.append(self.weight.shape)
+        self.fp8_weights.append(self.weight)
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -828,7 +812,7 @@ class Linear(TransformerEngineBaseLayer):
             inp = cast_if_needed(inp, self.activation_dtype)
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
-            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad_and_cast(is_first_microbatch)
 
             out = _Linear.apply(
                 self.weight,
