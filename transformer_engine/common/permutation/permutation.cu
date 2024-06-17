@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#pragma once
-
 #include "cutlass/arch/memory.h"
 #include "cutlass/arch/cache_operation.h"
 #include "cutlass/array.h"
@@ -238,10 +236,10 @@ __global__ void moe_permute_topK_kernel(const T *input_bwd,
     }
 }
 
-template <typename T, typename TCompute, bool FWD, int kElementsPerAccess>
+template <typename TInput, bool FWD, int kElementsPerAccess>
 void moe_permute_topK_kernel_launcher(
-    const T *input,
-    T *output,
+    const void *input,
+    void *output,
     const int *sorted_row_id,
     int *row_id_map,
     const float *prob,
@@ -250,9 +248,29 @@ void moe_permute_topK_kernel_launcher(
     const int num_cols,
     const int num_out_tokens,
     cudaStream_t stream,
-    float *prob_grad = nullptr,
-    const T *input_fwd = nullptr)
+    float *prob_grad,
+    const void *input_fwd)
 {
+    // Convert to cutlass type
+    using T_fp16 = typename cutlass::platform::conditional<
+        cutlass::platform::is_same<TInput, half>::value,
+        cutlass::half_t, TInput>::type;
+    using T_bf16 = typename cutlass::platform::conditional<
+        cutlass::platform::is_same<T_fp16, __nv_bfloat16>::value,
+        cutlass::bfloat16_t, T_fp16>::type;
+    using T_fp8e5m2 = typename cutlass::platform::conditional<
+        cutlass::platform::is_same<T_bf16, __nv_fp8_e5m2>::value,
+        cutlass::float_e5m2_t, T_bf16>::type;
+    using T_fp8e4m3 = typename cutlass::platform::conditional<
+        cutlass::platform::is_same<T_fp8e5m2, __nv_fp8_e4m3>::value,
+        cutlass::float_e4m3_t, T_fp8e5m2>::type;
+    using T = T_fp8e4m3;
+
+    using TCompute = typename cutlass::platform::conditional<
+        (cutlass::platform::is_same<T, cutlass::float_e5m2_t>::value ||
+        cutlass::platform::is_same<T, cutlass::float_e4m3_t>::value),
+        cutlass::half_t, T>::type;
+
     if (FWD)
     {
         if (prob == nullptr)

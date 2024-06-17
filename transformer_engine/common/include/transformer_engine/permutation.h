@@ -9,9 +9,9 @@
 
 #include "transformer_engine.h"
 
-template <typename T, typename TCompute, bool FWD, int kElementsPerAccess>
-void moe_permute_topK_kernel_launcher(const T *input,
-                                      T *output,
+template <typename TInput, bool FWD, int kElementsPerAccess>
+void moe_permute_topK_kernel_launcher(const void *input,
+                                      void *output,
                                       const int *sorted_row_id,
                                       int *row_id_map,
                                       const float *prob,
@@ -21,6 +21,6 @@ void moe_permute_topK_kernel_launcher(const T *input,
                                       const int num_out_tokens,
                                       cudaStream_t stream,
                                       float *prob_grad = nullptr,
-                                      const T *input_fwd = nullptr);
+                                      const void *input_fwd = nullptr);
 
 #endif  // TRANSFORMER_ENGINE_PERMUTATION_H_
