@@ -222,7 +222,7 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
 
   const auto &desc = *UnpackOpaque<CustomCallCommonWkDescriptor>(opaque, opaque_len);
   NVTE_CHECK(amax == amax_out,
-             "amax not bound to amax_out in TE/JAX DActLuDBiasCastTranspose primitive");
+             "amax not bound to amax_out in TE/JAX DActLuDBiasCastTranspose primitive.");
   if (!use_fp8(desc.out_dtype)) {
     scale = nullptr;
     scale_inv = nullptr;

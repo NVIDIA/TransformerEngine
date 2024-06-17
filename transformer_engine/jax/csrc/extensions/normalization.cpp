@@ -319,7 +319,7 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
   auto *amax_out = buffers[7];
   auto *workspace = buffers[8];
   auto *barrier = buffers[9];
-  NVTE_CHECK(amax_out == amax, "amax not bound to amax_out in TE/JAX RMSNormForwardFp8 primitive");
+  NVTE_CHECK(amax_out == amax, "amax not bound to amax_out in TE/JAX RSMNormForwardFP8 primitive.");
 
   void *bias = nullptr;
   void *mu = nullptr;
