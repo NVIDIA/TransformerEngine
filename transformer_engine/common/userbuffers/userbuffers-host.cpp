@@ -17,9 +17,9 @@
 #include <chrono>
 #include <iostream>
 
+#include "../util/logging.h"
 #include "ipcsocket.h"
 #include "userbuffers.h"
-#include "../util/logging.h"
 
 #ifdef UB_MPI_BOOTSTRAP
 #include <mpi.h>
@@ -194,7 +194,7 @@ int create_communicator_grouped2(
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
     NVTE_CHECK_CUDRIVER(
-      cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
+        cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
@@ -214,9 +214,8 @@ int create_communicator_grouped2(
 
     if ((*comm)->ar2_nvrank == 0) {
       NVTE_CHECK_CUDRIVER(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
-      NVTE_CHECK_CUDRIVER(
-        cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
-                                     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+      NVTE_CHECK_CUDRIVER(cuMemExportToShareableHandle(
+          &fd, (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
@@ -226,9 +225,9 @@ int create_communicator_grouped2(
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
         (*comm)->_barrier((*comm)->comm_intra);
-      NVTE_CHECK_CUDRIVER(
-        cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-                                       CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+      NVTE_CHECK_CUDRIVER(cuMemImportFromShareableHandle(&(*comm)->mc_handle,
+                                                         reinterpret_cast<void *>(fd),
+                                                         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
   error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
@@ -259,7 +258,7 @@ int create_communicator_grouped2(
   // peer pointers + op flags + comm buffer
 
   NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->gpu_ptrs,
-                       LOCALSIZE));  // flags and pointers, no block data yet
+                             LOCALSIZE));  // flags and pointers, no block data yet
   NVTE_CHECK_CUDA(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, false);
@@ -267,7 +266,7 @@ int create_communicator_grouped2(
   NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
   NVTE_CHECK_CUDA(
-    cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -455,7 +454,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     size_t granularity = 0;
     NVTE_CHECK_CUDRIVER(
-      cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+        cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
     // MPI_Allreduce MAX of granularity check
     aligned_size = (bytes + granularity - 1) / granularity * granularity;
 
@@ -465,7 +464,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       mcProp.size = aligned_size;
       mcProp.handleTypes = prop.requestedHandleTypes;
       NVTE_CHECK_CUDRIVER(
-        cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
+          cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
       aligned_size = (aligned_size + granularity - 1) / granularity * granularity;
     }
 
@@ -476,7 +475,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
     NVTE_CHECK_CUDRIVER(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
-                                         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+                                                     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+                                                     0 /*flags*/));
 
     volatile uint32_t abortFlag = 0;
     struct ncclIpcSocket ipcSock = {0};
@@ -502,9 +502,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
-        NVTE_CHECK_CUDRIVER(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
-                                               reinterpret_cast<void *>(peerfd[p]),
-                                               CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        NVTE_CHECK_CUDRIVER(cuMemImportFromShareableHandle(
+            &comm->uchandles[hndl][p], reinterpret_cast<void *>(peerfd[p]),
+            CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
       close(peerfd[p]);
     }
     CUdeviceptr ptr;
@@ -517,7 +517,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int i = 0; i < nranks; i++) {
       NVTE_CHECK_CUDRIVER(
-        cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
+          cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
       if (i == comm->nvrank) {
         if (hndl)
@@ -529,8 +529,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
     NVTE_CHECK_CUDRIVER(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
 
-    if (hndl == 0)
-      NVTE_CHECK_CUDA(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
+    if (hndl == 0) NVTE_CHECK_CUDA(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
     NVTE_CHECK_CUDA(
         cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
                    remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
@@ -539,9 +538,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
-      NVTE_CHECK_CUDRIVER(
-        cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
-                           0 /*memOffset*/, aligned_size, 0));
+      NVTE_CHECK_CUDRIVER(cuMulticastBindMem(comm->mc_handle, comm->mc_offset,
+                                             comm->uchandles[hndl][myrank], 0 /*memOffset*/,
+                                             aligned_size, 0));
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
@@ -557,13 +556,13 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    comm->_alloc_copy_allgather(reinterpret_cast<void**>(&tmp), reinterpret_cast<void*>(&memhndl),
+    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
                                 sizeof(cudaIpcMemHandle_t), comm->comm_intra);
 
     for (int i = 0; i < comm->nvsize; i++) {
       if (i != comm->nvrank) {
         NVTE_CHECK_CUDA(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
-                                       tmp[i], cudaIpcMemLazyEnablePeerAccess));
+                                             tmp[i], cudaIpcMemLazyEnablePeerAccess));
       }
     }
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;

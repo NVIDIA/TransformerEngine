@@ -19,8 +19,8 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cudnn.h>
-#include <torch/extension.h>
 #include <torch/custom_class.h>
+#include <torch/extension.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>

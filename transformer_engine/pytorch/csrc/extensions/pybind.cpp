@@ -4,19 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <torch/torch.h>
-#include <torch/extension.h>
-#include <torch/custom_class.h>
-#include <torch/script.h>
-
 #include <pybind11/functional.h>
-
-#include "common/userbuffers/comm_gemm_overlap.h"
-#include "common/util/pybind_helper.h"
+#include <torch/custom_class.h>
+#include <torch/extension.h>
+#include <torch/script.h>
+#include <torch/torch.h>
 
 #include "../comm_gemm_overlap.h"
-#include "../extensions.h"
 #include "../common.h"
+#include "../extensions.h"
+#include "common/userbuffers/comm_gemm_overlap.h"
+#include "common/util/pybind_helper.h"
 
 namespace te = transformer_engine;
 namespace te_cgo = te::comm_gemm_overlap;

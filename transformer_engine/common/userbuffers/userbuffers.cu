@@ -19,8 +19,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "userbuffers.h"
 #include "../util/logging.h"
+#include "userbuffers.h"
 
 #define MAX_THREADS 1024
 
@@ -32,8 +32,7 @@
       static_cast<unsigned int *>(counters)[chunk] = 1;                               \
       asm volatile("fence.sc.gpu;\n");                                                \
     }                                                                                 \
-    if (blockIdx.x == 0)                                                              \
-      __syncthreads();                                                                \
+    if (blockIdx.x == 0)__syncthreads();                                              \
   }
 
 #define ATOMIC_PRODUCER(chunk)                        \
@@ -2271,7 +2270,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     NVTE_CHECK_CUDA(
-      cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+        cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
@@ -2360,9 +2359,8 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
-  NVTE_CHECK_CUDA(
-    cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic),
-                        kernelArgs));
+  NVTE_CHECK_CUDA(cudaLaunchKernelExC(
+      &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic), kernelArgs));
 }
 
 void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler,

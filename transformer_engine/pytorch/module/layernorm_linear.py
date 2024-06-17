@@ -456,7 +456,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             dgrad_size = list(grad_output.size())
             dgrad_size[1] = weight.size(1)
-            if ctx.ub_bulk_wgrad: # allocate dgrad output
+            if ctx.ub_bulk_wgrad:  # allocate dgrad output
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             elif ctx.ub_overlap_rs_dgrad:
@@ -477,7 +477,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 if ub_obj_dgrad.is_p2p_overlap():
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
-                        ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P
+                        ub_algo = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P
                     else:
                         ub_algo = tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS_P2P
                 else:
@@ -655,7 +655,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             if ctx.ub_bulk_wgrad
                             else None
                         ),
-                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
+                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                     )
                     clear_tensor_data(ln_out_total)
                     if ctx.ub_bulk_wgrad:

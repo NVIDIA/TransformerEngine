@@ -61,14 +61,16 @@ def train(opts):
 
     # Seed RNG
     torch.cuda.set_device(WORLD_RANK)
-    torch.manual_seed(opts.seed+WORLD_RANK)
-    torch.cuda.manual_seed(opts.seed+WORLD_RANK)
+    torch.manual_seed(opts.seed + WORLD_RANK)
+    torch.cuda.manual_seed(opts.seed + WORLD_RANK)
 
     # Initialize torch.distributed global process group and get TP group
-    dist.init_process_group(backend="nccl",
-                            rank=WORLD_RANK,
-                            world_size=WORLD_SIZE,
-                            device_id=torch.device(f'cuda:{WORLD_RANK}'))
+    dist.init_process_group(
+        backend="nccl",
+        rank=WORLD_RANK,
+        world_size=WORLD_SIZE,
+        device_id=torch.device(f"cuda:{WORLD_RANK}"),
+    )
     torch.manual_seed(opts.seed + WORLD_RANK)
     torch.cuda.manual_seed(opts.seed + WORLD_RANK)
 

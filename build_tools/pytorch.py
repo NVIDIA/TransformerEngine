@@ -87,6 +87,7 @@ def setup_pytorch_extension(
 
     # Construct PyTorch CUDA extension
     from torch.utils.cpp_extension import CUDAExtension
+
     return CUDAExtension(
         name="transformer_engine_torch",
         sources=[str(src) for src in sources],

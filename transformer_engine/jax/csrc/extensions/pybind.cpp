@@ -4,9 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/extensions.h"
-
 #include "common/util/pybind_helper.h"
+#include "jax/csrc/extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -56,11 +55,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   NVTE_ADD_COMMON_PYBIND11_BINDINGS(m);
 
   m.def("registrations", &Registrations);
-  m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,
-        pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
-  m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor,
-        pybind11::arg(), pybind11::arg(), pybind11::arg(),
-        pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
+  m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
+        pybind11::arg(), pybind11::arg("act_num") = 0);
+  m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor, pybind11::arg(),
+        pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg(),
+        pybind11::arg("act_num") = 0);
   m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
   m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
   m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
