@@ -47,8 +47,15 @@ pybind11::dict Registrations() {
   return dict;
 }
 
+pybind11::dict RegistrationsWithFFI() {
+    pybind11::dict dict;
+    dict["te_cast_transpose_ffi"] = EncapsulateFunction(CastTransposeFFI);
+    return dict;
+}
+
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
+  m.def("registrations_with_ffi", &RegistrationsWithFFI);
   m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
         pybind11::arg(), pybind11::arg("act_num") = 0);
   m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor, pybind11::arg(),

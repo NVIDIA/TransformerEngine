@@ -3,6 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#include <cstring>
 
 #include "jax/csrc/extensions/misc.h"
 

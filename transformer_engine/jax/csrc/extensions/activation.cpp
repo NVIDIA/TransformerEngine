@@ -3,9 +3,10 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#include "transformer_engine/activation.h"
+#include "transformer_engine/transpose.h"
 
 #include "jax/csrc/extensions.h"
-#include "jax/csrc/extensions/misc.h"
 
 
 namespace transformer_engine {

@@ -4,6 +4,9 @@
 """JAX/TE miscellaneous for custom ops"""
 
 import numpy as np
+from importlib.metadata import version as get_pkg_version
+from packaging.version import Version as PkgVersion
+
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
@@ -128,3 +131,12 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
         *shape[transpose_axis_boundary:],
         *shape[transpose_start_idx:transpose_axis_boundary],
     )
+
+
+def jax_version_meet_requirement(version: str = "0.4.29"):
+    """
+      Helper function checking if required JAX version is available
+      """
+    jax_version = PkgVersion(get_pkg_version("jax"))
+    jax_version_required = PkgVersion(version)
+    return jax_version >= jax_version_required
