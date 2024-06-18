@@ -3,6 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#include <cstring>
 
 #include "extensions.h"
 #include "extensions/misc.h"

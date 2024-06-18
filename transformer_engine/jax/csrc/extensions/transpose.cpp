@@ -106,7 +106,7 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 }
 
 XLA_FFI_DEFINE_HANDLER(handler_cast_transpose, CastTransposeFFI,
-                       FFI_Bind
+                       FFI::Bind()
                        .Ctx<FFI_Stream_Type>()   // stream
                        .Arg<Buffer_Type>()  // input
                        .Arg<Buffer_Type>()  // amax

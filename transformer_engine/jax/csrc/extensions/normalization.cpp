@@ -3,11 +3,11 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#include "transformer_engine/layer_norm.h"
+#include "transformer_engine/rmsnorm.h"
 
 #include "extensions.h"
 #include "extensions/misc.h"
-#include "transformer_engine/layer_norm.h"
-#include "transformer_engine/rmsnorm.h"
 
 namespace transformer_engine {
 namespace jax {

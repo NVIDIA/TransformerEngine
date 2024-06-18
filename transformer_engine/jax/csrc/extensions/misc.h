@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cassert>
+#include <string>
 #include <vector>
 
 #include <transformer_engine/transformer_engine.h>

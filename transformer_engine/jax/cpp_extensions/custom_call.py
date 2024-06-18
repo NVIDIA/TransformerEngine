@@ -9,6 +9,7 @@ from jax.interpreters import mlir
 
 from transformer_engine import transformer_engine_jax
 
+from .misc import jax_version_meet_requirement
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -46,10 +47,9 @@ class CustomCallArgsWrapper:
         self.operand_layouts = CustomCallArgsWrapper.generate_layouts(
             operand_shapes, operand_specific_layouts
         )
-        output_shapes = [x.shape for x in output_types]
-        self.output_layouts = CustomCallArgsWrapper.generate_layouts(
-            output_shapes, output_specific_layouts
-        )
+        self.output_shapes = [x.shape for x in output_types]
+        self.output_layouts = CustomCallArgsWrapper.generate_layouts(self.output_shapes,
+                                                                     output_specific_layouts)
 
     @staticmethod
     def generate_layouts(shapes, specific_layouts):
@@ -134,7 +134,7 @@ def custom_caller_with_ffi(name, args, backend_config, **kwargs):
                            backend_config=backend_config,
                            result_shapes=args.output_shapes,
                            operand_layouts=args.operand_layouts,
-                           result_layouts=args.result_layouts,
+                           result_layouts=args.output_layouts,
                            **kwargs,
                            ).results
     return out
