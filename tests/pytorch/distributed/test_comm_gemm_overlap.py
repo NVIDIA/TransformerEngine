@@ -14,7 +14,7 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 RNG_SEED: int = 1234
 NUM_PROCS: int = torch.cuda.device_count()
-SEQ_LENGTH: int = 1024
+SEQ_LENGTH: int = 2024
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 64
 HEAD_DIM: int = 128
@@ -92,3 +92,7 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
 #         env=os.environ,
 #         check=True
 #     )
+
+@pytest.mark.parametrize()
+def test_transformer_layer_with_overlap(fp8):
+

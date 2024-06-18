@@ -237,12 +237,12 @@ def main(opts):
             world_size,
             local_rank,
             local_size,
-            4 if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS else 8,  # num_splits
+            4,  # num_splits
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             2,  # cga_size
-            1,  # num_comm_sms
-            opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS or opts.atomic,  # set_sm_margin
-            False,  # use_ce
+            16,  # num_comm_sms
+            True,  # set_sm_margin
+            True,  # use_ce
             opts.atomic,
         )
     )

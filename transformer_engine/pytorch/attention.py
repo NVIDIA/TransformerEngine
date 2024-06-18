@@ -4504,8 +4504,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.window_size = check_set_window_size(attn_mask_type, self.window_size)
-        self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
-        self.tp_group = tp_group
+        if tp_group is None:
+            self.tp_size = tp_size
+            if tp_size == 1:
+                self.set_tensor_parallel_group(tp_group)
+        else:
+            self.tp_size = get_distributed_world_size(tp_group)
+            self.set_tensor_parallel_group(tp_group)
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
         self.layer_number = 1 if layer_number is None else layer_number
@@ -5644,8 +5649,8 @@ class MultiheadAttention(torch.nn.Module):
         if layer_number is not None:
             assert layer_number > 0, "layer_number must be a positive integer"
 
-        tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
-        self.tp_size = tp_size
+        self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
+        self.set_tensor_parallel_group(tp_group)
         self.sequence_parallel = (tp_size > 1) and sequence_parallel
 
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
@@ -6001,6 +6006,7 @@ class MultiheadAttention(torch.nn.Module):
                 # split along third last dimension
                 split_dim = -3
 
+            print(f"QKV output: {mixed_x_layer.size()} | view shape: {new_tensor_shape}\n", end='', flush=True)
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
             # qkv_weight_interleaved:

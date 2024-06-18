@@ -177,8 +177,8 @@ def initialize_ub(
                 set_sm_margin,  # Set SM margin
                 use_ce,  # Use copy engine
                 atomic_gemm,  # Use a single GEMM with atomic-counters
-                aggregate,  # Aggregate 2X GEMM chunks
-                is_reduce_scatter,  # Overlapped collective is reduce-scatter
+                aggregate,  # Aggregate 2X GEMM chunksis_reduce_scatter,
+                is_reduce_scatter  # Overlapped collective is reduce-scatter
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -233,14 +233,14 @@ def initialize_ub(
         if ub_cfgs is not None and name in ub_cfgs:
             ub_cfg = ub_cfgs[name]
             method = ub_cfg.get("method", get_method(name))
-            num_comm_sm = ub_cfg.get("num_sm", 16)
-            cga_size = ub_cfg.get("cga_size", 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
-            set_sm_margin = ub_cfg.get("set_sm_margin", False)
+            num_comm_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
+            cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
+            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else tp_size)
+            aggregate = ub_cfg.get("aggregate", 0)
+            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
             use_ce = ub_cfg.get("use_ce", True)
-            aggregate = ub_cfg.get("aggregate", False)
-            atomic_gemm = ub_cfg.get("atomic_gemm", False)
-            is_reduce_scatter = name in layers_reduce_scatter_overlap
+            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
+            set_sm_margin = ub_cfg.get("set_sm_margin", is_reduce_scatter or atomic_gemm)
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
                 ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
