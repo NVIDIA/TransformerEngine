@@ -70,7 +70,7 @@ class CMakeExtension(setuptools.Extension):
         configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
 
         # CMake build and install commands
-        build_command = [_cmake_bin, "--build", build_dir, "-j"]
+        build_command = [_cmake_bin, "--build", build_dir]
         install_command = [_cmake_bin, "--install", build_dir]
 
         # Run CMake commands
