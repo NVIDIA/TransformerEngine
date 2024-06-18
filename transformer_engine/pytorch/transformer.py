@@ -10,7 +10,6 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention import (
     InferenceParams,
@@ -269,9 +268,6 @@ class TransformerLayer(torch.nn.Module):
         attn_input_format: str = "sbhd",
     ) -> None:
         super().__init__()
-
-        if ub_tp_comm_overlap:
-            assert tex.userbuf_comm_available(), "Userbuffer communication backend not available."
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = window_size
