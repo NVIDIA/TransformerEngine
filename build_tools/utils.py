@@ -32,7 +32,7 @@ def all_files_in_dir(path, name_extension = None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
-            if not (name_extension is None) and name_extension not in name:
+            if not (name_extension is None) and not (name_extension in name):
                 continue
             all_files.append(Path(dirname, name))
     return all_files
