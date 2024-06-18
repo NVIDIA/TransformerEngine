@@ -8,6 +8,9 @@
 
 #include "extensions.h"
 #include "transformer_engine/transpose.h"
+#include "extensions/misc.h"
+
+>>>>>>> b2cad39 (moved headers of misc to misc.h, add ffi.h)
 
 namespace transformer_engine {
 namespace jax {

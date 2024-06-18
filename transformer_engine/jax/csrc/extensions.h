@@ -154,21 +154,13 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
 
-<<<<<<< HEAD
-void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-=======
-
-using XlaInpBuf = xla::ffi::AnyBuffer;
-using XlaOutBuf = xla::ffi::Result<xla::ffi::AnyBuffer>;
-
-void CastTransposeFFI(cudaStream_t stream, XlaInpBuf input_buf, XlaInpBuf amax_buf,
-                      XlaInpBuf scale_buf, XlaInpBuf scale_inv_buf,
-                      XlaOutBuf input_cast_buf, XlaOutBuf input_cast_trans_buf,
-                      XlaOutBuf amax_out_buf);
+void CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
+                      Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
+                      Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
+                      Result_Type amax_out_buf);
 
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
->>>>>>> 122290d (added header for new ffi function)
 
 // Activation
 

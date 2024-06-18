@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "extensions.h"
+#include "extensions/misc.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
 

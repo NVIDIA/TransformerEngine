@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "extensions.h"
+#include "extensions/misc.h"
 
 
 namespace transformer_engine {
