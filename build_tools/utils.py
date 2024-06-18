@@ -28,7 +28,7 @@ def debug_build_enabled() -> bool:
     return False
 
 
-def all_files_in_dir(path, name_extension = None):
+def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
