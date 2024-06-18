@@ -19,7 +19,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-find_package(CUDAToolkit REQUIRED cublas nvtx3
+find_package(CUDAToolkit REQUIRED cublas nvtx3)
 
 # Check for cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
