@@ -5,8 +5,7 @@
  ************************************************************************/
 
 #include "jax/csrc/extensions.h"
-#include "transformer_engine/layer_norm.h"
-#include "transformer_engine/rmsnorm.h"
+#include "jax/csrc/extensions/misc.h"
 
 namespace transformer_engine {
 namespace jax {

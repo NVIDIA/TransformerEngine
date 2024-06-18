@@ -4,10 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/activation.h"
-
 #include "jax/csrc/extensions.h"
-#include "transformer_engine/transpose.h"
+#include "jax/csrc/extensions/misc.h"
+
 
 namespace transformer_engine {
 namespace jax {

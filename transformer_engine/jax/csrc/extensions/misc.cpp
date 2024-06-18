@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/extensions.h"
+#include "jax/csrc/extensions/misc.h"
 
 
 namespace transformer_engine {
