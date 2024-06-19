@@ -205,14 +205,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
-<<<<<<< HEAD
-=======
 
   // Communication functions to initialize Userbuffers communicators
   // Note: Callbacks are not called, so safe to release GIL.
   m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
         py::call_guard<py::gil_scoped_release>());
->>>>>>> main
 
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
       .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
@@ -228,18 +225,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-<<<<<<< HEAD
-      .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int, bool, torch::Tensor>())
-      .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
-      .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
-      .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
-      .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs)
-      .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf)
-      .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
-      .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
-      .def("is_atomic_gemm", &ubuf::UbufCommOverlap::is_atomic_gemm)
-      .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap);
-=======
       .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool,
                     torch::Tensor>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
@@ -260,31 +245,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap,
            py::call_guard<py::gil_scoped_release>());
->>>>>>> main
 
   // Note: Can't release GIL in constructor since it may bootstrap
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-<<<<<<< HEAD
-      .def(py::init<torch::Tensor&, int, int, int, int, bool, bool, int, bool, bool,
-                    torch::Tensor>())
-      .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
-      .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
-      .def("atomic_gemm_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
-      .def("atomic_gemm_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_rs)
-      .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
-      .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output)
-      .def("is_fp8_ubuf", &ubuf::UbufP2PCommOverlap::is_fp8_ubuf)
-      .def("is_atomic_gemm", &ubuf::UbufP2PCommOverlap::is_atomic_gemm)
-      .def("is_p2p_overlap", &ubuf::UbufP2PCommOverlap::is_p2p_overlap)
-      .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv);
-#else   // NVTE_WITH_USERBUFFERS
-  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
-#endif  // NVTE_WITH_USERBUFFERS
-=======
       .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
                     torch::Tensor>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
@@ -307,7 +272,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>());
->>>>>>> main
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
       .value("kByte", transformer_engine::DType::kByte)
