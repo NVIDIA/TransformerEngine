@@ -778,6 +778,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         fuse_wgrad_accumulation: bool = False,
         rng_state_name: str = "local_seed",
         backend: str = "transformer_engine",
+        assume_static_shape: bool = True,
     ) -> None:
         super().__init__()
         self.input_layernorm = input_layernorm

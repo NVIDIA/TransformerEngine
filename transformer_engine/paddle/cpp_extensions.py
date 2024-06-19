@@ -10,7 +10,24 @@ import paddle.nn.functional as F
 from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
 from .fp8 import FP8TensorMeta
-from .utils import cudagraph_fp8_meta_update_manager
+
+class _cudaGraphEmptyTensorManager:
+
+    def __init__(self):
+        self.tensor = {}
+
+    def __contains__(self, key):
+        return self.tensor.__contains__(key)
+
+    def __setitem__(self, key, value):
+        return self.tensor.__setitem__(key, value)
+
+    def __getitem__(self, key):
+        return self.tensor[key].zero_()
+
+
+cudagraph_fp8_meta_update_manager = _cudaGraphEmptyTensorManager()
+
 
 BACKEND_F16m512_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
