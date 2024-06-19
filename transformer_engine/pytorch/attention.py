@@ -183,7 +183,7 @@ _flash_attn_3_installation_steps = """\
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
-    if get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             _flash_attn_3_installation_steps,
