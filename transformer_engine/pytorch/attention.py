@@ -2071,6 +2071,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
+        attn_mask_type = "causal" if attn_mask_type == "causal_bottom_right" else attn_mask_type
 
         assert (
             qkv_layout in QKVLayouts
@@ -4967,7 +4968,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention
                 and inference_params is None
                 and _flash_attn_2_1_plus
-                and "causal" in attn_mask_type
+                and "causal_bottom_right" in attn_mask_type
                 and max_seqlen_q != max_seqlen_kv
             ):
                 self.logger.warning(
@@ -4975,23 +4976,27 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "changed its behavior for causal mask in cross attention. See "
                     "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
                 )
-                use_flash_attention = False
+                #use_flash_attention = False
+                #if "causal_bottom_right" in attn_mask_type and get_cudnn_version() < (9,3,0):
+                #    self.logger.warning(
+                #        "Disabling FusedAttention as bottom-right causal mask requires cuDNN 9.3+"
+                #    )
+                #    use_fused_attention = False
 
             context_parallel = (
                 self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1
             )
 
             # Filter: sliding window attention.
-            # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
             if window_size not in ((-1, -1), (-1, 0)):
-                if use_fused_attention:
-                    self.logger.debug("Disabling FusedAttention for SWA")
-                use_fused_attention = False
+                if use_fused_attention and (window_size[0] < 0 or window_size[1] != 0):
+                    self.logger.debug("Disabling FusedAttention as it only supports window_size[>=0, 0].")
+                    use_fused_attention = False
                 if (not _flash_attn_2_3_plus) or context_parallel:
                     if use_flash_attention:
                         self.logger.debug(
                             "Disabling FusedAttention as it requires flash-attn 2.3+ "
-                            "and no context parallelism"
+                            "and no context parallelism."
                         )
                     use_flash_attention = False
 

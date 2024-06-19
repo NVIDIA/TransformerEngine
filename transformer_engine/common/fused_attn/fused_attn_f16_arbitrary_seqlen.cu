@@ -61,6 +61,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
@@ -203,6 +205,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          .set_name("flash_attention")
                          .set_is_inference(false)
                          .set_causal_mask(is_causal)
+                         .set_causal_mask_bottom_right(is_bottom_right)
                          .set_attn_scale(attn_scale);
 
       sdpa_options.set_alibi_mask(is_alibi);
@@ -376,6 +379,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
@@ -544,6 +549,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       sdpa_backward_options = fe::graph::SDPA_backward_attributes()
                                   .set_name("flash_attention_backward")
                                   .set_causal_mask(is_causal)
+                                  .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
 
       sdpa_backward_options.set_alibi_mask(is_alibi);

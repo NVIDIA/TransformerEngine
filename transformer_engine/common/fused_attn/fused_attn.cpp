@@ -144,6 +144,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
+         ((cudnn_runtime_version >= 90300) &&
+          (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))) &&
         (!(cudnn_runtime_version >= 8906 &&
            (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
