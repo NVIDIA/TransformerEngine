@@ -26,6 +26,7 @@ _tols: Dict[tex.DType, Dict[str, float]] = {
     tex.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
 }
 
+
 def _to_list(x: Union[Iterable, Any]) -> List:
     """Convert to list if iterable, otherwise put in singleton list"""
     if isinstance(x, Iterable):
@@ -33,11 +34,13 @@ def _to_list(x: Union[Iterable, Any]) -> List:
     else:
         return [x]
 
+
 # Types that can be interpreted as tensor dims
 DimsType = Union[Iterable[int], int]
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFloat8Tensor:
@@ -108,7 +111,7 @@ class TestFloat8Tensor:
     def test_quantize_dequantize_scales(self, scale: float) -> None:
         self._test_quantize_dequantize(scale=scale)
 
-    @pytest.mark.parametrize("dims", [[], 1, 311, [7,11], [7,5,3], [2,3,5,3]])
+    @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
     def test_quantize_dequantize_dims(self, dims: DimsType) -> None:
         self._test_quantize_dequantize(dims=dims)
 
@@ -310,7 +313,7 @@ class TestFloat8Tensor:
 
     def test_serialization(
         self,
-        dims: DimsType = [2,3,5],
+        dims: DimsType = [2, 3, 5],
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         scale: float = 0.5,
         dtype: torch.dtype = torch.float32,

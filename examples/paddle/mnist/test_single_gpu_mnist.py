@@ -59,7 +59,9 @@ def train(args, model, train_loader, optimizer, epoch, use_fp8):
     model.train()
     losses = []
     for batch_id, (data, labels) in enumerate(train_loader):
-        with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
+        with paddle.amp.auto_cast(
+            dtype="bfloat16", level="O2"
+        ):  # pylint: disable=not-context-manager
             with te.fp8_autocast(enabled=use_fp8):
                 outputs = model(data)
             loss = F.cross_entropy(outputs, labels)
@@ -70,10 +72,12 @@ def train(args, model, train_loader, optimizer, epoch, use_fp8):
         optimizer.clear_gradients()
 
         if batch_id % args.log_interval == 0:
-            print(f"Train Epoch: {epoch} "
-                  f"[{batch_id * len(data)}/{len(train_loader.dataset)} "
-                  f"({100. * batch_id / len(train_loader):.0f}%)]\t"
-                  f"Loss: {loss.item():.6f}")
+            print(
+                f"Train Epoch: {epoch} "
+                f"[{batch_id * len(data)}/{len(train_loader.dataset)} "
+                f"({100. * batch_id / len(train_loader):.0f}%)]\t"
+                f"Loss: {loss.item():.6f}"
+            )
             if args.dry_run:
                 return loss.item()
     avg_loss = sum(losses) / len(losses)
@@ -89,7 +93,9 @@ def evaluate(model, test_loader, epoch, use_fp8):
 
     with paddle.no_grad():
         for data, labels in test_loader:
-            with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
+            with paddle.amp.auto_cast(
+                dtype="bfloat16", level="O2"
+            ):  # pylint: disable=not-context-manager
                 with te.fp8_autocast(enabled=use_fp8):
                     outputs = model(data)
                 acc = metric.compute(outputs, labels)
@@ -104,7 +110,9 @@ def calibrate(model, test_loader):
 
     with paddle.no_grad():
         for data, _ in test_loader:
-            with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
+            with paddle.amp.auto_cast(
+                dtype="bfloat16", level="O2"
+            ):  # pylint: disable=not-context-manager
                 with te.fp8_autocast(enabled=False, calibrating=True):
                     _ = model(data)
 
@@ -160,20 +168,27 @@ def mnist_parser(args):
         metavar="N",
         help="how many batches to wait before logging training status",
     )
-    parser.add_argument("--use-fp8",
-                        action="store_true",
-                        default=False,
-                        help="Use FP8 for inference and training without recalibration. " \
-                             "It also enables Transformer Engine implicitly.")
-    parser.add_argument("--use-fp8-infer",
-                        action="store_true",
-                        default=False,
-                        help="Use FP8 for inference only. If not using FP8 for training, "
-                        "calibration is performed for FP8 infernece.")
-    parser.add_argument("--use-te",
-                        action="store_true",
-                        default=False,
-                        help="Use Transformer Engine")
+    parser.add_argument(
+        "--use-fp8",
+        action="store_true",
+        default=False,
+        help=(
+            "Use FP8 for inference and training without recalibration. "
+            "It also enables Transformer Engine implicitly."
+        ),
+    )
+    parser.add_argument(
+        "--use-fp8-infer",
+        action="store_true",
+        default=False,
+        help=(
+            "Use FP8 for inference only. If not using FP8 for training, "
+            "calibration is performed for FP8 infernece."
+        ),
+    )
+    parser.add_argument(
+        "--use-te", action="store_true", default=False, help="Use Transformer Engine"
+    )
     args = parser.parse_args(args)
     return args
 
@@ -185,9 +200,9 @@ def train_and_evaluate(args):
     paddle.seed(args.seed)
 
     # Load MNIST dataset
-    transform = Normalize(mean=[127.5], std=[127.5], data_format='CHW')
-    train_dataset = MNIST(mode='train', transform=transform)
-    val_dataset = MNIST(mode='test', transform=transform)
+    transform = Normalize(mean=[127.5], std=[127.5], data_format="CHW")
+    train_dataset = MNIST(mode="train", transform=transform)
+    val_dataset = MNIST(mode="test", transform=transform)
 
     # Define data loaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
@@ -198,7 +213,7 @@ def train_and_evaluate(args):
     optimizer = paddle.optimizer.Adam(learning_rate=args.lr, parameters=model.parameters())
 
     # Cast model to BF16
-    model = paddle.amp.decorate(models=model, level='O2', dtype='bfloat16')
+    model = paddle.amp.decorate(models=model, level="O2", dtype="bfloat16")
 
     for epoch in range(1, args.epochs + 1):
         loss = train(args, model, train_loader, optimizer, epoch, args.use_fp8)
@@ -209,7 +224,7 @@ def train_and_evaluate(args):
 
     if args.save_model or args.use_fp8_infer:
         paddle.save(model.state_dict(), "mnist_cnn.pdparams")
-        print('Eval with reloaded checkpoint : fp8=' + str(args.use_fp8))
+        print("Eval with reloaded checkpoint : fp8=" + str(args.use_fp8))
         weights = paddle.load("mnist_cnn.pdparams")
         model.set_state_dict(weights)
         acc = evaluate(model, val_loader, 0, args.use_fp8)
@@ -235,8 +250,10 @@ class TestMNIST(unittest.TestCase):
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_test_accuracy
 
-    @unittest.skipIf(paddle.device.cuda.get_device_capability() < (8, 0),
-                     "BF16 MNIST example requires Ampere+ GPU")
+    @unittest.skipIf(
+        paddle.device.cuda.get_device_capability() < (8, 0),
+        "BF16 MNIST example requires Ampere+ GPU",
+    )
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         self.args.use_te = True

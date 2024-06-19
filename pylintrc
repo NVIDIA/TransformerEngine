@@ -1,6 +1,11 @@
 [MASTER]
-extension-pkg-whitelist=torch,
-                        transformer_engine_torch
+extension-pkg-whitelist=flash_attn_2_cuda,
+                        torch,
+                        transformer_engine_torch,
+                        transformer_engine_paddle,
+                        transformer_engine_jax
+
+extension-pkg-allow-list=transformer_engine.transformer_engine_jax
 
 disable=too-many-locals,
         too-many-public-methods,
@@ -25,7 +30,8 @@ disable=too-many-locals,
         too-many-branches,
         global-variable-not-assigned,
         redefined-argument-from-local,
-        too-many-nested-blocks
+        line-too-long,
+        too-many-return-statements
 
 [TYPECHECK]
 ignored-modules=torch

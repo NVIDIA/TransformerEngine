@@ -30,7 +30,7 @@ from build_tools.utils import package_files, copy_common_headers, install_and_im
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
-install_and_import('pybind11')
+install_and_import("pybind11")
 from pybind11.setup_helpers import build_ext as BuildExtension
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
@@ -39,12 +39,12 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
-    copy_common_headers(
-        current_file_path.parent,
-        str(current_file_path / common_headers_dir))
+    copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
     ext_modules = [
         setup_jax_extension(
-            "csrc", current_file_path / "csrc", current_file_path / common_headers_dir)]
+            "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
+        )
+    ]
 
     # Configure package
     setuptools.setup(
@@ -57,9 +57,11 @@ if __name__ == "__main__":
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy", "praxis"],
         include_package_data=True,
-        package_data={"csrc": package_files("csrc"),
-                      common_headers_dir: package_files(common_headers_dir),
-                      "build_tools": package_files("build_tools")},
+        package_data={
+            "csrc": package_files("csrc"),
+            common_headers_dir: package_files(common_headers_dir),
+            "build_tools": package_files("build_tools"),
+        },
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

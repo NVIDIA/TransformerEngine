@@ -42,17 +42,5 @@ def _load_library():
     return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
 
 
-def _load_userbuffers():
-    """Load shared library with userbuffers"""
-
-    so_dir = get_te_path() / "transformer_engine"
-    so_file = so_dir / f"libtransformer_engine_userbuffers.{_get_sys_extension()}"
-
-    if so_file.exists():
-        return ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
-    return None
-
-
 if "NVTE_PROJECT_BUILDING" not in os.environ:
     _TE_LIB_CTYPES = _load_library()
-    _UB_LIB_CTYPES = _load_userbuffers()

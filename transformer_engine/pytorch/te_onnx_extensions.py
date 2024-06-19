@@ -84,9 +84,9 @@ def quantize(g, inputs, scale_inv, fp8_tensor):
         inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
     scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
-    q_op = g.op(
-        make_op_name("TRT_FP8QuantizeLinear"), inputs, scale).setType(
-            inputs.type().with_dtype(torch.uint8).with_sizes(output_shape))
+    q_op = g.op(make_op_name("TRT_FP8QuantizeLinear"), inputs, scale).setType(
+        inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
+    )
     return q_op
 
 
@@ -96,7 +96,8 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
 
     scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
     out = g.op(make_op_name("TRT_FP8DequantizeLinear"), inputs, scale).setType(
-        inputs.type().with_dtype(torch.float32).with_sizes(output_shape))
+        inputs.type().with_dtype(torch.float32).with_sizes(output_shape)
+    )
 
     # DQ outputs are currently constrained to FP32 due to a similar limitation in ORT
     # custom ops, so cast the output if needed.
@@ -230,10 +231,30 @@ def onnx_fp8_geglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return geglu
 
 
-@symbolic_helper.parse_args("v", "fs", "i", "i", "i",
-                            "v", "fs", "i", "i", "i",
-                            "v", "fs", "i", "fs", "v", "i", "v", "i",
-                            "v", "i", "i", "i")
+@symbolic_helper.parse_args(
+    "v",
+    "fs",
+    "i",
+    "i",
+    "i",
+    "v",
+    "fs",
+    "i",
+    "i",
+    "i",
+    "v",
+    "fs",
+    "i",
+    "fs",
+    "v",
+    "i",
+    "v",
+    "i",
+    "v",
+    "i",
+    "i",
+    "i",
+)
 def onnx_te_gemm(
     g,
     weight,
@@ -257,7 +278,8 @@ def onnx_te_gemm(
     workspace,
     workspaceSize,
     accumulate,
-    use_split_accumulator):
+    use_split_accumulator,
+):
     """ONNX graph for te_gemm"""
     # pylint: disable=unused-argument
     is_fp16 = is_dtype_fp16(inputs)
@@ -270,8 +292,9 @@ def onnx_te_gemm(
 
     empty_tensor_size = [0]
     bias_empty = torch.onnx.symbolic_helper._get_tensor_sizes(bias) == empty_tensor_size
-    pre_gelu_out_empty = torch.onnx.symbolic_helper._get_tensor_sizes(pre_gelu_out) \
-        == empty_tensor_size
+    pre_gelu_out_empty = (
+        torch.onnx.symbolic_helper._get_tensor_sizes(pre_gelu_out) == empty_tensor_size
+    )
 
     if not bias_empty:
         output = g.op("Gemm", inputs, weight, bias, transA_i=trans_input, transB_i=trans_weight)
@@ -297,16 +320,31 @@ def _ones_like(g, inp, dtype):
     # WAR ONNX spec: ConstantOfShape accepts all data types except for BF16. To WAR
     # create a ConstantOfShape with type FP32 and then add a Cast to BF16.
     is_bf16 = dtype == torch.bfloat16
-    one = g.op("ConstantOfShape", shape, value_t=torch.tensor([1],
-        dtype=torch.float32 if is_bf16 else dtype))
+    one = g.op(
+        "ConstantOfShape",
+        shape,
+        value_t=torch.tensor([1], dtype=torch.float32 if is_bf16 else dtype),
+    )
     if is_bf16:
         one = g.op("Cast", one, to_i=_C_onnx.TensorProtoDataType.BFLOAT16)
     return one
 
 
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
-def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
-                           scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
+def onnx_layernorm_fwd_fp8(
+    g,
+    inputs,
+    weight,
+    bias,
+    eps,
+    scale,
+    amax,
+    scale_inv,
+    fp8_tensor,
+    otype,
+    sm_margin,
+    zero_centered_gamma,
+):
     """ONNX graph for layernorm_fwd_fp8"""
     # pylint: disable=unused-argument
     inp_dtype = get_TensorProtoDataType(inputs)
@@ -340,7 +378,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, sm_margin, zero_centered_ga
         weight = g.op("Add", weight, one)
 
     axis = -len(normalized_shape)
-    ln =  g.op(
+    ln = g.op(
         "LayerNormalization",
         inputs,
         weight,
@@ -352,9 +390,21 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, sm_margin, zero_centered_ga
     )
     return ln
 
+
 @symbolic_helper.parse_args("v", "v", "f", "v", "v", "fs", "i", "i", "i", "b")
-def onnx_rmsnorm_fwd_fp8(g, inputs, weight, eps, scale, amax,
-                         scale_inv, fp8_tensor, otype, sm_margin, zero_centered_gamma):
+def onnx_rmsnorm_fwd_fp8(
+    g,
+    inputs,
+    weight,
+    eps,
+    scale,
+    amax,
+    scale_inv,
+    fp8_tensor,
+    otype,
+    sm_margin,
+    zero_centered_gamma,
+):
     """ONNX graph for rmsnorm_fwd_fp8"""
     # pylint: disable=unused-argument
     inp_dtype = get_TensorProtoDataType(inputs)
@@ -403,16 +453,16 @@ def onnx_rmsnorm_fwd(g, inputs, weight, eps, sm_margin, zero_centered_gamma):
     return result
 
 
-register_custom_op_symbolic('tex_ts::cast_to_fp8_ts', onnx_cast_to_fp8, VER)
-register_custom_op_symbolic('tex_ts::cast_to_fp8_noalloc_ts', onnx_cast_to_fp8_noalloc, VER)
-register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
-register_custom_op_symbolic('tex_ts::gelu_ts', onnx_fp8_gelu, VER)
-register_custom_op_symbolic('tex_ts::relu_ts', onnx_fp8_relu, VER)
-register_custom_op_symbolic('tex_ts::reglu_ts', onnx_fp8_reglu, VER)
-register_custom_op_symbolic('tex_ts::geglu_ts', onnx_fp8_geglu, VER)
-register_custom_op_symbolic('tex_ts::swiglu_ts', onnx_fp8_swiglu, VER)
-register_custom_op_symbolic('tex_ts::te_gemm_ts', onnx_te_gemm, VER)
-register_custom_op_symbolic('tex_ts::layernorm_fwd_fp8_inf_ts', onnx_layernorm_fwd_fp8, VER)
-register_custom_op_symbolic('tex_ts::layernorm_fwd_inf_ts', onnx_layernorm_fwd, VER)
-register_custom_op_symbolic('tex_ts::rmsnorm_fwd_fp8_inf_ts', onnx_rmsnorm_fwd_fp8, VER)
-register_custom_op_symbolic('tex_ts::rmsnorm_fwd_inf_ts', onnx_rmsnorm_fwd, VER)
+register_custom_op_symbolic("tex_ts::cast_to_fp8_ts", onnx_cast_to_fp8, VER)
+register_custom_op_symbolic("tex_ts::cast_to_fp8_noalloc_ts", onnx_cast_to_fp8_noalloc, VER)
+register_custom_op_symbolic("tex_ts::cast_from_fp8_ts", onnx_cast_from_fp8, VER)
+register_custom_op_symbolic("tex_ts::gelu_ts", onnx_fp8_gelu, VER)
+register_custom_op_symbolic("tex_ts::relu_ts", onnx_fp8_relu, VER)
+register_custom_op_symbolic("tex_ts::reglu_ts", onnx_fp8_reglu, VER)
+register_custom_op_symbolic("tex_ts::geglu_ts", onnx_fp8_geglu, VER)
+register_custom_op_symbolic("tex_ts::swiglu_ts", onnx_fp8_swiglu, VER)
+register_custom_op_symbolic("tex_ts::te_gemm_ts", onnx_te_gemm, VER)
+register_custom_op_symbolic("tex_ts::layernorm_fwd_fp8_inf_ts", onnx_layernorm_fwd_fp8, VER)
+register_custom_op_symbolic("tex_ts::layernorm_fwd_inf_ts", onnx_layernorm_fwd, VER)
+register_custom_op_symbolic("tex_ts::rmsnorm_fwd_fp8_inf_ts", onnx_rmsnorm_fwd_fp8, VER)
+register_custom_op_symbolic("tex_ts::rmsnorm_fwd_inf_ts", onnx_rmsnorm_fwd, VER)

@@ -6,6 +6,7 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     from transformer_engine import transformer_engine_paddle  # pylint: disable=unused-import

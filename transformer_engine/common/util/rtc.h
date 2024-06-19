@@ -7,16 +7,16 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
+#include <cuda.h>
+#include <cuda_runtime_api.h>
+#include <nvrtc.h>
+
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <nvrtc.h>
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
@@ -38,10 +38,10 @@ class Kernel {
  public:
   Kernel(std::string mangled_name, std::string compiled_code);
   ~Kernel();
-  Kernel(const Kernel&) = delete;  // move-only
-  Kernel(Kernel&&) noexcept;
-  Kernel& operator=(Kernel) noexcept;
-  friend void swap(Kernel& first, Kernel& second) noexcept;
+  Kernel(const Kernel &) = delete;  // move-only
+  Kernel(Kernel &&) noexcept;
+  Kernel &operator=(Kernel) noexcept;
+  friend void swap(Kernel &first, Kernel &second) noexcept;
 
   /*! \brief Launch CUDA kernel
    *
@@ -57,25 +57,12 @@ class Kernel {
    * \param[in] args             Kernel arguments
    */
   template <typename... ArgTs>
-  void launch(int device_id,
-              const dim3 grid_dim,
-              const dim3 block_dim,
-              unsigned int shared_mem_bytes,
-              cudaStream_t stream,
-              ArgTs &&... args) {
-    void* arg_ptrs[] = { const_cast<void*>(static_cast<const void*>(&args))... };
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchKernel,
-                                get_function(device_id),
-                                grid_dim.x,
-                                grid_dim.y,
-                                grid_dim.z,
-                                block_dim.x,
-                                block_dim.y,
-                                block_dim.z,
-                                shared_mem_bytes,
-                                static_cast<CUstream>(stream),
-                                arg_ptrs,
-                                nullptr);
+  void launch(int device_id, const dim3 grid_dim, const dim3 block_dim,
+              unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+    void *arg_ptrs[] = {const_cast<void *>(static_cast<const void *>(&args))...};
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchKernel, get_function(device_id), grid_dim.x, grid_dim.y,
+                                grid_dim.z, block_dim.x, block_dim.y, block_dim.z, shared_mem_bytes,
+                                static_cast<CUstream>(stream), arg_ptrs, nullptr);
   }
 
   /*! \brief CUDA function for given CUDA device
@@ -84,6 +71,12 @@ class Kernel {
    * accessed.
    */
   CUfunction get_function(int device_id);
+
+  /*! \brief Sets the preferred cache configuration for a function
+   *
+   * Wrapper of the CUDA Driver API function "cuFuncSetCacheConfig"
+   */
+  void set_function_cache_config(int device_id, CUfunc_cache cache_config);
 
  private:
   /*! \brief Mangled function name */
@@ -108,7 +101,7 @@ class Kernel {
 class KernelManager {
  public:
   /*! \brief Get singleton instance */
-  static KernelManager& instance();
+  static KernelManager &instance();
 
   /*! \brief Compile CUDA kernel for current CUDA device
    *
@@ -120,10 +113,8 @@ class KernelManager {
    * \param[in] filename     Path to associate with source code,
    *                         primarily for debugging
    */
-  void compile(const std::string &kernel_label,
-               const std::string &kernel_name,
-               const std::string &code,
-               const std::string &filename);
+  void compile(const std::string &kernel_label, const std::string &kernel_name,
+               const std::string &code, const std::string &filename);
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
@@ -132,8 +123,7 @@ class KernelManager {
 
    * \return Whether kernel has been compiled
    */
-  bool is_compiled(const std::string &kernel_label,
-                   int device_id = -1) const;
+  bool is_compiled(const std::string &kernel_label, int device_id = -1) const;
 
   /*! \brief Launch CUDA kernel on current CUDA device
    *
@@ -148,23 +138,23 @@ class KernelManager {
    * \param[in] args             Kernel arguments
    */
   template <typename... ArgTs>
-  void launch(const std::string &kernel_label,
-              const dim3 grid_dim,
-              const dim3 block_dim,
-              unsigned int shared_mem_bytes,
-              cudaStream_t stream,
-              ArgTs &&... args) {
+  void launch(const std::string &kernel_label, const dim3 grid_dim, const dim3 block_dim,
+              unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
-    NVTE_CHECK(kernel_cache_.count(key) > 0,
-               "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch(device_id,
-                                 grid_dim,
-                                 block_dim,
-                                 shared_mem_bytes,
-                                 stream,
+    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
+    kernel_cache_.at(key).launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
                                  std::forward<ArgTs>(args)...);
   }
+
+  /*! \brief Sets the preferred cache configuration for a function in the context
+   *
+   * Assumes the kernel has already been compiled.
+   *
+   * \param[in] kernel_label     Unique identifying string for kernel
+   * \param[in] cache_config     Prefered cache configuration
+   */
+  void set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config);
 
  private:
   /*! \brief Compiled kernels */
@@ -174,8 +164,8 @@ class KernelManager {
 
   KernelManager() = default;
   ~KernelManager() = default;
-  KernelManager(const KernelManager&) = delete;
-  KernelManager& operator=(const KernelManager&) = delete;
+  KernelManager(const KernelManager &) = delete;
+  KernelManager &operator=(const KernelManager &) = delete;
 
   /*! \brief Construct key for kernel cache
    *
@@ -184,8 +174,7 @@ class KernelManager {
    *
    * \return Key for kernel cache
    */
-  std::string get_kernel_cache_key(const std::string &kernel_label,
-                                   int device_id) const;
+  std::string get_kernel_cache_key(const std::string &kernel_label, int device_id) const;
 };
 
 }  // namespace rtc

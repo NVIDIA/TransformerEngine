@@ -22,7 +22,7 @@ class TestParallelLinear(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_linear_tp(self):
         """Tests linear with tensor parallel in BF16"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'linear_tp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "linear_tp.py"))
 
 
 class TestParallelLayerNormLinear(TestDistributed):
@@ -32,7 +32,7 @@ class TestParallelLayerNormLinear(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_layernorm_linear_tp(self):
         """Tests layernorm_linear with tensor parallel in BF16"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'layernorm_linear_tp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "layernorm_linear_tp.py"))
 
 
 class TestParallelLayerNormMLP(TestDistributed):
@@ -42,7 +42,7 @@ class TestParallelLayerNormMLP(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_layernorm_mlp_tp(self):
         """Tests layernorm_mlp with tensor parallel in BF16"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'layernorm_mlp_tp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "layernorm_mlp_tp.py"))
 
 
 class TestAmaxReduction(TestDistributed):
@@ -52,7 +52,7 @@ class TestAmaxReduction(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_amax_reduction(self):
         """Tests amax reduction"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'amax_reduction.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "amax_reduction.py"))
 
 
 class TestPipelineParallel(TestDistributed):
@@ -62,7 +62,7 @@ class TestPipelineParallel(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_pipeline_parallel(self):
         """Tests pipeline parallel"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'linear_pp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "linear_pp.py"))
 
 
 class TestGroupSharding(TestDistributed):
@@ -72,7 +72,7 @@ class TestGroupSharding(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_group_sharding(self):
         """Tests group sharding"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'group_sharding.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "group_sharding.py"))
 
 
 class TestParallelAttention(TestDistributed):
@@ -82,7 +82,7 @@ class TestParallelAttention(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_attention_tp(self):
         """Tests TransMultiHeadAttentionformer Layer with tensor parallel in BF16"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'attention_tp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "attention_tp.py"))
 
 
 class TestParallelTransformerLayer(TestDistributed):
@@ -92,8 +92,8 @@ class TestParallelTransformerLayer(TestDistributed):
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_transformer_tp(self):
         """Tests Transformer Layer with tensor parallel in BF16"""
-        self.run_2gpu(str(test_root / 'parallel_tests' / 'transformer_tp.py'))
+        self.run_2gpu(str(test_root / "parallel_tests" / "transformer_tp.py"))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

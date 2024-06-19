@@ -209,6 +209,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
+
 #if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205
   if (counter != nullptr) {
     if (m_split == 0) m_split = 1;

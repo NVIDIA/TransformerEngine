@@ -117,9 +117,7 @@ class TestFusedAdam(TestFusedOptimizer):
         tensors = []
         for size in sizes:
             tensors.append(torch.rand(size, dtype=torch.float, device="cuda"))
-        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(
-            tensors, self.options
-        )
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
 
         for i in range(self.iters):
             self.gen_grad(ref_param, tst_param)
@@ -139,9 +137,7 @@ class TestFusedAdam(TestFusedOptimizer):
         }
 
         tensor = torch.rand(nelem, dtype=torch.float, device="cuda")
-        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(
-            [tensor], adam_option
-        )
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim([tensor], adam_option)
 
         for i in range(self.iters):
             self.gen_grad(ref_param, tst_param)
@@ -161,9 +157,7 @@ class TestFusedAdam(TestFusedOptimizer):
         }
 
         tensor = torch.rand(nelem, dtype=torch.float, device="cuda")
-        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(
-            [tensor], adam_option
-        )
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim([tensor], adam_option)
 
         # Add an empty param group which may occur for pipeline parallel p-tuning
         tst_optim.add_param_group({"params": []})
@@ -175,10 +169,11 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
+
 class TestFusedSGD(TestFusedOptimizer):
     def __init__(self, *args, **kwargs):
         super(TestFusedSGD, self).__init__(*args, **kwargs)
-        self.options = {"lr": .25, "momentum": .125}
+        self.options = {"lr": 0.25, "momentum": 0.125}
         self.ref_optim = torch.optim.SGD
         self.fused_optim = te.optimizers.FusedSGD
 
@@ -188,7 +183,7 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
+    @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
         for current_dev, tensor_dev in product(devices, devices):
@@ -452,8 +447,8 @@ class AdamTest(unittest.TestCase):
 
     @largeTensorTest("60GB", "cuda")
     def testLargeTensor(self):
-        t = torch.zeros(2359332864, dtype=torch.half, device='cuda')
-        t2 = torch.zeros(2359332864, dtype=torch.half, device='cuda')
+        t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
+        t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)
         t.grad = grad
         t2.grad = grad

@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" MNIST training on single GPU"""
+"""MNIST training on single GPU"""
 import argparse
 import unittest
 from functools import partial
@@ -20,13 +20,14 @@ import transformer_engine.jax.flax as te_flax
 IMAGE_H = 28
 IMAGE_W = 28
 IMAGE_C = 1
-PARAMS_KEY = 'params'
-DROPOUT_KEY = 'dropout'
-INPUT_KEY = 'input_rng'
+PARAMS_KEY = "params"
+DROPOUT_KEY = "dropout"
+INPUT_KEY = "input_rng"
 
 
 class Net(nn.Module):
     """CNN model for MNIST."""
+
     use_te: bool = False
 
     @nn.compact
@@ -83,17 +84,17 @@ def update_model(state, grads):
 
 def train_epoch(state, train_ds, batch_size, rngs, var_collect):
     """Train for a single epoch."""
-    train_ds_size = len(train_ds['image'])
+    train_ds_size = len(train_ds["image"])
     steps_per_epoch = train_ds_size // batch_size
     perms = jax.random.permutation(rngs[INPUT_KEY], train_ds_size)
-    perms = perms[:steps_per_epoch * batch_size]    # skip incomplete batch
+    perms = perms[: steps_per_epoch * batch_size]  # skip incomplete batch
     perms = perms.reshape((steps_per_epoch, batch_size))
     epoch_loss = []
     epoch_accuracy = []
 
     for perm in perms:
-        batch_images = train_ds['image'][perm, ...]
-        batch_labels = train_ds['label'][perm, ...]
+        batch_images = train_ds["image"][perm, ...]
+        batch_labels = train_ds["label"][perm, ...]
         grads, loss, accuracy = apply_model(state, batch_images, batch_labels, var_collect, rngs)
         state, var_collect = update_model(state, grads)
         epoch_loss.append(loss)
@@ -106,7 +107,7 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect):
 
 def eval_model(state, test_ds, batch_size, var_collect):
     """Evaluation loop."""
-    test_ds_size = len(test_ds['image'])
+    test_ds_size = len(test_ds["image"])
     num_steps = test_ds_size // batch_size
     valid_size = num_steps * batch_size
     all_loss = []
@@ -114,8 +115,8 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
     for batch_start in range(0, valid_size, batch_size):
         batch_end = batch_start + batch_size
-        batch_images = test_ds['image'][batch_start:batch_end]
-        batch_labels = test_ds['label'][batch_start:batch_end]
+        batch_images = test_ds["image"][batch_start:batch_end]
+        batch_labels = test_ds["label"][batch_start:batch_end]
         _, loss, accuracy = apply_model(state, batch_images, batch_labels, var_collect)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
@@ -127,21 +128,21 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 def get_datasets():
     """Load MNIST train and test datasets into memory."""
-    train_ds = load_dataset('mnist', split='train')
-    train_ds.set_format(type='np')
-    batch_size = train_ds['image'].shape[0]
+    train_ds = load_dataset("mnist", split="train", trust_remote_code=True)
+    train_ds.set_format(type="np")
+    batch_size = train_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
     new_train_ds = {
-        'image': train_ds['image'].astype(np.float32).reshape(shape) / 255.,
-        'label': train_ds['label']
+        "image": train_ds["image"].astype(np.float32).reshape(shape) / 255.0,
+        "label": train_ds["label"],
     }
-    test_ds = load_dataset('mnist', split='test')
-    test_ds.set_format(type='np')
-    batch_size = test_ds['image'].shape[0]
+    test_ds = load_dataset("mnist", split="test", trust_remote_code=True)
+    test_ds.set_format(type="np")
+    batch_size = test_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
     new_test_ds = {
-        'image': test_ds['image'].astype(np.float32).reshape(shape) / 255.,
-        'label': test_ds['label']
+        "image": test_ds["image"].astype(np.float32).reshape(shape) / 255.0,
+        "label": test_ds["label"],
     }
     return new_train_ds, new_test_ds
 
@@ -149,8 +150,13 @@ def get_datasets():
 def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
     assert "f8_" in str(
-        jax.make_jaxpr(apply_model)(state, jnp.empty(input_shape, dtype=jnp.bfloat16),
-                                    jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
+        jax.make_jaxpr(apply_model)(
+            state,
+            jnp.empty(input_shape, dtype=jnp.bfloat16),
+            jnp.empty(label_shape, dtype=jnp.bfloat16),
+            var_collect,
+        )
+    )
 
 
 def train_and_evaluate(args):
@@ -173,17 +179,21 @@ def train_and_evaluate(args):
         cnn = Net(args.use_te)
         var_collect = cnn.init(init_rngs, jnp.empty(input_shape, dtype=jnp.bfloat16))
         tx = optax.sgd(args.lr, args.momentum)
-        state = train_state.TrainState.create(apply_fn=cnn.apply,
-                                              params=var_collect[PARAMS_KEY],
-                                              tx=tx)
+        state = train_state.TrainState.create(
+            apply_fn=cnn.apply, params=var_collect[PARAMS_KEY], tx=tx
+        )
 
         if args.use_fp8:
             check_fp8(state, var_collect, input_shape, label_shape)
 
         if args.dry_run:
-            apply_model(state, jnp.empty(input_shape, dtype=jnp.bfloat16),
-                        jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect,
-                        {DROPOUT_KEY: dropout_rng})
+            apply_model(
+                state,
+                jnp.empty(input_shape, dtype=jnp.bfloat16),
+                jnp.empty(label_shape, dtype=jnp.bfloat16),
+                var_collect,
+                {DROPOUT_KEY: dropout_rng},
+            )
             print("PASSED")
             return None
 
@@ -193,14 +203,17 @@ def train_and_evaluate(args):
             rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
 
             state, train_loss, train_accuracy, var_collect = train_epoch(
-                state, train_ds, args.batch_size, rngs, var_collect)
+                state, train_ds, args.batch_size, rngs, var_collect
+            )
             test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size, var_collect)
 
-            print(f"Epoch: {epoch:>2} "
-                  f"Train Loss: {train_loss:.6f} "
-                  f"Train Accuracy: {train_accuracy:.6f} "
-                  f"Test Loss: {test_loss:.6f} "
-                  f"Test Accuracy: {test_accuracy:.6f} ")
+            print(
+                f"Epoch: {epoch:>2} "
+                f"Train Loss: {train_loss:.6f} "
+                f"Train Accuracy: {train_accuracy:.6f} "
+                f"Test Loss: {test_loss:.6f} "
+                f"Test Accuracy: {test_accuracy:.6f} "
+            )
 
     return [train_loss, train_accuracy, test_loss, test_accuracy]
 
@@ -250,15 +263,18 @@ def mnist_parser(args):
         help="quickly check a single pass",
     )
     parser.add_argument("--seed", type=int, default=1, metavar="S", help="random seed (default: 1)")
-    parser.add_argument("--use-fp8",
-                        action="store_true",
-                        default=False,
-                        help="Use FP8 for inference and training without recalibration. " \
-                             "It also enables Transformer Engine implicitly.")
-    parser.add_argument("--use-te",
-                        action="store_true",
-                        default=False,
-                        help="Use Transformer Engine")
+    parser.add_argument(
+        "--use-fp8",
+        action="store_true",
+        default=False,
+        help=(
+            "Use FP8 for inference and training without recalibration. "
+            "It also enables Transformer Engine implicitly."
+        ),
+    )
+    parser.add_argument(
+        "--use-te", action="store_true", default=False, help="Use Transformer Engine"
+    )
 
     return parser.parse_args(args)
 

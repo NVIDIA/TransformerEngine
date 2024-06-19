@@ -5,7 +5,8 @@
 """Module level PyTorch APIs"""
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
+from .grouped_linear import GroupedLinear
 from .layernorm_mlp import LayerNormMLP
 from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
-from .grouped_linear import GroupedLinear
+from .base import initialize_ub, destroy_ub
