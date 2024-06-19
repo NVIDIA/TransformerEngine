@@ -28,6 +28,7 @@ _IS_GRAPH_CAPTURING = False
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
+
 def set_capture_start() -> None:
     """Record beginning of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING

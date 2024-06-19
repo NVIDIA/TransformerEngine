@@ -408,14 +408,16 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     layer_order = [1, 2, 1, 2, -2, -1, 1, 2, -2, -1, -2, -1]
 
     # Initialize model.
-    model = torch.nn.ModuleList([
-        Linear(
-            config.hidden_size,
-            config.hidden_size,
-            params_dtype=dtype,
-        )
-        for _ in range(num_layers)
-    ])
+    model = torch.nn.ModuleList(
+        [
+            Linear(
+                config.hidden_size,
+                config.hidden_size,
+                params_dtype=dtype,
+            )
+            for _ in range(num_layers)
+        ]
+    )
 
     # Initialize gradient buffers.
     for param in model.parameters():
@@ -428,8 +430,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     }
     if with_graph:
         sample_args = tuple(
-            generate_data(config, dtype, warmup=True)
-            for _ in range(num_layers * num_microbatches)
+            generate_data(config, dtype, warmup=True) for _ in range(num_layers * num_microbatches)
         )
         layer_forwards = make_graphed_callables(
             tuple(model),
@@ -438,8 +439,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             _order=layer_order,
         )
         layer_forwards = {
-            (i % num_layers, i // num_layers): forward
-            for i, forward in enumerate(layer_forwards)
+            (i % num_layers, i // num_layers): forward for i, forward in enumerate(layer_forwards)
         }
 
     # Optimizer.
@@ -461,13 +461,14 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
 
         # Forward and backward steps.
         outputs = {}
+
         def forward(layer_idx: int, microbatch_idx: int):
             idxs = (layer_idx, microbatch_idx)
             outputs[idxs] = layer_forwards[idxs](inputs[idxs])
+
         def backward(layer_idx: int, microbatch_idx: int):
-            outputs[layer_idx, microbatch_idx].backward(
-                grad_outputs[layer_idx, microbatch_idx]
-            )
+            outputs[layer_idx, microbatch_idx].backward(grad_outputs[layer_idx, microbatch_idx])
+
         forward(0, 0)
         forward(1, 0)
         forward(0, 1)
