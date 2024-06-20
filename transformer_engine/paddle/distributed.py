@@ -59,7 +59,7 @@ def get_tp_group_and_world_size(
     return model_parallel_group, world_size
 
 
-def get_pp_degree() -> int:
+def is_pp_enabled() -> int:
     if not (paddle.distributed.is_initialized()):
         return 1
 

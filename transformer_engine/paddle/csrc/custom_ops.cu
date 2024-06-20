@@ -1328,7 +1328,7 @@ __global__ void UpdateFP8MetaKernel(unsigned int identifier,  // This is used to
 
 constexpr int BLOCK_SIZE = 512;
 
-void amax_and_scale_update_inplace_delay(paddle::Tensor &amax_history,  // NOLINT
+void amax_and_scale_update_inplace_new(paddle::Tensor &amax_history,  // NOLINT
                                    paddle::Tensor &scale,         // NOLINT
                                    paddle::Tensor &scale_inv,     // NOLINT
                                    const paddle::Tensor &non_weight_mask, int64_t fp8_dtype,
@@ -1743,8 +1743,18 @@ PD_BUILD_OP(amax_and_scale_update_inplace)
     .SetInplaceMap({{"_amax_history", "amax_history"},
                     {"_scale", "scale"},
                     {"_scale_inv", "scale_inv"}})
-    .Attrs({"fp8_dtype: int64_t", "margin: float", "amax_compute: std::string"})
+    .Attrs({"update_weight_scale_inv: bool", "fp8_max: float", "margin: float",
+            "amax_compute: std::string"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace));
+
+PD_BUILD_OP(amax_and_scale_update_inplace_new)
+    .Inputs({"_amax_history", "_scale", "_scale_inv", "non_weight_mask"})
+    .Outputs({"amax_history", "scale", "scale_inv"})
+    .SetInplaceMap({{"_amax_history", "amax_history"},
+                    {"_scale", "scale"},
+                    {"_scale_inv", "scale_inv"}})
+    .Attrs({"fp8_dtype: int64_t", "margin: float", "amax_compute: std::string"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace_new));
 
 PD_BUILD_OP(update_latest_amax_history_inplace)
     .Inputs({"_history", "amax"})

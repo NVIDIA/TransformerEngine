@@ -74,7 +74,7 @@ def _linear_fwd_fp8(
     else:
         inputmat_total = inputmat
 
-    out = fp8_gemm(
+    out, _ = fp8_gemm(
         weight_fp8,
         fp8_meta["scaling_fwd"].scale_inv,
         weight_fp8_index,

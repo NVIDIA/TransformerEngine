@@ -29,7 +29,7 @@ from ..fp8 import (
     get_global_fp8_state,
     get_fp8_te_dtype,
 )
-from ..distributed import allgather, register_pp_fwd_begin_hook
+from ..distributed import allgather, register_pp_fwd_begin_hook, is_pp_enabled
 from ..profile import nvtx_range
 from ..recompute import is_in_recompute_phase
 from ..fp8_buffer import FP8RecomputeBuffer
@@ -500,7 +500,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             out_list.extend([weight_fp8, weight_t_fp8])
 
         # we only register the callback once
-        if not self.registered_pp_start_callback:
+        if not self.registered_pp_start_callback and is_pp_enabled():
 
             def cast_callback(step_id=None, **kwargs):
                 update_fp8_weights = step_id == 0
