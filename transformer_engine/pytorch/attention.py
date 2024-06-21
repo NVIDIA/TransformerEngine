@@ -966,8 +966,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 return_softmax=False,
                                 **fa_optional_forward_kwargs,
                             )
+
+                if i != len(p2p_comm_buffers) - 1:
                     p2p_comm_buffers[i] = None
-                    kv_inputs[i % 2] = None
+                kv_inputs[i % 2] = None
 
             if i > 0:
                 # wait until fwd restuls correction of last step is done
