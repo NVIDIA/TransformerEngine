@@ -62,13 +62,10 @@ class FP8State:
         self._fp8_autocast_counter = 0
         self._fp8_autocast_depth = 0
         self._fp8_recompute_enabled = False
+        self._use_cudagraph = False
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
         self._fp8_recompute_buffer = FP8RecomputeBuffer()
-        self._fp8_first_module_fp8_meta = None
-        self._fp8_first_module_tp_group = None
-        self._fp8_first_module_tp_size = 1
-        self._bwd_finalize = True
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -120,34 +117,15 @@ class FP8State:
         """Returns global fp8 recompute buffer."""
         return self._fp8_recompute_buffer
 
-    def set_first_module_state(
-        self, fp8_meta: Dict[str, Any], tp_group: dist_group_type, tp_size: int
-    ):
-        """Set fp8 first module state for finalizing fp8"""
-        self._fp8_first_module_fp8_meta = fp8_meta
-        self._fp8_first_module_tp_group = tp_group
-        self._fp8_first_module_tp_size = tp_size
+    def is_cudagraph_enabled(self) -> bool:
+        return self._use_cudagraph
 
-    def get_first_module_state(self) -> (Dict[str, Any], dist_group_type, int):
-        """Get fp8 first module state for finalizing fp8"""
-        return (
-            self._fp8_first_module_fp8_meta,
-            self._fp8_first_module_tp_group,
-            self._fp8_first_module_tp_size,
-        )
-
-    def finalize_fp8_bwd_buffer(self):
-        return self._fp8_bwd_buffer.finalize(
-            self._fp8_first_module_fp8_meta,
-            self._fp8_first_module_tp_group,
-            self._fp8_first_module_tp_size,
-        )
-
-    def disable_bwd_finalize(self):
-        self._bwd_finalize = False
-
-    def is_bwd_finalize(self):
-        return self._bwd_finalize
+    def enable_cudagraph(self):
+        self._use_cudagraph = True
+        self._fp8_fwd_buffer.enable_cudagraph()
+        self._fp8_bwd_buffer.enable_cudagraph()
+        if self._fp8_recompute_enabled:
+            assert False, "Currently, We do not allow recompute with cudagraph"
 
     def enter(
         self,
@@ -269,39 +247,42 @@ def amax_and_scale_update(
     fwd_update: bool,
     update_weight_scale_inv: bool = True,
     current_step_id_tensor: Optional[Any] = None,
+    use_cudagraph: bool = False,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
     sf_compute = fp8_meta["recipe"].scaling_factor_compute_algo
     fp8_meta_tensor_key = "scaling_fwd" if fwd_update else "scaling_bwd"
     fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
-    
+
     if not callable(amax_compute) and sf_compute is None:
         non_weight_mask = fp8_meta[fp8_meta_tensor_key].non_weight_mask
 
-        tex.amax_and_scale_update_inplace(
-            _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
-            _scale=fp8_meta[fp8_meta_tensor_key].scale,
-            _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
-            non_weight_mask=non_weight_mask,
-            current_step_id_tensor=current_step_id_tensor,
-            update_weight_scale_inv=update_weight_scale_inv,
-            fp8_max=fp8_meta[fp8_max_key],
-            margin=float(fp8_meta["recipe"].margin),
-            amax_compute=amax_compute,
-        )
-
-        # if update_weight_scale_inv:
-        #     non_weight_mask = paddle.empty([0])
-        # tex.amax_and_scale_update_inplace_new(
-        #     _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
-        #     _scale=fp8_meta[fp8_meta_tensor_key].scale,
-        #     _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
-        #     non_weight_mask=non_weight_mask,
-        #     fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
-        #     margin=float(fp8_meta["recipe"].margin),
-        #     amax_compute=amax_compute,
-        # )
+        if use_cudagraph:
+            tex.amax_and_scale_update_inplace_legacy(
+                _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
+                _scale=fp8_meta[fp8_meta_tensor_key].scale,
+                _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
+                non_weight_mask=non_weight_mask,
+                current_step_id_tensor=current_step_id_tensor,
+                update_weight_scale_inv=update_weight_scale_inv,
+                fp8_max=fp8_meta[fp8_max_key],
+                margin=float(fp8_meta["recipe"].margin),
+                amax_compute=amax_compute,
+            )
+        else:
+            if update_weight_scale_inv:
+                # we pass nullptr into kernel when we need to update_weight_scale_inv
+                non_weight_mask = paddle.empty([0])
+            tex.amax_and_scale_update_inplace(
+                _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
+                _scale=fp8_meta[fp8_meta_tensor_key].scale,
+                _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
+                non_weight_mask=non_weight_mask,
+                fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
+                margin=float(fp8_meta["recipe"].margin),
+                amax_compute=amax_compute,
+            )
 
     else:
         raise ValueError(

@@ -311,6 +311,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                         True,
                         update_weight_scale_inv=update_weight_scale_inv,
                         current_step_id_tensor=self.current_step_id,
+                        use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                     )
                     global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
                 else:
@@ -319,6 +320,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                         True,
                         update_weight_scale_inv=update_weight_scale_inv,
                         current_step_id_tensor=self.current_step_id,
+                        use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                     )
 
             if self.fp8_enabled and self.training:
@@ -376,22 +378,23 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             if fp8_meta["recipe"].reduce_amax:
                 # This is useless of single gpu, we need to rewrite this later
                 global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
-                amax_and_scale_update(fp8_meta, False)
+                amax_and_scale_update(
+                    fp8_meta, False, use_cudagraph=get_global_fp8_state().is_cudagraph_enabled()
+                )
                 global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
 
                 # Get new backward key.
                 fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
             else:
-                amax_and_scale_update(fp8_meta, False)
+                amax_and_scale_update(
+                    fp8_meta, False, use_cudagraph=get_global_fp8_state().is_cudagraph_enabled()
+                )
 
         with nvtx_range(name + " backward"):
             yield
 
         if fp8_enabled and fp8_meta["recipe"].reduce_amax:
             global_fp8_bwd_buffer.add_amax(fp8_meta)
-            if fp8_meta["first_module"] and global_fp8_state.is_bwd_finalize():
-                global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
-                global_fp8_state.set_first_module_state(fp8_meta, tp_group, tp_size)
 
     @staticmethod
     def grad_output_preprocess(

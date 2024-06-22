@@ -609,7 +609,6 @@ class _Linear(paddle.autograd.PyLayer):
             ) = TransformerEngineBaseLayer.grad_output_preprocess(
                 ctx, grad_output, ctx.parallel_mode == "row"
             )
-            
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch

@@ -11,6 +11,7 @@ from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
 from .fp8 import FP8TensorMeta
 
+
 class _cudaGraphEmptyTensorManager:
 
     def __init__(self):
@@ -26,7 +27,7 @@ class _cudaGraphEmptyTensorManager:
         return self.tensor[key].zero_()
 
 
-cudagraph_fp8_meta_update_manager = _cudaGraphEmptyTensorManager()
+cudagraph_buffer_manager = _cudaGraphEmptyTensorManager()
 
 
 BACKEND_F16m512_THREADS_PER_CTA = 128
@@ -539,25 +540,25 @@ def rmsnorm_bwd(
 
 
 def mask_to_cu_seqlens(
-    mask: paddle.Tensor, need_kv: bool = False, assume_static_shape: bool = True
+    mask: paddle.Tensor, need_kv: bool = False, use_cudagraph: bool = False
 ) -> paddle.Tensor:
     """Convert mask to cu_seqlens"""
     # mask shape: [b, 1, s_q, s_kv]
-    if assume_static_shape:
+    if use_cudagraph:
         q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
-        if "q_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+        if "q_cu_seqlens" not in cudagraph_buffer_manager:
             q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
             q_cu_seqlens[0] = 0
-            cudagraph_fp8_meta_update_manager["q_cu_seqlens"] = q_cu_seqlens
-        q_cu_seqlens = cudagraph_fp8_meta_update_manager["q_cu_seqlens"]
+            cudagraph_buffer_manager["q_cu_seqlens"] = q_cu_seqlens
+        q_cu_seqlens = cudagraph_buffer_manager["q_cu_seqlens"]
 
         kv_cu_seqlens = None
         if need_kv:
-            if "kv_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+            if "kv_cu_seqlens" not in cudagraph_buffer_manager:
                 kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
                 kv_cu_seqlens[0] = 0
-                cudagraph_fp8_meta_update_manager["kv_cu_seqlens"] = kv_cu_seqlens
-            kv_cu_seqlens = cudagraph_fp8_meta_update_manager["kv_cu_seqlens"]
+                cudagraph_buffer_manager["kv_cu_seqlens"] = kv_cu_seqlens
+            kv_cu_seqlens = cudagraph_buffer_manager["kv_cu_seqlens"]
     else:
         q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
         q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)

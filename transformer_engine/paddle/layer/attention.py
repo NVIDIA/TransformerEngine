@@ -440,7 +440,7 @@ class DotProductAttention(paddle.nn.Layer):
         attention_type: str = "self",
         tp_size: int = 1,
         backend: str = "transformer_engine",
-        assume_static_shape: bool = True,
+        use_cudagraph: bool = True,
     ) -> None:
         super().__init__()
 
@@ -456,7 +456,7 @@ class DotProductAttention(paddle.nn.Layer):
         self.num_queries_per_key_value = num_attention_heads // self.num_gqa_groups
 
         self.backend = backend
-        self.assume_static_shape = assume_static_shape
+        self.use_cudagraph = use_cudagraph
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
@@ -568,7 +568,6 @@ class DotProductAttention(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
     ) -> paddle.Tensor:
-
         if self.attention_type == "self":
             # self attention - q: [b, s, h, d]  kv: None
             assert (
@@ -586,7 +585,7 @@ class DotProductAttention(paddle.nn.Layer):
                 )
             else:
                 cu_seqlens, _ = mask_to_cu_seqlens(
-                    attention_mask, need_kv=False, assume_static_shape=self.assume_static_shape
+                    attention_mask, need_kv=False, use_cudagraph=self.use_cudagraph
                 )
             qkv_dtype = TE_DType[query_layer.dtype]
 
@@ -623,7 +622,7 @@ class DotProductAttention(paddle.nn.Layer):
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             cu_seqlens_q, cu_seqlens_kv = mask_to_cu_seqlens(
-                attention_mask, need_kv=True, assume_static_shape=self.assume_static_shape
+                attention_mask, need_kv=True, use_cudagraph=self.use_cudagraph
             )
             qkv_dtype = TE_DType[query_layer.dtype]
             output = FusedAttnFunc.apply(
@@ -778,7 +777,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         fuse_wgrad_accumulation: bool = False,
         rng_state_name: str = "local_seed",
         backend: str = "transformer_engine",
-        assume_static_shape: bool = True,
+        use_cudagraph: bool = True,
     ) -> None:
         super().__init__()
         self.input_layernorm = input_layernorm
@@ -802,7 +801,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.set_parallel_mode = set_parallel_mode
         self.rng_state_name = rng_state_name
         self.backend = backend
-        self.assume_static_shape = assume_static_shape
+        self.use_cudagraph = use_cudagraph
 
         self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
@@ -897,7 +896,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             attention_type=self.attention_type,
             tp_size=self.tp_size,
             backend=self.backend,
-            assume_static_shape=self.assume_static_shape,
+            use_cudagraph=self.use_cudagraph,
         )
 
         # Linear
@@ -967,13 +966,10 @@ class MultiHeadAttention(paddle.nn.Layer):
 
         input_dim = len(hidden_states.shape)
         if input_dim == 2:
-            if "NVTE_OVERRIDE_MAX_SEQ_LEN" in os.environ:
-                max_seq_len = int(os.environ['NVTE_OVERRIDE_MAX_SEQ_LEN'])
-            else:
-                # hidden_states: [b * s_q, hidden_size]
-                # need to get max_seq_len from attention_mask
-                assert self.max_sequence_length is not None, "max_sequence_length must be provided"
-                max_seq_len = self.max_sequence_length
+            # hidden_states: [b * s_q, hidden_size]
+            # need to get max_seq_len from attention_mask
+            assert self.max_sequence_length is not None, "max_sequence_length must be provided"
+            max_seq_len = self.max_sequence_length
         elif input_dim == 3:
             # hidden_states: [b, s_q, hidden_size]
             max_seq_len = hidden_states.shape[1]

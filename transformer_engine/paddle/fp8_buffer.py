@@ -27,6 +27,7 @@ class FP8MetaBufferBase(ABC):
         self._amax_reduce_wait_func = None
         self._dp_amax_reduce_interval = None
         self._contiguous_amax = None
+        self._use_cudagraph = False
         self._dp_amax_reduce_idx = 0
 
     @staticmethod
@@ -64,9 +65,12 @@ class FP8MetaBufferBase(ABC):
         """Wait for amax reduction to finish and then copy reduced amax to buffer"""
         if wait_handle is not None:
             wait_handle.wait()
-        splited_list = list(contiguous_amax.split(chunk_sizes))
-        for amax, split in zip(self._global_amax[amax_buffer_key], splited_list):
-            amax.copy_(split, False)
+        if self._use_cudagraph:
+            splited_list = list(contiguous_amax.split(chunk_sizes))
+            for amax, split in zip(self._global_amax[amax_buffer_key], splited_list):
+                amax.copy_(split, False)
+        else:
+            self._global_amax[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
 
     def _global_amax_reduction(
         self,
@@ -110,10 +114,16 @@ class FP8MetaBufferBase(ABC):
                 return None
 
         chunk_sizes = [x.shape[0] for x in self._global_amax[amax_buffer_key]]
-        if self._contiguous_amax is None:
-            self._contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
+        if self._use_cudagraph:
+            # we need to ensure the _contiguous_amax is address-stable under cudagraph
+            if self._contiguous_amax is None:
+                self._contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
+            else:
+                self._contiguous_amax.copy_(
+                    paddle.concat(self._global_amax[amax_buffer_key]), False
+                )
         else:
-            self._contiguous_amax.copy_(paddle.concat(self._global_amax[amax_buffer_key]), False)
+            self._contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
 
         wait_handle = _reduce_tensor_across_group_op_max(
             self._contiguous_amax,
@@ -121,7 +131,8 @@ class FP8MetaBufferBase(ABC):
             not fp8_meta["async_amax_reduction"],
         )
 
-        if wait_handle is not None:
+        if wait_handle is not None and self._use_cudagraph:
+            # we need to ensure record/wait does not cross the boundary of the graph
             wait_handle.wait()
             wait_handle = None
 
@@ -199,6 +210,9 @@ class FP8MetaBufferBase(ABC):
         """Set buffer values from numpy arrays"""
         for k, v in buffer.items():
             self._global_amax[k] = [paddle.to_tensor(arr) for arr in v]
+
+    def enable_cudagraph(self):
+        self._use_cudagraph = True
 
 
 class FP8MetaFwdBuffer(FP8MetaBufferBase):
