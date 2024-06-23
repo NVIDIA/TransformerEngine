@@ -31,7 +31,7 @@ from ..distributed import (
     set_weight_tensor_dist_attr,
     mark_as_sequence_parallel_parameter,
 )
-from ..fp8 import get_fp8_te_dtype
+from ..fp8 import get_fp8_te_dtype, get_global_fp8_state
 from ..utils import (
     assert_dim_for_fp8_forward_exec,
     cast_if_needed,
@@ -73,6 +73,30 @@ def _linear_fwd_fp8(
         inputmat_total, _ = allgather(inputmat, tp_group)
     else:
         inputmat_total = inputmat
+
+    if not get_global_fp8_state().is_cudagraph_enabled():
+        # if cuda graph is not enabled, we cast the weight here
+        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        if is_grad_enabled:
+            if update_fp8_weights:
+                weight_fp8, weight_t_fp8 = cast_transpose(
+                    weight,
+                    fp8_meta["scaling_fwd"],
+                    weight_fp8_index,
+                    fp8_dtype_forward,
+                    cast_out=weight_fp8,
+                    transpose_out=weight_t_fp8,
+                )
+        else:
+            weight_t_fp8 = None
+            if update_fp8_weights:
+                weight_fp8 = cast_to_fp8(
+                    weight,
+                    fp8_meta["scaling_fwd"],
+                    weight_fp8_index,
+                    fp8_dtype_forward,
+                    out=weight_fp8,
+                )
 
     out, _ = fp8_gemm(
         weight_fp8,

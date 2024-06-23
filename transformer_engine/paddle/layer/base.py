@@ -39,8 +39,6 @@ _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
 
-import sys
-
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
@@ -480,7 +478,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         """
         if not self.fp8_enabled or is_first_microbatch is None:
             return [None, None] * len(self.fp8_weights)
-
+    
         out_list = []
         for i, weight in enumerate(self.fp8_weights, start=1):
             weight_cast_key = f"weight{i}_fp8"
@@ -498,12 +496,13 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             # Enalbe fp8 weight cache
             # is_first_microbatch == true -> we cast the weights into fp8 every micro step
 
-            fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
-
             out_list.extend([weight_fp8, weight_t_fp8])
 
+        # is cudagraph is enabled we cast the weight before the pp pipe
         # we only register the callback once
-        if not self.registered_pp_start_callback and is_pp_enabled():
+        if get_global_fp8_state().is_cudagraph_enabled() and (not self.registered_pp_start_callback and is_pp_enabled()):
+            
+            fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
 
             def cast_callback(step_id=None, **kwargs):
                 update_fp8_weights = step_id == 0

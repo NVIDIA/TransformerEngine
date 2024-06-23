@@ -9,26 +9,7 @@ import paddle
 import paddle.nn.functional as F
 from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
-from .fp8 import FP8TensorMeta
-
-
-class _cudaGraphEmptyTensorManager:
-
-    def __init__(self):
-        self.tensor = {}
-
-    def __contains__(self, key):
-        return self.tensor.__contains__(key)
-
-    def __setitem__(self, key, value):
-        return self.tensor.__setitem__(key, value)
-
-    def __getitem__(self, key):
-        return self.tensor[key].zero_()
-
-
-cudagraph_buffer_manager = _cudaGraphEmptyTensorManager()
-
+from .fp8 import FP8TensorMeta, get_global_fp8_state
 
 BACKEND_F16m512_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -540,25 +521,13 @@ def rmsnorm_bwd(
 
 
 def mask_to_cu_seqlens(
-    mask: paddle.Tensor, need_kv: bool = False, use_cudagraph: bool = False
+    mask: paddle.Tensor,
+    need_kv: bool = False,
 ) -> paddle.Tensor:
     """Convert mask to cu_seqlens"""
     # mask shape: [b, 1, s_q, s_kv]
-    if use_cudagraph:
-        q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
-        if "q_cu_seqlens" not in cudagraph_buffer_manager:
-            q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
-            q_cu_seqlens[0] = 0
-            cudagraph_buffer_manager["q_cu_seqlens"] = q_cu_seqlens
-        q_cu_seqlens = cudagraph_buffer_manager["q_cu_seqlens"]
-
-        kv_cu_seqlens = None
-        if need_kv:
-            if "kv_cu_seqlens" not in cudagraph_buffer_manager:
-                kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
-                kv_cu_seqlens[0] = 0
-                cudagraph_buffer_manager["kv_cu_seqlens"] = kv_cu_seqlens
-            kv_cu_seqlens = cudagraph_buffer_manager["kv_cu_seqlens"]
+    if get_global_fp8_state().is_cudagraph_enabled():
+        assert False, "mask_to_cu_seqlens is not supported with cuda graphs."
     else:
         q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
         q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)

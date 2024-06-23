@@ -202,7 +202,6 @@ class TransformerLayer(paddle.nn.Layer):
             attn_mask_type=self_attn_mask_type,
             input_layernorm=not output_layernorm,
             attention_type="self",
-            use_cudagraph=self.use_cudagraph,
         )
 
         if layer_type == "decoder":
@@ -212,7 +211,6 @@ class TransformerLayer(paddle.nn.Layer):
                 attn_mask_type="padding",
                 input_layernorm=True,
                 attention_type="cross",
-                use_cudagraph=self.use_cudagraph,
             )
 
         self.layernorm_mlp = LayerNormMLP(
