@@ -302,7 +302,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
                 global_fp8_fwd_buffer.wait()
                 if self.fp8_meta["recipe"].reduce_amax:
-                    # This is useless of single gpu, we need to rewrite this later
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
                     amax_and_scale_update(
                         self.fp8_meta,
@@ -374,7 +373,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             global_fp8_bwd_buffer.wait()
 
             if fp8_meta["recipe"].reduce_amax:
-                # This is useless of single gpu, we need to rewrite this later
                 global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
                 amax_and_scale_update(
                     fp8_meta, False, use_cudagraph=get_global_fp8_state().is_cudagraph_enabled()
@@ -393,6 +391,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         if fp8_enabled and fp8_meta["recipe"].reduce_amax:
             global_fp8_bwd_buffer.add_amax(fp8_meta)
+            if fp8_meta["first_module"]:
+                global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
 
     @staticmethod
     def grad_output_preprocess(
