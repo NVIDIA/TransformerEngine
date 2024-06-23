@@ -315,8 +315,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         """
         Fused attention fwd lowering rules
         """
-        operands = [q, k, v, bias, q_cu_seqlen, kv_cu_seqlen,
-                    q_seq_offsets, k_seq_offsets, v_seq_offsets, o_seq_offsets, seed]
+        operands = [
+            q,
+            k,
+            v,
+            bias,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            v_seq_offsets,
+            o_seq_offsets,
+            seed,
+        ]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
@@ -388,6 +399,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
         if nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD:
+
             def _fix_len_take(x, condition):
                 x_shape = x.shape
                 x = x.flatten()
@@ -397,8 +409,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 return jnp.reshape(y, x_shape)
 
             def convert_to_2d(offsets, batch, max_seqlen):
-                offsets_2d = jnp.where(offsets >= 0,
-                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis], offsets)
+                offsets_2d = jnp.where(
+                    offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis],
+                    offsets,
+                )
                 return offsets_2d
 
             match qkv_layout:
@@ -804,6 +819,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert FusedAttnBwdPrimitive.inner_primitive is not None
 
         if nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD:
+
             def _fix_len_take(x, condition):
                 x_shape = x.shape
                 x = x.flatten()
@@ -814,8 +830,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 return jnp.reshape(y, x_shape)
 
             def convert_to_2d(offsets, batch, max_seqlen):
-                offsets_2d = jnp.where(offsets >= 0,
-                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis], offsets)
+                offsets_2d = jnp.where(
+                    offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis],
+                    offsets,
+                )
                 return offsets_2d
 
             match qkv_layout:
@@ -979,8 +998,20 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
 
         def sharded_impl(
-            q, k, v, bias, softmax_aux, rng_state, output, doutput, q_cu_seqlen, kv_cu_seqlen,
-            q_seq_offsets, k_seq_offsets, v_seq_offsets, o_seq_offsets
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            v_seq_offsets,
+            o_seq_offsets,
         ):
             local_dq, local_dk, local_dv, local_dbias = FusedAttnBwdPrimitive.impl(
                 q,
@@ -1016,13 +1047,22 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 register_primitive(FusedAttnBwdPrimitive)
 
 
-def fused_attn_fwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
-                   q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
-                   q_seq_offsets: Optional[jnp.ndarray], kv_seq_offsets: Optional[jnp.ndarray],
-                   seed: Optional[jnp.ndarray],
-                   attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                   qkv_layout: NVTE_QKV_Layout, scaling_factor: float, dropout_probability: float,
-                   is_training: bool, max_segments_per_seq: int) -> jnp.ndarray:
+def fused_attn_fwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seqlen: jnp.ndarray,
+    kv_seqlen: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: NVTE_Bias_Type,
+    attn_mask_type: NVTE_Mask_Type,
+    qkv_layout: NVTE_QKV_Layout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
 
@@ -1057,7 +1097,8 @@ def fused_attn_fwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
 
     if (q_seq_offsets is None) != (kv_seq_offsets is None):
         raise ArgumentValidationError(
-            "Both q_seq_offsets and kv_seq_offsets must be either None or have values.")
+            "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
+        )
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     # For optional tensors, which custom calls doesn't support None
@@ -1067,10 +1108,14 @@ def fused_attn_fwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
             assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = [*qkv, _not_used, _not_used]
         case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
-            assert len(qkv) == 2, f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
+            assert (
+                len(qkv) == 2
+            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = [*qkv, _not_used]
         case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
-            assert len(qkv) == 3, f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+            assert (
+                len(qkv) == 3
+            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = qkv
 
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
@@ -1093,16 +1138,29 @@ def fused_attn_fwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq)
+        max_segments_per_seq=max_segments_per_seq,
+    )
 
 
-def fused_attn_bwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
-                   softmax_aux: jnp.ndarray, rng_state: jnp.ndarray, output: jnp.ndarray,
-                   doutput: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
-                   q_seq_offsets: Optional[jnp.ndarray], kv_seq_offsets: Optional[jnp.ndarray],
-                   attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                   qkv_layout: NVTE_QKV_Layout, scaling_factor: float, dropout_probability: float,
-                   is_training: bool, max_segments_per_seq: int):
+def fused_attn_bwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    softmax_aux: jnp.ndarray,
+    rng_state: jnp.ndarray,
+    output: jnp.ndarray,
+    doutput: jnp.ndarray,
+    q_seqlen: jnp.ndarray,
+    kv_seqlen: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    attn_bias_type: NVTE_Bias_Type,
+    attn_mask_type: NVTE_Mask_Type,
+    qkv_layout: NVTE_QKV_Layout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
 
@@ -1141,7 +1199,8 @@ def fused_attn_bwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
 
     if (q_seq_offsets is None) != (kv_seq_offsets is None):
         raise ArgumentValidationError(
-            "Both q_seq_offsets and kv_seq_offsets must be either None or have values.")
+            "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
+        )
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     # For optional tensors, which custom calls doesn't support None
@@ -1149,16 +1208,17 @@ def fused_attn_bwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
 
     match qkv_layout:
         case NVTE_QKV_Layout.NVTE_BS3HD | NVTE_QKV_Layout.NVTE_T3HD:
-            assert len(qkv) == 1, \
-                f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
+            assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = [*qkv, _not_used, _not_used]
         case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
-            assert len(qkv) == 2, \
-                f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
+            assert (
+                len(qkv) == 2
+            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = [*qkv, _not_used]
         case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
-            assert len(qkv) == 3, \
-                f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+            assert (
+                len(qkv) == 3
+            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
             qkv_for_primitive = qkv
 
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
@@ -1184,5 +1244,6 @@ def fused_attn_bwd(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq)
-    return tuple(qkv_grads[:len(qkv)]), bias_grad
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    return tuple(qkv_grads[: len(qkv)]), bias_grad

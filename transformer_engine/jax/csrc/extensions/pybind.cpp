@@ -98,10 +98,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
       .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
 
- pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
-     .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
-     .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
-     .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
+  pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
+      .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
+      .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
 
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)

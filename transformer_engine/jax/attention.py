@@ -25,6 +25,7 @@ class AttnBiasType(Enum):
     PRE_SCALE_BIAS: Softmax is performed as softmax(scale * (qk + bias))
     POST_SCALE_BIAS: Softmax is performed as softmax(scale * qk + bias)
     """
+
     NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
     PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
     POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
@@ -37,6 +38,7 @@ class AttnMaskType(Enum):
     CAUSAL_MASK: An upper triangular mask is applied to the softmax inputs.
     PADDING_CAUSAL_MASK: A combination of both causal and padding masks.
     """
+
     NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
@@ -45,6 +47,7 @@ class AttnMaskType(Enum):
 
 class QKVLayout(Enum):
     """QKV layout"""
+
     BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
     BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
     BSHD_BSHD_BSHD = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
@@ -55,6 +58,7 @@ class QKVLayout(Enum):
 
 class QKVFormat(Enum):
     """QKV format"""
+
     SBHD = NVTE_QKV_Format.NVTE_SBHD
     BSHD = NVTE_QKV_Format.NVTE_BSHD
     THD = NVTE_QKV_Format.NVTE_THD
@@ -71,27 +75,49 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
     However, we will lease this limitation in the near feature.
     """
     match attn_mask_type:
-        case 'no_mask':
+        case "no_mask":
             return AttnMaskType.NO_MASK
-        case 'padding':
+        case "padding":
             return AttnMaskType.PADDING_MASK
-        case 'causal':
+        case "causal":
             return AttnMaskType.CAUSAL_MASK
-        case 'padding_causal' | 'causal_padding':
+        case "padding_causal" | "causal_padding":
             return AttnMaskType.PADDING_CAUSAL_MASK
-    raise ValueError(f"Unsupported {attn_mask_type=}, supported attn_mask_type="
-                     "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}")
+    raise ValueError(
+        f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+        "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
+    )
 
 
-def is_fused_attn_kernel_available(q_dtype, kv_dtype, qkv_layout, attn_bias_type, attn_mask_type,
-                                   dropout_probability, q_num_heads, kv_num_heads, q_max_seqlen,
-                                   kv_max_seqlen, head_dim):
+def is_fused_attn_kernel_available(
+    q_dtype,
+    kv_dtype,
+    qkv_layout,
+    attn_bias_type,
+    attn_mask_type,
+    dropout_probability,
+    q_num_heads,
+    kv_num_heads,
+    q_max_seqlen,
+    kv_max_seqlen,
+    head_dim,
+):
     """
     To check whether the fused attention kernel is supported
     """
-    return tex.FusedAttnHelper(q_dtype, kv_dtype, qkv_layout.value, attn_bias_type.value,
-                           attn_mask_type.value, dropout_probability, q_num_heads, kv_num_heads,
-                           q_max_seqlen, kv_max_seqlen, head_dim).is_fused_attn_kernel_available()
+    return tex.FusedAttnHelper(
+        q_dtype,
+        kv_dtype,
+        qkv_layout.value,
+        attn_bias_type.value,
+        attn_mask_type.value,
+        dropout_probability,
+        q_num_heads,
+        kv_num_heads,
+        q_max_seqlen,
+        kv_max_seqlen,
+        head_dim,
+    ).is_fused_attn_kernel_available()
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
@@ -113,19 +139,32 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def fused_attn(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray], mask: Optional[jnp.ndarray],
-               q_seq_lens: Optional[jnp.ndarray], kv_seq_lens: Optional[jnp.ndarray],
-               q_seq_offsets: Optional[jnp.ndarray], kv_seq_offsets: Optional[jnp.ndarray],
-               seed: jnp.ndarray, attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
-               qkv_layout: QKVLayout, scaling_factor: float, dropout_probability: float,
-               is_training: bool, max_segments_per_seq: int = 1):
+def fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    mask: Optional[jnp.ndarray],
+    q_seq_lens: Optional[jnp.ndarray],
+    kv_seq_lens: Optional[jnp.ndarray],
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: jnp.ndarray,
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int = 1,
+):
     """
     Dot product attention ... (TODO): rewang
     """
 
     if get_qkv_format(qkv_layout) == QKVFormat.THD:
-        assert mask is None, "THD format doesn't support mask, please provide the explicit " \
+        assert mask is None, (
+            "THD format doesn't support mask, please provide the explicit "
             "[q_seqlens, kv_seqlens, q_seq_offsets, kv_seq_offsets]."
+        )
     else:
         assert max_segments_per_seq == 1, "max_segments_per_seq should be 1 for non-THD format."
 
@@ -146,87 +185,155 @@ def fused_attn(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray], mask: 
                 # When mask is causal, the actual seqlen is not the last row, use max to find it
                 kv_seq_lens = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
     else:
-        assert \
-            all(x is not None for x in [q_seq_lens, q_seq_offsets, kv_seq_lens, kv_seq_offsets]), \
-            "mask is None, seq_lens and seq_offsets must not be None."
+        assert all(
+            x is not None for x in [q_seq_lens, q_seq_offsets, kv_seq_lens, kv_seq_offsets]
+        ), "mask is None, seq_lens and seq_offsets must not be None."
 
-    output = _fused_attn(qkv,
-                         bias,
-                         q_seq_lens,
-                         kv_seq_lens,
-                         q_seq_offsets,
-                         kv_seq_offsets,
-                         seed,
-                         attn_bias_type=attn_bias_type,
-                         attn_mask_type=attn_mask_type,
-                         qkv_layout=qkv_layout,
-                         scaling_factor=scaling_factor,
-                         dropout_probability=dropout_probability,
-                         is_training=is_training,
-                         max_segments_per_seq=max_segments_per_seq)
+    output = _fused_attn(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
 
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
-def _fused_attn(qkv: Tuple[jnp.ndarray, ...], bias: Optional[jnp.ndarray],
-                q_seq_lens: jnp.ndarray, kv_seq_lens: jnp.ndarray,
-                q_seq_offsets: Optional[jnp.ndarray], kv_seq_offsets: Optional[jnp.ndarray],
-                seed: jnp.ndarray, attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
-                qkv_layout: QKVLayout, scaling_factor: float, dropout_probability: float,
-                is_training: bool, max_segments_per_seq: int):
-    output, _ = _fused_attn_fwd_rule(qkv, bias, q_seq_lens, kv_seq_lens, q_seq_offsets,
-                                     kv_seq_offsets, seed, attn_bias_type, attn_mask_type,
-                                     qkv_layout, scaling_factor, dropout_probability, is_training,
-                                     max_segments_per_seq)
+def _fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seq_lens: jnp.ndarray,
+    kv_seq_lens: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: jnp.ndarray,
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+):
+    output, _ = _fused_attn_fwd_rule(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+    )
     return output
 
 
-def _fused_attn_fwd_rule(qkv, bias, q_seq_lens, kv_seq_lens, q_seq_offsets, kv_seq_offsets,
-                         seed, attn_bias_type, attn_mask_type, qkv_layout, scaling_factor,
-                         dropout_probability, is_training, max_segments_per_seq):
-    output, softmax_aux, rng_state = tex.fused_attn_fwd(qkv,
-                                                    bias,
-                                                    q_seq_lens,
-                                                    kv_seq_lens,
-                                                    q_seq_offsets,
-                                                    kv_seq_offsets,
-                                                    seed,
-                                                    attn_bias_type=attn_bias_type.value,
-                                                    attn_mask_type=attn_mask_type.value,
-                                                    qkv_layout=qkv_layout.value,
-                                                    scaling_factor=scaling_factor,
-                                                    dropout_probability=dropout_probability,
-                                                    is_training=is_training,
-                                                    max_segments_per_seq=max_segments_per_seq)
-    output = checkpoint_name(output, 'context')
-    softmax_aux = checkpoint_name(softmax_aux, 'context')
-    rng_state = checkpoint_name(rng_state, 'context')
-    return output, (qkv, bias, q_seq_lens, kv_seq_lens, q_seq_offsets, kv_seq_offsets,
-                    softmax_aux, rng_state, output)
+def _fused_attn_fwd_rule(
+    qkv,
+    bias,
+    q_seq_lens,
+    kv_seq_lens,
+    q_seq_offsets,
+    kv_seq_offsets,
+    seed,
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+):
+    output, softmax_aux, rng_state = tex.fused_attn_fwd(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    output = checkpoint_name(output, "context")
+    softmax_aux = checkpoint_name(softmax_aux, "context")
+    rng_state = checkpoint_name(rng_state, "context")
+    return output, (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    )
 
 
-def _fused_attn_bwd_rule(attn_bias_type, attn_mask_type, qkv_layout, scaling_factor,
-                         dropout_probability, is_training, max_segments_per_seq, ctx, dz):
-    qkv, bias, q_seq_lens, kv_seq_lens, q_seq_offsets, kv_seq_offsets, \
-        softmax_aux, rng_state, output = ctx
-    grad_qkv, grad_bias = tex.fused_attn_bwd(qkv,
-                                        bias,
-                                        softmax_aux,
-                                        rng_state,
-                                        output,
-                                        dz,
-                                        q_seq_lens,
-                                        kv_seq_lens,
-                                        q_seq_offsets,
-                                        kv_seq_offsets,
-                                        attn_bias_type=attn_bias_type.value,
-                                        attn_mask_type=attn_mask_type.value,
-                                        qkv_layout=qkv_layout.value,
-                                        scaling_factor=scaling_factor,
-                                        dropout_probability=dropout_probability,
-                                        is_training=is_training,
-                                        max_segments_per_seq=max_segments_per_seq)
+def _fused_attn_bwd_rule(
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    ctx,
+    dz,
+):
+    (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    ) = ctx
+    grad_qkv, grad_bias = tex.fused_attn_bwd(
+        qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        dz,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
     return grad_qkv, grad_bias, None, None, None, None, None
