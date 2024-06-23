@@ -137,14 +137,13 @@ def get_seqlens_and_offsets(segment_ids, segment_pad):
         same_as_previous = jnp.hstack((first_column, same_as_previous))
         return jax.vmap(partial(jnp.argwhere, size=x.shape[1], fill_value=-1))(same_as_previous).squeeze(-1)
     offsets = _find_offsets(segment_ids)
-    offsets_2d = jnp.where(offsets >= 0, offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis], offsets)
     if segment_pad is not None:
         segment_id_with_paddings = jnp.where(segment_pad, 0, segment_ids)
         padding_aware_seqlen = bincount_vmap(segment_id_with_paddings)
         output = jnp.insert(padding_aware_seqlen[..., 1:], -1, values=0, axis=-1)
     else:
         output = jnp.insert(seqlens, -1, values=0, axis=-1)
-    return output, offsets_2d
+    return output, offsets
 
 
 @jax.jit

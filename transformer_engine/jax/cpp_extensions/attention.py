@@ -396,38 +396,60 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 y = jnp.take(x, indices, fill_value=-1)
                 return jnp.reshape(y, x_shape)
 
+            def convert_to_2d(offsets, batch, max_seqlen):
+                offsets_2d = jnp.where(offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis], offsets)
+                return offsets_2d
+
+            match qkv_layout:
+                case NVTE_QKV_Layout.NVTE_T3HD:
+                    q_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
+                    kv_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
+                    o_seq_offsets_stride = q_seq_offsets_stride // 3
+                    kv_max_seqlen = q_max_seqlen = q.shape[-4]
+                    kv_batch = q_batch = reduce(operator.mul, q.shape[:-4])
+                case NVTE_QKV_Layout.NVTE_THD_T2HD:
+                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
+                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-3:])
+                    q_max_seqlen = q.shape[-3]
+                    q_batch = reduce(operator.mul, q.shape[:-3])
+                    kv_max_seqlen = k.shape[-4]
+                    kv_batch = reduce(operator.mul, k.shape[:-4])
+                case NVTE_QKV_Layout.NVTE_THD_THD_THD:
+                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
+                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-2:])
+                    q_max_seqlen = q.shape[-3]
+                    q_batch = reduce(operator.mul, q.shape[:-3])
+                    kv_max_seqlen = k.shape[-3]
+                    kv_batch = reduce(operator.mul, k.shape[:-3])
+
             # Gather valid q_seqlen, which is greater than 0
+            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
             q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0)
             kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0)
 
-            # Gather valid offsets, which is greater and equal than 0
-            q_seq_offsets = q_seq_offsets - q_seq_offsets[0][0]  # For sharding
-            k_seq_offsets = k_seq_offsets - k_seq_offsets[0][0]  # For sharding
+            # Flatten the offset calculation
+            # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
+            q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
+            k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+            # Gather valid q_seq_offsets, which is greater and equal to 0
+            # [[0, 3, 5, -1], [8, 11, 13, -1]] -> [[0, 3, 5, 8], [11, 13, -1, -1]]
             q_seq_offsets = _fix_len_take(q_seq_offsets, q_seq_offsets >= 0)
             k_seq_offsets = _fix_len_take(k_seq_offsets, k_seq_offsets >= 0)
 
-            # Reset the unused valus to max size
-            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_seq_offsets.size, q_seq_offsets)
-            k_seq_offsets = jnp.where(k_seq_offsets < 0, k_seq_offsets.size, k_seq_offsets)
+            # Set the unused position to max size (batch * max_seqlen)
+            # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
+            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
+            k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
+            v_seq_offsets = k_seq_offsets
+            o_seq_offsets = q_seq_offsets
 
             index_type = jnp.int32
-            match qkv_layout:
-                case NVTE_QKV_Layout.NVTE_T3HD:
-                    q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-3:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-3:]) * k_seq_offsets).astype(index_type)
-                    o_seq_offsets = q_seq_offsets // 3
-                case NVTE_QKV_Layout.NVTE_THD_T2HD:
-                    o_seq_offsets = q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-2:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, k.shape[-3:]) * k_seq_offsets).astype(index_type)
-                case NVTE_QKV_Layout.NVTE_THD_THD_THD:
-                    o_seq_offsets = q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-2:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, k.shape[-2:]) * k_seq_offsets).astype(index_type)
+            # convert the sequence-based offset to element-based offset
+            q_seq_offsets = (q_seq_offsets * q_seq_offsets_stride).astype(index_type)
+            k_seq_offsets = (k_seq_offsets * kv_seq_offsets_stride).astype(index_type)
+            v_seq_offsets = (v_seq_offsets * kv_seq_offsets_stride).astype(index_type)
+            o_seq_offsets = (o_seq_offsets * o_seq_offsets_stride).astype(index_type)
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
@@ -791,38 +813,60 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 y = jnp.take(x, indices, fill_value=-1)
                 return jnp.reshape(y, x_shape)
 
+            def convert_to_2d(offsets, batch, max_seqlen):
+                offsets_2d = jnp.where(offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis], offsets)
+                return offsets_2d
+
+            match qkv_layout:
+                case NVTE_QKV_Layout.NVTE_T3HD:
+                    q_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
+                    kv_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
+                    o_seq_offsets_stride = q_seq_offsets_stride // 3
+                    kv_max_seqlen = q_max_seqlen = q.shape[-4]
+                    kv_batch = q_batch = reduce(operator.mul, q.shape[:-4])
+                case NVTE_QKV_Layout.NVTE_THD_T2HD:
+                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
+                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-3:])
+                    q_max_seqlen = q.shape[-3]
+                    q_batch = reduce(operator.mul, q.shape[:-3])
+                    kv_max_seqlen = k.shape[-4]
+                    kv_batch = reduce(operator.mul, k.shape[:-4])
+                case NVTE_QKV_Layout.NVTE_THD_THD_THD:
+                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
+                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-2:])
+                    q_max_seqlen = q.shape[-3]
+                    q_batch = reduce(operator.mul, q.shape[:-3])
+                    kv_max_seqlen = k.shape[-3]
+                    kv_batch = reduce(operator.mul, k.shape[:-3])
+
             # Gather valid q_seqlen, which is greater than 0
+            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
             q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0)
             kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0)
 
-            # Gather valid offsets, which is greater and equal than 0
-            q_seq_offsets = q_seq_offsets - q_seq_offsets[0][0]  # For sharding
-            k_seq_offsets = k_seq_offsets - k_seq_offsets[0][0]  # For sharding
+            # Flatten the offset calculation
+            # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
+            q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
+            k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+            # Gather valid q_seq_offsets, which is greater and equal to 0
+            # [[0, 3, 5, -1], [8, 11, 13, -1]] -> [[0, 3, 5, 8], [11, 13, -1, -1]]
             q_seq_offsets = _fix_len_take(q_seq_offsets, q_seq_offsets >= 0)
             k_seq_offsets = _fix_len_take(k_seq_offsets, k_seq_offsets >= 0)
 
-            # Reset the unused valus to max size
-            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_seq_offsets.size, q_seq_offsets)
-            k_seq_offsets = jnp.where(k_seq_offsets < 0, k_seq_offsets.size, k_seq_offsets)
+            # Set the unused position to max size (batch * max_seqlen)
+            # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
+            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
+            k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
+            v_seq_offsets = k_seq_offsets
+            o_seq_offsets = q_seq_offsets
 
             index_type = jnp.int32
-            match qkv_layout:
-                case NVTE_QKV_Layout.NVTE_T3HD:
-                    q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-3:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-3:]) * k_seq_offsets).astype(index_type)
-                    o_seq_offsets = q_seq_offsets // 3
-                case NVTE_QKV_Layout.NVTE_THD_T2HD:
-                    o_seq_offsets = q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-2:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, k.shape[-3:]) * k_seq_offsets).astype(index_type)
-                case NVTE_QKV_Layout.NVTE_THD_THD_THD:
-                    o_seq_offsets = q_seq_offsets = \
-                        (reduce(operator.mul, q.shape[-2:]) * q_seq_offsets).astype(index_type)
-                    k_seq_offsets = v_seq_offsets = \
-                        (reduce(operator.mul, k.shape[-2:]) * k_seq_offsets).astype(index_type)
+            # convert the sequence-based offset to element-based offset
+            q_seq_offsets = (q_seq_offsets * q_seq_offsets_stride).astype(index_type)
+            k_seq_offsets = (k_seq_offsets * kv_seq_offsets_stride).astype(index_type)
+            v_seq_offsets = (v_seq_offsets * kv_seq_offsets_stride).astype(index_type)
+            o_seq_offsets = (o_seq_offsets * o_seq_offsets_stride).astype(index_type)
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
