@@ -170,7 +170,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     name = "te_fused_attn_forward"
     multiple_results = True
-    impl_static_args = (11, 12, 13, 14, 15, 16, 17)
+    impl_static_args = (9, 10, 11, 12, 13, 14, 15)
     inner_primitive = None
     outer_primitive = None
 
@@ -184,8 +184,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         kv_seqlen_or_cu_seqlen_aval,
         _q_seq_offsets,
         _k_seq_offsets,
-        _v_seq_offsets,
-        _o_seq_offsets,
         seed_aval,
         *,
         attn_bias_type,
@@ -300,8 +298,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         kv_cu_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        v_seq_offsets,
-        o_seq_offsets,
         seed,
         *,
         attn_bias_type,
@@ -324,8 +320,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            v_seq_offsets,
-            o_seq_offsets,
             seed,
         ]
         operand_shapes = map(lambda x: x.type.shape, operands)
@@ -385,8 +379,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         kv_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        v_seq_offsets,
-        o_seq_offsets,
         seed,
         attn_bias_type,
         attn_mask_type,
@@ -418,21 +410,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
             match qkv_layout:
                 case NVTE_QKV_Layout.NVTE_T3HD:
-                    q_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
-                    kv_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
-                    o_seq_offsets_stride = q_seq_offsets_stride // 3
                     kv_max_seqlen = q_max_seqlen = q.shape[-4]
                     kv_batch = q_batch = reduce(operator.mul, q.shape[:-4])
                 case NVTE_QKV_Layout.NVTE_THD_T2HD:
-                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
-                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-3:])
                     q_max_seqlen = q.shape[-3]
                     q_batch = reduce(operator.mul, q.shape[:-3])
                     kv_max_seqlen = k.shape[-4]
                     kv_batch = reduce(operator.mul, k.shape[:-4])
                 case NVTE_QKV_Layout.NVTE_THD_THD_THD:
-                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
-                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-2:])
                     q_max_seqlen = q.shape[-3]
                     q_batch = reduce(operator.mul, q.shape[:-3])
                     kv_max_seqlen = k.shape[-3]
@@ -456,15 +441,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
             q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
             k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
-            v_seq_offsets = k_seq_offsets
-            o_seq_offsets = q_seq_offsets
-
-            index_type = jnp.int32
-            # convert the sequence-based offset to element-based offset
-            q_seq_offsets = (q_seq_offsets * q_seq_offsets_stride).astype(index_type)
-            k_seq_offsets = (k_seq_offsets * kv_seq_offsets_stride).astype(index_type)
-            v_seq_offsets = (v_seq_offsets * kv_seq_offsets_stride).astype(index_type)
-            o_seq_offsets = (o_seq_offsets * o_seq_offsets_stride).astype(index_type)
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
@@ -478,8 +454,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            v_seq_offsets,
-            o_seq_offsets,
             seed,
             attn_bias_type=attn_bias_type,
             attn_mask_type=attn_mask_type,
@@ -609,7 +583,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
     name = "te_fused_attn_backward"
     multiple_results = True
-    impl_static_args = (14, 15, 16, 17, 18, 19, 20)
+    impl_static_args = (12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
     outer_primitive = None
 
@@ -627,8 +601,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         kv_seqlen_or_cu_seqlen_aval,
         _q_seq_offsets,
         _k_seq_offsets,
-        _v_seq_offsets,
-        _o_seq_offsets,
         *,
         attn_bias_type,
         attn_mask_type,
@@ -714,8 +686,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         kv_cu_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        v_seq_offsets,
-        o_seq_offsets,
         *,
         attn_bias_type,
         attn_mask_type,
@@ -741,8 +711,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            v_seq_offsets,
-            o_seq_offsets,
         ]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
@@ -806,8 +774,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         kv_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        v_seq_offsets,
-        o_seq_offsets,
         attn_bias_type,
         attn_mask_type,
         qkv_layout,
@@ -839,21 +805,14 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
             match qkv_layout:
                 case NVTE_QKV_Layout.NVTE_T3HD:
-                    q_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
-                    kv_seq_offsets_stride = reduce(operator.mul, q.shape[-3:])
-                    o_seq_offsets_stride = q_seq_offsets_stride // 3
                     kv_max_seqlen = q_max_seqlen = q.shape[-4]
                     kv_batch = q_batch = reduce(operator.mul, q.shape[:-4])
                 case NVTE_QKV_Layout.NVTE_THD_T2HD:
-                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
-                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-3:])
                     q_max_seqlen = q.shape[-3]
                     q_batch = reduce(operator.mul, q.shape[:-3])
                     kv_max_seqlen = k.shape[-4]
                     kv_batch = reduce(operator.mul, k.shape[:-4])
                 case NVTE_QKV_Layout.NVTE_THD_THD_THD:
-                    o_seq_offsets_stride = q_seq_offsets_stride = reduce(operator.mul, q.shape[-2:])
-                    kv_seq_offsets_stride = reduce(operator.mul, k.shape[-2:])
                     q_max_seqlen = q.shape[-3]
                     q_batch = reduce(operator.mul, q.shape[:-3])
                     kv_max_seqlen = k.shape[-3]
@@ -880,13 +839,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             v_seq_offsets = k_seq_offsets
             o_seq_offsets = q_seq_offsets
 
-            index_type = jnp.int32
-            # convert the sequence-based offset to element-based offset
-            q_seq_offsets = (q_seq_offsets * q_seq_offsets_stride).astype(index_type)
-            k_seq_offsets = (k_seq_offsets * kv_seq_offsets_stride).astype(index_type)
-            v_seq_offsets = (v_seq_offsets * kv_seq_offsets_stride).astype(index_type)
-            o_seq_offsets = (o_seq_offsets * o_seq_offsets_stride).astype(index_type)
-
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
 
@@ -903,8 +855,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            v_seq_offsets,
-            o_seq_offsets,
             attn_bias_type=attn_bias_type,
             attn_mask_type=attn_mask_type,
             qkv_layout=qkv_layout,
@@ -1010,8 +960,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            v_seq_offsets,
-            o_seq_offsets,
         ):
             local_dq, local_dk, local_dv, local_dbias = FusedAttnBwdPrimitive.impl(
                 q,
@@ -1026,8 +974,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 kv_cu_seqlen,
                 q_seq_offsets,
                 k_seq_offsets,
-                v_seq_offsets,
-                o_seq_offsets,
                 attn_bias_type=attn_bias_type,
                 attn_mask_type=attn_mask_type,
                 qkv_layout=qkv_layout,
@@ -1129,8 +1075,6 @@ def fused_attn_fwd(
         kv_seqlen,
         q_seq_offsets if is_ragged else _not_used,
         kv_seq_offsets if is_ragged else _not_used,
-        kv_seq_offsets if is_ragged else _not_used,
-        q_seq_offsets if is_ragged else _not_used,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -1236,8 +1180,6 @@ def fused_attn_bwd(
         kv_seqlen,
         q_seq_offsets if is_ragged else _not_used,
         kv_seq_offsets if is_ragged else _not_used,
-        kv_seq_offsets if is_ragged else _not_used,
-        q_seq_offsets if is_ragged else _not_used,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
