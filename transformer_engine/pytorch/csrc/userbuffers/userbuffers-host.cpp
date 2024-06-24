@@ -140,10 +140,9 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     unsigned char *cluster_uuid = NULL;
     unsigned int *cluster_cliqueid = NULL;
     int mpi_status;
-    int clique_size   = 0;
-    int myclique_rank = 0;
-    int clique_index  = 0;
-
+    int myclique_rank   = -1;
+    int clique_size     = 0;
+    int clique_index    = 0;
 
     cluster_uuid = (unsigned char*)malloc((*comm)->nranks * sizeof(char)*NVML_GPU_FABRIC_UUID_LEN);
     if (cluster_uuid == NULL) {
@@ -173,20 +172,22 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
                 myclique_rank = clique_size;
               }
               clique_size++;
+       } else if (myclique_rank > 0) {
+	 // we found or clique and we can break here
+	 break;
        } else {
-        // all nodes in the same clique will have the same index
-        clique_index++;
+         // all nodes in the same clique will have the same index which first rank in the group
+         clique_index++;
        }
     }
+
+    assert(myclique_rank > 0);
 
     (*comm)->nvrank = myclique_rank;
     (*comm)->nvsize = clique_size;
     // User as a color for MPI communicatro split
-    // for case when nvlink domain hosts few tensor parallel groups
-    // we need to split clique_size / tensorgpus groups.
-    // e.g. 32 GPU nvlink domain with 8 gpus per tensort dimension
-    // means that we have to split the clique to 4 communicators
-    (*comm)->nvclique_index = clique_index + (myclique_rank/tensorgpus);
+    // nodes under the same nvlink domain are in the same intra communicator
+    (*comm)->nvclique_index = clique_index;
 
     MPICHECK(MPI_Comm_split(MPI_COMM_WORLD, (*comm)->nvclique_index,
              (*comm)->myrank, &(*comm)->comm_intra));
@@ -200,8 +201,9 @@ static int mnnvl_detect_domains(communicator **comm, int tensorgpus) {
     assert(numlocal == clique_size);
 
     if (getenv("NVTE_UBDEBUG"))
-      UB_PRINT("MNNVL cliqueId 0x%x cliqueSize %d [%d] cliqueRank %d [%d]",
-              (*comm)->nvml_fabric_info.cliqueId, clique_size, numlocal,  myclique_rank, mylocal);
+        UB_PRINT("MNNVL cliqueId 0x%x cliqueSize %d [%d] cliqueRank %d [%d] nvclique_index %d",
+                (*comm)->nvml_fabric_info.cliqueId, clique_size, numlocal,  myclique_rank,
+                mylocal, (*comm)->nvclique_index);
 
     ret = 0;
 error:
@@ -396,14 +398,17 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 1;
     size_t gran;
-    CUmulticastObjectProp mcProp = {};
+    CUmulticastObjectProp mcProp;
+    memset(&mcProp, 0, sizeof(CUmulticastObjectProp));
     mcProp.numDevices = (*comm)->ar2_nvsize;
-    mcProp.size = (*comm)->mc_maxsize;
+    mcProp.size = mc_maxsize;
 #if MNNVL
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
 #else
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 #endif
+
+    // UB_PRINT("num dev %d size %ld %ld", mcProp.numDevices, mcProp.size, mc_maxsize);
 
     CUCHECK(cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
@@ -411,19 +416,19 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     (*comm)->mc_maxsize = mc_maxsize;
 
 #if MNNVL
-    if ((*comm)->myrank == 0) {
+    if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
     }
 
     // Allocate temporary handle since out of N bcast calls we will need to keep only the
     // the one that is relevant for my tensor domain.
     CUmemFabricHandle *tmp = reinterpret_cast<CUmemFabricHandle *>
-                                                  (malloc(sizeof(CUmemFabricHandle)));
+                                                  (calloc(1, sizeof(CUmemFabricHandle)));
     if (tmp == NULL) {
       UB_PRINT("Memory allocation failed %p\n", tmp); exit(1);
     }
     CUmemFabricHandle *exphndl = reinterpret_cast<CUmemFabricHandle *>
-                                                  (malloc(sizeof(CUmemFabricHandle)));
+                                                  (calloc(1, sizeof(CUmemFabricHandle)));
     if (exphndl == NULL) {
       UB_PRINT("Memory allocation failed %p\n", exphndl); exit(1);
     }
@@ -436,7 +441,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     // Ranks that withing the same tensor group will keep the handle and other will discard it.
     for (int i = 0; i < numlocal; i+=tensorgpus) {
       // tmp is through away handle
-      MPICHECK(MPI_Bcast(((*comm)->ar2_firstgpu == i * tensorgpus) ? exphndl : tmp,
+      MPICHECK(MPI_Bcast(((*comm)->ar2_firstgpu == i * tensorgpus) ? (void *)exphndl : (void *)tmp,
                          sizeof(CUmemFabricHandle), MPI_BYTE, i, (*comm)->comm_intra));
     }
     // Non root ranks will import the fabric handle.
