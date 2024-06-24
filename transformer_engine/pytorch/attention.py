@@ -5896,7 +5896,11 @@ class MultiheadAttention(torch.nn.Module):
                 # split along third last dimension
                 split_dim = -3
 
-            print(f"QKV output: {mixed_x_layer.size()} | view shape: {new_tensor_shape}\n", end='', flush=True)
+            print(
+                f"QKV output: {mixed_x_layer.size()} | view shape: {new_tensor_shape}\n",
+                end="",
+                flush=True,
+            )
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
             # qkv_weight_interleaved:

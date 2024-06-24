@@ -32,7 +32,7 @@
       static_cast<unsigned int *>(counters)[chunk] = 1;                               \
       asm volatile("fence.sc.gpu;\n");                                                \
     }                                                                                 \
-    if (blockIdx.x == 0)__syncthreads();                                              \
+    if (blockIdx.x == 0) __syncthreads();                                             \
   }
 
 #define ATOMIC_PRODUCER(chunk)                        \
@@ -1111,8 +1111,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
         // make sure all threadblocks have read/waited on counters.
         atomicInc(static_cast<unsigned int *>(counters) + numchunks + chunk_i, gridDim.x - 1);
-        while (0 != (atomicCAS(static_cast<unsigned int *>(counters) + numchunks + chunk_i,
-                               0, 0))) {
+        while (0 !=
+               (atomicCAS(static_cast<unsigned int *>(counters) + numchunks + chunk_i, 0, 0))) {
         }
 
         // reset counter for next producer.
@@ -2326,7 +2326,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     NVTE_CHECK_CUDA(
-      cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+        cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
