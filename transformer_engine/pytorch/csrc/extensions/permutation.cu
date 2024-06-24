@@ -10,7 +10,7 @@
 
 using torch::Tensor;
 
-std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
+std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute(
     Tensor              input,
     Tensor              indices,
     int64_t             num_out_tokens,
@@ -76,7 +76,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, true>(
+        moe_permutation_launcher<float, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -92,7 +92,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, true>(
+        moe_permutation_launcher<half, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -108,7 +108,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, true>(
+        moe_permutation_launcher<__nv_bfloat16, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -124,7 +124,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true>(
+        moe_permutation_launcher<__nv_fp8_e5m2, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -140,7 +140,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true>(
+        moe_permutation_launcher<__nv_fp8_e4m3, true>(
             input_ptr,
             permuted_output_ptr,
             sorted_row_id_ptr,
@@ -162,7 +162,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
 }
 
 
-Tensor moe_recover_topK_op(
+Tensor moe_unpermute_fwd(
     Tensor  input,
     Tensor  row_id_map,
     Tensor  prob,
@@ -189,7 +189,7 @@ Tensor moe_recover_topK_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, false>(
+        moe_permutation_launcher<float, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -205,7 +205,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, false>(
+        moe_permutation_launcher<half, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -221,7 +221,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, false>(
+        moe_permutation_launcher<__nv_bfloat16, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -237,7 +237,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, false>(
+        moe_permutation_launcher<__nv_fp8_e5m2, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -253,7 +253,7 @@ Tensor moe_recover_topK_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, false>(
+        moe_permutation_launcher<__nv_fp8_e4m3, false>(
             input_ptr,
             unpermuted_output_ptr,
             nullptr,
@@ -274,7 +274,7 @@ Tensor moe_recover_topK_op(
     return unpermuted_output;
 }
 
-std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
+std::tuple<Tensor, Tensor> moe_unpermute_bwd(
     Tensor  input_bwd,
     Tensor  input_fwd,
     Tensor  row_id_map,
@@ -307,7 +307,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     {
     case at::ScalarType::Float:
     {
-        moe_permute_topK_kernel_launcher<float, true>(
+        moe_permutation_launcher<float, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -325,7 +325,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Half:
     {
-        moe_permute_topK_kernel_launcher<half, true>(
+        moe_permutation_launcher<half, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -343,7 +343,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::BFloat16:
     {
-        moe_permute_topK_kernel_launcher<__nv_bfloat16, true>(
+        moe_permutation_launcher<__nv_bfloat16, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -361,7 +361,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Float8_e5m2:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e5m2, true>(
+        moe_permutation_launcher<__nv_fp8_e5m2, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
@@ -379,7 +379,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     }
     case at::ScalarType::Float8_e4m3fn:
     {
-        moe_permute_topK_kernel_launcher<__nv_fp8_e4m3, true>(
+        moe_permutation_launcher<__nv_fp8_e4m3, true>(
             input_bwd_ptr,
             act_grad_ptr,
             nullptr,
