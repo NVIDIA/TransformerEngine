@@ -1504,13 +1504,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if ctx.qkv_format != "thd":
                         dq.add_(dq_)
                     else:
-                        dq[:cu_seqlens_q[-1]].add_(dq_[:cu_seqlens_q[-1]])
+                        dq[: cu_seqlens_q[-1]].add_(dq_[: cu_seqlens_q[-1]])
                 elif i == (cp_size - rank - 1):
                     if rank == (cp_size - 1):
                         if ctx.qkv_format != "thd":
                             dq.copy_(dq_)
                         else:
-                            dq[:cu_seqlens_q[-1]].copy_(dq_[:cu_seqlens_q[-1]])
+                            dq[: cu_seqlens_q[-1]].copy_(dq_[: cu_seqlens_q[-1]])
                     else:
                         if ctx.qkv_format == "bshd":
                             dq[:, 0, ...].copy_(dq_[:, 0, ...])
@@ -1539,12 +1539,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if ctx.qkv_format != "thd":
                         dq.copy_(dq_)
                     else:
-                        dq[:cu_seqlens_q[-1]].copy_(dq_[:cu_seqlens_q[-1]])
+                        dq[: cu_seqlens_q[-1]].copy_(dq_[: cu_seqlens_q[-1]])
                 else:
                     if ctx.qkv_format != "thd":
                         dq.add_(dq_)
                     else:
-                        dq[:cu_seqlens_q[-1]].add_(dq_[:cu_seqlens_q[-1]])
+                        dq[: cu_seqlens_q[-1]].add_(dq_[: cu_seqlens_q[-1]])
 
             if attn_dbias is not None:
                 idx = (rank + i + 1) % cp_size
@@ -1596,7 +1596,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         if ctx.qkv_format != "thd":
                             dkv.add_(dkv_)
                         else:
-                            dkv[:, :cu_seqlens_k[-1]].add_(dkv_[:, :cu_seqlens_k[-1]])
+                            dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
                 elif i >= (cp_size - rank - 1):
                     if i == 0 and rank == (cp_size - 1):
                         if ctx.qkv_format == "bshd":
@@ -1616,23 +1616,23 @@ class AttnFuncWithCP(torch.autograd.Function):
                     if ctx.qkv_format != "thd":
                         dkv.add_(dkv_)
                     else:
-                        dkv[:, :cu_seqlens_k[-1]].add_(dkv_[:, :cu_seqlens_k[-1]])
+                        dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
                 else:
                     if ctx.qkv_format != "thd":
                         dkv.copy_(dkv_)
                     else:
-                        dkv[:, :cu_seqlens_k[-1]].copy_(dkv_[:, :cu_seqlens_k[-1]])
+                        dkv[:, : cu_seqlens_k[-1]].copy_(dkv_[:, : cu_seqlens_k[-1]])
             else:
                 if i == 0:
                     if ctx.qkv_format != "thd":
                         dkv.copy_(dkv_)
                     else:
-                        dkv[:, :cu_seqlens_k[-1]].copy_(dkv_[:, :cu_seqlens_k[-1]])
+                        dkv[:, : cu_seqlens_k[-1]].copy_(dkv_[:, : cu_seqlens_k[-1]])
                 else:
                     if ctx.qkv_format != "thd":
                         dkv.add_(dkv_)
                     else:
-                        dkv[:, :cu_seqlens_k[-1]].add_(dkv_[:, :cu_seqlens_k[-1]])
+                        dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
 
         if causal:
             if ctx.qkv_format == "bshd":
