@@ -85,6 +85,7 @@ namespace te = transformer_engine;
       .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS_P2P)                \
       .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P);               \
   m.attr("NVTE_COMM_OVERLAP_MAX_STREAMS") = py::int_(NVTE_COMM_OVERLAP_MAX_STREAMS);          \
-  m.def("comm_overlap_supports_multicast", &nvte_comm_overlap_supports_multicast);
+  m.def("comm_overlap_supports_multicast", &nvte_comm_overlap_supports_multicast,             \
+        py::call_guard<py::gil_scoped_release>());
 
 #endif  // TRANSFORMER_ENGINE_COMMON_PYBIND_HELPER_H_
