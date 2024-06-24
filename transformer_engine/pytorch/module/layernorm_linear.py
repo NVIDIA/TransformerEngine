@@ -165,7 +165,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
                 if ub_overlap_ag:
-                    ln_out_fp8 = ub_obj_lnout.get_ubuf_output(0)
+                    ln_out_fp8 = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
                     tex.cast_to_fp8(
                         ln_out,
                         fp8_meta["scaling_fwd"],
@@ -1058,7 +1058,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

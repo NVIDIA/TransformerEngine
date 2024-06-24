@@ -30,6 +30,7 @@ TEST_CMD_BASE = [
     str(0),
     "--timing-iters",
     str(1),
+    "--verbose",
 ]
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
@@ -38,30 +39,38 @@ if not tex.comm_overlap_supports_multicast():
 
 
 @pytest.mark.parametrize(
-    "fp8,p2p,comm_type,aggregate",
+    "fp8,p2p,comm_type,aggregate,atomic",
     [
-        (False, True, "AG", False),
-        (False, True, "AG", True),
-        (True, True, "AG", False),
-        (True, True, "AG", True),
-        (False, False, "RS", False),
-        (False, True, "RS", False),
-        (True, False, "RS", False),
-        (True, True, "RS", False),
+        #FP8        P2P        Type        Aggregate        Atomic
+        (False,     True,      "AG",       False,           False),
+        (False,     True,      "AG",       True,            False),
+        (True,      True,      "AG",       False,           False),
+        (True,      True,      "AG",       True,            False),
+        (False,     False,     "RS",       False,           False),
+        (False,     True,      "RS",       False,           False),
+        (True,      False,     "RS",       False,           False),
+        (True,      True,      "RS",       False,           False),
+        # (True,      False,     "RS",       False,           True),
+        (True,      True,      "RS",       False,           True),
     ],
     ids=[
-        "BF16 RING-EXCHANGE ALL-GATHER",
-        "BF16 AGGREGATED RING-EXCHANGE ALL-GATHER",
-        "FP8 RING-EXCHANGE ALL-GATHER",
-        "FP8 AGGREGATED RING-EXCHANGE ALL-GATHER",
-        "BF16 COLLECTIVE REDUCE-SCATTER",
-        "BF16 RING-EXCHANGE REDUCE-SCATTER",
-        "FP8 COLLECTIVE REDUCE-SCATTER",
-        "FP8 RING-ECHANGE REDUCE-SCATTER",
+        " AG + SPLIT GEMM | BF16 | RING-EXCHANGE",
+        " AG + SPLIT GEMM | BF16 | 2X AGGREGATED RING-EXCHANGE",
+        " AG + SPLIT GEMM | FP8  | RING-EXCHANGE",
+        " AG + SPLIT GEMM | FP8  | 2X AGGREGATED RING-EXCHANGE",
+        " SPLIT GEMM + RS | BF16 | PIPELINE",
+        " SPLIT GEMM + RS | BF16 | RING-EXCHANGE",
+        " SPLIT GEMM + RS | FP8  | PIPELINE",
+        " SPLIT GEMM + RS | FP8  | RING-EXCHANGE",
+        # "ATOMIC GEMM + RS | FP8  | PIPELINE",
+        "ATOMIC GEMM + RS | FP8  | RING-EXCHANGE",
     ],
 )
-def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
-    """Test communication overlap with split GEMM."""
+def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic):
+    """
+    Test comm+GEMM overlap algorithms with direct calls to
+    te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm
+    """
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     test_cmd = TEST_CMD_BASE + ["--comm-type", comm_type]
@@ -71,27 +80,6 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
         test_cmd.append("--p2p")
     if aggregate:
         test_cmd.append("--aggregate")
-    subprocess.run(test_cmd, env=os.environ, check=True)
-
-
-# NOTE: Atomic GEMM overlaps suffer from hangs. Test is disabled while issue is being actively
-#       worked on.
-
-# @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-# @pytest.mark.parametrize(
-#     "p2p", [False, True],
-#     ids=['RING-EXCHANGE ALL-GATHER + COLLECTIVE REDUCE-SCATTER',
-#          'RING-EXCHANGE ALL-GATHER + RING-EXHCANGE REDUCE-SCATTER'])
-# def test_paired_atomic_gemm_overlap_fp8(p2p):
-#     """Test communication overlap with atomic GEMM."""
-#     test_cmd = BASE_CMD + ['--fp8 --atomic']
-#     if p2p:
-#         test_cmd.append('--p2p')
-#     subprocess.run(
-#         test_cmd,
-#         env=os.environ,
-#         check=True
-#     )
-
-# @pytest.mark.parametrize()
-# def test_transformer_layer_with_overlap(fp8):
+    if atomic:
+        test_cmd.append("--atomic")
+    assert not bool(subprocess.call(test_cmd, env=os.environ))

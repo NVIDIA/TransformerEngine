@@ -97,7 +97,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
                                    free_handle, 1, 1, localsize, 1);
 #endif
       if (worldrank == 0) {
-        printf("!!! [CommGemmOverlap] communicator initialized\n");
+        printf("[CommGemmOverlap] communicator initialized\n");
       }
       _comm_created = true;
     }
@@ -136,23 +136,28 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
       cudaStreamDestroy(_stream_compute[i]);
     }
     if (_comm_created) {
+#ifdef UB_MPI_BOOTSTRAP
+      destroy_communicator_mpi(_ub_comm);
+#else
       destroy_communicator(_ub_comm);
+#endif
       _comm_created = false;
     }
   }
 
+  // Disallow copy-constructor and copy-assignment
   CommGemmOverlapBase(const CommGemmOverlapBase &other) = delete;
   CommGemmOverlapBase &operator=(const CommGemmOverlapBase &other) = delete;
 
   void register_gpu_buffer(void **gpuptr, size_t bytes, bool alloc) {
     NVTE_CHECK(
         _comm_created,
-        "!!! [CommGemmOverlap] Communicator must be initialized before buffer registration.");
-    NVTE_CHECK(!_buffer_registered, "!!! [CommGemmOverlap] GPU buffer is already registered.");
+        "[CommGemmOverlap] Communicator must be initialized before buffer registration.");
+    NVTE_CHECK(!_buffer_registered, "[CommGemmOverlap] GPU buffer is already registered.");
     _ub_reg = register_user_buffer_collective(gpuptr, bytes, _ub_comm, alloc);
     _buffer_registered = true;
     if (_tp_id == 0) {
-      printf("!!! [CommGemmOverlap] registered buffer %d\n", _ub_reg);
+      printf("[CommGemmOverlap] registered buffer %d\n", _ub_reg);
     }
   }
 
@@ -180,9 +185,9 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
       NVTE_CHECK(0 <= _rs_kernel_type && _rs_kernel_type < 3,
                  "Invalid choice for NVTE_RS_STRIDED_ATOMIC");
       if (worldrank == 0 && _rs_kernel_type == 1) {
-        printf("!!! [CommGemmOverlap] collective reduce-scatter with atomic kernel\n");
+        printf("[CommGemmOverlap] collective reduce-scatter with atomic kernel\n");
       } else if (worldrank == 0 && _rs_kernel_type == 2) {
-        printf("!!! [CommGemmOverlap] collective reduce-scatter with multi-atomic kernel\n");
+        printf("[CommGemmOverlap] collective reduce-scatter with multi-atomic kernel\n");
       }
     }
 
@@ -196,8 +201,9 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
   }
 
   /*
-  ** Bulk GEMM + All-Gather/Reduce-Scatter
-  ** This function assumes that input (B) is pre-copied to ubuf
+    Bulk GEMM + All-Gather/Reduce-Scatter
+
+    This function assumes that input (B) is pre-copied to ubuf
   */
   void bulk_gemm_overlap(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                          const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -248,7 +254,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
   }  // bulk_gemm_overlap
 
   /*
-  ** Atomic FPROP GEMM + ReduceScatter
+    Atomic FPROP GEMM + ReduceScatter
   */
   void atomic_gemm_overlap_rs(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                               const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -334,7 +340,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
   }  // atomic_gemm_overlap_rs
 
   /*
-  ** Split FPROP GEMM + ReduceScatter
+    Split FPROP GEMM + ReduceScatter
   */
   void split_gemm_overlap_rs(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                              const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -517,7 +523,7 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       if (!_is_reduce_scatter) {
         _ag_sendrecv_multiatomic = getenv<bool>("NVTE_AG_P2P_MULTI_ATOMIC");
         if (worldrank == 0 && _ag_sendrecv_multiatomic) {
-          printf("!!! [CommGemmOverlap] p2p all-gather with multi-atomic send/recv\n");
+          printf("[CommGemmOverlap] p2p all-gather with multi-atomic send/recv\n");
         }
       }
     }
@@ -536,10 +542,11 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   }
 
   /*
-  ** Split AllGather + AtomicGEMM using P2P communication
-  ** This function assumes the input (B) is pre-copied to ubuf_chunks[rank_id]. This is
-  ** necessary to have AG outputs in each rank to be in the contiguous memory space
-  ** after all ring exchange phases.
+    Split AllGather + AtomicGEMM using P2P communication
+
+    This function assumes the input (B) is pre-copied to ubuf_chunks[rank_id]. This is
+    necessary to have AG outputs in each rank to be in the contiguous memory space
+    after all ring exchange phases.
   */
   void atomic_gemm_overlap_ag(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                               const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -629,10 +636,11 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   }  // atomic_gemm_overlap_ag
 
   /*
-  ** Split AllGather + GEMM using P2P communication
-  ** This function assumes the input_b is pre-copied to ubufs[rank_id]. This is
-  ** needed to have AG outputs in each rank to be in the contiguous memory space
-  ** after all ring exchange phases.
+    Split AllGather + GEMM using P2P communication
+
+    This function assumes the input_b is pre-copied to ubufs[rank_id]. This is
+    needed to have AG outputs in each rank to be in the contiguous memory space
+    after all ring exchange phases.
   */
   void split_gemm_overlap_ag(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                              const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -806,10 +814,12 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   }  // split_gemm_overlap_ag
 
   /*
-  ** Split ReduceScatter + Atomic GEMM using P2P communication
-  ** This implementation produces an RS output in the shape of
-  ** {_tp_size, _ubuf.size(0) / _tp_size, _ubuf.size(1)}. This needs to be sum-reduced in the
-  ** first dimension to produce the final RS output of size {_ubuf.size(0), _ubuf_size(1)}.
+    Split ReduceScatter + Atomic GEMM using P2P communication
+
+    The TE/common implementation produces an RS output in the shape of
+    {_tp_size, _ubuf.size(0) / _tp_size, _ubuf.size(1)}. TE/framework wrappers need to sum-reduce
+    this output in the first dimension to produce the final RS output of size
+    {_ubuf.size(0), _ubuf_size(1)}.
   */
   void atomic_gemm_overlap_rs(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                               const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,
@@ -863,10 +873,12 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
   }  // atomic_gemm_overlap_rs
 
   /*
-  ** Split ReduceScatter + Pipelined GEMM using P2P communication
-  ** This implementation produces an RS output in the shape of
-  ** {_tp_size, _ubuf.size(0) / _tp_size, _ubuf.size(1)}. This needs to be sum-reduced in the
-  ** first dimension to produce the final RS output of size {_ubuf.size(0), _ubuf_size(1)}.
+    Split ReduceScatter + Pipelined GEMM using P2P communication
+
+    The TE/common implementation produces an RS output in the shape of
+    {_tp_size, _ubuf.size(0) / _tp_size, _ubuf.size(1)}. TE/framework wrappers need to sum-reduce
+    this output in the first dimension to produce the final RS output of size
+    {_ubuf.size(0), _ubuf_size(1)}.
   */
   void split_gemm_overlap_rs(cudaStream_t stream_main, const TensorWrapper &A, bool A_trans,
                              const TensorWrapper &B, bool B_trans, const TensorWrapper &bias,

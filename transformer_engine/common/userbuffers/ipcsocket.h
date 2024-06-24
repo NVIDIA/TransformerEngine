@@ -20,32 +20,58 @@
 #include <unistd.h>
 
 typedef enum {
-  ncclSuccess = 0,
-  ncclUnhandledCudaError = 1,
-  ncclSystemError = 2,
-  ncclInternalError = 3,
-  ncclInvalidArgument = 4,
-  ncclInvalidUsage = 5,
-  ncclRemoteError = 6,
-  ncclInProgress = 7,
-  ncclNumResults = 8
-} ncclResult_t;
+  ipcSocketSuccess = 0,
+  ipcSocketUnhandledCudaError = 1,
+  ipcSocketSystemError = 2,
+  ipcSocketInternalError = 3,
+  ipcSocketInvalidArgument = 4,
+  ipcSocketInvalidUsage = 5,
+  ipcSocketRemoteError = 6,
+  ipcSocketInProgress = 7,
+  ipcSocketNumResults = 8
+} ipcSocketResult_t;
 
-#define NCCL_IPC_SOCKNAME_LEN 64
-
-struct ncclIpcSocket {
-  int fd;
-  char socketName[NCCL_IPC_SOCKNAME_LEN];
-  volatile uint32_t *abortFlag;
+static const char* ipcSocketResultStrings[static_cast<int>(ipcSocketNumResults)] = {
+  "Success",
+  "Unhandled CUDA error",
+  "Internal error",
+  "Invalid argument",
+  "Invalid usage",
+  "Remote error",
+  "Operation in progress"
 };
 
-ncclResult_t ncclIpcSocketInit(struct ncclIpcSocket *handle, int rank, uint64_t hash,
-                               volatile uint32_t *abortFlag);
-ncclResult_t ncclIpcSocketClose(struct ncclIpcSocket *handle);
-ncclResult_t ncclIpcSocketGetFd(struct ncclIpcSocket *handle, int *fd);
+#define IPC_SOCKET_CHECK(cmd)                                             \
+  do {                                                                    \
+    ipcSocketResult_t r = cmd;                                            \
+    if (r != ipcSocketSuccess) {                                          \
+      printf("Failed, IPC socket error %s:%d : %s\n", __FILE__, __LINE__, \
+             ipcSocketResultStrings[static_cast<int>(r)]);                \
+      exit(EXIT_FAILURE);                                                 \
+    }                                                                     \
+  } while (0)
 
-ncclResult_t ncclIpcSocketRecvFd(struct ncclIpcSocket *handle, int *fd);
-ncclResult_t ncclIpcSocketSendFd(struct ncclIpcSocket *handle, const int fd, int rank,
-                                 uint64_t hash);
+#define IPC_SOCKET_CHECK_GOTO(call, RES, label)                  \
+  do {                                                           \
+    RES = call;                                                  \
+    if (RES != ipcSocketSuccess && RES != ipcSocketInProgress) { \
+      goto label;                                                \
+    }                                                            \
+  } while (0);
 
-#endif /* TRANSFORMER_ENGINE_NCCL_IPCSOCKET_H */
+#define IPC_SOCKNAME_LEN 64
+
+typedef struct ipcSocket {
+  int fd;
+  char socketName[IPC_SOCKNAME_LEN];
+  volatile uint32_t *abortFlag;
+} ipcSocket;
+
+ipcSocketResult_t ipcSocketInit(ipcSocket *handle, int rank, uint64_t hash,
+                                volatile uint32_t *abortFlag);
+ipcSocketResult_t ipcSocketClose(ipcSocket *handle);
+ipcSocketResult_t ipcSocketGetFd(ipcSocket *handle, int *fd);
+ipcSocketResult_t ipcSocketRecvFd(ipcSocket *handle, int *fd);
+ipcSocketResult_t ipcSocketSendFd(ipcSocket *handle, const int fd, int rank, uint64_t hash);
+
+#endif /* TRANSFORMER_ENGINE_COMMON_IPCSOCKET_H */

@@ -511,6 +511,7 @@ def main(opts):
     if world_rank == 0:
         print("\n", end="", flush=True)
 
+    del ub_obj
     dist.destroy_process_group()
 
     # Reset clock speeds

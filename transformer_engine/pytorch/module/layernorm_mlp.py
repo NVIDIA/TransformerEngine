@@ -171,7 +171,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # Column Parallel Linear
         ln_out_gathered = False
         if ub_overlap_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out_total = ub_obj_lnout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             ln_out = torch.empty_like(ln_out)
             if ub_obj_lnout.is_atomic_gemm():
                 ub_algo_ag = tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P

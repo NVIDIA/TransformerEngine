@@ -661,7 +661,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
                 else:
                     ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
-                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(1)
+                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(
+                        tex.NVTE_Comm_Overlap_Type.AG)
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -679,7 +680,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 grad_bias = None
             if ctx.ub_overlap_ag:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
             if not isinstance(grad_output_mat, Float8Tensor):
@@ -699,7 +700,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     grad_output_t = grad_output_c.transpose_2d()
             else:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 grad_output_t = None
 
             return grad_output_mat, grad_output_c, grad_output_t, grad_bias

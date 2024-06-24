@@ -22,10 +22,41 @@
 #include "userbuffers.h"
 
 #ifdef UB_MPI_BOOTSTRAP
-#include <mpi.h>
 static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
 static MPI_Comm EXT_COMM_INTRA;
 static MPI_Comm EXT_COMM_INTER;
+
+#define UB_MPI_CHECK(expr)                                                                   \
+  do {                                                                                       \
+    const int mpicode = (expr);                                                              \
+    if (mpicode != MPI_SUCCESS) {                                                            \
+      char mpimsg[MPI_MAX_ERROR_STRING];                                                     \
+      int mpilen;                                                                            \
+      MPI_Error_string(mpicode, mpimsg, &mpilen);                                            \
+      std::vector<char> errmsg(1024);                                                        \
+      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s", __FILE__, __LINE__, \
+               __func__, mpimsg);                                                            \
+      throw std::runtime_error(errmsg.data());                                               \
+    }                                                                                        \
+  } while (false)
+
+void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, ExtComm comm) {
+  int myrank, nranks;
+  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
+  UB_MPI_CHECK(MPI_Comm_size(comm, &nranks));
+  *globaldata = malloc(nranks * localbytes);
+  memcpy(*globaldata + myrank * localbytes, localdata, localbytes);
+  UB_MPI_CHECK(MPI_Allgather(localdata, localbytes, MPI_BYTE, *globaldata, nranks * localbytes,
+                             MPI_BYTE, comm));
+}
+
+void ub_bcast(void *data, size_t bytes, int src, ExtComm comm) {
+  UB_MPI_CHECK(MPI_Bcast(data, bytes, MPI_BYTE, src, comm));
+}
+
+void ub_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
+
+void ub_free(void *ptr) { free(ptr); }
 #else
 static char EXT_COMM_WORLD[] = "world";
 static char EXT_COMM_INTRA[] = "intra";
@@ -41,23 +72,6 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     throw std::runtime_error(std::string(__FILE__ ":") + std::to_string(__LINE__) + \
                              " in function " + __func__ + ": " + x);                \
   } while (false)
-
-#define NCCLCHECK(cmd)                                                                        \
-  do {                                                                                        \
-    ncclResult_t r = cmd;                                                                     \
-    if (r != ncclSuccess) {                                                                   \
-      printf("Failed, NCCL error %s:%d ''\n", __FILE__, __LINE__ /*,ncclGetErrorString(r)*/); \
-      exit(EXIT_FAILURE);                                                                     \
-    }                                                                                         \
-  } while (0)
-
-#define NCCLCHECKGOTO(call, RES, label)                \
-  do {                                                 \
-    RES = call;                                        \
-    if (RES != ncclSuccess && RES != ncclInProgress) { \
-      goto label;                                      \
-    }                                                  \
-  } while (0);
 
 int pipe_rank(communicator *comm, int step) {
   int mynode = comm->myrank / comm->nvsize;
@@ -78,7 +92,7 @@ int create_communicator_grouped2(
     int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
     std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
     int pipenodes, int tensorgpus, int tensornodes) {
-  *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
+  *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
@@ -112,7 +126,7 @@ int create_communicator_grouped2(
   NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {
-    printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n", sec_timeout,
+    printf("[UB] Timeout is set to %d sec, %" PRIu64 " cycles, freq: %d kHz\n", sec_timeout,
            (*comm)->ub_timeout, device_clock);
   }
 
@@ -143,7 +157,8 @@ int create_communicator_grouped2(
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
-      printf("%d: device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev, mylocal);
+      printf("[UB][rank:%d] device used %d[%d] ,resetting device to %d\n",
+             myrank, cur_dev, ndev, mylocal);
     NVTE_CHECK_CUDA(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
@@ -206,10 +221,10 @@ int create_communicator_grouped2(
     //       without mangling.
     int fd;
     volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
+    ipcSocket ipc_sock = {0};
     uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
-    ncclResult_t ret = ncclSuccess;
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
+    ipcSocketResult_t ret = ipcSocketSuccess;
+    IPC_SOCKET_CHECK(ipcSocketInit(&ipc_sock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
     (*comm)->_barrier((*comm)->comm_world);
 
     if ((*comm)->ar2_nvrank == 0) {
@@ -218,11 +233,11 @@ int create_communicator_grouped2(
           &fd, (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
-        NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
+        IPC_SOCKET_CHECK_GOTO(ipcSocketSendFd(&ipc_sock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
       for (int i = 0; i < (*comm)->ar2_nvrank; i++) (*comm)->_barrier((*comm)->comm_intra);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
+      IPC_SOCKET_CHECK_GOTO(ipcSocketRecvFd(&ipc_sock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
         (*comm)->_barrier((*comm)->comm_intra);
       NVTE_CHECK_CUDRIVER(cuMemImportFromShareableHandle(&(*comm)->mc_handle,
@@ -230,7 +245,7 @@ int create_communicator_grouped2(
                                                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
   error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+    IPC_SOCKET_CHECK(ipcSocketClose(&ipc_sock));
     close(fd);
     NVTE_CHECK_CUDRIVER(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
 
@@ -246,15 +261,16 @@ int create_communicator_grouped2(
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
     (*comm)->_barrier((*comm)->comm_world);
-    if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
+    if (!(*comm)->myrank) printf("[UB] MC initialized succesfully, window size = %ld MB\n",
+                                 mc_maxsize / 1024 / 1024);
   } else {
-    if (!(*comm)->myrank) printf("MC NOT initialized and used\n");
+    if (!(*comm)->myrank) printf("[UB] MC NOT initialized and used\n");
     (*comm)->mc_maxsize = 0;
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 0;
   }
 
-#define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
+#define LOCALSIZE 4 * (NVTE_REG0_OFFSET + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
   NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->gpu_ptrs,
@@ -292,7 +308,7 @@ int create_communicator_grouped2(
 
   if (getenv("NVTE_UBDEBUG"))
     printf(
-        "%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
+        "[UB][rank:%d/%d (%d x %d)] DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
         "%dx%d PIPE_ID %d/%d\n",
         myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
         (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
@@ -301,24 +317,6 @@ int create_communicator_grouped2(
   fflush(NULL);
 
   return 0;
-}
-
-int create_communicator_grouped(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, pipegpus,
-                                      pipenodes, 1, 1);
-}
-
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, 1, 1, 1, 1);
 }
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
@@ -378,14 +376,6 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
 #endif
 }
 
-int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipenodes) {
-  return create_communicator_grouped2_mpi(comm, pipegpus, pipenodes, 1, 1);
-}
-
-int create_communicator_mpi(communicator **comm) {
-  return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
-}
-
 void destroy_communicator(communicator *comm) {
   for (int hndl = 0; hndl < comm->free_region; hndl++) {
     if (comm->mem_dealloc[hndl]) {
@@ -418,7 +408,7 @@ void destroy_communicator(communicator *comm) {
     cudaFree(comm->gpu_ptrs);
   }
   free(comm->fifo);
-  free(comm);
+  delete comm;
 }
 
 void destroy_communicator_mpi(communicator *comm) {
@@ -479,26 +469,26 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
                                                      0 /*flags*/));
 
     volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
+    ipcSocket ipc_sock = {0};
     uint64_t opId = 0xdeadcafebeef;
-    ncclResult_t ret = ncclSuccess;
+    ipcSocketResult_t ret = ipcSocketSuccess;
 
     // All-gather POSIX file descriptors across local ranks.
     // NOTE: This cannot be done via MPI_Allgather or other external comm libraries. They mangle
     //       the file descriptor and prevent cuMemImportFromShareableHandle() from correctly
     //       interpreting the file. Instead, we use system socket to send/recv the file handle
     //       without mangling.
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
+    IPC_SOCKET_CHECK(ipcSocketInit(&ipc_sock, myrank, (uint64_t)opId, &abortFlag));
     for (int p = 1; p < nranks; p++) {
       comm->_barrier(comm->comm_intra);
-      NCCLCHECKGOTO(
-          ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
+      IPC_SOCKET_CHECK_GOTO(
+          ipcSocketSendFd(&ipc_sock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
           error);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
+      IPC_SOCKET_CHECK_GOTO(ipcSocketRecvFd(&ipc_sock, &peerfd[(myrank + nranks - p) % nranks]), ret,
                     error);
     }
   error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+    IPC_SOCKET_CHECK(ipcSocketClose(&ipc_sock));
 
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
@@ -545,8 +535,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
     } else if (!comm->myrank) {
-      printf("UB: warning region %d size %ld MB registered without MC access\n", hndl,
-             aligned_size / 1024 / 1024);
+      printf("[UB] region %d size %ld MB registered without MC access (max %ld MB)\n",
+             hndl, aligned_size / 1024 / 1024, comm->mc_maxsize / 1024 / 1024);
     }
 
   } else {
