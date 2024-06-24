@@ -178,7 +178,7 @@ def initialize_ub(
                 use_ce,  # Use copy engine
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 aggregate,  # Aggregate 2X GEMM chunksis_reduce_scatter,
-                is_reduce_scatter  # Overlapped collective is reduce-scatter
+                is_reduce_scatter,  # Overlapped collective is reduce-scatter
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -199,16 +199,14 @@ def initialize_ub(
 
     def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
         pg = None if group == "world" else tp_group
-        use_nccl = torch.distributed.get_backend(pg) == 'nccl'
+        use_nccl = torch.distributed.get_backend(pg) == "nccl"
         global_data = torch.zeros(
             local_data.numel() * torch.distributed.get_world_size(pg),
             dtype=local_data.dtype,
-            device='cuda' if use_nccl else 'cpu'
+            device="cuda" if use_nccl else "cpu",
         )
         torch.distributed.all_gather_into_tensor(
-            global_data,
-            local_data.cuda() if use_nccl else local_data,
-            group=pg
+            global_data, local_data.cuda() if use_nccl else local_data, group=pg
         )
         return global_data.cpu() if use_nccl else global_data
 

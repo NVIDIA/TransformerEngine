@@ -86,7 +86,10 @@ class TorchLayerNormMLP(nn.Module):
 
 class TorchGPT(nn.Module):
     def __init__(
-        self, hidden_size: int, eps: float, num_attention_heads: int,
+        self,
+        hidden_size: int,
+        eps: float,
+        num_attention_heads: int,
     ):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
@@ -105,6 +108,7 @@ class TorchGPT(nn.Module):
         x = x + n
         return x
 
+
 torch_dtypes = {
     "fp32": torch.float32,
     "fp16": torch.float16,
@@ -112,20 +116,20 @@ torch_dtypes = {
 }
 
 atol_map = {
-    torch.float32 : 5e-3,
-    torch.float16 : 5e-2,
-    torch.bfloat16 : 5e-2,
+    torch.float32: 5e-3,
+    torch.float16: 5e-2,
+    torch.bfloat16: 5e-2,
 }
+
 
 def mapped_argtype(opt, typemap={}):
     if str(opt).lower() not in typemap.keys():
         raise TypeError(f"Unrecognized option! Please choose from: {typemap.keys()}")
     return typemap[str(opt).lower()]
 
+
 def parse_args(argv=None, namespace=None):
-    parser = argparse.ArgumentParser(
-        description="Test te.TransformerLayer with GEMM+comm overlap."
-    )
+    parser = argparse.ArgumentParser(description="Test te.TransformerLayer with GEMM+comm overlap.")
     parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument(
@@ -139,7 +143,9 @@ def parse_args(argv=None, namespace=None):
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
     )
     parser.add_argument(
-        "--dtype", type=partial(mapped_argtype, typemap=torch_dtypes), default=torch.bfloat16,
+        "--dtype",
+        type=partial(mapped_argtype, typemap=torch_dtypes),
+        default=torch.bfloat16,
     )
     parser.add_argument(
         "--no-mask", action="store_true", default=False, help="Disable the causal attention mask."
@@ -151,6 +157,7 @@ def parse_args(argv=None, namespace=None):
         "-v", "--verbose", action="store_true", default=False, help="Print out debug info."
     )
     return parser.parse_args(argv, namespace)
+
 
 def train(opts):
     WORLD_RANK = int(os.getenv("RANK"))
@@ -200,26 +207,21 @@ def train(opts):
 
     # Initialize test and reference model, and share parameters
     te_kwargs = {
-        'layernorm_epsilon' : 1e-5,
-        'hidden_dropout' : 0.0,
-        'attention_dropout' : 0.0,
-        'fuse_qkv_params' : True,
-        'qkv_weight_interleaved' : False,
-        'device' : 'cuda',
-        'params_dtype' : opts.dtype,
-        'seq_length' : opts.seq_length,
-        'set_parallel_mode' : WORLD_SIZE > 1,
-        'tp_group' : tp_group if WORLD_SIZE > 1 else None,
-        'sequence_parallel' : WORLD_SIZE > 1,
-        'ub_tp_comm_overlap' : not opts.no_overlap,
-        'parallel_attention_mlp' : False,
+        "layernorm_epsilon": 1e-5,
+        "hidden_dropout": 0.0,
+        "attention_dropout": 0.0,
+        "fuse_qkv_params": True,
+        "qkv_weight_interleaved": False,
+        "device": "cuda",
+        "params_dtype": opts.dtype,
+        "seq_length": opts.seq_length,
+        "set_parallel_mode": WORLD_SIZE > 1,
+        "tp_group": tp_group if WORLD_SIZE > 1 else None,
+        "sequence_parallel": WORLD_SIZE > 1,
+        "ub_tp_comm_overlap": not opts.no_overlap,
+        "parallel_attention_mlp": False,
     }
-    te_gpt = te.TransformerLayer(
-        hidden_size,
-        4 * hidden_size,
-        opts.num_heads,
-        **te_kwargs
-    ).eval()
+    te_gpt = te.TransformerLayer(hidden_size, 4 * hidden_size, opts.num_heads, **te_kwargs).eval()
 
     torch_gpt = TorchGPT(hidden_size, 1e-5, opts.num_heads).cuda().to(opts.dtype).eval()
     with torch.no_grad():
@@ -227,62 +229,81 @@ def train(opts):
         # TransformerLayer.MultiheadAttention.LayerNormLinear --> TorchGPT.LayerNorm
         dist_print(
             f"TE input LN weight: {te_gpt.self_attention.layernorm_qkv.layer_norm_weight.size()}",
-            section=True)
+            section=True,
+        )
         torch_gpt.ln.weight = nn.Parameter(
-            te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone())
+            te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone()
+        )
         dist_print(f"Torch input LN weight: {torch_gpt.ln.weight.size()}", src=0)
 
         dist_print(
-            f"TE input LN bias: {te_gpt.self_attention.layernorm_qkv.layer_norm_bias.size()}")
+            f"TE input LN bias: {te_gpt.self_attention.layernorm_qkv.layer_norm_bias.size()}"
+        )
         torch_gpt.ln.bias = nn.Parameter(
-            te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
+            te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone()
+        )
         dist_print(f"Torch input LN bias: {torch_gpt.ln.bias.size()}", src=0)
 
         # Clone QKV projection params
         # TransformerLayer.MultiheadAttention.LayerNormLinear --> TorchGPT.MultiheadAttention
-        dist_print(f"TE QKV proj weight: {te_gpt.self_attention.layernorm_qkv.weight.size()}",
-                   section=True)
+        dist_print(
+            f"TE QKV proj weight: {te_gpt.self_attention.layernorm_qkv.weight.size()}", section=True
+        )
         torch_gpt.causal_attn.mhsa.in_proj_weight = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.self_attention.layernorm_qkv.weight.clone(), tp_group)[0]
+                te_gpt.self_attention.layernorm_qkv.weight.clone(), tp_group
+            )[0]
             if WORLD_SIZE > 1
-            else te_gpt.self_attention.layernorm_qkv.weight.clone())
-        dist_print(f"Torch QKV proj weight: {torch_gpt.causal_attn.mhsa.in_proj_weight.size()}",
-                   src=0)
+            else te_gpt.self_attention.layernorm_qkv.weight.clone()
+        )
+        dist_print(
+            f"Torch QKV proj weight: {torch_gpt.causal_attn.mhsa.in_proj_weight.size()}", src=0
+        )
 
         dist_print(f"TE QKV proj bias: {te_gpt.self_attention.layernorm_qkv.bias.size()}")
         torch_gpt.causal_attn.mhsa.in_proj_bias = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.self_attention.layernorm_qkv.bias.clone(), tp_group)[0]
+                te_gpt.self_attention.layernorm_qkv.bias.clone(), tp_group
+            )[0]
             if WORLD_SIZE > 1
-            else te_gpt.self_attention.layernorm_qkv.bias.clone())
+            else te_gpt.self_attention.layernorm_qkv.bias.clone()
+        )
         dist_print(f"Torch QKV proj bias: {torch_gpt.causal_attn.mhsa.in_proj_bias.size()}", src=0)
 
         # Clone MHA projection params
         # TransformerLayer.MultiheadAttention.Linear --> TorchGPT.MultiheadAttention
-        dist_print(f"TE MHA out proj weights: {te_gpt.self_attention.proj.weight.size()}",
-                   section=True)
+        dist_print(
+            f"TE MHA out proj weights: {te_gpt.self_attention.proj.weight.size()}", section=True
+        )
         torch_gpt.causal_attn.mhsa.out_proj.weight = nn.Parameter(
             torch.transpose(
                 te.distributed.gather_along_first_dim(
-                    torch.transpose(te_gpt.self_attention.proj.weight.clone(), 0, 1), tp_group)[0],
-                0, 1)
+                    torch.transpose(te_gpt.self_attention.proj.weight.clone(), 0, 1), tp_group
+                )[0],
+                0,
+                1,
+            )
             if WORLD_SIZE > 1
-            else te_gpt.self_attention.proj.weight.clone())
+            else te_gpt.self_attention.proj.weight.clone()
+        )
         dist_print(
             f"Torch MHA out proj weights: {torch_gpt.causal_attn.mhsa.out_proj.weight.size()}",
-            src=0)
+            src=0,
+        )
 
         dist_print(f"TE MHA out proj bias: {te_gpt.self_attention.proj.bias.size()}")
         torch_gpt.causal_attn.mhsa.out_proj.bias = nn.Parameter(
-            te_gpt.self_attention.proj.bias.clone())
-        dist_print(f"Torch MHA out proj bias: {torch_gpt.causal_attn.mhsa.out_proj.bias.size()}",
-                   src=0)
+            te_gpt.self_attention.proj.bias.clone()
+        )
+        dist_print(
+            f"Torch MHA out proj bias: {torch_gpt.causal_attn.mhsa.out_proj.bias.size()}", src=0
+        )
 
         # Clone LayerNormMLP params
         # TransformerLayer.LayerNormMLP --> TorchGPT.LayerNormMLP.Linear
-        dist_print(f"TE LN-MLP LN weights: {te_gpt.layernorm_mlp.layer_norm_weight.size()}",
-                   section=True)
+        dist_print(
+            f"TE LN-MLP LN weights: {te_gpt.layernorm_mlp.layer_norm_weight.size()}", section=True
+        )
         torch_gpt.ln_mlp.ln.weight = nn.Parameter(te_gpt.layernorm_mlp.layer_norm_weight.clone())
         dist_print(f"Torch LN-MLP LN weights: {torch_gpt.ln_mlp.ln.weight.size()}", src=0)
 
@@ -293,18 +314,21 @@ def train(opts):
         dist_print(f"TE LN-MLP FC1 weights: {te_gpt.layernorm_mlp.fc1_weight.size()}")
         torch_gpt.ln_mlp.fc1.weight = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.layernorm_mlp.fc1_weight.clone(), tp_group)[0]
+                te_gpt.layernorm_mlp.fc1_weight.clone(), tp_group
+            )[0]
             if WORLD_SIZE > 1
-            else te_gpt.layernorm_mlp.fc1_weight.clone())
+            else te_gpt.layernorm_mlp.fc1_weight.clone()
+        )
         dist_print(f"Torch LN-MLP FC1 weights: {torch_gpt.ln_mlp.fc1.weight.size()}", src=0)
 
-        dist_print(f"TE LN-MLP FC1 bias: {te_gpt.layernorm_mlp.fc1_bias.size()}",
-                   section=True)
+        dist_print(f"TE LN-MLP FC1 bias: {te_gpt.layernorm_mlp.fc1_bias.size()}", section=True)
         torch_gpt.ln_mlp.fc1.bias = nn.Parameter(
-            te.distributed.gather_along_first_dim(
-                te_gpt.layernorm_mlp.fc1_bias.clone(), tp_group)[0]
+            te.distributed.gather_along_first_dim(te_gpt.layernorm_mlp.fc1_bias.clone(), tp_group)[
+                0
+            ]
             if WORLD_SIZE > 1
-            else te_gpt.layernorm_mlp.fc1_bias.clone())
+            else te_gpt.layernorm_mlp.fc1_bias.clone()
+        )
         dist_print(f"Torch LN-MLP FC1 bias: {torch_gpt.ln_mlp.fc1.bias.size()}", src=0)
 
         dist_print(f"TE LN-MLP FC2 weights: {te_gpt.layernorm_mlp.fc2_weight.size()}")
@@ -312,9 +336,13 @@ def train(opts):
             torch.transpose(
                 te.distributed.gather_along_first_dim(
                     torch.transpose(te_gpt.layernorm_mlp.fc2_weight.clone(), 0, 1), tp_group
-                )[0], 0, 1)
+                )[0],
+                0,
+                1,
+            )
             if WORLD_SIZE > 1
-            else te_gpt.layernorm_mlp.fc2_weight.clone())
+            else te_gpt.layernorm_mlp.fc2_weight.clone()
+        )
         dist_print(f"Torch LN-MLP FC2 weights: {torch_gpt.ln_mlp.fc2.weight.size()}", src=0)
 
         dist_print(f"TE LN-MLP FC2 bias: {te_gpt.layernorm_mlp.fc2_bias.size()}")
@@ -326,9 +354,11 @@ def train(opts):
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
 
     # Generate causal attention mask and random input in SBHD format
-    causal_mask = torch.triu(
-        torch.ones(opts.seq_length, opts.seq_length, device="cuda"), diagonal=1
-    ).bool() if not opts.no_mask else None
+    causal_mask = (
+        torch.triu(torch.ones(opts.seq_length, opts.seq_length, device="cuda"), diagonal=1).bool()
+        if not opts.no_mask
+        else None
+    )
     x = torch.rand(
         (opts.seq_length // tp_size, opts.batch_size, hidden_size),
         dtype=opts.dtype,
@@ -390,7 +420,7 @@ def train(opts):
     # Now compare overlapped layer against no-overlap
     if not numerics_failed and not opts.no_overlap:
         # Create new TransformerLayer without comm overlap
-        te_kwargs['ub_tp_comm_overlap'] = False
+        te_kwargs["ub_tp_comm_overlap"] = False
         te_gpt_no_overlap = te.TransformerLayer(
             hidden_size,
             4 * hidden_size,
@@ -411,13 +441,13 @@ def train(opts):
         ln.backward()
 
         # Assemble list of tensors to be compared
-        overlap = [ y, x.grad ]
-        names = ['output', 'input_grad']
+        overlap = [y, x.grad]
+        names = ["output", "input_grad"]
         for name, param in te_gpt.named_parameters():
             if param.requires_grad:
                 overlap.append(param)
                 names.append(name)
-        no_overlap = [ yn, xn.grad ]
+        no_overlap = [yn, xn.grad]
         for param in te_gpt_no_overlap.parameters():
             if param.requires_grad:
                 no_overlap.append(param)

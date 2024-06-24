@@ -7,10 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_PYBIND_HELPER_H_
 #define TRANSFORMER_ENGINE_COMMON_PYBIND_HELPER_H_
 
-#include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
+#include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
 #include <transformer_engine/activation.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
