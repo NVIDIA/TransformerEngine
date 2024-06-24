@@ -404,6 +404,12 @@ class DotProductAttention(paddle.nn.Layer):
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
         :attr:`attn_mask_type` is set to `"causal"`.
 
+    .. warning::
+
+        Fused attention backward uses a non-deterministic algorithm when workspace
+        optimization is not enabled. To use a deterministic algorithm, set the environment
+        variable :attr:`FLAGS_cudnn_deterministic=1`.
+
     Parameters
     ----------
     num_attention_heads: int
@@ -457,6 +463,8 @@ class DotProductAttention(paddle.nn.Layer):
         self.backend = backend
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
+
+        self.deterministic = bool(int(os.getenv("FLAGS_cudnn_deterministic", "0")))
 
         if not self.use_fused_attention and backend == "transformer_engine":
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
@@ -566,6 +574,22 @@ class DotProductAttention(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
     ) -> paddle.Tensor:
+
+        if self.deterministic:
+            # workspace optimization path is deterministic
+            os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+
+        # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+        # - unset:       enables workspace optimization when required workspace is <= 256MB
+        #                or when bias gradient needs to be computed
+        # - n:           enables workspace optimization when required workspace is <= n bytes
+        # - -1:          enables workspace optimization always
+        # - 0:           disables workspace optimization always
+        if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+            if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+            if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         if self.attention_type == "self":
             # self attention - q: [b, s, h, d]  kv: None

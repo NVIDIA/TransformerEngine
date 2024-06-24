@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Test TE operators"""
 
+import os
 import struct
 
 import numpy as np
@@ -1055,6 +1056,40 @@ class TestFusedAttn:
         assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
+
+    @pytest.mark.parametrize("b, s, h, d", [(2, 2048, 16, 128)])
+    @pytest.mark.parametrize("dtype", ["bfloat16"])
+    @pytest.mark.parametrize("is_causal_masking", [False])
+    def test_fused_attn_with_separate_qkv_forward_backward_deterministic(
+        self, b, s, h, d, dtype, is_causal_masking
+    ):
+        """
+        test flash attention forward + backward with separate qkv inputs
+        """
+        if not is_fused_attention_supported(
+            num_heads=h,
+            num_gqa_groups=h,
+            q_seqlen=s,
+            kv_seqlen=s,
+            head_size=d,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bshd_bshd",
+            bias_type="no_bias",
+            mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
+        self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
+        os.environ["FLAGS_cudnn_deterministic"] = "1"
+        reference_out, q_grad_ref, k_grad_ref, v_grad_ref = (
+            self._get_fused_attention_with_separate_qkv()
+        )
+        fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_with_separate_qkv()
+        os.environ["FLAGS_cudnn_deterministic"] = "0"
+        assert_allclose(reference_out, fused_attention_out, rtol=1e-12, atol=1e-12)
+        assert_allclose(q_grad_ref, q_grad, rtol=1e-12, atol=1e-12)
+        assert_allclose(k_grad_ref, k_grad, rtol=1e-12, atol=1e-12)
+        assert_allclose(v_grad_ref, v_grad, rtol=1e-12, atol=1e-12)
 
 
 class TestSoftmax:
