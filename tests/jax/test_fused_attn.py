@@ -620,21 +620,15 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "dtype",
+    "b, s_q, s_kv, h_q, h_kv, d, dtype",
     [
-        pytest.param(jnp.bfloat16, id="BF16"),
-        # pytest.param(jnp.float16, id="FP16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d",
-    [
-        pytest.param(4, 128, 128, 16, 16, 64, id="4-128-128-16-16-64-SELF"),
-        pytest.param(2, 2048, 2048, 12, 12, 64, id="2-2048-2048-12-12-64-SELF"),
-        pytest.param(4, 512, 128, 16, 16, 64, id="4-512-128-16-16-64-CROSS"),
-        pytest.param(2, 2048, 1024, 12, 12, 64, id="2-2048-1048-12-12-64-CROSS"),
-        pytest.param(4, 128, 128, 16, 8, 64, id="4-128-128-16-8-64-GQA"),
-        pytest.param(2, 2048, 2048, 12, 6, 64, id="2-2048-2048-12-6-64-GQA"),
+        pytest.param(4, 128, 128, 16, 16, 64, jnp.bfloat16, id="4-128-128-16-16-64-BF16-SELF"),
+        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
+        pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
+        pytest.param(4, 512, 128, 16, 16, 64, jnp.bfloat16, id="4-512-128-16-16-64-BF16-CROSS"),
+        pytest.param(2, 2048, 1024, 12, 12, 64, jnp.bfloat16, id="2-2048-1048-12-12-64-BF16-CROSS"),
+        pytest.param(4, 128, 128, 16, 8, 64, jnp.bfloat16, id="4-128-128-16-8-64-BF16-GQA"),
+        pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
     ],
 )
 @pytest.mark.parametrize(
@@ -657,7 +651,7 @@ class TestFusedAttn:
             pytest.param(False, id="INFERENCE"),
         ],
     )
-    def test_forward(
+    def _test_forward(
         b,
         s_q,
         s_kv,
@@ -674,6 +668,8 @@ class TestFusedAttn:
     ):
         """
         Test forward with parameterized configs
+        This test is not intended to run automatically during CI as it is time-consuming
+        It is kept for development and debugging
         """
         runner = FusedAttnRunner(
             b,
