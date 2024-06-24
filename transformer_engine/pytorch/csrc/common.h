@@ -167,10 +167,4 @@ at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 
 void* getDataPtr(at::Tensor tensor, int offset = 0);
 
-template <typename T>
-inline T *get_ptr(torch::Tensor &t)
-{
-    return reinterpret_cast<T *>(t.data_ptr());
-}
-
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_

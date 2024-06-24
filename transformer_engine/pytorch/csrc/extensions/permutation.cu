@@ -44,12 +44,12 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
         workspace.push_back(temp_storage);
     }
 
-    int *indices_ptr = get_ptr<int>(indices);
-    int *sorted_indices_ptr = get_ptr<int>(workspace[0]);
-    int *row_id_ptr = get_ptr<int>(workspace[1]);
-    int *sorted_row_id_ptr = get_ptr<int>(workspace[2]);
+    int *indices_ptr = reinterpret_cast<int *>(getDataPtr(indices, 0));
+    int *sorted_indices_ptr = reinterpret_cast<int *>(getDataPtr(workspace[0], 0));
+    int *row_id_ptr = reinterpret_cast<int *>(getDataPtr(workspace[1], 0));
+    int *sorted_row_id_ptr = reinterpret_cast<int *>(getDataPtr(workspace[2], 0));
 
-    void *d_temp_storage = get_ptr<void>(workspace[3]);
+    void *d_temp_storage = getDataPtr(workspace[3], 0);
     size_t temp_storage_bytes = std::numeric_limits<size_t>::max();
 
     cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
@@ -66,7 +66,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_topK_op(
     Tensor row_id_map = 
         torch::empty({num_tokens * num_topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
-    int *row_id_map_ptr = get_ptr<int>(row_id_map);
+    int *row_id_map_ptr = reinterpret_cast<int *>(getDataPtr(row_id_map, 0));
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
     void *input_ptr = getDataPtr(input, 0);
@@ -178,8 +178,8 @@ Tensor moe_recover_topK_op(
     Tensor unpermuted_output =
         torch::empty({num_tokens, num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
 
-    int *row_id_map_ptr = get_ptr<int>(row_id_map);
-    float *prob_ptr = (prob.numel() > 0) ? get_ptr<float>(prob) : nullptr;
+    int *row_id_map_ptr = reinterpret_cast<int *>(getDataPtr(row_id_map, 0));
+    float *prob_ptr = (prob.numel() > 0) ? reinterpret_cast<float *>(getDataPtr(prob, 0)) : nullptr;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
     void *input_ptr = getDataPtr(input, 0);
@@ -284,8 +284,8 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
     const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
     const int num_cols = input_bwd.size(1);
 
-    int *row_id_map_ptr = get_ptr<int>(row_id_map);
-    float *prob_ptr = (prob.numel() > 0) ? get_ptr<float>(prob) : nullptr;
+    int *row_id_map_ptr = reinterpret_cast<int *>(getDataPtr(row_id_map, 0));
+    float *prob_ptr = (prob.numel() > 0) ? reinterpret_cast<float *>(getDataPtr(prob, 0)) : nullptr;
 
     // activations type
     const at::ScalarType _st = input_bwd.scalar_type();
@@ -295,7 +295,7 @@ std::tuple<Tensor, Tensor> moe_recover_topK_bwd_op(
         torch::empty({input_fwd.size(0), num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
     Tensor prob_grad =
         torch::empty({num_tokens, num_topK}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
-    float *prob_grad_ptr = get_ptr<float>(prob_grad);
+    float *prob_grad_ptr = reinterpret_cast<float *>(getDataPtr(prob_grad, 0));
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
