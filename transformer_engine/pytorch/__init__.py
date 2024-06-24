@@ -36,7 +36,7 @@ from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
 from transformer_engine.pytorch.module import LayerNorm
-from transformer_engine.pytorch.module import permute, unpermute
+from transformer_engine.pytorch.module import Permute, Unpermute
 from transformer_engine.pytorch.module import RMSNorm
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.pytorch.attention import DotProductAttention

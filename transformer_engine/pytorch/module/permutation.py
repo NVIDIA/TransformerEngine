@@ -10,33 +10,39 @@ import warnings
 import transformer_engine_torch as tex
 
 
-class PermuteMoE_topK(torch.autograd.Function):
+__all__ = [
+  'Permute',
+  'Unpermute',
+]
 
-  workspace_fw=None
+
+class _Permute(torch.autograd.Function):
+
+  workspace=None
   dtype=None
   max_expanded_token_num=0
 
   @staticmethod
   def forward(ctx, 
-              input_act: torch.Tensor,
+              inp: torch.Tensor,
               indices: torch.Tensor,
               num_out_tokens: int,
               max_token_num: int):
     # Empty input check
-    if not input_act.numel():
-      return input_act, None
+    if not inp.numel():
+      return inp, None
 
     # Device check
-    if input_act.is_cpu:
-      raise RuntimeError("[Error] The input `input_act` of permute_topK op is on the device: CPU!")
+    if inp.is_cpu:
+      raise RuntimeError("[Error] The input `inp` of permute_topK op is on the device: CPU!")
     if indices.is_cpu:
       warnings.warn("[Warning] The input `indices` of permute_topK op is on the device: CPU!")
       expert_for_rows = expert_for_rows.cuda()
 
     # Shape check
-    if input_act.size(0) != indices.size(0):
+    if inp.size(0) != indices.size(0):
       raise RuntimeError(f"[Error] permute_topK op input `indices` shape mismatch! "
-                         f"Expect {input_act.size(0)}, but got {indices.size(0)}.")
+                         f"Expect {inp.size(0)}, but got {indices.size(0)}.")
 
     # Data type check
     if indices.dtype != torch.int32:
@@ -45,30 +51,30 @@ class PermuteMoE_topK(torch.autograd.Function):
       indices = indices.to(torch.int32)
 
     # Contiguous check
-    if not input_act.is_contiguous():
-      warnings.warn("[Warning] The input `input_act` of permute_topK op is discontiguous!")
-      input_act = input_act.contiguous()
+    if not inp.is_contiguous():
+      warnings.warn("[Warning] The input `inp` of permute_topK op is discontiguous!")
+      inp = inp.contiguous()
     if not indices.is_contiguous():
       warnings.warn("[Warning] The input `indices` of permute_topK op is discontiguous!")
       indices = indices.contiguous()
 
     num_topK = indices.size(1)
 
-    input_max_expanded_token_num = max(max_token_num, input_act.size(0)) * num_topK
-    if PermuteMoE_topK.max_expanded_token_num < input_max_expanded_token_num:
-      PermuteMoE_topK.max_expanded_token_num = input_max_expanded_token_num
-      PermuteMoE_topK.workspace_fw = []
+    input_max_expanded_token_num = max(max_token_num, inp.size(0)) * num_topK
+    if _Permute.max_expanded_token_num < input_max_expanded_token_num:
+      _Permute.max_expanded_token_num = input_max_expanded_token_num
+      _Permute.workspace = []
 
-    if PermuteMoE_topK.dtype != input_act.dtype:
-      PermuteMoE_topK.dtype = input_act.dtype
-      PermuteMoE_topK.workspace_fw = []
+    if _Permute.dtype != inp.dtype:
+      _Permute.dtype = inp.dtype
+      _Permute.workspace = []
 
-    permuted_act, row_id_map, PermuteMoE_topK.workspace_fw = tex.moe_permute(
-      input_act,
+    permuted_act, row_id_map, _Permute.workspace = tex.moe_permute(
+      inp,
       indices,
       num_out_tokens,
-      PermuteMoE_topK.workspace_fw,
-      PermuteMoE_topK.max_expanded_token_num)
+      _Permute.workspace,
+      _Permute.max_expanded_token_num)
 
     ctx.row_id_map = row_id_map
     ctx.num_tokens = indices.size(0)
@@ -98,17 +104,17 @@ class PermuteMoE_topK(torch.autograd.Function):
     return unpermuted_act_grad, None, None, None
 
 
-class UnpermuteMoE_topK(torch.autograd.Function):
+class _Unpermute(torch.autograd.Function):
 
   @staticmethod
   def forward(ctx,
-              input_act: torch.Tensor,
+              inp: torch.Tensor,
               row_id_map: torch.Tensor,
               probs: torch.Tensor):
     # Empty input check
-    if not input_act.numel():
+    if not inp.numel():
       ctx.probs = probs
-      return input_act
+      return inp
 
     # None probs check
     if probs.numel():
@@ -124,8 +130,8 @@ class UnpermuteMoE_topK(torch.autograd.Function):
         probs = probs.contiguous()
 
     # Device check
-    if input_act.is_cpu:
-      raise RuntimeError("[Error] The input `input_act` of unpermute_topK op is on the device: CPU!")
+    if inp.is_cpu:
+      raise RuntimeError("[Error] The input `inp` of unpermute_topK op is on the device: CPU!")
     if row_id_map.is_cpu:
       warnings.warn("[Warning] The input `row_id_map` of unpermute_topK op is on the device: CPU!")
       row_id_map = row_id_map.cuda()
@@ -137,9 +143,9 @@ class UnpermuteMoE_topK(torch.autograd.Function):
       row_id_map = row_id_map.to(torch.int32)
 
     # Contiguous check
-    if not input_act.is_contiguous():
-      warnings.warn("[Warning] The input `input_act` of unpermute_topK op is discontiguous!")
-      input_act = input_act.contiguous()
+    if not inp.is_contiguous():
+      warnings.warn("[Warning] The input `inp` of unpermute_topK op is discontiguous!")
+      inp = inp.contiguous()
     if not row_id_map.is_contiguous():
       warnings.warn("[Warning] The input `row_id_map` of unpermute_topK op is discontiguous!")
       row_id_map = row_id_map.contiguous()
@@ -148,13 +154,13 @@ class UnpermuteMoE_topK(torch.autograd.Function):
     num_tokens = probs.size(0) if probs.numel() else row_id_map.size(0)
 
     unpermuted_output = tex.moe_unpermute_fwd(
-      input_act,
+      inp,
       row_id_map,
       probs,
       num_tokens,
       num_topK)
 
-    ctx.save_for_backward(input_act, row_id_map, probs)
+    ctx.save_for_backward(inp, row_id_map, probs)
     return unpermuted_output
 
   @staticmethod
@@ -166,13 +172,13 @@ class UnpermuteMoE_topK(torch.autograd.Function):
     if not unpermuted_act_grad.is_contiguous():
       unpermuted_act_grad = unpermuted_act_grad.contiguous()
 
-    input_act, row_id_map, probs = ctx.saved_tensors
+    inp, row_id_map, probs = ctx.saved_tensors
 
     act_grad = None
     if ctx.needs_input_grad[0]:
       act_grad, prob_grad = tex.moe_unpermute_bwd(
         unpermuted_act_grad,
-        input_act,
+        inp,
         row_id_map,
         probs)
     
@@ -181,8 +187,8 @@ class UnpermuteMoE_topK(torch.autograd.Function):
     return act_grad, None, prob_grad
 
 
-def permute(input_act, indices, num_out_tokens=-1, max_token_num=-1):
-  return PermuteMoE_topK.apply(input_act, indices, num_out_tokens, max_token_num)
+def Permute(inp, indices, num_out_tokens=-1, max_token_num=-1):
+  return _Permute.apply(inp, indices, num_out_tokens, max_token_num)
 
-def unpermute(input_act, row_id_map, probs):
-  return UnpermuteMoE_topK.apply(input_act, row_id_map, probs)
+def Unpermute(inp, row_id_map, probs):
+  return _Unpermute.apply(inp, row_id_map, probs)

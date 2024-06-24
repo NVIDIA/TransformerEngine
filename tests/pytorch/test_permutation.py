@@ -6,7 +6,7 @@ import torch
 import triton
 import torch.cuda.nvtx as nvtx
 
-from transformer_engine.pytorch import permute as permute_topK, unpermute as unpermute_topK
+from transformer_engine.pytorch import Permute as permute_topK, Unpermute as unpermute_topK
 
 def permute(tokens, indices, num_out_tokens: int = 0):
     """Permute the tokens based on the indices. Token with the same index will be grouped together.
