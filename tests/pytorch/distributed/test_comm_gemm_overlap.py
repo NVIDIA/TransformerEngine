@@ -41,17 +41,17 @@ if not tex.comm_overlap_supports_multicast():
 @pytest.mark.parametrize(
     "fp8,p2p,comm_type,aggregate,atomic",
     [
-        #FP8        P2P        Type        Aggregate        Atomic
-        (False,     True,      "AG",       False,           False),
-        (False,     True,      "AG",       True,            False),
-        (True,      True,      "AG",       False,           False),
-        (True,      True,      "AG",       True,            False),
-        (False,     False,     "RS",       False,           False),
-        (False,     True,      "RS",       False,           False),
-        (True,      False,     "RS",       False,           False),
-        (True,      True,      "RS",       False,           False),
+        # FP8        P2P        Type        Aggregate        Atomic
+        (False, True, "AG", False, False),
+        (False, True, "AG", True, False),
+        (True, True, "AG", False, False),
+        (True, True, "AG", True, False),
+        (False, False, "RS", False, False),
+        (False, True, "RS", False, False),
+        (True, False, "RS", False, False),
+        (True, True, "RS", False, False),
         # (True,      False,     "RS",       False,           True),
-        (True,      True,      "RS",       False,           True),
+        (True, True, "RS", False, True),
     ],
     ids=[
         " AG + SPLIT GEMM | BF16 | RING-EXCHANGE",

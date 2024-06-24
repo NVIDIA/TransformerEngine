@@ -155,7 +155,7 @@ ipcSocketResult_t ipcSocketRecvFd(ipcSocket *handle, int *recvFd) {
 }
 
 ipcSocketResult_t ipcSocketSendMsg(ipcSocket *handle, void *hdr, int hdrLen, const int sendFd,
-                                  int rank, uint64_t hash) {
+                                   int rank, uint64_t hash) {
   struct msghdr msg = {0, 0, 0, 0, 0, 0, 0};
   struct iovec iov[1];
   char temp[IPC_SOCKNAME_LEN];

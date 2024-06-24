@@ -31,15 +31,9 @@ typedef enum {
   ipcSocketNumResults = 8
 } ipcSocketResult_t;
 
-static const char* ipcSocketResultStrings[static_cast<int>(ipcSocketNumResults)] = {
-  "Success",
-  "Unhandled CUDA error",
-  "Internal error",
-  "Invalid argument",
-  "Invalid usage",
-  "Remote error",
-  "Operation in progress"
-};
+static const char *ipcSocketResultStrings[static_cast<int>(ipcSocketNumResults)] = {
+    "Success",       "Unhandled CUDA error", "Internal error",       "Invalid argument",
+    "Invalid usage", "Remote error",         "Operation in progress"};
 
 #define IPC_SOCKET_CHECK(cmd)                                             \
   do {                                                                    \

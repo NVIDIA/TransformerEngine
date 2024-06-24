@@ -660,7 +660,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
                     grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(
-                        tex.NVTE_Comm_Overlap_Type.AG)
+                        tex.NVTE_Comm_Overlap_Type.AG
+                    )
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)

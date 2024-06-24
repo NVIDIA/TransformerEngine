@@ -150,9 +150,8 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
   CommGemmOverlapBase &operator=(const CommGemmOverlapBase &other) = delete;
 
   void register_gpu_buffer(void **gpuptr, size_t bytes, bool alloc) {
-    NVTE_CHECK(
-        _comm_created,
-        "[CommGemmOverlap] Communicator must be initialized before buffer registration.");
+    NVTE_CHECK(_comm_created,
+               "[CommGemmOverlap] Communicator must be initialized before buffer registration.");
     NVTE_CHECK(!_buffer_registered, "[CommGemmOverlap] GPU buffer is already registered.");
     _ub_reg = register_user_buffer_collective(gpuptr, bytes, _ub_comm, alloc);
     _buffer_registered = true;

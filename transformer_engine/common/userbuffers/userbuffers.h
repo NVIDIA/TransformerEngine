@@ -162,8 +162,8 @@ typedef struct communicator {
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
     int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free,
-    int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
+    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
+    int pipenodes, int tensorgpus, int tensornodes);
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes);
@@ -279,7 +279,6 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                                       const size_t bytes, communicator *comm, const int send_peer,
                                       const int recv_peer, const int nchunks, void *counters,
                                       bool shuffle, cudaStream_t stream = 0);
-
 
 /*
   All-to-all split send and recv calls

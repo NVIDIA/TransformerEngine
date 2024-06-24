@@ -157,8 +157,8 @@ int create_communicator_grouped2(
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
-      printf("[UB][rank:%d] device used %d[%d] ,resetting device to %d\n",
-             myrank, cur_dev, ndev, mylocal);
+      printf("[UB][rank:%d] device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev,
+             mylocal);
     NVTE_CHECK_CUDA(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
@@ -261,8 +261,8 @@ int create_communicator_grouped2(
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
     (*comm)->_barrier((*comm)->comm_world);
-    if (!(*comm)->myrank) printf("[UB] MC initialized succesfully, window size = %ld MB\n",
-                                 mc_maxsize / 1024 / 1024);
+    if (!(*comm)->myrank)
+      printf("[UB] MC initialized succesfully, window size = %ld MB\n", mc_maxsize / 1024 / 1024);
   } else {
     if (!(*comm)->myrank) printf("[UB] MC NOT initialized and used\n");
     (*comm)->mc_maxsize = 0;
@@ -484,8 +484,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       IPC_SOCKET_CHECK_GOTO(
           ipcSocketSendFd(&ipc_sock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
           error);
-      IPC_SOCKET_CHECK_GOTO(ipcSocketRecvFd(&ipc_sock, &peerfd[(myrank + nranks - p) % nranks]), ret,
-                    error);
+      IPC_SOCKET_CHECK_GOTO(ipcSocketRecvFd(&ipc_sock, &peerfd[(myrank + nranks - p) % nranks]),
+                            ret, error);
     }
   error:
     IPC_SOCKET_CHECK(ipcSocketClose(&ipc_sock));
@@ -535,8 +535,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
     } else if (!comm->myrank) {
-      printf("[UB] region %d size %ld MB registered without MC access (max %ld MB)\n",
-             hndl, aligned_size / 1024 / 1024, comm->mc_maxsize / 1024 / 1024);
+      printf("[UB] region %d size %ld MB registered without MC access (max %ld MB)\n", hndl,
+             aligned_size / 1024 / 1024, comm->mc_maxsize / 1024 / 1024);
     }
 
   } else {
