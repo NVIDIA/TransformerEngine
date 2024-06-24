@@ -157,6 +157,7 @@ def get_seqlens_and_offsets(segment_ids, segment_pad):
         ).squeeze(-1)
 
     offsets = _find_offsets(segment_ids)
+    offsets = jnp.insert(offsets, -1, values=-1, axis=-1)
     if segment_pad is not None:
         segment_id_with_paddings = jnp.where(segment_pad, 0, segment_ids)
         padding_aware_seqlen = bincount_vmap(segment_id_with_paddings)

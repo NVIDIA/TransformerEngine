@@ -159,7 +159,6 @@ def fused_attn(
     """
     Dot product attention ... (TODO): rewang
     """
-
     if get_qkv_format(qkv_layout) == QKVFormat.THD:
         assert mask is None, (
             "THD format doesn't support mask, please provide the explicit "
@@ -168,7 +167,7 @@ def fused_attn(
     else:
         assert max_segments_per_seq == 1, "max_segments_per_seq should be 1 for non-THD format."
 
-    if mask is not None:
+    if mask is not None or attn_mask_type == AttnMaskType.NO_MASK:
         # convert the mask to seqlens, mask doesn't support ragged offsets
         assert all(x is None for x in [q_seq_lens, q_seq_offsets, kv_seq_lens, kv_seq_offsets])
         if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
@@ -188,6 +187,11 @@ def fused_attn(
         assert all(
             x is not None for x in [q_seq_lens, q_seq_offsets, kv_seq_lens, kv_seq_offsets]
         ), "mask is None, seq_lens and seq_offsets must not be None."
+        batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
+        assert q_seq_lens.shape == (batch, q_max_seqlen)
+        assert kv_seq_lens.shape == (batch, kv_max_seqlen)
+        assert q_seq_offsets.shape == (batch, q_max_seqlen + 1)
+        assert kv_seq_offsets.shape == (batch, kv_max_seqlen + 1)
 
     output = _fused_attn(
         qkv,
