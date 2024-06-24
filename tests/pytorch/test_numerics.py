@@ -1674,6 +1674,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_grouped_gemm(shape, dtype, layout, accumulate):
+    torch.manual_seed(0)
     z, m, k, n = shape
 
     dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
