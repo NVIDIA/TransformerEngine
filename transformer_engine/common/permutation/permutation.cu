@@ -11,7 +11,7 @@
 
 #include <transformer_engine/permutation.h>
 
-static __global__ void moe_permute_topK_row_map(
+static __global__ void moe_permute_row_map(
     const int *sorted_row_id,
     int *row_id_map,
     const int num_rows,
@@ -42,13 +42,13 @@ static __global__ void moe_permute_topK_row_map(
 }
 
 template <typename T, typename TCompute, int kElementsPerAccess, bool hasProb>
-__global__ void moe_recover_topK_kernel(const T *input,
-                                        T *unpermuted_output,
-                                        const int *row_id_map,
-                                        const float *prob,
-                                        const int num_rows,
-                                        const int num_topK,
-                                        const int num_cols)
+__global__ void moe_unpermute_kernel(const T *input,
+                                     T *unpermuted_output,
+                                     const int *row_id_map,
+                                     const float *prob,
+                                     const int num_rows,
+                                     const int num_topK,
+                                     const int num_cols)
 {
     extern __shared__ int8_t s_mem[];
     TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
@@ -133,15 +133,15 @@ template <typename T,
           int kElementsPerAccess,
           int topKTile,
           bool hasProb>
-__global__ void moe_permute_topK_kernel(const T *input_bwd,
-                                        const T *input_fwd,
-                                        T *act_grad,
-                                        const float *prob,
-                                        float *prob_grad,
-                                        const int *row_id_map,
-                                        const int num_rows,
-                                        const int num_topK,
-                                        const int num_cols)
+__global__ void moe_permute_kernel(const T *input_bwd,
+                                   const T *input_fwd,
+                                   T *act_grad,
+                                   const float *prob,
+                                   float *prob_grad,
+                                   const int *row_id_map,
+                                   const int num_rows,
+                                   const int num_topK,
+                                   const int num_cols)
 {
     extern __shared__ int8_t s_mem[];
     TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
@@ -237,7 +237,7 @@ __global__ void moe_permute_topK_kernel(const T *input_bwd,
 }
 
 template <typename TInput, bool FWD>
-void moe_permute_topK_kernel_launcher(
+void moe_permutation_launcher(
     const void *input_,
     void *output_,
     const int *sorted_row_id,
@@ -286,7 +286,7 @@ void moe_permute_topK_kernel_launcher(
                 // permute_topK fwd
                 int threads = 64;
                 int blocks = (num_rows * num_topK + threads - 1) / threads;
-                moe_permute_topK_row_map<<<blocks, threads, 0, stream>>>(
+                moe_permute_row_map<<<blocks, threads, 0, stream>>>(
                     sorted_row_id,
                     row_id_map,
                     num_rows,
@@ -295,7 +295,7 @@ void moe_permute_topK_kernel_launcher(
 
                 blocks = num_rows;
                 threads = std::min(num_cols / kElementsPerAccess, 1024);
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 128, false><<<blocks, threads, 0, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 128, false><<<blocks, threads, 0, stream>>>(
                     input,
                     nullptr,
                     output,
@@ -312,7 +312,7 @@ void moe_permute_topK_kernel_launcher(
                 int blocks = num_rows;
                 int threads = 32;
 
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 1, false><<<blocks, threads, 0, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 1, false><<<blocks, threads, 0, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -333,7 +333,7 @@ void moe_permute_topK_kernel_launcher(
 
             if (num_topK <= 8)
             {
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 8, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 8, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -346,7 +346,7 @@ void moe_permute_topK_kernel_launcher(
             }
             else if (num_topK <= 16)
             {
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 16, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 16, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -359,7 +359,7 @@ void moe_permute_topK_kernel_launcher(
             }
             else if (num_topK <= 32)
             {
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 32, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 32, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -372,7 +372,7 @@ void moe_permute_topK_kernel_launcher(
             }
             else if (num_topK <= 64)
             {
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 64, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 64, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -385,7 +385,7 @@ void moe_permute_topK_kernel_launcher(
             }
             else if (num_topK <= 128)
             {
-                moe_permute_topK_kernel<T, TCompute, kElementsPerAccess, 128, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, kElementsPerAccess, 128, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -412,7 +412,7 @@ void moe_permute_topK_kernel_launcher(
         {
             // permute_topK bwd
             // unpermute_topK fwd without probs
-            moe_recover_topK_kernel<T, TCompute, kElementsPerAccess, false><<<blocks, threads, smem_bytes, stream>>>(
+            moe_unpermute_kernel<T, TCompute, kElementsPerAccess, false><<<blocks, threads, smem_bytes, stream>>>(
                 input,
                 output,
                 row_id_map,
@@ -424,7 +424,7 @@ void moe_permute_topK_kernel_launcher(
         else
         {
             // unpermute_topK fwd with probs
-            moe_recover_topK_kernel<T, TCompute, kElementsPerAccess, true><<<blocks, threads, smem_bytes, stream>>>(
+            moe_unpermute_kernel<T, TCompute, kElementsPerAccess, true><<<blocks, threads, smem_bytes, stream>>>(
                 input,
                 output,
                 row_id_map,
@@ -439,7 +439,7 @@ void moe_permute_topK_kernel_launcher(
 
 
 #define FUNCTION_INSTANTIATION(T, FWD)                                                             \
-template void moe_permute_topK_kernel_launcher<T, FWD>(                                            \
+template void moe_permutation_launcher<T, FWD>(                                                    \
     const void *input,                                                                             \
     void *output,                                                                                  \
     const int *sorted_row_id,                                                                      \

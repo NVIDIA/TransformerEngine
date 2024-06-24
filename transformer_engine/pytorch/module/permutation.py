@@ -9,13 +9,6 @@ import warnings
 
 import transformer_engine_torch as tex
 
-# TODO by Jiang Shao, add parameter `out` which can be optionally given to be used as output buffers.
-
-################################################################################################
-##
-## PermuteMoE topK
-##
-################################################################################################
 
 class PermuteMoE_topK(torch.autograd.Function):
 
@@ -70,7 +63,7 @@ class PermuteMoE_topK(torch.autograd.Function):
       PermuteMoE_topK.dtype = input_act.dtype
       PermuteMoE_topK.workspace_fw = []
 
-    permuted_act, row_id_map, PermuteMoE_topK.workspace_fw = tex.moe_permute_topK_op(
+    permuted_act, row_id_map, PermuteMoE_topK.workspace_fw = tex.moe_permute(
       input_act,
       indices,
       num_out_tokens,
@@ -96,7 +89,7 @@ class PermuteMoE_topK(torch.autograd.Function):
     num_tokens = ctx.num_tokens
     num_topK = ctx.num_topK
 
-    unpermuted_act_grad = tex.moe_recover_topK_op(
+    unpermuted_act_grad = tex.moe_unpermute_fwd(
       permuted_act_grad,
       row_id_map,
       torch.empty(0),
@@ -104,11 +97,6 @@ class PermuteMoE_topK(torch.autograd.Function):
       num_topK)
     return unpermuted_act_grad, None, None, None
 
-################################################################################################
-##
-## UnpermuteMoE topK
-##
-################################################################################################
 
 class UnpermuteMoE_topK(torch.autograd.Function):
 
@@ -159,7 +147,7 @@ class UnpermuteMoE_topK(torch.autograd.Function):
     num_topK = probs.size(1) if probs.numel() else 1
     num_tokens = probs.size(0) if probs.numel() else row_id_map.size(0)
 
-    unpermuted_output = tex.moe_recover_topK_op(
+    unpermuted_output = tex.moe_unpermute_fwd(
       input_act,
       row_id_map,
       probs,
@@ -182,7 +170,7 @@ class UnpermuteMoE_topK(torch.autograd.Function):
 
     act_grad = None
     if ctx.needs_input_grad[0]:
-      act_grad, prob_grad = tex.moe_recover_topK_bwd_op(
+      act_grad, prob_grad = tex.moe_unpermute_bwd(
         unpermuted_act_grad,
         input_act,
         row_id_map,
@@ -192,11 +180,6 @@ class UnpermuteMoE_topK(torch.autograd.Function):
       prob_grad = None
     return act_grad, None, prob_grad
 
-################################################################################################
-##
-## Ops Wrapper
-##
-################################################################################################
 
 def permute(input_act, indices, num_out_tokens=-1, max_token_num=-1):
   return PermuteMoE_topK.apply(input_act, indices, num_out_tokens, max_token_num)
