@@ -22,32 +22,35 @@ from jax.experimental.pjit import pjit
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 
-DEVICE_DP_AXIS = 'data'
-PARAMS_KEY = 'params'
-PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
-DROPOUT_KEY = 'dropout'
-INPUT_KEY = 'input_rng'
+DEVICE_DP_AXIS = "data"
+PARAMS_KEY = "params"
+PARAMS_AXES_KEY = PARAMS_KEY + "_axes"
+DROPOUT_KEY = "dropout"
+INPUT_KEY = "input_rng"
 
 
 class Net(nn.Module):
     """NLP Encoder"""
+
     num_embed: int
 
     @nn.compact
     def __call__(self, x, mask, disable_dropout=False):
         x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
-        te_Encoder = partial(te_flax.TransformerLayer,
-                             hidden_size=256,
-                             mlp_hidden_size=1024,
-                             num_attention_heads=8,
-                             hidden_dropout=0.1,
-                             attention_dropout=0.1,
-                             dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te_flax.TransformerLayerType.ENCODER,
-                             self_attn_mask_type='padding',
-                             enable_relative_embedding=False,
-                             dtype=jnp.bfloat16)
+        te_Encoder = partial(
+            te_flax.TransformerLayer,
+            hidden_size=256,
+            mlp_hidden_size=1024,
+            num_attention_heads=8,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            dropout_rng_name=DROPOUT_KEY,
+            layer_type=te_flax.TransformerLayerType.ENCODER,
+            self_attn_mask_type="padding",
+            enable_relative_embedding=False,
+            dtype=jnp.bfloat16,
+        )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
@@ -82,20 +85,21 @@ def train_step(state, inputs, masks, labels, var_collect, rngs):
 
 def train_epoch(state, train_ds, batch_size, rngs, var_collect, train_fn):
     """Train for a single epoch."""
-    train_ds_size = len(train_ds['sentence'])
+    train_ds_size = len(train_ds["sentence"])
     steps_per_epoch = train_ds_size // batch_size
     perms = jax.random.permutation(rngs[INPUT_KEY], train_ds_size)
-    perms = perms[:steps_per_epoch * batch_size]    # skip incomplete batch
+    perms = perms[: steps_per_epoch * batch_size]  # skip incomplete batch
     perms = perms.reshape((steps_per_epoch, batch_size))
     epoch_loss = []
     epoch_accuracy = []
 
     for perm in perms:
-        batch_inputs = train_ds['sentence'][perm, ...]
-        batch_masks = train_ds['mask'][perm, ...]
-        batch_labels = train_ds['label'][perm, ...]
-        state, loss, accuracy, var_collect = train_fn(state, batch_inputs, batch_masks,
-                                                      batch_labels, var_collect, rngs)
+        batch_inputs = train_ds["sentence"][perm, ...]
+        batch_masks = train_ds["mask"][perm, ...]
+        batch_labels = train_ds["label"][perm, ...]
+        state, loss, accuracy, var_collect = train_fn(
+            state, batch_inputs, batch_masks, batch_labels, var_collect, rngs
+        )
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -121,7 +125,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
 
 def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
     """Evaluation loop."""
-    test_ds_size = len(test_ds['sentence'])
+    test_ds_size = len(test_ds["sentence"])
     num_steps = test_ds_size // batch_size
     valid_size = num_steps * batch_size
     all_loss = []
@@ -129,9 +133,9 @@ def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
 
     for batch_start in range(0, valid_size, batch_size):
         batch_end = batch_start + batch_size
-        batch_inputs = test_ds['sentence'][batch_start:batch_end]
-        batch_masks = test_ds['mask'][batch_start:batch_end]
-        batch_labels = test_ds['label'][batch_start:batch_end]
+        batch_inputs = test_ds["sentence"][batch_start:batch_end]
+        batch_masks = test_ds["mask"][batch_start:batch_end]
+        batch_labels = test_ds["label"][batch_start:batch_end]
         loss, accuracy = eval_fn(state, batch_inputs, batch_masks, batch_labels, var_collect)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
@@ -143,12 +147,12 @@ def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
 
 def data_preprocess(dataset, vocab, word_id, max_seq_len):
     """Convert tokens to numbers."""
-    nltk.download('punkt')
-    dataset_size = len(dataset['sentence'])
+    nltk.download("punkt")
+    dataset_size = len(dataset["sentence"])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
     mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
-    for j, sentence in enumerate(dataset['sentence']):
+    for j, sentence in enumerate(dataset["sentence"]):
         tokens = nltk.word_tokenize(sentence)
         tensor = output[j]
 
@@ -168,9 +172,9 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
         mask_2d[:seq_len, :seq_len] = 0
 
     new_dataset = {
-        'sentence': output,
-        'label': dataset['label'].astype(np.float32),
-        'mask': mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
+        "sentence": output,
+        "label": dataset["label"].astype(np.float32),
+        "mask": mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len)),
     }
     return new_dataset, vocab, word_id
 
@@ -180,12 +184,12 @@ def get_datasets(max_seq_len):
     vocab = {}
     word_id = 0
 
-    train_ds = load_dataset('glue', 'cola', split='train')
-    train_ds.set_format(type='np')
+    train_ds = load_dataset("glue", "cola", split="train")
+    train_ds.set_format(type="np")
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
 
-    test_ds = load_dataset('glue', 'cola', split='validation')
-    test_ds.set_format(type='np')
+    test_ds = load_dataset("glue", "cola", split="validation")
+    test_ds.set_format(type="np")
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
 
@@ -194,7 +198,8 @@ def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
     rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
     assert "fp8_" in str(
-        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
+        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs)
+    )
 
 
 def get_params_pspec(sharding_rules, abs_var_collect):
@@ -232,8 +237,7 @@ def train_and_evaluate(args):
 
     num_gpu = jax.local_device_count()
     assert args.batch_size % num_gpu == 0, f"Batch size needs to be multiple of {num_gpu}"
-    assert args.test_batch_size % num_gpu == 0, \
-        f"Test batch size needs to be multiple of {num_gpu}"
+    assert args.test_batch_size % num_gpu == 0, f"Test batch size needs to be multiple of {num_gpu}"
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu,))
     with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)):
@@ -247,8 +251,9 @@ def train_and_evaluate(args):
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(args.use_fp8,
-                             mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None)):
+        with te.fp8_autocast(
+            args.use_fp8, mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None)
+        ):
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
@@ -260,18 +265,21 @@ def train_and_evaluate(args):
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
 
             in_shardings = (None, inputs_pspec, masks_pspec)
-            out_shardings = {key: params_pspec if key is PARAMS_KEY else None \
-                                        for key in abs_var_collect}
+            out_shardings = {
+                key: params_pspec if key is PARAMS_KEY else None for key in abs_var_collect
+            }
             pjit_encoder_init = pjit(encoder.init, in_shardings, out_shardings)
             var_collect = pjit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
             var_collect, params = flax.core.pop(var_collect, PARAMS_KEY)
-            state = train_state.TrainState.create(apply_fn=encoder.apply,
-                                                  params=params,
-                                                  tx=optimizer)
+            state = train_state.TrainState.create(
+                apply_fn=encoder.apply, params=params, tx=optimizer
+            )
             state_pspec = get_state_pspec(state, params_pspec)
-            labels_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS,)
+            labels_pspec = jax.sharding.PartitionSpec(
+                DEVICE_DP_AXIS,
+            )
 
             in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None, None)
             out_shardings = (state_pspec, None, None, None)
@@ -298,16 +306,20 @@ def train_and_evaluate(args):
                 rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
 
                 state, train_loss, train_accuracy, var_collect = train_epoch(
-                    state, train_ds, args.batch_size, rngs, var_collect, pjit_train_step)
+                    state, train_ds, args.batch_size, rngs, var_collect, pjit_train_step
+                )
 
-                test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size,
-                                                      var_collect, pjit_eval_step)
+                test_loss, test_accuracy = eval_model(
+                    state, test_ds, args.test_batch_size, var_collect, pjit_eval_step
+                )
 
-                print(f"Epoch: {epoch:>2} "
-                      f"Train Loss: {train_loss:.6f} "
-                      f"Train Accuracy: {train_accuracy:.6f} "
-                      f"Test Loss: {test_loss:.6f} "
-                      f"Test Accuracy: {test_accuracy:.6f} ")
+                print(
+                    f"Epoch: {epoch:>2} "
+                    f"Train Loss: {train_loss:.6f} "
+                    f"Train Accuracy: {train_accuracy:.6f} "
+                    f"Test Loss: {test_loss:.6f} "
+                    f"Test Accuracy: {test_accuracy:.6f} "
+                )
 
             return [train_loss, train_accuracy, test_loss, test_accuracy]
 
@@ -357,10 +369,12 @@ def encoder_parser(args):
         help="quickly check a single pass",
     )
     parser.add_argument("--seed", type=int, default=0, metavar="S", help="random seed (default: 0)")
-    parser.add_argument("--use-fp8",
-                        action="store_true",
-                        default=False,
-                        help="Use FP8 for inference and training without recalibration")
+    parser.add_argument(
+        "--use-fp8",
+        action="store_true",
+        default=False,
+        help="Use FP8 for inference and training without recalibration",
+    )
 
     return parser.parse_args(args)
 

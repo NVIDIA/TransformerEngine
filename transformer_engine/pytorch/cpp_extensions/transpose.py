@@ -9,10 +9,12 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 
 
-__all__ = ['fp8_cast_transpose_fused',
-           'fp8_cast_transpose_bgrad_fused',
-           'fp8_cast_transpose_bgrad_dgelu_fused',
-           'fp8_transpose_bgrad_fused']
+__all__ = [
+    "fp8_cast_transpose_fused",
+    "fp8_cast_transpose_bgrad_fused",
+    "fp8_cast_transpose_bgrad_dgelu_fused",
+    "fp8_transpose_bgrad_fused",
+]
 
 
 def fp8_cast_transpose_fused(
@@ -28,9 +30,7 @@ def fp8_cast_transpose_fused(
 
     return_outputs = False
     if transpose_out is None:
-        transpose_out = torch.empty(
-            inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8
-        )
+        transpose_out = torch.empty(inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8)
         return_outputs = True
     if cast_out is None:
         cast_out = torch.empty_like(inp, dtype=torch.uint8)

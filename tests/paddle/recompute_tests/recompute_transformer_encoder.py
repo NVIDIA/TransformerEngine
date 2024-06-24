@@ -37,14 +37,17 @@ def main():
     enable_recompute = int(sys.argv[1])
     use_reentrant = int(sys.argv[2])
 
-    layers = paddle.nn.LayerList([
-        te.TransformerLayer(
-            hidden_size,
-            ffn_hidden_size,
-            num_heads,
-            layer_type='encoder',
-        ) for _ in range(num_layers)
-    ])
+    layers = paddle.nn.LayerList(
+        [
+            te.TransformerLayer(
+                hidden_size,
+                ffn_hidden_size,
+                num_heads,
+                layer_type="encoder",
+            )
+            for _ in range(num_layers)
+        ]
+    )
     model = Net(layers)
 
     optimizer = paddle.optimizer.AdamW(learning_rate=0.001, parameters=model.parameters())
@@ -52,7 +55,7 @@ def main():
     for _ in range(10):
         inp = paddle.uniform([batch_size, q_seqlen, hidden_size])
         inp.stop_gradient = False
-        mask = paddle.zeros(shape=(batch_size, 1, q_seqlen, kv_seqlen), dtype='bool')
+        mask = paddle.zeros(shape=(batch_size, 1, q_seqlen, kv_seqlen), dtype="bool")
         with te.fp8_autocast(enabled=True):
             out = model(inp, mask, enable_recompute, use_reentrant)
         loss = out.mean()

@@ -32,8 +32,9 @@ _default_causal_mask = {}
 def _get_default_causal_mask(seqlen: int) -> paddle.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if seqlen not in _default_causal_mask:
-        _default_causal_mask[seqlen] = paddle.triu(paddle.ones((seqlen, seqlen)),
-                                                   diagonal=1).cast('bool')
+        _default_causal_mask[seqlen] = paddle.triu(paddle.ones((seqlen, seqlen)), diagonal=1).cast(
+            "bool"
+        )
     return _default_causal_mask[seqlen]
 
 
@@ -58,8 +59,9 @@ class ScaledUpperTriangMaskedSoftmax(paddle.autograd.PyLayer):
     def backward(ctx, output_grads: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
         """ScaledUpperTriangMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensor()
-        input_grads = scaled_upper_triang_masked_softmax_backward(output_grads, softmax_results,
-                                                                  scale_t[0])
+        input_grads = scaled_upper_triang_masked_softmax_backward(
+            output_grads, softmax_results, scale_t[0]
+        )
 
         return input_grads, None
 
@@ -140,7 +142,7 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
         attn_mask_type: str,
         mask_func: Callable,
         softmax_in_fp32: bool = True,
-        backend: str = 'transformer_engine',
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.attn_mask_type = attn_mask_type
@@ -162,16 +164,17 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
         self.input_is_bf16 = inp.dtype == paddle.bfloat16
         self.input_in_16bit_float = self.input_is_fp16 or self.input_is_bf16
 
-        assert (scale is None or self.softmax_in_fp32), "softmax should be in fp32 when scaled"
+        assert scale is None or self.softmax_in_fp32, "softmax should be in fp32 when scaled"
 
-        if self.backend == 'transformer_engine' and not self.is_kernel_available(*inp.shape):
+        if self.backend == "transformer_engine" and not self.is_kernel_available(*inp.shape):
             warnings.warn(
-                "fused kernel is not available for this input shape, fall back to paddle backend")
-            self.backend = 'paddle'
+                "fused kernel is not available for this input shape, fall back to paddle backend"
+            )
+            self.backend = "paddle"
 
-        if self.backend == 'transformer_engine':
+        if self.backend == "transformer_engine":
             return self._te_forward(inp, mask, scale)
-        if self.backend == 'paddle':
+        if self.backend == "paddle":
             return self._pd_forward(inp, mask, scale)
         raise AttributeError(f"Backend {self.backend} is not supported.")
 
@@ -179,12 +182,13 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * h
 
-        if (self.scaled_masked_softmax_fusion    # user want to fuse
-                and self.input_in_16bit_float    # input must be fp16
-                and 16 < s_kv <= 4096    # s_kv must be 16 ~ 2048
-                and s_q % 4 == 0    # s_q must be a multiple of 4
-                and attn_batches % 4 == 0    # b * h must be a multiple of 4
-           ):
+        if (
+            self.scaled_masked_softmax_fusion  # user want to fuse
+            and self.input_in_16bit_float  # input must be fp16
+            and 16 < s_kv <= 4096  # s_kv must be 16 ~ 2048
+            and s_q % 4 == 0  # s_q must be a multiple of 4
+            and attn_batches % 4 == 0  # b * h must be a multiple of 4
+        ):
             if 0 <= s_kv <= 4096:
                 batch_per_block = self.get_batch_per_block(int(s_kv))
 
@@ -196,10 +200,9 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
                         return True
         return False
 
-    def _te_forward(self,
-                    inp: paddle.Tensor,
-                    mask: paddle.Tensor,
-                    scale: Optional[float] = None) -> paddle.Tensor:
+    def _te_forward(
+        self, inp: paddle.Tensor, mask: paddle.Tensor, scale: Optional[float] = None
+    ) -> paddle.Tensor:
         """Fused masked softmax kernel"""
         b, h, s_q, s_kv = inp.size()
         scale = 1.0 if scale is None else scale
@@ -216,13 +219,12 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
 
-    def _pd_forward(self,
-                    inp: paddle.Tensor,
-                    mask: paddle.Tensor,
-                    scale: Optional[float] = None) -> paddle.Tensor:
+    def _pd_forward(
+        self, inp: paddle.Tensor, mask: paddle.Tensor, scale: Optional[float] = None
+    ) -> paddle.Tensor:
         """Call Paddle OP"""
         if self.input_in_16bit_float and self.softmax_in_fp32:
-            inp = paddle.cast(inp, 'float32')
+            inp = paddle.cast(inp, "float32")
 
         if scale is not None:
             inp = inp * scale
@@ -235,9 +237,9 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
 
         if self.input_in_16bit_float and self.softmax_in_fp32:
             if self.input_is_fp16:
-                probs = paddle.cast(probs, 'float16')
+                probs = paddle.cast(probs, "float16")
             else:
-                probs = paddle.cast(probs, 'bfloat16')
+                probs = paddle.cast(probs, "bfloat16")
 
         return probs
 
