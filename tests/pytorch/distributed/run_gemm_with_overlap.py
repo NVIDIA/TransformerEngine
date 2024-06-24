@@ -95,12 +95,6 @@ def parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--scale", type=float, default=1e-2, help="Set scaling factor for input and weight tensors."
     )
-    parser.add_argument(
-        "--no-atomic-pair",
-        action="store_true",
-        default=False,
-        help="Disable paired AG+RS checks for atomic GEMM overlaps.",
-    )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
     if opts.atomic:

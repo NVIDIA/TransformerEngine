@@ -93,6 +93,5 @@ def test_split_gemm_overlap(fp8, p2p, comm_type, aggregate):
 #         check=True
 #     )
 
-@pytest.mark.parametrize()
-def test_transformer_layer_with_overlap(fp8):
-
+# @pytest.mark.parametrize()
+# def test_transformer_layer_with_overlap(fp8):

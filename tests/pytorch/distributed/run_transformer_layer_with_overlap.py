@@ -8,6 +8,8 @@ import os
 import sys
 import subprocess
 import argparse
+import warnings
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -15,6 +17,10 @@ from torch import nn
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Format, DelayedScaling
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 class TorchLayerNorm(nn.Module):
@@ -52,8 +58,8 @@ class TorchMHA(nn.Module):
             batch_first=False,
         )
 
-    def forward(self, x):
-        output = self.mhsa(x, x, x, need_weights=False)
+    def forward(self, x, attention_mask=None):
+        output = self.mhsa(x, x, x, attn_mask=attention_mask, need_weights=False)
         if isinstance(output, tuple):
             output = output[0]
         return output
@@ -68,8 +74,10 @@ class TorchLayerNormMLP(nn.Module):
     ):
         super().__init__()
         self.ln = TorchLayerNorm(hidden_size, eps=eps, zero_centered_gamma=False)
+        fc1_output_features = ffn_hidden_size
         self.gelu = nn.GELU(approximate="tanh")
-        self.fc1 = nn.Linear(hidden_size, ffn_hidden_size)
+
+        self.fc1 = nn.Linear(hidden_size, fc1_output_features)
         self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
 
     def forward(self, x):
@@ -78,42 +86,70 @@ class TorchLayerNormMLP(nn.Module):
 
 class TorchGPT(nn.Module):
     def __init__(
-        self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool
+        self, hidden_size: int, eps: float, num_attention_heads: int,
     ):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.parallel_attention_mlp = parallel_attention_mlp
 
     def forward(
         self,
-        x: torch.Tensor
+        x: torch.Tensor,
+        attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b = self.causal_attn(a)
-        x = x + nn.functional.dropout(b, p=0.1, training=self.training)
+        b = self.causal_attn(a, attention_mask)
+        x = x + b
         n = self.ln_mlp(x)
-        x = x + nn.functional.dropout(n, p=0.1, training=self.training)
+        x = x + n
+        return x
 
+torch_dtypes = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
+atol_map = {
+    torch.float32 : 5e-3,
+    torch.float16 : 5e-2,
+    torch.bfloat16 : 5e-2,
+}
+
+def mapped_argtype(opt, typemap={}):
+    if str(opt).lower() not in typemap.keys():
+        raise TypeError(f"Unrecognized option! Please choose from: {typemap.keys()}")
+    return typemap[str(opt).lower()]
 
 def parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(
-        description="Test a TE layer module with GEMM+comm overlap."
+        description="Test te.TransformerLayer with GEMM+comm overlap."
     )
-    parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
+    parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument(
-        "-n", "--num-heads", type=int, default=64, help="Number of attention heads."
+        "-n", "--num-heads", type=int, default=12, help="Number of attention heads."
     )
     parser.add_argument(
-        "-d", "--head-dim", type=int, default=128, help="Dimension of each attention head."
+        "-d", "--head-dim", type=int, default=64, help="Dimension of each attention head."
     )
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
     parser.add_argument(
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Print out debug info.")
+    parser.add_argument(
+        "--dtype", type=partial(mapped_argtype, typemap=torch_dtypes), default=torch.bfloat16,
+    )
+    parser.add_argument(
+        "--no-mask", action="store_true", default=False, help="Disable the causal attention mask."
+    )
+    parser.add_argument(
+        "--no-overlap", action="store_true", default=False, help="Disable comm+GEMM overlap."
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="Print out debug info."
+    )
     return parser.parse_args(argv, namespace)
 
 def train(opts):
@@ -135,216 +171,293 @@ def train(opts):
     tp_group = dist.new_group(backend="nccl")
     tp_size = dist.get_world_size(tp_group)
 
+    # Info printout
+    def dist_print(msg, src=None, debug=False, section=False):
+        if debug or opts.verbose:
+            if section:
+                dist.barrier()
+                if WORLD_RANK == (0 if src is None else src):
+                    print("\n", end="", flush=True)
+            dist.barrier()
+            if src is None or WORLD_RANK == src:
+                prefix = "[GLOBAL] " if src is not None else f"[rank:{WORLD_RANK}] "
+                lines = msg.splitlines()
+                msg = "\n".join(
+                    [prefix + lines[0]] + [(" " * len(prefix)) + line for line in lines[1:]]
+                )
+                print(msg + "\n", end="", flush=True)
+
     # Intialize userbuffers
     hidden_size = opts.num_heads * opts.head_dim
     batched_size = opts.seq_length * opts.batch_size
-    te.initialize_ub(
-        [batched_size, hidden_size],
-        tp_group,
-        use_fp8=opts.fp8,
-        dtype=torch.bfloat16,
-    )
+    if not opts.no_overlap:
+        te.initialize_ub(
+            [batched_size, hidden_size],
+            tp_group,
+            use_fp8=opts.fp8,
+            dtype=opts.dtype,
+        )
 
     # Initialize test and reference model, and share parameters
+    te_kwargs = {
+        'layernorm_epsilon' : 1e-5,
+        'hidden_dropout' : 0.0,
+        'attention_dropout' : 0.0,
+        'fuse_qkv_params' : True,
+        'qkv_weight_interleaved' : False,
+        'device' : 'cuda',
+        'params_dtype' : opts.dtype,
+        'seq_length' : opts.seq_length,
+        'set_parallel_mode' : WORLD_SIZE > 1,
+        'tp_group' : tp_group if WORLD_SIZE > 1 else None,
+        'sequence_parallel' : WORLD_SIZE > 1,
+        'ub_tp_comm_overlap' : not opts.no_overlap,
+        'parallel_attention_mlp' : False,
+    }
     te_gpt = te.TransformerLayer(
         hidden_size,
         4 * hidden_size,
         opts.num_heads,
-        layernorm_epsilon=1e-5,
-        hidden_dropout=0.1,
-        attention_dropout=0.1,
-        fuse_qkv_params=True,
-        qkv_weight_interleaved=False,
-        params_dtype=torch.bfloat16,
-        seq_length=opts.seq_length,
-        set_parallel_mode=True,
-        tp_group=tp_group,
-        sequence_parallel=True,
-        ub_tp_comm_overlap=True,
-        parallel_attention_mlp=False,
-    )
+        **te_kwargs
+    ).eval()
 
-    torch_gpt = TorchGPT(hidden_size, 1e-5, opts.num_heads, False)
+    torch_gpt = TorchGPT(hidden_size, 1e-5, opts.num_heads).cuda().to(opts.dtype).eval()
     with torch.no_grad():
         # Clone input layernorm params
-        print(f"[rank:{WORLD_RANK}] TE input LN weight: {te_gpt.self_attention.layernorm_qkv.layer_norm_weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch input LN weight: {torch_gpt.ln.weight.size()}\n", end='', flush=True)
+        # TransformerLayer.MultiheadAttention.LayerNormLinear --> TorchGPT.LayerNorm
+        dist_print(
+            f"TE input LN weight: {te_gpt.self_attention.layernorm_qkv.layer_norm_weight.size()}",
+            section=True)
         torch_gpt.ln.weight = nn.Parameter(
-            te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone()
-        )
+            te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone())
+        dist_print(f"Torch input LN weight: {torch_gpt.ln.weight.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE input LN bias: {te_gpt.self_attention.layernorm_qkv.layer_norm_bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch input LN bias: {torch_gpt.ln.bias.size()}\n", end='', flush=True)
-        torch_gpt.ln.bias = nn.Parameter(te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
+        dist_print(
+            f"TE input LN bias: {te_gpt.self_attention.layernorm_qkv.layer_norm_bias.size()}")
+        torch_gpt.ln.bias = nn.Parameter(
+            te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
+        dist_print(f"Torch input LN bias: {torch_gpt.ln.bias.size()}", src=0)
 
         # Clone QKV projection params
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE QKV weight: {te_gpt.self_attention.layernorm_qkv.weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch QKV weight: {torch_gpt.causal_attn.mhsa.in_proj_weight.size()}\n", end='', flush=True)
+        # TransformerLayer.MultiheadAttention.LayerNormLinear --> TorchGPT.MultiheadAttention
+        dist_print(f"TE QKV proj weight: {te_gpt.self_attention.layernorm_qkv.weight.size()}",
+                   section=True)
         torch_gpt.causal_attn.mhsa.in_proj_weight = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.self_attention.layernorm_qkv.weight, tp_group
-            )[0]
-        )
+                te_gpt.self_attention.layernorm_qkv.weight.clone(), tp_group)[0]
+            if WORLD_SIZE > 1
+            else te_gpt.self_attention.layernorm_qkv.weight.clone())
+        dist_print(f"Torch QKV proj weight: {torch_gpt.causal_attn.mhsa.in_proj_weight.size()}",
+                   src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE QKV bias: {te_gpt.self_attention.layernorm_qkv.bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch QKV bias: {torch_gpt.causal_attn.mhsa.in_proj_bias.size()}\n", end='', flush=True)
+        dist_print(f"TE QKV proj bias: {te_gpt.self_attention.layernorm_qkv.bias.size()}")
         torch_gpt.causal_attn.mhsa.in_proj_bias = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.self_attention.layernorm_qkv.bias, tp_group
-            )[0]
-        )
+                te_gpt.self_attention.layernorm_qkv.bias.clone(), tp_group)[0]
+            if WORLD_SIZE > 1
+            else te_gpt.self_attention.layernorm_qkv.bias.clone())
+        dist_print(f"Torch QKV proj bias: {torch_gpt.causal_attn.mhsa.in_proj_bias.size()}", src=0)
 
         # Clone MHA projection params
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE proj weights: {te_gpt.self_attention.proj.weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch proj weights: {torch_gpt.causal_attn.mhsa.out_proj.weight.size()}\n", end='', flush=True)
+        # TransformerLayer.MultiheadAttention.Linear --> TorchGPT.MultiheadAttention
+        dist_print(f"TE MHA out proj weights: {te_gpt.self_attention.proj.weight.size()}",
+                   section=True)
         torch_gpt.causal_attn.mhsa.out_proj.weight = nn.Parameter(
             torch.transpose(
                 te.distributed.gather_along_first_dim(
-                    torch.transpose(te_gpt.self_attention.proj.weight, 0, 1), tp_group
-                )[0], 0, 1
-            )
-        )
+                    torch.transpose(te_gpt.self_attention.proj.weight.clone(), 0, 1), tp_group)[0],
+                0, 1)
+            if WORLD_SIZE > 1
+            else te_gpt.self_attention.proj.weight.clone())
+        dist_print(
+            f"Torch MHA out proj weights: {torch_gpt.causal_attn.mhsa.out_proj.weight.size()}",
+            src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE proj bias: {te_gpt.self_attention.proj.bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch proj bias: {torch_gpt.causal_attn.mhsa.out_proj.bias.size()}\n", end='', flush=True)
+        dist_print(f"TE MHA out proj bias: {te_gpt.self_attention.proj.bias.size()}")
         torch_gpt.causal_attn.mhsa.out_proj.bias = nn.Parameter(
-            te_gpt.self_attention.proj.bias.clone()
-        )
+            te_gpt.self_attention.proj.bias.clone())
+        dist_print(f"Torch MHA out proj bias: {torch_gpt.causal_attn.mhsa.out_proj.bias.size()}",
+                   src=0)
 
         # Clone LayerNormMLP params
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE output LN weights: {te_gpt.layernorm_mlp.layer_norm_weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch output LN weights: {torch_gpt.ln_mlp.ln.weight.size()}\n", end='', flush=True)
+        # TransformerLayer.LayerNormMLP --> TorchGPT.LayerNormMLP.Linear
+        dist_print(f"TE LN-MLP LN weights: {te_gpt.layernorm_mlp.layer_norm_weight.size()}",
+                   section=True)
         torch_gpt.ln_mlp.ln.weight = nn.Parameter(te_gpt.layernorm_mlp.layer_norm_weight.clone())
+        dist_print(f"Torch LN-MLP LN weights: {torch_gpt.ln_mlp.ln.weight.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE output LN bias: {te_gpt.layernorm_mlp.layer_norm_bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch output LN bias: {torch_gpt.ln_mlp.ln.bias.size()}\n", end='', flush=True)
+        dist_print(f"TE LN-MLP LN bias: {te_gpt.layernorm_mlp.layer_norm_bias.size()}")
         torch_gpt.ln_mlp.ln.bias = nn.Parameter(te_gpt.layernorm_mlp.layer_norm_bias.clone())
+        dist_print(f"Torch LN-MLP LN bias: {torch_gpt.ln_mlp.ln.bias.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE MLP FC1 weights: {te_gpt.layernorm_mlp.fc1_weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch MLP FC1 weights: {torch_gpt.ln_mlp.fc1.weight.size()}\n", end='', flush=True)
+        dist_print(f"TE LN-MLP FC1 weights: {te_gpt.layernorm_mlp.fc1_weight.size()}")
         torch_gpt.ln_mlp.fc1.weight = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.layernorm_mlp.fc1_weight, tp_group)[0]
-        )
+                te_gpt.layernorm_mlp.fc1_weight.clone(), tp_group)[0]
+            if WORLD_SIZE > 1
+            else te_gpt.layernorm_mlp.fc1_weight.clone())
+        dist_print(f"Torch LN-MLP FC1 weights: {torch_gpt.ln_mlp.fc1.weight.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE MLP FC1 bias: {te_gpt.layernorm_mlp.fc1_bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch MLP FC1 bias: {torch_gpt.ln_mlp.fc1.bias.size()}\n", end='', flush=True)
+        dist_print(f"TE LN-MLP FC1 bias: {te_gpt.layernorm_mlp.fc1_bias.size()}",
+                   section=True)
         torch_gpt.ln_mlp.fc1.bias = nn.Parameter(
             te.distributed.gather_along_first_dim(
-                te_gpt.layernorm_mlp.fc1_bias, tp_group)[0]
-        )
+                te_gpt.layernorm_mlp.fc1_bias.clone(), tp_group)[0]
+            if WORLD_SIZE > 1
+            else te_gpt.layernorm_mlp.fc1_bias.clone())
+        dist_print(f"Torch LN-MLP FC1 bias: {torch_gpt.ln_mlp.fc1.bias.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE MLP FC2 weights: {te_gpt.layernorm_mlp.fc2_weight.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch MLP FC2 weights: {torch_gpt.ln_mlp.fc2.weight.size()}\n", end='', flush=True)
+        dist_print(f"TE LN-MLP FC2 weights: {te_gpt.layernorm_mlp.fc2_weight.size()}")
         torch_gpt.ln_mlp.fc2.weight = nn.Parameter(
             torch.transpose(
                 te.distributed.gather_along_first_dim(
-                    torch.transpose(te_gpt.layernorm_mlp.fc2_weight, 0, 1), tp_group
-                )[0], 0, 1
-            )
-        )
+                    torch.transpose(te_gpt.layernorm_mlp.fc2_weight.clone(), 0, 1), tp_group
+                )[0], 0, 1)
+            if WORLD_SIZE > 1
+            else te_gpt.layernorm_mlp.fc2_weight.clone())
+        dist_print(f"Torch LN-MLP FC2 weights: {torch_gpt.ln_mlp.fc2.weight.size()}", src=0)
 
-        dist.barrier()
-        print(f"[rank:{WORLD_RANK}] TE MLP FC2 bias: {te_gpt.layernorm_mlp.fc2_bias.size()}\n", end='', flush=True)
-        if WORLD_RANK == 0: print(f"[GLOBAL] Torch MLP FC2 bias: {torch_gpt.ln_mlp.fc2.bias.size()}\n", end='', flush=True)
+        dist_print(f"TE LN-MLP FC2 bias: {te_gpt.layernorm_mlp.fc2_bias.size()}")
         torch_gpt.ln_mlp.fc2.bias = nn.Parameter(te_gpt.layernorm_mlp.fc2_bias.clone())
+        dist_print(f"Torch LN-MLP FC2 bias: {torch_gpt.ln_mlp.fc2.bias.size()}", src=0)
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
 
-    # Generate random input in SBHD format
+    # Generate causal attention mask and random input in SBHD format
+    causal_mask = torch.triu(
+        torch.ones(opts.seq_length, opts.seq_length, device="cuda"), diagonal=1
+    ).bool() if not opts.no_mask else None
     x = torch.rand(
         (opts.seq_length // tp_size, opts.batch_size, hidden_size),
-        dtype=torch.bfloat16,
+        dtype=opts.dtype,
         device="cuda",
         requires_grad=True,
     )
+    x.retain_grad()
+    dist_print(f"Distributed input: {x.size()}", section=True)
 
-    # Forward + backward passes
-    with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
-        y = te_gpt(x)
-        loss = y.flatten().sum()
-    loss.backward()
-
-    # Globalize input and compute reference results
-    xr = te.distributed.gather_along_first_dim(x, tp_group)[0].requires_grad_(True)
-    yr = torch_gpt(xr)
-    lr = yr.flatten().sum()
-    lr.backward()
-    references = [ yr, xr.grad ]
-    names = [ "output", "input_grad" ]
-    for n, p in ref_model.named_parameters():
-        if p.requires_grad:
-            references.append(p.grad)
-            names.append(n)
-
-    # Globalize outputs and compare against reference
+    # Forward + backward passes + globalize output for numerical check
     torch.cuda.synchronize()
     dist.barrier()
-    outputs = [
-        te.distributed.gather_along_first_dim(y, tp_group)[0],
-        te.distributed.gather_along_first_dim(x.grad, tp_group)[0],
-    ]
-    for p in te_model.parameters():
-        if p.requires_grad:
-            outputs.append(
-                te.distributed.gather_along_first_dim(p.grad, tp_group)[0]
-            )
+    with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
+        y = te_gpt(x, attention_mask=causal_mask)
+        loss = y.sum()
+    loss.backward()
+    dist_print(f"Distributed output: {y.size()}")
+    yg = te.distributed.gather_along_first_dim(y, tp_group)[0]
+    dist_print(f"Global output: {yg.size()}", src=0)
 
-    length_failed = len(outputs) != len(references)
-    numerics_failed = False
-    fail_msg = None
-    if not length_failed:
-        for i, (out, ref) in enumerate(zip(outputs, references)):
-            torch.cuda.synchronize()
-            dist.barrier()
-            numerics_failed = not torch.allclose(out, ref,
-                                                 rtol=0.125 if opts.fp8 else 1.6e-2,
-                                                 atol=0.0675 if opts.fp8 else 1e-5)
-            if numerics_failed:
-                diff = torch.abs(out - ref).flatten()
-                m = torch.argmax(diff)
-                fail_msg = (
-                    "NUMERICAL CHECK FAILED: "
-                    + f"{names[i]} tensor not close enough at index {m.item()} "
-                    + f"with {out.flatten()[m].item()} vs {ref.flatten()[m].item()} "
-                    + f"(diff {diff[m].item()})."
-                )
-                break
-    else:
-        fail_msg = (
-            "INCORRECT NUMBER OF OUTPUTS: "
-            + f"Expected {len(references)} tensors but got {len(outputs)}."
+    # Globalize input and compute reference results
+    xr = te.distributed.gather_along_first_dim(x.clone(), tp_group)[0].requires_grad_(True)
+    dist_print(f"Reference input: {xr.size()}", src=0, section=True)
+    yr = torch_gpt(xr, attention_mask=causal_mask)
+    dist_print(f"Reference output: {yr.size()}", src=0)
+
+    # Compare against reference
+    atol = 0.0675 if opts.fp8 else atol_map[opts.dtype]
+    diff = torch.abs(yg - yr).flatten()
+    max_idx = torch.argmax(diff)
+    min_idx = torch.argmin(diff)
+    numerics_failed = not torch.allclose(yg, yr, atol=atol)
+    if numerics_failed:
+        max_idx = torch.argmax(diff)
+        min_idx = torch.argmin(diff)
+        failed_idx = diff > atol
+        num_fails = failed_idx.int().sum()
+        fail_ratio = failed_idx.float().mean()
+        result_info = (
+            "NUMERICAL CHECK FAILED! "
+            + f"\nError above tolerance ({atol}) for {num_fails} elements ({fail_ratio*100}%). "
+            + f"\nMax diff {diff[max_idx].item()} at index {max_idx.item()} "
+            + f"({yg.flatten()[max_idx].item()} vs {yr.flatten()[max_idx].item()})."
         )
+        if yg.flatten()[min_idx].item() != yr.flatten()[min_idx].item() != 0.0:
+            result_info += (
+                f"\nMin diff {diff[min_idx].item()} at index {min_idx.item()} "
+                + f"({yg.flatten()[min_idx].item()} vs {yr.flatten()[min_idx].item()})."
+            )
+        dist_print(result_info, src=0, section=True)
+    else:
+        result_info = (
+            "NUMERICAL CHECK PASSED: "
+            + f"\nMax diff {diff[max_idx].item()} at index {max_idx.item()}"
+            + f"and min diff {diff[min_idx].item()} at index {min_idx.item()}."
+        )
+        dist_print(result_info, src=0, section=True)
 
-    if fail_msg is not None and WORLD_RANK == 0:
-        print(fail_msg + '\n', end='', flush=True)
+    # Now compare overlapped layer against no-overlap
+    if not numerics_failed and not opts.no_overlap:
+        # Create new TransformerLayer without comm overlap
+        te_kwargs['ub_tp_comm_overlap'] = False
+        te_gpt_no_overlap = te.TransformerLayer(
+            hidden_size,
+            4 * hidden_size,
+            opts.num_heads,
+            **te_kwargs,
+        )
+        # Clone parameters from original layer
+        with torch.no_grad():
+            for p1, p2 in zip(te_gpt.parameters(), te_gpt_no_overlap.parameters()):
+                p2.copy_(p1)
 
-    te.destroy_ub()
+        # Run forward and backward passes
+        xn = x.detach().clone().requires_grad_(True)
+        xn.retain_grad()
+        with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
+            yn = te_gpt_no_overlap(xn, attention_mask=causal_mask)
+            ln = yn.sum()
+        ln.backward()
+
+        # Assemble list of tensors to be compared
+        overlap = [ y, x.grad ]
+        names = ['output', 'input_grad']
+        for name, param in te_gpt.named_parameters():
+            if param.requires_grad:
+                overlap.append(param)
+                names.append(name)
+        no_overlap = [ yn, xn.grad ]
+        for param in te_gpt_no_overlap.parameters():
+            if param.requires_grad:
+                no_overlap.append(param)
+
+        if len(overlap) == len(no_overlap):
+            for i, (o, n) in enumerate(zip(overlap, no_overlap)):
+                numerics_failed = not torch.allclose(o, n, atol=atol)
+                if numerics_failed:
+                    diff = torch.abs(o - n).flatten()
+                    max_idx = torch.argmax(diff)
+                    failed_idx = diff > atol
+                    num_fails = failed_idx.int().sum()
+                    fail_ratio = failed_idx.float().mean()
+                    mismatch_info = (
+                        f"OVERLAP MISMATCH in '{names[i]}'!"
+                        + f"\nDiff above tolerance ({atol}) for {num_fails} elements "
+                        + f"({fail_ratio.item()*100.}%)."
+                        + f"\nMax diff {diff[max_idx].item()} at index {max_idx} "
+                        + f"({o.flatten()[max_idx].item()} vs {n.flatten()[max_idx].item()})."
+                    )
+                    dist_print(mismatch_info, section=i == 0)
+                    break
+
+        torch.cuda.synchronize()
+        dist.barrier()
+        te.destroy_ub()
+
     dist.destroy_process_group()
 
-    return int(length_failed or numerics_failed)
+    return int(numerics_failed)
 
 
 if __name__ == "__main__":
     if "TORCHELASTIC_RUN_ID" in os.environ.keys():
         args = parse_args()
-        train(args)
+        os._exit(train(args))
     else:
         subprocess.run(
             ["torchrun", f"--nproc-per-node={torch.cuda.device_count()}", *sys.argv],
             env=os.environ,
             check=True,
         )
-    os._exit(0)
+        os._exit(0)
