@@ -478,7 +478,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         """
         if not self.fp8_enabled or is_first_microbatch is None:
             return [None, None] * len(self.fp8_weights)
-    
+
         out_list = []
         for i, weight in enumerate(self.fp8_weights, start=1):
             weight_cast_key = f"weight{i}_fp8"
@@ -500,8 +500,10 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         # is cudagraph is enabled we cast the weight before the pp pipe
         # we only register the callback once
-        if get_global_fp8_state().is_cudagraph_enabled() and (not self.registered_pp_start_callback and is_pp_enabled()):
-            
+        if get_global_fp8_state().is_cudagraph_enabled() and (
+            not self.registered_pp_start_callback and is_pp_enabled()
+        ):
+
             fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
 
             def cast_callback(step_id=None, **kwargs):
