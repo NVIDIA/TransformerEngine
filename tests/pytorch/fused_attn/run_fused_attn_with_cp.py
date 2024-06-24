@@ -105,24 +105,21 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
             torch.int32
         )
         seqlens = seqlens - seqlens % (world_size * 2)
-        q_input_shape = (
-            config.max_seqlen_q * config.batch_size,
-            config.num_heads,
-            config.head_dim
-        )
+        q_input_shape = (config.max_seqlen_q * config.batch_size, config.num_heads, config.head_dim)
         kv_input_shape = (
             config.max_seqlen_q * config.batch_size,
             config.num_gqa_groups,
-            config.head_dim
+            config.head_dim,
         )
         attn_output_shape = (
             config.max_seqlen_q * config.batch_size,
-            config.num_heads * config.head_dim
+            config.num_heads * config.head_dim,
         )
         cu_seqlens = torch.cat(
-            [torch.zeros([1], dtype=torch.int32), \
-             seqlens.cumsum(0), \
-             torch.tensor([q_input_shape[0]], dtype=torch.int32) \
+            [
+                torch.zeros([1], dtype=torch.int32),
+                seqlens.cumsum(0),
+                torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         )
         cu_seqlens = cu_seqlens.to(torch.int32).cuda()
@@ -237,10 +234,12 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
             for x in [q_.grad, k_.grad, v_.grad, out_]
         ]
     elif qkv_format == "thd":
-        dq, dk, dv, out = [x.index_select(0, seq_idx).contiguous() for x in [q.grad, k.grad, v.grad, out]]
+        dq, dk, dv, out = [
+            x.index_select(0, seq_idx).contiguous() for x in [q.grad, k.grad, v.grad, out]
+        ]
         dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
         for x in [dq, dk, dv, out, dq_, dk_, dv_, out_]:
-            assert (torch.all(torch.logical_not(x[cu_seqlens[-2]:])).item())
+            assert torch.all(torch.logical_not(x[cu_seqlens[-2] :])).item()
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
