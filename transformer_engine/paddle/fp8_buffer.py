@@ -49,7 +49,7 @@ class FP8MetaBufferBase(ABC):
 
     def _execute_deletion(self) -> None:
         """Delete the key from global amax buffer."""
-        if (self._buffer_delete_key is not None and self._buffer_delete_key in self._data):
+        if self._buffer_delete_key is not None and self._buffer_delete_key in self._data:
             del self._data[self._buffer_delete_key]
 
     def _wait_handle_and_split(
@@ -137,11 +137,12 @@ class FP8MetaBufferBase(ABC):
             fp8_meta[buffer_position_key] = len(self._data[buffer_key]) - 1
 
         # Catch incorrect fp8_autocast usage.
-        assert fp8_meta[buffer_position_key] == len(self._data[buffer_key]) - 1, \
-            "Same module is being invoked more than once inside an `fp8_autocast` " \
-            "region when using FP8 with amax reduction. This behavior is currently " \
-            "unsupported. For more details and correct usage, please see " \
+        assert fp8_meta[buffer_position_key] == len(self._data[buffer_key]) - 1, (
+            "Same module is being invoked more than once inside an `fp8_autocast` "
+            "region when using FP8 with amax reduction. This behavior is currently "
+            "unsupported. For more details and correct usage, please see "
             "https://github.com/NVIDIA/TransformerEngine/pull/93."
+        )
 
     def copy_amax_from_buffer(self, fp8_meta: Dict[str, Any]) -> None:
         """Populate current amax with the correct location from buffer."""
@@ -156,7 +157,8 @@ class FP8MetaBufferBase(ABC):
         # Copy amax to amax_history[0]
         tex.update_latest_amax_history_inplace(
             _history=fp8_meta[fp8_meta_tensor_key].amax_history,
-            amax=self._data[amax_buffer_key][fp8_meta[buffer_position_key]])
+            amax=self._data[amax_buffer_key][fp8_meta[buffer_position_key]],
+        )
 
     def set_for_deletion(self, fp8_meta: Dict[str, Any]) -> None:
         """Delete this amax key from global buffer during autocast end."""
@@ -171,7 +173,7 @@ class FP8MetaBufferBase(ABC):
     def wait(self) -> None:
         """Wait for reduced amax to be available in buffer."""
         if self._amax_reduce_wait_func is not None:
-            self._amax_reduce_wait_func()    # pylint: disable=not-callable
+            self._amax_reduce_wait_func()  # pylint: disable=not-callable
             self._amax_reduce_wait_func = None
 
     def to_numpy(self) -> Dict[str, List[np.array]]:
@@ -224,7 +226,7 @@ class FP8MetaFwdBuffer(FP8MetaBufferBase):
         Called at FP8 autocast end.
         Performs AMAX reduction and delete unused buffer entries.
         """
-        if hasattr(self, '_amax_global_reduce_func') and callable(self._amax_global_reduce_func):
+        if hasattr(self, "_amax_global_reduce_func") and callable(self._amax_global_reduce_func):
             self._amax_reduce_wait_func = self._amax_global_reduce_func()
         self._execute_deletion()
 
@@ -270,7 +272,7 @@ class FP8RecomputeBuffer:
     @staticmethod
     def get_buffer_position_key():
         """Returns the key (in fp8_meta) for recompute buffer position"""
-        return 'recompute_buffer_pos'
+        return "recompute_buffer_pos"
 
     def stash_fp8_meta_tensors(self, fp8_meta: Dict[str, Any]) -> None:
         """Stash the scaling factors and amaxes for recompute"""
@@ -308,11 +310,13 @@ class FP8RecomputeBuffer:
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-        assert "updated_amax_history_fwd" in fp8_meta, "Recompute internal error." \
-            " If you are not using recompute, please check if" \
-            " the forward function is called from one of these functions: " \
-            f"{RecomputeFunctionNames}. If so, consider change the function name " \
+        assert "updated_amax_history_fwd" in fp8_meta, (
+            "Recompute internal error."
+            " If you are not using recompute, please check if"
+            " the forward function is called from one of these functions: "
+            f"{RecomputeFunctionNames}. If so, consider change the function name "
             "or set NVTE_DISABLE_RECOMPUTE=1."
+        )
         fp8_meta["scaling_fwd"].amax_history = fp8_meta["updated_amax_history_fwd"]
         fp8_meta["scaling_fwd"].scale = fp8_meta["updated_scale_fwd"]
         fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]

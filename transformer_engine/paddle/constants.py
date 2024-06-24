@@ -13,6 +13,7 @@ from transformer_engine import transformer_engine_paddle as tex
 class FP8FwdTensors(Enum):
     """Used as named indices on the `scale`, `scale_inv`,
     and `amax` tensors in the `FP8TensorMeta` class."""
+
     GEMM1_INPUT = 0
     GEMM1_WEIGHT = 1
     GEMM1_OUTPUT = 2
@@ -24,6 +25,7 @@ class FP8FwdTensors(Enum):
 class FP8BwdTensors(Enum):
     """Used as named indices on the `scale`, `scale_inv`,
     and `amax` tensors in the `FP8TensorMeta` class."""
+
     GRAD_OUTPUT1 = 0
     GRAD_INPUT1 = 1
     GRAD_OUTPUT2 = 2
@@ -51,7 +53,7 @@ GemmParallelModes = ("row", "column", None)
 
 dist_group_type = paddle.distributed.collective.Group
 
-RecomputeFunctionNames = ('unpack', 'backward')
+RecomputeFunctionNames = ("unpack", "backward")
 
 AttnBiasType = {
     "no_bias": tex.NVTE_Bias_Type.NVTE_NO_BIAS,

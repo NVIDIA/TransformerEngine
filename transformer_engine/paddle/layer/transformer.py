@@ -112,32 +112,34 @@ class TransformerLayer(paddle.nn.Layer):
 
     """
 
-    def __init__(self,
-                 hidden_size: int,
-                 ffn_hidden_size: int,
-                 num_attention_heads: int,
-                 num_gqa_groups: Optional[int] = None,
-                 layernorm_epsilon: float = 1e-5,
-                 hidden_dropout: float = 0.1,
-                 attention_dropout: float = 0.1,
-                 weight_attr: Union[paddle.ParamAttr, None] = None,
-                 bias_attr: Union[paddle.ParamAttr, None, bool] = None,
-                 max_sequence_length: Optional[int] = None,
-                 self_attn_mask_type: str = "causal",
-                 params_dtype: Optional[paddle.dtype] = None,
-                 apply_residual_connection_post_layernorm: bool = False,
-                 output_layernorm: bool = False,
-                 layer_type: str = "encoder",
-                 normalization: str = "LayerNorm",
-                 zero_centered_gamma: bool = False,
-                 activation: str = 'gelu',
-                 set_parallel_mode: bool = False,
-                 sequence_parallel: bool = False,
-                 tp_group: Optional[dist_group_type] = None,
-                 fuse_wgrad_accumulation: bool = False,
-                 attention_dropout_rng_state_name: str = 'local_seed',
-                 hidden_dropout_rng_state_name: str = 'global_seed',
-                 backend: str = 'transformer_engine') -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        num_attention_heads: int,
+        num_gqa_groups: Optional[int] = None,
+        layernorm_epsilon: float = 1e-5,
+        hidden_dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        weight_attr: Union[paddle.ParamAttr, None] = None,
+        bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        max_sequence_length: Optional[int] = None,
+        self_attn_mask_type: str = "causal",
+        params_dtype: Optional[paddle.dtype] = None,
+        apply_residual_connection_post_layernorm: bool = False,
+        output_layernorm: bool = False,
+        layer_type: str = "encoder",
+        normalization: str = "LayerNorm",
+        zero_centered_gamma: bool = False,
+        activation: str = "gelu",
+        set_parallel_mode: bool = False,
+        sequence_parallel: bool = False,
+        tp_group: Optional[dist_group_type] = None,
+        fuse_wgrad_accumulation: bool = False,
+        attention_dropout_rng_state_name: str = "local_seed",
+        hidden_dropout_rng_state_name: str = "global_seed",
+        backend: str = "transformer_engine",
+    ) -> None:
         super().__init__()
 
         params_dtype = paddle.get_default_dtype() if params_dtype is None else params_dtype
@@ -146,19 +148,23 @@ class TransformerLayer(paddle.nn.Layer):
         self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
         self.self_attn_mask_type = self_attn_mask_type
         self.set_parallel_mode = set_parallel_mode
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
-                                                                  enable_tp=set_parallel_mode)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(
+            tp_group, enable_tp=set_parallel_mode
+        )
         self.tensor_parallel = self.tp_size > 1
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
         # SP needs local seed for hidden dropout
-        if self.sequence_parallel and self.hidden_dropout_rng_state_name == 'global_seed':
-            warnings.warn("RNG state for hidden dropout needs to be different across TP ranks. "
-                          "Forcing hidden_dropout_rng_state_name to 'local_seed'")
-            self.hidden_dropout_rng_state_name = 'local_seed'
+        if self.sequence_parallel and self.hidden_dropout_rng_state_name == "global_seed":
+            warnings.warn(
+                "RNG state for hidden dropout needs to be different across TP ranks. "
+                "Forcing hidden_dropout_rng_state_name to 'local_seed'"
+            )
+            self.hidden_dropout_rng_state_name = "local_seed"
 
-        assert (self_attn_mask_type
-                in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
+        assert (
+            self_attn_mask_type in AttnMaskTypes
+        ), f"self_attn_mask_type {self_attn_mask_type} not supported"
         assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
 
         attention_args = (
@@ -176,7 +182,7 @@ class TransformerLayer(paddle.nn.Layer):
             "zero_centered_gamma": zero_centered_gamma,
             "set_parallel_mode": set_parallel_mode,
             "sequence_parallel": self.sequence_parallel,
-            'max_sequence_length': max_sequence_length,
+            "max_sequence_length": max_sequence_length,
             "tp_group": tp_group,
             "num_gqa_groups": num_gqa_groups,
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -295,10 +301,12 @@ class TransformerLayer(paddle.nn.Layer):
         """
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
-            assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
+            assert attention_mask.dtype == paddle.bool, "Attention mask must be a boolean tensor"
 
-        assert core_attention_bias_type in ['no_bias'], f"Only no_bias is supported currently, " \
+        assert core_attention_bias_type in ["no_bias"], (
+            "Only no_bias is supported currently, "
             f"but receive core_attention_bias_type = {core_attention_bias_type}"
+        )
 
         # Self attention.
         self_attention_outputs = self.self_attention(
@@ -340,8 +348,9 @@ class TransformerLayer(paddle.nn.Layer):
                 attention_output = inter_attention_outputs
                 residual = bda_output
 
-            with track_rng_state(enable=self.tensor_parallel,
-                                 name=self.hidden_dropout_rng_state_name):
+            with track_rng_state(
+                enable=self.tensor_parallel, name=self.hidden_dropout_rng_state_name
+            ):
                 bda_output = self.fused_dropout_add2(attention_output, residual)
 
         # MLP.

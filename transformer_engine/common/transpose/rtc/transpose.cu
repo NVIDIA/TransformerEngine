@@ -19,13 +19,10 @@ constexpr size_t block_size = __BLOCK_SIZE__;
 
 }  // namespace
 
-__global__ void
-__launch_bounds__(block_size)
-transpose_optimized_kernel(const Type * __restrict__ const input,
-                           const float * const noop,
-                           Type * __restrict__  const output,
-                           const size_t row_length,
-                           const size_t num_rows) {
+__global__ void __launch_bounds__(block_size)
+    transpose_optimized_kernel(const Type* __restrict__ const input, const float* const noop,
+                               Type* __restrict__ const output, const size_t row_length,
+                               const size_t num_rows) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
   // Vectorized load/store sizes
@@ -63,17 +60,17 @@ transpose_optimized_kernel(const Type * __restrict__ const input,
   // Note: Each thread loads num_iterations subtiles and transposes in
   // registers.
   OVec local_output[nvec_in][num_iterations];
-  #pragma unroll
+#pragma unroll
   for (size_t iter = 0; iter < num_iterations; ++iter) {
     const size_t i1 = tidy + iter * bdimy;
     const size_t j1 = tidx;
-    #pragma unroll
+#pragma unroll
     for (size_t i2 = 0; i2 < nvec_out; ++i2) {
       const size_t row = tile_row + i1 * nvec_out + i2;
       const size_t col = tile_col + j1 * nvec_in;
       IVec local_input;
       local_input.load_from(&input[row * row_length + col]);
-      #pragma unroll
+#pragma unroll
       for (size_t j2 = 0; j2 < nvec_in; ++j2) {
         local_output[j2][iter].data.elt[i2] = local_input.data.elt[j2];
       }
@@ -81,17 +78,17 @@ transpose_optimized_kernel(const Type * __restrict__ const input,
   }
 
   // Copy from registers to shared memory to global memory
-  __shared__ OVec shared_output[THREADS_PER_WARP][THREADS_PER_WARP+1];
-  #pragma unroll
+  __shared__ OVec shared_output[THREADS_PER_WARP][THREADS_PER_WARP + 1];
+#pragma unroll
   for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-    #pragma unroll
+#pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidy + iter * bdimy;
       const size_t j1 = tidx;
       shared_output[j1][i1] = local_output[j2][iter];
     }
     __syncthreads();
-    #pragma unroll
+#pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidx;
       const size_t j1 = tidy + iter * bdimy;

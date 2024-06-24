@@ -22,9 +22,11 @@ if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))
 no_torch_dynamo = lambda recursive=True: lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
+
     if torch.__version__ >= "2.1":
-        no_torch_dynamo = lambda recursive=True: lambda f: \
-                                                    torch._dynamo.disable(f, recursive=recursive)
+        no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(
+            f, recursive=recursive
+        )
     else:
         # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
         no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
@@ -35,7 +37,9 @@ def set_jit_fusion_options() -> None:
     # flags required to enable jit fusion kernels
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
-    if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
+    if TORCH_MAJOR == 2 and TORCH_MINOR >= 2:
+        pass
+    elif (TORCH_MAJOR == 2) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
@@ -79,27 +83,25 @@ def bgrad_dgelu_fused_(
     x = inp + bias
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
-    ff = 0.5 * x * (
-        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
-    ) + 0.5 * (1 + tanh_out)
+    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (
+        1 + tanh_out
+    )
     dgelu = ff * grad_output
     bgrad = dgelu.sum(dim=0)
     return bgrad, dgelu
 
 
 @jit_fuser
-def dgelu_fused_(
-    grad_output: torch.Tensor, inp: torch.Tensor
-) -> torch.Tensor:
+def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
     """
     Dgelu fused, this is copy of bgrad_dgelu_fused_ cause jit fusion doesn't allow conditioning.
     """
     x = inp
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
-    ff = 0.5 * x * (
-        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
-    ) + 0.5 * (1 + tanh_out)
+    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (
+        1 + tanh_out
+    )
     dgelu = ff * grad_output
     return dgelu
 
@@ -185,19 +187,13 @@ def warmup_jit_bias_dropout_add(
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
     rng_state = torch.cuda.get_rng_state()
 
-    inp = torch.rand(
-        (seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda"
-    )
-    residual = torch.rand(
-        (seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda"
-    )
+    inp = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
+    residual = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
     bias = torch.rand((hidden_size), dtype=dtype, device="cuda")
     dropout_rate = 0.1
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
-    for input_grad, bias_grad, residual_grad in zip(
-        [False, True], [True, True], [True, True]
-    ):
+    for input_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
         inp.requires_grad = input_grad
         bias.requires_grad = bias_grad
         residual.requires_grad = residual_grad

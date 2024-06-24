@@ -8,12 +8,14 @@ import torch
 import transformer_engine_torch as tex
 
 
-__all__ = ['layernorm_fwd_fp8',
-           'layernorm_fwd_fp8_inf',
-           'layernorm_fwd_inf',
-           'rmsnorm_fwd_fp8',
-           'rmsnorm_fwd_fp8_inf',
-           'rmsnorm_fwd_inf']
+__all__ = [
+    "layernorm_fwd_fp8",
+    "layernorm_fwd_fp8_inf",
+    "layernorm_fwd_inf",
+    "rmsnorm_fwd_fp8",
+    "rmsnorm_fwd_fp8_inf",
+    "rmsnorm_fwd_inf",
+]
 
 
 def layernorm_fwd_fp8(
@@ -91,7 +93,8 @@ def layernorm_fwd_fp8_inf(
         fp8_tensor,
         otype,
         sm_margin,
-        zero_centered_gamma)
+        zero_centered_gamma,
+    )
     return ret
 
 
@@ -112,6 +115,7 @@ def layernorm_fwd_inf(
         sm_margin,
         zero_centered_gamma,
     )
+
 
 def rmsnorm_fwd_fp8(
     inp: torch.Tensor,
@@ -183,7 +187,8 @@ def rmsnorm_fwd_fp8_inf(
         fp8_tensor,
         otype,
         sm_margin,
-        zero_centered_gamma)
+        zero_centered_gamma,
+    )
     return ret
 
 

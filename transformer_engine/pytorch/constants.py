@@ -29,9 +29,22 @@ AttnTypes = ("self", "cross")
 AttnBiasTypes = ("pre_scale_bias", "post_scale_bias", "no_bias", "alibi")
 
 QKVLayouts = (
-    "sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
-    "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
-    "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd")
+    "sb3hd",
+    "sbh3d",
+    "sbhd_sb2hd",
+    "sbhd_sbh2d",
+    "sbhd_sbhd_sbhd",
+    "bs3hd",
+    "bsh3d",
+    "bshd_bs2hd",
+    "bshd_bsh2d",
+    "bshd_bshd_bshd",
+    "t3hd",
+    "th3d",
+    "thd_t2hd",
+    "thd_th2d",
+    "thd_thd_thd",
+)
 
 LayerTypes = ("encoder", "decoder")
 

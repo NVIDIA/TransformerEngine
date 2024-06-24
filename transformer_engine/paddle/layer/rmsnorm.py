@@ -33,8 +33,14 @@ class _RMSNorm(paddle.autograd.PyLayer):
         assert inp.shape[-1] == in_features, "RMSNorm not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        rmsnorm_out, rsigma = rmsnorm_fwd(inputmat, rmsnorm_weight, eps, TE_DType[inp.dtype],
-                                          fwd_rmsnorm_sm_margin, zero_centered_gamma)
+        rmsnorm_out, rsigma = rmsnorm_fwd(
+            inputmat,
+            rmsnorm_weight,
+            eps,
+            TE_DType[inp.dtype],
+            fwd_rmsnorm_sm_margin,
+            zero_centered_gamma,
+        )
 
         ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
         ctx.inp_shape = inp.shape
@@ -49,8 +55,14 @@ class _RMSNorm(paddle.autograd.PyLayer):
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensor()
         d_rmsnorm_out = grad_output.reshape(inputmat.shape)
-        dxmat, dgamma = rmsnorm_bwd(d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
-                                    ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma)
+        dxmat, dgamma = rmsnorm_bwd(
+            d_rmsnorm_out,
+            inputmat,
+            rsigma,
+            rmsnorm_weight,
+            ctx.bwd_rmsnorm_sm_margin,
+            ctx.zero_centered_gamma,
+        )
         return (
             dxmat.reshape(ctx.inp_shape) if ctx.requires_dx else None,
             dgamma if ctx.requires_dw else None,
@@ -149,7 +161,8 @@ class RMSNorm(paddle.nn.Layer):
     ) -> paddle.Tensor:
         if self.zero_centered_gamma:
             raise NotImplementedError(
-                "Paddle backend does not support RMSNorm with zero_centered_gamma.")
+                "Paddle backend does not support RMSNorm with zero_centered_gamma."
+            )
         norm = paddle.rsqrt(paddle.mean(inp**2, axis=-1, keepdim=True) + self.eps)
         y = inp * norm * self.weight
         return y

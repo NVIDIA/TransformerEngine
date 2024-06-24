@@ -15,7 +15,7 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 from .constants import dist_group_type
 from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
 
-__all__ = ['fp8_autocast']
+__all__ = ["fp8_autocast"]
 
 # FP8 support
 _is_fp8_available = None
@@ -27,9 +27,9 @@ def _check_fp8_support() -> Tuple[bool, str]:
 
     # Check GPU arch
     arch = paddle.device.cuda.get_device_capability()
-    if arch >= (9, 0):    # hopper and above
+    if arch >= (9, 0):  # hopper and above
         return True, ""
-    if arch < (8, 9):    # pre-ada
+    if arch < (8, 9):  # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
 
     # Special handling for Ada
@@ -124,8 +124,13 @@ class FP8State:
         fp8_group: Optional[dist_group_type],
     ) -> None:
         """Called when entering 'fp8_autocast'"""
-        self.saved_states = (self._fp8_enabled, self._fp8_calibration, self._fp8_recipe,
-                             self._fp8_distributed_group, self._is_first_fp8_module)
+        self.saved_states = (
+            self._fp8_enabled,
+            self._fp8_calibration,
+            self._fp8_recipe,
+            self._fp8_distributed_group,
+            self._is_first_fp8_module,
+        )
 
         self._fp8_enabled = enabled
         self._fp8_calibration = calibrating
@@ -140,8 +145,13 @@ class FP8State:
     def exit(self):
         """Called when exiting 'fp8_autocast'"""
         # Restore saved states
-        (self._fp8_enabled, self._fp8_calibration, self._fp8_recipe, self._fp8_distributed_group,
-         self._is_first_fp8_module) = self.saved_states
+        (
+            self._fp8_enabled,
+            self._fp8_calibration,
+            self._fp8_recipe,
+            self._fp8_distributed_group,
+            self._is_first_fp8_module,
+        ) = self.saved_states
 
         self._fp8_autocast_depth -= 1
 
@@ -214,8 +224,9 @@ def fp8_autocast(
 
 def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
     """Get fp8 data type according to recipe and tensor"""
-    if fp8_recipe.fp8_format == Format.E4M3 or (fp8_recipe.fp8_format == Format.HYBRID
-                                                and fprop_tensor):
+    if fp8_recipe.fp8_format == Format.E4M3 or (
+        fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
+    ):
         return tex.DType.kFloat8E4M3
     return tex.DType.kFloat8E5M2
 
@@ -241,14 +252,17 @@ def amax_and_scale_update(
             non_weight_mask=non_weight_mask,
             fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
             margin=float(fp8_meta["recipe"].margin),
-            amax_compute=amax_compute)
+            amax_compute=amax_compute,
+        )
     else:
-        raise ValueError("We only support the fp8 recipe with 'max' or 'most_recent' "
-                         "amax_compute_algo and default scaling_factor_compute_algo at this "
-                         "moment.")
+        raise ValueError(
+            "We only support the fp8 recipe with 'max' or 'most_recent' "
+            "amax_compute_algo and default scaling_factor_compute_algo at this "
+            "moment."
+        )
 
 
-class FP8TensorMeta():
+class FP8TensorMeta:
     """Holds FP8 scaling and amax history for FP8 layers"""
 
     def __init__(self, is_forward: bool):
@@ -281,20 +295,22 @@ class FP8TensorMeta():
                 self.amax_history = self.amax_history[:amax_history_len]
             elif amax_history_len > curr_len:
                 extra_rows = amax_history_len - curr_len
-                self.amax_history = paddle.concat([
-                    self.amax_history,
-                    paddle.zeros((extra_rows, num_fp8_tensors), dtype='float32')
-                ],
-                                                  axis=0)
+                self.amax_history = paddle.concat(
+                    [
+                        self.amax_history,
+                        paddle.zeros((extra_rows, num_fp8_tensors), dtype="float32"),
+                    ],
+                    axis=0,
+                )
             return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
-        num_fp8_tensors = (num_gemms * 3 if self.is_forward else num_gemms * 2)
+        num_fp8_tensors = num_gemms * 3 if self.is_forward else num_gemms * 2
 
-        self.scale = paddle.ones(num_fp8_tensors, dtype='float32')
-        self.scale_inv = paddle.ones(num_fp8_tensors, dtype='float32')
-        self.amax_history = paddle.zeros([amax_history_len, num_fp8_tensors], dtype='float32')
+        self.scale = paddle.ones(num_fp8_tensors, dtype="float32")
+        self.scale_inv = paddle.ones(num_fp8_tensors, dtype="float32")
+        self.amax_history = paddle.zeros([amax_history_len, num_fp8_tensors], dtype="float32")
         self.non_weight_mask = self.get_non_weight_mask(num_gemms=num_gemms)
 
         self.is_initialized = True
@@ -303,16 +319,16 @@ class FP8TensorMeta():
         """Convert FP8 meta tensors to numpy."""
         assert self.is_initialized, "FP8TensorMeta is not initialized yet."
         return {
-            'scale': self.scale.numpy(),
-            'scale_inv': self.scale_inv.numpy(),
-            'amax_history': self.amax_history.numpy(),
+            "scale": self.scale.numpy(),
+            "scale_inv": self.scale_inv.numpy(),
+            "amax_history": self.amax_history.numpy(),
         }
 
     def from_numpy(self, data: Dict[str, np.array]):
         """Set FP8 meta tensors from numpy"""
-        self.scale = paddle.to_tensor(data['scale'])
-        self.scale_inv = paddle.to_tensor(data['scale_inv'])
-        self.amax_history = paddle.to_tensor(data['amax_history'])
+        self.scale = paddle.to_tensor(data["scale"])
+        self.scale_inv = paddle.to_tensor(data["scale_inv"])
+        self.amax_history = paddle.to_tensor(data["amax_history"])
 
         num_fp8_tensors = self.scale.shape[0]
         num_gemms = num_fp8_tensors // 3 if self.is_forward else num_fp8_tensors // 2

@@ -43,15 +43,9 @@ extern "C" {
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
-void nvte_rmsnorm_fwd(const NVTETensor x,
-                      const NVTETensor gamma,
-                      const float epsilon,
-                      NVTETensor z,
-                      NVTETensor rsigma,
-                      cudaStream_t stream,
-                      const int multiprocessorCount,
-                      NVTETensor workspace,
-                      NVTETensor barrier);
+void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float epsilon, NVTETensor z,
+                      NVTETensor rsigma, cudaStream_t stream, const int multiprocessorCount,
+                      NVTETensor workspace, NVTETensor barrier);
 
 /*! \brief Compute RMSNorm with zero-centered gamma on the input.
  *
@@ -79,15 +73,9 @@ void nvte_rmsnorm_fwd(const NVTETensor x,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
-void nvte_rmsnorm1p_fwd(const NVTETensor x,
-                        const NVTETensor gamma,
-                        const float epsilon,
-                        NVTETensor z,
-                        NVTETensor rsigma,
-                        cudaStream_t stream,
-                        const int multiprocessorCount,
-                        NVTETensor workspace,
-                        NVTETensor barrier);
+void nvte_rmsnorm1p_fwd(const NVTETensor x, const NVTETensor gamma, const float epsilon,
+                        NVTETensor z, NVTETensor rsigma, cudaStream_t stream,
+                        const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier);
 
 /*! \brief Compute backward of RMSNorm.
  *
@@ -118,18 +106,10 @@ void nvte_rmsnorm1p_fwd(const NVTETensor x,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
-void nvte_rmsnorm_bwd(const NVTETensor dz,
-                      const NVTETensor x,
-                      const NVTETensor rsigma,
-                      const NVTETensor gamma,
-                      NVTETensor dx,
-                      NVTETensor dgamma,
-                      NVTETensor dgamma_part,
-                      cudaStream_t stream,
-                      const int multiprocessorCount,
-                      NVTETensor workspace,
-                      NVTETensor barrier
-);
+void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor rsigma,
+                      const NVTETensor gamma, NVTETensor dx, NVTETensor dgamma,
+                      NVTETensor dgamma_part, cudaStream_t stream, const int multiprocessorCount,
+                      NVTETensor workspace, NVTETensor barrier);
 
 /*! \brief Compute backward of RMSNorm with zero-centered gamma.
  *
@@ -160,18 +140,10 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
-void nvte_rmsnorm1p_bwd(const NVTETensor dz,
-                        const NVTETensor x,
-                        const NVTETensor rsigma,
-                        const NVTETensor gamma,
-                        NVTETensor dx,
-                        NVTETensor dgamma,
-                        NVTETensor dgamma_part,
-                        cudaStream_t stream,
-                        const int multiprocessorCount,
-                        NVTETensor workspace,
-                        NVTETensor barrier
-);
+void nvte_rmsnorm1p_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor rsigma,
+                        const NVTETensor gamma, NVTETensor dx, NVTETensor dgamma,
+                        NVTETensor dgamma_part, cudaStream_t stream, const int multiprocessorCount,
+                        NVTETensor workspace, NVTETensor barrier);
 
 #ifdef __cplusplus
 }  // extern "C"
