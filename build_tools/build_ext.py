@@ -94,7 +94,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 if isinstance(ext, CMakeExtension):
                     print(f"Building CMake extension {ext.name}")
                     # Set up incremental builds for CMake extensions
-                    setup_dir = Path(__file__).resolve().parent
+                    setup_dir = Path(__file__).resolve().parent.parent
                     build_dir = setup_dir / "build" / "cmake"
 
                     # Ensure the directory exists

@@ -28,10 +28,12 @@ def debug_build_enabled() -> bool:
     return False
 
 
-def all_files_in_dir(path):
+def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
+            if name_extension is not None and name_extension not in name:
+                continue
             all_files.append(Path(dirname, name))
     return all_files
 
