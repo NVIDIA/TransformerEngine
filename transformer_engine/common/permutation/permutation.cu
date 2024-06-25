@@ -4,12 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "cutlass/arch/memory.h"
-#include "cutlass/arch/cache_operation.h"
-#include "cutlass/array.h"
-#include "cutlass/numeric_conversion.h"
-
 #include <transformer_engine/permutation.h>
+
+#include "../common.h"
 
 static __global__ void moe_permute_row_map(
     const int *sorted_row_id,
@@ -41,7 +38,9 @@ static __global__ void moe_permute_row_map(
     }
 }
 
-template <typename T, typename TCompute, int kElementsPerAccess, bool hasProb>
+template <typename T,
+          typename TCompute,
+          bool hasProb>
 __global__ void moe_unpermute_kernel(const T *input,
                                      T *unpermuted_output,
                                      const int *row_id_map,
@@ -52,12 +51,6 @@ __global__ void moe_unpermute_kernel(const T *input,
 {
     extern __shared__ int8_t s_mem[];
     TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
-
-    using FragmentLoadStore = cutlass::Array<T, kElementsPerAccess>;
-    using FragmentCompute = cutlass::Array<TCompute, kElementsPerAccess>;
-
-    cutlass::NumericArrayConverter<TCompute, T, kElementsPerAccess> src_converter;
-    cutlass::NumericArrayConverter<T, TCompute, kElementsPerAccess> dst_converter;
 
     // each block corresponds to one source token
     const int source_token = blockIdx.x;
@@ -72,11 +65,16 @@ __global__ void moe_unpermute_kernel(const T *input,
         __syncthreads();
     }
 
+    float4 frag_load_store;
+    T *frag_load_store_ptr = reinterpret_cast<T *>(&frag_load_store);
+
+    static constexpr int kElementsPerAccess = 16 / sizeof(T);
+
     for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess)
     {
-        FragmentLoadStore frag_load_store;
-        FragmentCompute frag_elem;
-        FragmentCompute frag_sum;
+
+        TCompute frag_elem[kElementsPerAccess];
+        TCompute frag_sum[kElementsPerAccess];
         
         int source_row = row_id_map[source_token];
 
@@ -84,18 +82,20 @@ __global__ void moe_unpermute_kernel(const T *input,
         {
             const T *source_row_ptr = input + source_row * num_cols;
 
-            cutlass::arch::global_load<FragmentLoadStore, sizeof(FragmentLoadStore), cutlass::arch::CacheOperation::LastUse>(
-                frag_load_store, (source_row_ptr + i), true);
-            frag_sum = src_converter(frag_load_store);
+            frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
 
-            if (hasProb)
-            {
-                frag_sum = frag_sum * s_prob[0];
+            for (int e = 0; e < kElementsPerAccess; e++) {
+                frag_sum[e] = TCompute(frag_load_store_ptr[e]); }
+
+            if (hasProb) {
+                for (int e = 0; e < kElementsPerAccess; e++) {
+                    frag_sum[e] = frag_sum[e] * s_prob[0]; }
             }
         }
         else
         {
-            frag_sum.clear();
+            for (int e = 0; e < kElementsPerAccess; e++) {
+                frag_sum[e] = TCompute(0.0f); }
         }
 
         for (int k = 1; k < num_topK; k++)
@@ -107,30 +107,31 @@ __global__ void moe_unpermute_kernel(const T *input,
 
             const T *source_row_ptr = input + source_row * num_cols;
 
-            cutlass::arch::global_load<FragmentLoadStore, sizeof(FragmentLoadStore), cutlass::arch::CacheOperation::LastUse>(
-                frag_load_store, (source_row_ptr + i), true);
-            frag_elem = src_converter(frag_load_store);
+            frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
 
-            if (hasProb)
-            {
-                frag_elem = frag_elem * s_prob[k];
+            for (int e = 0; e < kElementsPerAccess; e++) {
+                frag_elem[e] = TCompute(frag_load_store_ptr[e]); }
+
+            if (hasProb) {
+                for (int e = 0; e < kElementsPerAccess; e++) {
+                    frag_elem[e] = frag_elem[e] * s_prob[k]; }
             }
             
-            for (int e = 0; e < kElementsPerAccess; e++)
-            {
-                frag_sum.at(e) = frag_sum.at(e) + frag_elem.at(e);
-            }
+            for (int e = 0; e < kElementsPerAccess; e++) {
+                frag_sum[e] = frag_sum[e] + frag_elem[e]; }
         }
 
         T *dest_row_ptr = unpermuted_output + source_token * num_cols;
-        frag_load_store = dst_converter(frag_sum);
-        *(float4 *)(dest_row_ptr + i) = *(float4 *)(frag_load_store.data());
+
+        for (int e = 0; e < kElementsPerAccess; e++) {
+            frag_load_store_ptr[e] = T(frag_sum[e]); }
+
+        *(float4 *)(dest_row_ptr + i) = frag_load_store;
     }
 }
 
 template <typename T,
           typename TCompute,
-          int kElementsPerAccess,
           int topKTile,
           bool hasProb>
 __global__ void moe_permute_kernel(const T *input_bwd,
@@ -146,12 +147,6 @@ __global__ void moe_permute_kernel(const T *input_bwd,
     extern __shared__ int8_t s_mem[];
     TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
-    using FragmentLoadStore = cutlass::Array<T, kElementsPerAccess>;
-    using FragmentCompute = cutlass::Array<TCompute, kElementsPerAccess>;
-
-    cutlass::NumericArrayConverter<TCompute, T, kElementsPerAccess> src_converter;
-    cutlass::NumericArrayConverter<T, TCompute, kElementsPerAccess> dst_converter;
-
     const int source_token = blockIdx.x;
     const int tid = threadIdx.x;
 
@@ -165,14 +160,21 @@ __global__ void moe_permute_kernel(const T *input_bwd,
     }
 
     float accum[topKTile] = {0.0f};
-    FragmentLoadStore frag_load_store;
+
+    float4 frag_load_store;
+    T *frag_load_store_ptr = reinterpret_cast<T *>(&frag_load_store);
+
+    static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
     const T *source_row_ptr = input_bwd + source_token * num_cols;
     for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess)
     {
-        cutlass::arch::global_load<FragmentLoadStore, sizeof(FragmentLoadStore), cutlass::arch::CacheOperation::LastUse>(
-            frag_load_store, (source_row_ptr + i), true);
-        FragmentCompute frag_src = src_converter(frag_load_store);
+        TCompute frag_src[kElementsPerAccess];
+
+        frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+
+        for (int e = 0; e < kElementsPerAccess; e++)
+            frag_src[e] = TCompute(frag_load_store_ptr[e]);
 
         int index = source_token;
 
@@ -187,27 +189,30 @@ __global__ void moe_permute_kernel(const T *input_bwd,
             {
                 if (hasProb)
                 {
-                    frag_load_store = dst_converter(frag_src * s_prob[k]);
+                    for (int e = 0; e < kElementsPerAccess; e++)
+                        frag_load_store_ptr[e] = T(frag_src[e] * s_prob[k]);
                 }
                 else
                 {
-                    frag_load_store = dst_converter(frag_src);
+                    for (int e = 0; e < kElementsPerAccess; e++)
+                        frag_load_store_ptr[e] = T(frag_src[e]);
                 }
 
                 T *dest_row_ptr = act_grad + dest_row * num_cols;
-                *(float4 *)(dest_row_ptr + i) = *(float4 *)(frag_load_store.data());
+                *(float4 *)(dest_row_ptr + i) = frag_load_store;
 
                 if (hasProb)
                 {
                     const T *input_fwd_ptr = input_fwd + dest_row * num_cols;
-                    cutlass::arch::global_load<FragmentLoadStore, sizeof(FragmentLoadStore), cutlass::arch::CacheOperation::LastUse>(
-                        frag_load_store, (input_fwd_ptr + i), true);
-                    FragmentCompute frag_input_fwd = src_converter(frag_load_store);
 
+                    frag_load_store = __ldlu(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
+
+                    TCompute frag_input_fwd[kElementsPerAccess];
                     for (int e = 0; e < kElementsPerAccess; e++)
-                    {
-                        accum[k] += float(frag_src.at(e) * frag_input_fwd.at(e));
-                    }
+                        frag_input_fwd[e] = TCompute(frag_load_store_ptr[e]);
+
+                    for (int e = 0; e < kElementsPerAccess; e++) {
+                        accum[k] += float(frag_src[e] * frag_input_fwd[e]); }
                 }
             }
         }
@@ -236,7 +241,7 @@ __global__ void moe_permute_kernel(const T *input_bwd,
     }
 }
 
-template <typename TInput, bool FWD>
+template <typename T, bool FWD>
 void moe_permutation_launcher(
     const void *input_,
     void *output_,
@@ -251,27 +256,12 @@ void moe_permutation_launcher(
     float *prob_grad,
     const void *input_fwd_)
 {
-    // Convert to cutlass type
-    using T_fp16 = typename cutlass::platform::conditional<
-        cutlass::platform::is_same<TInput, half>::value,
-        cutlass::half_t, TInput>::type;
-    using T_bf16 = typename cutlass::platform::conditional<
-        cutlass::platform::is_same<T_fp16, __nv_bfloat16>::value,
-        cutlass::bfloat16_t, T_fp16>::type;
-    using T_fp8e5m2 = typename cutlass::platform::conditional<
-        cutlass::platform::is_same<T_bf16, __nv_fp8_e5m2>::value,
-        cutlass::float_e5m2_t, T_bf16>::type;
-    using T_fp8e4m3 = typename cutlass::platform::conditional<
-        cutlass::platform::is_same<T_fp8e5m2, __nv_fp8_e4m3>::value,
-        cutlass::float_e4m3_t, T_fp8e5m2>::type;
-    using T = T_fp8e4m3;
+    using TCompute = typename std::conditional<
+        (std::is_same<T, __nv_fp8_e5m2>::value ||
+        std::is_same<T, __nv_fp8_e4m3>::value),
+        half, T>::type;
 
-    using TCompute = typename cutlass::platform::conditional<
-        (cutlass::platform::is_same<T, cutlass::float_e5m2_t>::value ||
-        cutlass::platform::is_same<T, cutlass::float_e4m3_t>::value),
-        cutlass::half_t, T>::type;
-
-    static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<T>::value;
+    static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
     const T* input = reinterpret_cast<const T *>(input_);
     T* output = reinterpret_cast<T *>(output_);
@@ -295,7 +285,7 @@ void moe_permutation_launcher(
 
                 blocks = num_rows;
                 threads = std::min(num_cols / kElementsPerAccess, 1024);
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 128, false><<<blocks, threads, 0, stream>>>(
+                moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
                     input,
                     nullptr,
                     output,
@@ -312,7 +302,7 @@ void moe_permutation_launcher(
                 int blocks = num_rows;
                 int threads = 32;
 
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 1, false><<<blocks, threads, 0, stream>>>(
+                moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -333,7 +323,7 @@ void moe_permutation_launcher(
 
             if (num_topK <= 8)
             {
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 8, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, 8, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -346,7 +336,7 @@ void moe_permutation_launcher(
             }
             else if (num_topK <= 16)
             {
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 16, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, 16, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -359,7 +349,7 @@ void moe_permutation_launcher(
             }
             else if (num_topK <= 32)
             {
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 32, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, 32, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -372,7 +362,7 @@ void moe_permutation_launcher(
             }
             else if (num_topK <= 64)
             {
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 64, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, 64, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -385,7 +375,7 @@ void moe_permutation_launcher(
             }
             else if (num_topK <= 128)
             {
-                moe_permute_kernel<T, TCompute, kElementsPerAccess, 128, true><<<blocks, threads, smem_bytes, stream>>>(
+                moe_permute_kernel<T, TCompute, 128, true><<<blocks, threads, smem_bytes, stream>>>(
                     input,
                     input_fwd,
                     output,
@@ -412,7 +402,7 @@ void moe_permutation_launcher(
         {
             // permute_topK bwd
             // unpermute_topK fwd without probs
-            moe_unpermute_kernel<T, TCompute, kElementsPerAccess, false><<<blocks, threads, smem_bytes, stream>>>(
+            moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
                 input,
                 output,
                 row_id_map,
@@ -424,7 +414,7 @@ void moe_permutation_launcher(
         else
         {
             // unpermute_topK fwd with probs
-            moe_unpermute_kernel<T, TCompute, kElementsPerAccess, true><<<blocks, threads, smem_bytes, stream>>>(
+            moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
                 input,
                 output,
                 row_id_map,

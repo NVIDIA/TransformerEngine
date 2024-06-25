@@ -9,7 +9,7 @@
 
 #include "transformer_engine.h"
 
-template <typename TInput, bool FWD>
+template <typename T, bool FWD>
 void moe_permutation_launcher(const void *input,
                               void *output,
                               const int *sorted_row_id,
