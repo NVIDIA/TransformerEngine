@@ -137,6 +137,7 @@ struct CustomCallFusedAttnDescriptor {
   size_t num_gqa_groups;
   size_t bias_heads;
   size_t head_dim;
+  size_t max_segments_per_seq;
   size_t wkspace_size;
   float scaling_factor;
   float dropout_probability;
@@ -151,9 +152,9 @@ struct CustomCallFusedAttnDescriptor {
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t input_batch, size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
-    size_t wkspace_size, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
-    bool is_training);
+    size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training);
 
 // Transpose
 

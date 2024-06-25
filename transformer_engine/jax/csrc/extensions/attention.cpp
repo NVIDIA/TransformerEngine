@@ -216,6 +216,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   auto mask_type = descriptor.mask_type;
   auto dtype = descriptor.dtype;
   auto is_training = descriptor.is_training;
+  auto max_segments_per_seq = descriptor.max_segments_per_seq;
 
   /* Input tensors */
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -232,6 +233,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     size_t runtime_num_segments_kv =
         GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
     NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
+    NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
     num_segments = runtime_num_segments_q;
     cudaMemsetAsync(output, 0,
                     input_batch * q_max_seqlen * attn_heads * head_dim * typeToSize(dtype), stream);
@@ -446,6 +448,7 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
   auto bias_type = descriptor.bias_type;
   auto mask_type = descriptor.mask_type;
   auto dtype = descriptor.dtype;
+  auto max_segments_per_seq = descriptor.max_segments_per_seq;
 
   /* Input tensors */
   auto output_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, head_dim};
@@ -461,6 +464,7 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     size_t runtime_num_segments_kv =
         GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
     NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
+    NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
     num_segments = runtime_num_segments_q;
   }
 
