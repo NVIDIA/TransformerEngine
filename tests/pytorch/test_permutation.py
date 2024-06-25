@@ -8,9 +8,10 @@ import torch.cuda.nvtx as nvtx
 
 from transformer_engine.pytorch import Permute as permute_topK, Unpermute as unpermute_topK
 
+
 def permute(tokens, indices, num_out_tokens: int = 0):
     """Permute the tokens based on the indices. Token with the same index will be grouped together.
-       The input indices shape is [tokens, top_k], it indicates which experts were selected by each token separately. 
+       The input indices shape is [tokens, top_k], it indicates which experts were selected by each token separately.
     Args:
         tokens (torch.Tensor): The input token tensor.
         indices (torch.Tensor): The token to expert indices tensor, should have a shape of [num_tokens, topk].
@@ -70,14 +71,17 @@ def permute_topK_test(
     num_expert,
     hidden_size,
     num_topK,
-    num_out_tokens = None,
-    PRINT = False,
-    BENCHMARK = False):
+    num_out_tokens=None,
+    PRINT=False,
+    BENCHMARK=False,
+):
 
     if num_out_tokens == None:
         num_out_tokens = num_token * num_topK
 
-    print(f"{dtype} token:{num_token} hidden_size:{hidden_size} expert:{num_expert} topK:{num_topK}")
+    print(
+        f"{dtype} token:{num_token} hidden_size:{hidden_size} expert:{num_expert} topK:{num_topK}"
+    )
 
     is_fp8 = dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
 
@@ -90,7 +94,7 @@ def permute_topK_test(
         permute_input = permute_input.half()
 
     permute_input.requires_grad_(True)
-    
+
     if num_token > 0:
         indices = torch.stack([torch.randperm(num_expert)[:num_topK] for _ in range(num_token)])
     else:
@@ -134,8 +138,7 @@ def permute_topK_test(
     unpermute_input = permute_output.detach()
     unpermute_input.requires_grad_(True)
 
-    unpermute_output = unpermute(
-        unpermute_input, sorted_indices, probs=probs)
+    unpermute_output = unpermute(unpermute_input, sorted_indices, probs=probs)
 
     if PRINT:
         print("--------------unpermute fwd permute_input--------------")
@@ -218,7 +221,10 @@ def permute_topK_test(
         original_inputs = unpermute_input.grad.float().cpu().detach().numpy().flatten()
         original_output = new_unpermute_input.grad.float().cpu().detach().numpy().flatten()
         max_abs_error = abs(original_inputs - original_output).max()
-        print(f"unpermute_topK bwd act_grad max error (mine vs pytorch): \t{max_abs_error:.3e} ({dtype})")
+        print(
+            "unpermute_topK bwd act_grad max error (mine vs pytorch):"
+            f" \t{max_abs_error:.3e} ({dtype})"
+        )
         if PRINT:
             print(new_unpermute_input.grad)
             print(unpermute_input.grad)
@@ -227,21 +233,26 @@ def permute_topK_test(
         original_inputs = new_probs.grad.float().cpu().detach().numpy().flatten()
         original_output = probs.grad.float().cpu().detach().numpy().flatten()
         max_abs_error = abs(original_inputs - original_output).max()
-        print(f"unpermute_topK bwd prob_grad max error (mine vs pytorch): \t{max_abs_error:.3e} ({dtype})")
+        print(
+            "unpermute_topK bwd prob_grad max error (mine vs pytorch):"
+            f" \t{max_abs_error:.3e} ({dtype})"
+        )
         if PRINT:
             print(new_probs.grad)
             print(probs.grad)
 
     if not permute_input.numel():
-      print("Empty permute_input activation test passed.")
-      return
+        print("Empty permute_input activation test passed.")
+        return
 
     ###################################################################################################################################
     #
     # Benchmark
     #
     ###################################################################################################################################
-    def backward_wrapper(act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False):
+    def backward_wrapper(
+        act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False
+    ):
         # Set forward_input.grad to None to avoid grad accumulation.
         if accumulate_grad == False:
             for i in forward_input:
@@ -256,25 +267,53 @@ def permute_topK_test(
         print(f"new     fwd: {t:.3f} ms")
 
         t = perf_test_cuda_kernel(
-            lambda: backward_wrapper(permute_output, permute_bwd_input, forward_input=[permute_input], retain_graph=True, accumulate_grad=False))
+            lambda: backward_wrapper(
+                permute_output,
+                permute_bwd_input,
+                forward_input=[permute_input],
+                retain_graph=True,
+                accumulate_grad=False,
+            )
+        )
         print(f"pytorch bwd: {t:.3f} ms")
         t = perf_test_cuda_kernel(
-            lambda: backward_wrapper(new_permute_output, new_permute_bwd_input, forward_input=[new_permute_input], retain_graph=True, accumulate_grad=False))
+            lambda: backward_wrapper(
+                new_permute_output,
+                new_permute_bwd_input,
+                forward_input=[new_permute_input],
+                retain_graph=True,
+                accumulate_grad=False,
+            )
+        )
         print(f"new     bwd: {t:.3f} ms")
 
         print(f"----unpermute topK----")
-        t = perf_test_cuda_kernel(
-            lambda: unpermute(unpermute_input, sorted_indices, probs=probs))
+        t = perf_test_cuda_kernel(lambda: unpermute(unpermute_input, sorted_indices, probs=probs))
         print(f"pytorch fwd: {t:.3f} ms")
         t = perf_test_cuda_kernel(
-            lambda: unpermute_topK(new_unpermute_input, row_id_map, new_probs))
+            lambda: unpermute_topK(new_unpermute_input, row_id_map, new_probs)
+        )
         print(f"new     fwd: {t:.3f} ms")
 
         t = perf_test_cuda_kernel(
-            lambda: backward_wrapper(unpermute_output, unpermute_bwd_input, forward_input=[unpermute_input, probs], retain_graph=True, accumulate_grad=False))
+            lambda: backward_wrapper(
+                unpermute_output,
+                unpermute_bwd_input,
+                forward_input=[unpermute_input, probs],
+                retain_graph=True,
+                accumulate_grad=False,
+            )
+        )
         print(f"pytorch bwd: {t:.3f} ms")
         t = perf_test_cuda_kernel(
-            lambda: backward_wrapper(new_unpermute_output, new_unpermute_bwd_input, forward_input=[new_unpermute_input, new_probs], retain_graph=True, accumulate_grad=False))
+            lambda: backward_wrapper(
+                new_unpermute_output,
+                new_unpermute_bwd_input,
+                forward_input=[new_unpermute_input, new_probs],
+                retain_graph=True,
+                accumulate_grad=False,
+            )
+        )
         print(f"new     bwd: {t:.3f} ms")
 
 
@@ -300,6 +339,7 @@ def perf_test_cuda_kernel(cuda_kernel_fn):
     else:
         print("CUDA is not available.")
 
+
 def test_permute_topK():
 
     torch.manual_seed(1)
@@ -316,25 +356,25 @@ def test_permute_topK():
     print("GPU:", torch.cuda.get_device_name(0))
 
     dtype = torch.float32
-    permute_topK_test(dtype, num_token, num_expert,
-                      hidden_size, num_topK, num_out_tokens,
-                      False, Benchmark)
+    permute_topK_test(
+        dtype, num_token, num_expert, hidden_size, num_topK, num_out_tokens, False, Benchmark
+    )
     dtype = torch.float16
-    permute_topK_test(dtype, num_token, num_expert,
-                      hidden_size, num_topK, num_out_tokens,
-                      False, Benchmark)
+    permute_topK_test(
+        dtype, num_token, num_expert, hidden_size, num_topK, num_out_tokens, False, Benchmark
+    )
     dtype = torch.bfloat16
-    permute_topK_test(dtype, num_token, num_expert,
-                      hidden_size, num_topK, num_out_tokens,
-                      False, Benchmark)
+    permute_topK_test(
+        dtype, num_token, num_expert, hidden_size, num_topK, num_out_tokens, False, Benchmark
+    )
     dtype = torch.float8_e5m2
-    permute_topK_test(dtype, num_token, num_expert,
-                      hidden_size, num_topK, num_out_tokens,
-                      False, Benchmark)
+    permute_topK_test(
+        dtype, num_token, num_expert, hidden_size, num_topK, num_out_tokens, False, Benchmark
+    )
     dtype = torch.float8_e4m3fn
-    permute_topK_test(dtype, num_token, num_expert,
-                      hidden_size, num_topK, num_out_tokens,
-                      False, Benchmark)
+    permute_topK_test(
+        dtype, num_token, num_expert, hidden_size, num_topK, num_out_tokens, False, Benchmark
+    )
     dtype = torch.bfloat16
     permute_topK_test(dtype, num_token, 4, hidden_size, 1, None, False, Benchmark)
     permute_topK_test(dtype, num_token, 5, hidden_size, 2, None, False, Benchmark)
@@ -343,6 +383,7 @@ def test_permute_topK():
     permute_topK_test(dtype, num_token, 8, hidden_size, 5, None, False, Benchmark)
     num_token = 0
     permute_topK_test(dtype, num_token, 8, hidden_size, 5, None, False, Benchmark)
+
 
 if __name__ == "__main__":
     test_permute_topK()
