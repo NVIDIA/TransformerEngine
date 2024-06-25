@@ -13,8 +13,6 @@ from transformer_engine.paddle.layer import LayerNormMLP, LayerNorm, MultiHeadAt
 from transformer_engine.paddle.constants import AttnMaskTypes, LayerTypes, dist_group_type
 from transformer_engine.paddle.distributed import get_tp_group_and_world_size, track_rng_state
 
-from ..fp8 import get_global_fp8_state
-
 
 class TransformerLayer(paddle.nn.Layer):
     r"""
@@ -141,7 +139,6 @@ class TransformerLayer(paddle.nn.Layer):
         attention_dropout_rng_state_name: str = "local_seed",
         hidden_dropout_rng_state_name: str = "global_seed",
         backend: str = "transformer_engine",
-        use_cudagraph: bool = True,
     ) -> None:
         super().__init__()
 
@@ -157,9 +154,6 @@ class TransformerLayer(paddle.nn.Layer):
         self.tensor_parallel = self.tp_size > 1
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
-        self.use_cudagraph = use_cudagraph
-        if use_cudagraph:
-            get_global_fp8_state().enable_cudagraph()
         # SP needs local seed for hidden dropout
         if self.sequence_parallel and self.hidden_dropout_rng_state_name == "global_seed":
             warnings.warn(

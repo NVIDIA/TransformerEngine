@@ -125,7 +125,7 @@ class FP8State:
         self._fp8_fwd_buffer.enable_cudagraph()
         self._fp8_bwd_buffer.enable_cudagraph()
         if self._fp8_recompute_enabled:
-            assert False, "Currently, We do not allow recompute with cudagraph"
+            raise RuntimeError("Currently, We do not allow recompute with cudagraph")
 
     def enter(
         self,
@@ -246,7 +246,7 @@ def amax_and_scale_update(
     fp8_meta: Dict[str, Any],
     fwd_update: bool,
     update_weight_scale_inv: bool = True,
-    current_step_id_tensor: Optional[Any] = None,
+    current_step_id_tensor: Optional[paddle.Tensor] = None,
     use_cudagraph: bool = False,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""

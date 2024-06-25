@@ -8,8 +8,8 @@
 #include <map>
 #include <vector>
 
-#include "../common.h"
 #include "common.h"
+#include "common/common.h"
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
 
 namespace transformer_engine {
@@ -583,7 +583,8 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
 }
 
 __global__ void set_rng_state(
-    unsigned int identifier,  // This is used to relate kernel to cudaGraph nodes
+    [[maybe_unused]] unsigned int
+        identifier,  // This is used to relate kernel to cudaGraph nodes please refer to https://github.com/PaddlePaddle/Paddle/pull/60516
     std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
   rng_state_ptr[0] = static_cast<int64_t>(seed_offset.first);
   rng_state_ptr[1] = static_cast<int64_t>(seed_offset.second);
@@ -1306,7 +1307,8 @@ void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads
 }
 
 __global__ void UpdateFP8MetaKernel(
-    unsigned int identifier,  // This is used to relate kernel to cudaGraph nodes
+    [[maybe_unused]] unsigned int
+        identifier,  // This is used to relate kernel to cudaGraph nodes please refer to https://github.com/PaddlePaddle/Paddle/pull/60516
     const float *amax, const float *rolled_amax_history, const bool *non_weight_mask,
     float *amax_history, float *scale, float *scale_inv, bool update_weight_scale_inv, float margin,
     float fp8_max, size_t history_numel, size_t amax_numel) {
@@ -1367,7 +1369,7 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
   auto amax_numel = amax.numel();
   size_t num_blocks = (amax_history_numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-  auto parameterSetter = [current_step_id_tensor](phi::backends::gpu::CUDAKernelParams &params) {
+  auto parameterSetter = [&current_step_id_tensor](phi::backends::gpu::CUDAKernelParams &params) {
     if (!current_step_id_tensor.initialized()) return;
     int current_step_id = (*current_step_id_tensor.data<int>());
     params.As<bool>(7) = (current_step_id == 0);
