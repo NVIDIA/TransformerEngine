@@ -42,12 +42,24 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+    # FindPythonInterp and FindPythonLibs are deprecated in newer CMake versions,
+    # but PyBind11 still tries to use them unless we set PYBIND11_FINDPYTHON=ON.
+    cmake_flags = ["-DPYBIND11_FINDPYTHON=ON"]
+
+    # Optionally switch userbuffers bootstrapping to the old MPI method.
+    # NOTE: This requires launching PyTorch distributed runs with
+    #       `mpiexec -np <N> -x MASTER_ADDR=<host addr> -x MASTER_PORT=<host port> -x PATH ...`
+    #       instead of `torchrun --nproc-per-node=<N> ...`
+    if int(os.getenv("UB_MPI_BOOTSTRAP", "0")):
+        assert os.getenv("MPI_HOME"), "MPI_HOME must be set if UB_MPI_BOOTSTRAP=1"
+        cmake_flags += ["-DUB_MPI_BOOTSTRAP=ON"]
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=[],
+        cmake_flags=cmake_flags,
     )
 
 

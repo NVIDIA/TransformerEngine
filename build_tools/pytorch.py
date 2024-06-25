@@ -28,9 +28,6 @@ def setup_pytorch_extension(
     sources = [
         csrc_source_files / "common.cu",
         csrc_source_files / "ts_fp8_op.cpp",
-        csrc_source_files / "userbuffers" / "ipcsocket.cc",
-        csrc_source_files / "userbuffers" / "userbuffers.cu",
-        csrc_source_files / "userbuffers" / "userbuffers-host.cpp",
     ] + all_files_in_dir(extensions_dir)
 
     # Header files
@@ -74,10 +71,9 @@ def setup_pytorch_extension(
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-    # Libraries -- PyTorch CUDAExtension links to libcudart.so but not to libcuda.so
-    cuda_home, _ = cuda_path()
-    library_dirs = [cuda_home / "compat" / "lib"]
-    libraries = ["cuda"]
+    # Libraries
+    library_dirs = []
+    libraries = []
     if os.getenv("UB_MPI_BOOTSTRAP"):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -90,8 +86,6 @@ def setup_pytorch_extension(
         libraries.append("mpi")
 
     # Construct PyTorch CUDA extension
-    sources = [str(path) for path in sources]
-    include_dirs = [str(path) for path in include_dirs]
     from torch.utils.cpp_extension import CUDAExtension
 
     return CUDAExtension(

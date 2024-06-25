@@ -71,6 +71,17 @@ def train(opts):
         world_size=WORLD_SIZE,
         device_id=torch.device(f"cuda:{WORLD_RANK}"),
     )
+    torch.manual_seed(opts.seed + WORLD_RANK)
+    torch.cuda.manual_seed(opts.seed + WORLD_RANK)
+
+    # Initialize torch.distributed global process group and get TP group
+    dist.init_process_group(
+        backend="nccl",
+        rank=WORLD_RANK,
+        world_size=WORLD_SIZE,
+        device_id=torch.device(f"cuda:{WORLD_RANK}"),
+    )
+
     tp_group = dist.new_group(backend="nccl")
     tp_size = dist.get_world_size(tp_group)
 

@@ -19,6 +19,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cudnn.h>
+#include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
@@ -49,8 +50,7 @@ namespace transformer_engine {
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
-class FP8TensorMeta {
- public:
+struct FP8TensorMeta : torch::CustomClassHolder {
   at::Tensor scale;
   at::Tensor scale_inv;
   at::Tensor amax_history;

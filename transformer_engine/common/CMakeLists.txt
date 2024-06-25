@@ -32,11 +32,12 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+include_directories(${PROJECT_SOURCE_DIR}/../)
 
-include_directories(${PROJECT_SOURCE_DIR}/..)
+#######################################################################################
+# Core Transformer Engines Library
+#######################################################################################
 
-# Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      transformer_engine.cpp
@@ -69,22 +70,38 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
-     recipe/delayed_scaling.cu)
+     recipe/delayed_scaling.cu
+     userbuffers/ipcsocket.cc
+     userbuffers/userbuffers.cu
+     userbuffers/userbuffers-host.cpp)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-target_include_directories(transformer_engine PUBLIC
-                           "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(transformer_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-# Configure dependencies
-target_link_libraries(transformer_engine PUBLIC
-                      CUDA::cublas
-                      CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvrtc
-                      CUDA::nvToolsExt
-                      CUDNN::cudnn)
+# Start configuring dependencies
+find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+set(transformer_engine_LIBS)
+list(APPEND transformer_engine_LIBS
+     CUDA::cublas
+     CUDA::cuda_driver
+     CUDA::cudart
+     CUDA::nvrtc
+     CUDA::nvToolsExt
+     CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+                           ${CUDNN_FRONTEND_INCLUDE_DIR})
+
+# Check for MPI (optional)
+option(UB_MPI_BOOTSTRAP "Bootstrap userbuffers with MPI." OFF)
+message(STATUS "Userbuffers MPI bootstrap: ${UB_MPI_BOOTSTRAP}")
+if (UB_MPI_BOOTSTRAP)
+     find_package(MPI REQUIRED COMPONENTS CXX)
+     list(APPEND transformer_engine_LIBS MPI::MPI_CXX)
+     target_compile_definitions(transformer_engine PRIVATE UB_MPI_BOOTSTRAP)
+endif()
+
+# Link configured dependencies
+target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LIBS})
 
 # Make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
@@ -117,6 +134,20 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
+set(USERBUFFERS_CUDA_SUPPRESS
+    -Xcudafe --diag_suppress=177     # variable declared but never referenced
+    -Xcudafe --diag_suppress=550     # variable set but never used
+    -Xcudafe --diag_suppress=949     # nonstandard default argument on declaration
+    -Xcudafe --diag_suppress=1143)   # arithmetic on pointer to void or function type
+set(USERBUFFERS_CXX_SUPPRESS
+    -Wno-pointer-arith
+    -Wno-return-local-addr)
+set_source_files_properties(userbuffers/userbuffers.cu
+                            PROPERTIES
+                            COMPILE_OPTIONS "${USERBUFFERS_CUDA_SUPPRESS}")
+set_source_files_properties(userbuffers/userbuffers-host.cpp
+                            PROPERTIES
+                            COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -125,5 +156,19 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
-# Install library
+# Install core library
 install(TARGETS transformer_engine DESTINATION .)
+
+#######################################################################################
+# PyBind11 Extensions
+#######################################################################################
+find_package(pybind11 CONFIG REQUIRED)
+pybind11_add_module(transformer_engine_common pybind.cpp)
+target_include_directories(transformer_engine_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(transformer_engine_common PUBLIC transformer_engine)
+
+# Install
+set_source_files_properties(pybind.cpp
+                            PROPERTIES
+                            COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
+install(TARGETS transformer_engine_common DESTINATION .)

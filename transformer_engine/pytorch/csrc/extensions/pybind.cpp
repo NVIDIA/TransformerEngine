@@ -5,11 +5,26 @@
  ************************************************************************/
 
 #include <pybind11/functional.h>
+#include <torch/custom_class.h>
+#include <torch/extension.h>
+#include <torch/script.h>
+#include <torch/torch.h>
 
 #include "../comm_gemm_overlap.h"
+#include "../common.h"
 #include "../extensions.h"
+#include "common/userbuffers/comm_gemm_overlap.h"
+#include "common/util/pybind_helper.h"
+
+namespace te = transformer_engine;
+namespace te_cgo = te::comm_gemm_overlap;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // Load nvte = py::module_::import("transformer_engine_common") into TE/PyTorch. This makes
+  // essential NVTE enums available through `import transformer_engine_torch` without requiring an
+  // additional `import transformer_engine_common`.
+  NVTE_ADD_COMMON_PYBIND11_BINDINGS(m)
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
@@ -199,139 +214,83 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Data structures
-  py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
+  py::class_<te::FP8TensorMeta>(m, "FP8TensorMeta", py::module_local())
       .def(py::init<>())
-      .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
-      .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
-      .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+      .def_readwrite("scale", &te::FP8TensorMeta::scale)
+      .def_readwrite("scale_inv", &te::FP8TensorMeta::scale_inv)
+      .def_readwrite("amax_history", &te::FP8TensorMeta::amax_history);
 
-  // Communication functions to initialize Userbuffers communicators
-  // Note: Callbacks are not called, so safe to release GIL.
-  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
+  py::enum_<te::FP8FwdTensors>(m, "FP8FwdTensors", py::module_local())
+      .value("GEMM1_INPUT", te::FP8FwdTensors::GEMM1_INPUT)
+      .value("GEMM1_WEIGHT", te::FP8FwdTensors::GEMM1_WEIGHT)
+      .value("GEMM1_OUTPUT", te::FP8FwdTensors::GEMM1_OUTPUT)
+      .value("GEMM2_INPUT", te::FP8FwdTensors::GEMM2_INPUT)
+      .value("GEMM2_WEIGHT", te::FP8FwdTensors::GEMM2_WEIGHT)
+      .value("GEMM2_OUTPUT", te::FP8FwdTensors::GEMM2_OUTPUT)
+      .value("GEMM3_INPUT", te::FP8FwdTensors::GEMM3_INPUT)
+      .value("GEMM3_WEIGHT", te::FP8FwdTensors::GEMM3_WEIGHT)
+      .value("GEMM3_OUTPUT", te::FP8FwdTensors::GEMM3_OUTPUT);
+
+  py::enum_<te::FP8BwdTensors>(m, "FP8BwdTensors", py::module_local())
+      .value("GRAD_OUTPUT1", te::FP8BwdTensors::GRAD_OUTPUT1)
+      .value("GRAD_INPUT1", te::FP8BwdTensors::GRAD_INPUT1)
+      .value("GRAD_OUTPUT2", te::FP8BwdTensors::GRAD_OUTPUT2)
+      .value("GRAD_INPUT2", te::FP8BwdTensors::GRAD_INPUT2)
+      .value("GRAD_OUTPUT3", te::FP8BwdTensors::GRAD_OUTPUT3)
+      .value("GRAD_INPUT3", te::FP8BwdTensors::GRAD_INPUT3);
+
+  // Comm+GEMM Overlap
+  m.def("set_bootstrap_callbacks", &te_cgo::set_bootstrap_callbacks,
         py::call_guard<py::gil_scoped_release>());
 
-  py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
-      .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
-      .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
-      .value("SPLIT_PIPELINED_RS", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS)
-      .value("SPLIT_PIPELINED_RS_P2P", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS_P2P)
-      .value("SPLIT_PIPELINED_AG_P2P", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG_P2P)
-      .value("ATOMIC_GEMM_RS", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS)
-      .value("ATOMIC_GEMM_AG_P2P", ubuf::UBOverlapAlgo::ATOMIC_GEMM_AG_P2P)
-      .value("ATOMIC_GEMM_RS_P2P", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS_P2P);
-
-  // Note: Can't release GIL in constructor since it may bootstrap
-  // communicator with Python functions (e.g. PyTorch distributed
-  // communication)
-  py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool,
-                    torch::Tensor>())
-      .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
+  py::class_<te_cgo::UbufCommOverlap>(m, "UbufCommOverlap", py::module_local())
+      .def(py::init</* sample_tensor */ torch::Tensor &, /* world_rank */ int, /* world_size */ int,
+                    /* tp_rank */ int, /* tp_size */ int, /* num_splits */ int,
+                    /* num_max_streams */ int, /* cga_size */ int, /* num_comm_sm */ int,
+                    /* set_sm_margin */ bool, /* use_ce */ bool, /* atomic_gemm */ bool>())
+      .def("bulk_overlap", &te_cgo::UbufCommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs,
+      .def("split_overlap_rs", &te_cgo::UbufCommOverlap::split_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv,
+      .def("atomic_gemm_overlap_rs", &te_cgo::UbufCommOverlap::atomic_gemm_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs,
+      .def("copy_input_to_ubuf", &te_cgo::UbufCommOverlap::copy_input_to_ubuf,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf,
+      .def("get_ubuf_output", &te_cgo::UbufCommOverlap::get_ubuf_output,
            py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf,
+      .def("set_ubuf_scale_inv", &te_cgo::UbufCommOverlap::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output,
+      .def("is_fp8_ubuf", &te_cgo::UbufCommOverlap::is_fp8_ubuf,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &ubuf::UbufCommOverlap::is_atomic_gemm,
+      .def("is_atomic_gemm", &te_cgo::UbufCommOverlap::is_atomic_gemm,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &ubuf::UbufCommOverlap::is_p2p_overlap,
+      .def("is_p2p_overlap", &te_cgo::UbufCommOverlap::is_p2p_overlap,
            py::call_guard<py::gil_scoped_release>());
 
-  // Note: Can't release GIL in constructor since it may bootstrap
-  // communicator with Python functions (e.g. PyTorch distributed
-  // communication)
-  py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
-                    torch::Tensor>())
-      .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
+  py::class_<te_cgo::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap", py::module_local())
+      .def(py::init</* sample_tensor */ torch::Tensor &, /* world_rank */ int, /* world_size */ int,
+                    /* tp_rank */ int, /* tp_size */ int, /* num_max_streams */ int,
+                    /* cga_size */ int, /* num_comm_sm */ int, /* set_sm_margin */ bool,
+                    /* use_ce */ bool, /* atomic_gemm */ bool, /* aggregate */ bool,
+                    /* is_reduce_scatter */ bool>())
+      .def("split_overlap_ag_p2p", &te_cgo::UbufP2PCommOverlap::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs,
+      .def("split_overlap_rs_p2p", &te_cgo::UbufP2PCommOverlap::split_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag,
+      .def("atomic_gemm_overlap_ag_p2p", &te_cgo::UbufP2PCommOverlap::atomic_gemm_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_rs,
+      .def("atomic_gemm_overlap_rs_p2p", &te_cgo::UbufP2PCommOverlap::atomic_gemm_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf,
+      .def("copy_input_to_ubuf", &te_cgo::UbufP2PCommOverlap::copy_input_to_ubuf,
            py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output,
+      .def("get_ubuf_output", &te_cgo::UbufP2PCommOverlap::get_ubuf_output,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &ubuf::UbufP2PCommOverlap::is_fp8_ubuf,
+      .def("set_ubuf_scale_inv", &te_cgo::UbufP2PCommOverlap::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &ubuf::UbufP2PCommOverlap::is_atomic_gemm,
+      .def("is_fp8_ubuf", &te_cgo::UbufP2PCommOverlap::is_fp8_ubuf,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &ubuf::UbufP2PCommOverlap::is_p2p_overlap,
+      .def("is_atomic_gemm", &te_cgo::UbufP2PCommOverlap::is_atomic_gemm,
            py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv,
+      .def("is_p2p_overlap", &te_cgo::UbufP2PCommOverlap::is_p2p_overlap,
            py::call_guard<py::gil_scoped_release>());
-
-  py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
-      .value("kByte", transformer_engine::DType::kByte)
-      .value("kInt32", transformer_engine::DType::kInt32)
-      .value("kFloat32", transformer_engine::DType::kFloat32)
-      .value("kFloat16", transformer_engine::DType::kFloat16)
-      .value("kBFloat16", transformer_engine::DType::kBFloat16)
-      .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)
-      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);
-
-  py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
-      .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
-      .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
-      .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
-      .value("GEMM2_INPUT", transformer_engine::FP8FwdTensors::GEMM2_INPUT)
-      .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT)
-      .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT)
-      .value("GEMM3_INPUT", transformer_engine::FP8FwdTensors::GEMM3_INPUT)
-      .value("GEMM3_WEIGHT", transformer_engine::FP8FwdTensors::GEMM3_WEIGHT)
-      .value("GEMM3_OUTPUT", transformer_engine::FP8FwdTensors::GEMM3_OUTPUT);
-
-  py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
-      .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
-      .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
-      .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
-      .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2)
-      .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
-      .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
-
-  py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
-      .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
-      .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
-      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
-
-  py::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")
-      .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
-      .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
-
-  py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
-      .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
-      .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
-      .value("NVTE_SBHD_SB2HD", NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
-      .value("NVTE_SBHD_SBH2D", NVTE_QKV_Layout::NVTE_SBHD_SBH2D)
-      .value("NVTE_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
-      .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
-      .value("NVTE_BSH3D", NVTE_QKV_Layout::NVTE_BSH3D)
-      .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
-      .value("NVTE_BSHD_BSH2D", NVTE_QKV_Layout::NVTE_BSHD_BSH2D)
-      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
-      .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
-      .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)
-      .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
-
-  py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
-      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
-      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
-}
+}  // PYBIND11_MODULE

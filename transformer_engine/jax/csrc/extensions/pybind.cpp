@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "common/util/pybind_helper.h"
 #include "jax/csrc/extensions.h"
 
 namespace transformer_engine {
@@ -48,6 +49,11 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
+  // Load nvte = py::module_::import("transformer_engine_common") into TE/JAX. This makes
+  // essential NVTE enums available through `import transformer_engine_jax` without requiring an
+  // additional `import transformer_engine_common`.
+  NVTE_ADD_COMMON_PYBIND11_BINDINGS(m);
+
   m.def("registrations", &Registrations);
   m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
         pybind11::arg(), pybind11::arg("act_num") = 0);

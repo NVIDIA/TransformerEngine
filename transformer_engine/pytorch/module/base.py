@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_torch as tex
+
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
@@ -43,7 +44,6 @@ _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
 _ub_communicators = None
-_NUM_MAX_UB_STREAMS = 3
 layers_atomic_ring_exchange = []
 
 
@@ -82,7 +82,7 @@ def initialize_ub(
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    _cublas_workspace = get_workspace().repeat(tex.NVTE_COMM_OVERLAP_MAX_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -117,14 +117,14 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
-        is_reduce_scatter: int,
-        num_sm: int = 16,
+        num_splits: int = 4,
         cga_size: int = 2,
-        set_sm_margin: int = 0,
-        num_splits: int = 0,
-        aggregate: int = 0,
-        atomic_gemm: int = 0,
+        num_comm_sm: int = 16,
+        set_sm_margin: bool = False,
         use_ce: bool = True,
+        atomic_gemm: bool = False,
+        aggregate: bool = False,
+        is_reduce_scatter: bool = False,
         fp8_buf: bool = False,
     ) -> None:
         if atomic_gemm:
@@ -171,15 +171,14 @@ def initialize_ub(
                 world_size,  # World size
                 tp_id,  # TP id
                 tp_size,  # TP size
-                num_sm,  # Number of communication SMs
+                tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
                 cga_size,  # CGA cluster size
+                num_comm_sm,  # Number of communication SMs
                 set_sm_margin,  # Set SM margin
-                aggregate,  # Aggregate 2X GEMM chunks
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # overlap with reduce scatter
-                atomic_gemm,  # use a single GEMM with atomic-counters
-                use_ce,  # use copy engine for P2P communications
-                torch.Tensor(),  # empty tensor to pass to counters
+                use_ce,  # Use copy engine
+                atomic_gemm,  # Use a single GEMM with atomic-counters
+                aggregate,  # Aggregate 2X GEMM chunksis_reduce_scatter,
+                is_reduce_scatter,  # Overlapped collective is reduce-scatter
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -188,22 +187,28 @@ def initialize_ub(
                 world_size,  # World size
                 tp_id,  # TP id
                 tp_size,  # TP size
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
                 num_splits,  # Number of communication splits
+                tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
+                cga_size,  # CGA cluster size
+                num_comm_sm,  # Number of communication SMs
                 set_sm_margin,  # Set SM margin
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
+                use_ce,  # Use copy engine
                 atomic_gemm,  # use a single GEMM with atomic-counters
-                torch.Tensor(),  # empty tensor to pass to counters
             )
         _ub_communicators[name] = ub_obj
 
     def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
         pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
+        use_nccl = torch.distributed.get_backend(pg) == "nccl"
+        global_data = torch.zeros(
+            local_data.numel() * torch.distributed.get_world_size(pg),
+            dtype=local_data.dtype,
+            device="cuda" if use_nccl else "cpu",
+        )
+        torch.distributed.all_gather_into_tensor(
+            global_data, local_data.cuda() if use_nccl else local_data, group=pg
+        )
+        return global_data.cpu() if use_nccl else global_data
 
     def barrier_callback(group: str) -> None:
         pg = None if group == "world" else tp_group
@@ -212,7 +217,7 @@ def initialize_ub(
     def free_callback(data: torch.Tensor) -> None:
         data.data = torch.Tensor()
 
-    tex.set_ubuf_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
+    tex.set_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -226,14 +231,14 @@ def initialize_ub(
         if ub_cfgs is not None and name in ub_cfgs:
             ub_cfg = ub_cfgs[name]
             method = ub_cfg.get("method", get_method(name))
-            num_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
+            num_comm_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
             cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
-            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
+            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else tp_size)
             aggregate = ub_cfg.get("aggregate", 0)
             atomic_gemm = ub_cfg.get("atomic_gemm", 0)
             use_ce = ub_cfg.get("use_ce", True)
             is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
+            set_sm_margin = ub_cfg.get("set_sm_margin", is_reduce_scatter or atomic_gemm)
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
                 ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
@@ -241,14 +246,14 @@ def initialize_ub(
             add_ub(
                 name,
                 method,
-                is_reduce_scatter,
-                num_sm,
-                cga_size,
-                set_sm_margin,
                 num_splits,
-                aggregate,
-                atomic_gemm,
+                cga_size,
+                num_comm_sm,
+                set_sm_margin,
                 use_ce,
+                atomic_gemm,
+                aggregate,
+                is_reduce_scatter,
                 fp8_buf,
             )
         else:
@@ -256,7 +261,7 @@ def initialize_ub(
             add_ub(
                 name,
                 method=method,
-                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
+                is_reduce_scatter=name in layers_reduce_scatter_overlap,
                 num_splits=4 if method == "pipeline" else 0,
                 fp8_buf=name in layers_all_gather_overlap,
             )
@@ -654,7 +659,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
                 else:
                     ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
-                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(1)
+                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(
+                        tex.NVTE_Comm_Overlap_Type.AG
+                    )
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -672,7 +679,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 grad_bias = None
             if ctx.ub_overlap_ag:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
             if not isinstance(grad_output_mat, Float8Tensor):
@@ -692,7 +699,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     grad_output_t = grad_output_c.transpose_2d()
             else:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
                 grad_output_t = None
 
             return grad_output_mat, grad_output_c, grad_output_t, grad_bias
