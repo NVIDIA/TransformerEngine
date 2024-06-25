@@ -441,7 +441,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     // Ranks that withing the same tensor group will keep the handle and other will discard it.
     for (int i = 0; i < numlocal; i+=tensorgpus) {
       // tmp is through away handle
-      MPICHECK(MPI_Bcast(((*comm)->ar2_firstgpu == i * tensorgpus) ? (void *)exphndl : (void *)tmp,
+      MPICHECK(MPI_Bcast(((*comm)->ar2_firstgpu == i) ? (void *)exphndl : (void *)tmp,
                          sizeof(CUmemFabricHandle), MPI_BYTE, i, (*comm)->comm_intra));
     }
     // Non root ranks will import the fabric handle.
