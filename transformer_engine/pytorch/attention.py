@@ -4976,8 +4976,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "changed its behavior for causal mask in cross attention. See "
                     "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
                 )
-                #use_flash_attention = False
-                #if "causal_bottom_right" in attn_mask_type and get_cudnn_version() < (9,3,0):
+                # use_flash_attention = False
+                # if "causal_bottom_right" in attn_mask_type and get_cudnn_version() < (9,3,0):
                 #    self.logger.warning(
                 #        "Disabling FusedAttention as bottom-right causal mask requires cuDNN 9.3+"
                 #    )
@@ -4990,7 +4990,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Filter: sliding window attention.
             if window_size not in ((-1, -1), (-1, 0)):
                 if use_fused_attention and (window_size[0] < 0 or window_size[1] != 0):
-                    self.logger.debug("Disabling FusedAttention as it only supports window_size[>=0, 0].")
+                    self.logger.debug(
+                        "Disabling FusedAttention as it only supports window_size[>=0, 0]."
+                    )
                     use_fused_attention = False
                 if (not _flash_attn_2_3_plus) or context_parallel:
                     if use_flash_attention:
