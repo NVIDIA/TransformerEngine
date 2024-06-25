@@ -25,6 +25,7 @@ from transformer_engine.jax.attention import (
     QKVLayout,
     QKVFormat,
     fused_attn,
+    fused_attn_thd,
     get_qkv_format,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
@@ -213,7 +214,7 @@ def customcall_fused_dpa(
     TE customcall dot product attention implementation
     """
     qkv_layout = kwargs["qkv_layout"]
-    common_args = [bias, mask, seqlens_q, seqlens_kv, offsets_q, offsets_kv, dropout_rng]
+    is_thd = get_qkv_format(qkv_layout) == QKVFormat.THD
     match qkv_layout:
         case QKVLayout.BS3HD | QKVLayout.T3HD:
             query, key, value = map(partial(jnp.expand_dims, axis=-3), [query, key, value])
@@ -227,7 +228,12 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(qkv_args, *common_args, **kwargs).astype(query.dtype)
+    if not is_thd:
+        kwargs.pop("max_segments_per_seq")
+        return fused_attn(qkv_args, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
+    return fused_attn_thd(
+        qkv_args, bias, seqlens_q, seqlens_kv, offsets_q, offsets_kv, dropout_rng, **kwargs
+    ).astype(query.dtype)
 
 
 class BiasShape(Enum):
