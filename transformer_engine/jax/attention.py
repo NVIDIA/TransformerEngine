@@ -264,7 +264,7 @@ def fused_attn_thd(
     max_segments_per_seq: int = 1,
 ):
     """
-    Perform THD (packed) cuDNN fused attention.
+    (Experimental) Perform THD (packed) cuDNN fused attention.
 
     This function implements the following formula:
         BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
