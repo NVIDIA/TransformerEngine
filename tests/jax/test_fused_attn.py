@@ -126,8 +126,6 @@ def make_mask(
     masking out the corresponding position and a `False` value means allowing
     that position to participate in attention.
     """
-    # TODO(rewang): check paddings
-    # inv_mask = make_attention_mask(q_token, kv_token, jnp.equal)
     inv_mask = make_attention_mask(
         q_token, kv_token, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
@@ -274,7 +272,7 @@ class FusedAttnRunner:
             AttnMaskType.PADDING_CAUSAL_MASK,
         ]:
             pytest.skip("THD format requires padding masks.")
-        # TODO(rewang): check THD
+
         if self.qkv_layout == QKVLayout.BS3HD or get_qkv_format(self.qkv_layout) == QKVFormat.THD:
             if self.num_heads_q != self.num_heads_kv:
                 pytest.skip("QKVPACKED layout requires num_heads_q and num_heads_kv to be equal.")
@@ -397,7 +395,7 @@ class FusedAttnRunner:
             self.token_q, self.segment_pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
-            # TODO(rewang): check if qkvpacked supported different q/kv
+            # TODO(rewang): Check if qkvpacked supported different q/kv
             # TODO(rewang): Causal with different q/kv segment_id fails
             if self.qkv_layout == QKVLayout.T3HD or is_causal_mask(self.attn_mask_type):
                 self.token_kv = self.token_q
