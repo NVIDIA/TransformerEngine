@@ -836,8 +836,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
             q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
             k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
-            v_seq_offsets = k_seq_offsets
-            o_seq_offsets = q_seq_offsets
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
@@ -910,7 +908,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del attn_bias_type, attn_mask_type, qkv_layout, scaling_factor
+        del attn_bias_type, attn_mask_type, qkv_layout, scaling_factor, max_segments_per_seq
         del dropout_probability, is_training, result_infos
         q_spec = get_padded_spec(arg_infos[0])
         k_spec = get_padded_spec(arg_infos[1])
@@ -1041,10 +1039,9 @@ def fused_attn_fwd(
     """
     seed = _FusedAttnRNGStateChecker().check_seed(seed, dropout_probability, is_training)
 
-    if (q_seq_offsets is None) != (kv_seq_offsets is None):
-        raise ArgumentValidationError(
-            "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
-        )
+    assert (q_seq_offsets is None) == (
+        kv_seq_offsets is None
+    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     # For optional tensors, which custom calls doesn't support None
@@ -1141,10 +1138,9 @@ def fused_attn_bwd(
         - The second value is the gradient with respect to `bias`, or `None` if `bias` is `None`.
     """
 
-    if (q_seq_offsets is None) != (kv_seq_offsets is None):
-        raise ArgumentValidationError(
-            "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
-        )
+    assert (q_seq_offsets is None) == (
+        kv_seq_offsets is None
+    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     # For optional tensors, which custom calls doesn't support None
