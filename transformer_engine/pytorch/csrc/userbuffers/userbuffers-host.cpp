@@ -272,8 +272,7 @@ int create_communicator_grouped2(
     CUCALL("cuMulticastAddDevice", (*comm)->mc_handle, (CUdeviceptr)(*comm)->mydev);
 
     CUdeviceptr mc_va;
-    CUCALL("cuMemAddressReserve", &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
-           (uint64_t)0);
+    CUCALL("cuMemAddressReserve", &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U, (uint64_t)0);
     CUCALL("cuMemMap", mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (uint64_t)0);
 
     CUmemAccessDesc accessDesc = {};
@@ -506,8 +505,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     prop.location.id = comm->mydev;
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
-    CUCALL("cuMemCreate", &(comm->uchandles[hndl][myrank]), aligned_size, &prop,
-           (uint64_t)0);
+    CUCALL("cuMemCreate", &(comm->uchandles[hndl][myrank]), aligned_size, &prop, (uint64_t)0);
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
     CUCALL("cuMemExportToShareableHandle", reinterpret_cast<void *>(&peerfd[myrank]),
