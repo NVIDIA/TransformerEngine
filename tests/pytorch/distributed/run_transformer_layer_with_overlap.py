@@ -481,13 +481,17 @@ def train(opts):
 
 
 if __name__ == "__main__":
-    if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-        args = parse_args()
-        os._exit(train(args))
-    else:
-        subprocess.run(
-            ["torchrun", f"--nproc-per-node={torch.cuda.device_count()}", *sys.argv],
-            env=os.environ,
-            check=True,
-        )
-        os._exit(0)
+    try:
+        if "TORCHELASTIC_RUN_ID" in os.environ.keys():
+            args = parse_args()
+            os._exit(train(args))
+        else:
+            subprocess.run(
+                ["torchrun", f"--nproc-per-node={torch.cuda.device_count()}", *sys.argv],
+                env=os.environ,
+                check=True,
+            )
+            os._exit(0)
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        print(err)
+        os._exit(1)

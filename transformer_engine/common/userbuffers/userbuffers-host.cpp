@@ -73,6 +73,24 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
                              " in function " + __func__ + ": " + x);                \
   } while (false)
 
+#define IPC_SOCKET_CHECK(cmd)                                             \
+  do {                                                                    \
+    ipcSocketResult_t r = cmd;                                            \
+    if (r != ipcSocketSuccess) {                                          \
+      printf("Failed, IPC socket error %s:%d : %s\n", __FILE__, __LINE__, \
+             getIpcSocketErrorString(r));                                 \
+      exit(EXIT_FAILURE);                                                 \
+    }                                                                     \
+  } while (0)
+
+#define IPC_SOCKET_CHECK_GOTO(call, RES, label)                  \
+  do {                                                           \
+    RES = call;                                                  \
+    if (RES != ipcSocketSuccess && RES != ipcSocketInProgress) { \
+      goto label;                                                \
+    }                                                            \
+  } while (0);
+
 int pipe_rank(communicator *comm, int step) {
   int mynode = comm->myrank / comm->nvsize;
   int mylocal = comm->nvrank;

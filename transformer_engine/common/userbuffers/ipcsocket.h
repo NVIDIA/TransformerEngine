@@ -31,27 +31,7 @@ typedef enum {
   ipcSocketNumResults = 8
 } ipcSocketResult_t;
 
-static const char *ipcSocketResultStrings[static_cast<int>(ipcSocketNumResults)] = {
-    "Success",       "Unhandled CUDA error", "Internal error",       "Invalid argument",
-    "Invalid usage", "Remote error",         "Operation in progress"};
-
-#define IPC_SOCKET_CHECK(cmd)                                             \
-  do {                                                                    \
-    ipcSocketResult_t r = cmd;                                            \
-    if (r != ipcSocketSuccess) {                                          \
-      printf("Failed, IPC socket error %s:%d : %s\n", __FILE__, __LINE__, \
-             ipcSocketResultStrings[static_cast<int>(r)]);                \
-      exit(EXIT_FAILURE);                                                 \
-    }                                                                     \
-  } while (0)
-
-#define IPC_SOCKET_CHECK_GOTO(call, RES, label)                  \
-  do {                                                           \
-    RES = call;                                                  \
-    if (RES != ipcSocketSuccess && RES != ipcSocketInProgress) { \
-      goto label;                                                \
-    }                                                            \
-  } while (0);
+const char *getIpcSocketErrorString(ipcSocketResult_t res);
 
 #define IPC_SOCKNAME_LEN 64
 

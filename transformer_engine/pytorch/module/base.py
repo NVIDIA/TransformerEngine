@@ -84,15 +84,6 @@ def initialize_ub(
     global _cublas_workspace
     _cublas_workspace = get_workspace().repeat(tex.NVTE_COMM_OVERLAP_MAX_STREAMS)
 
-    # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
-    layers_all_gather_overlap = [
-        "qkv_fprop",
-        "qkv_dgrad",
-        "proj_dgrad",
-        "fc1_fprop",
-        "fc1_dgrad",
-        "fc2_dgrad",
-    ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
@@ -114,12 +105,28 @@ def initialize_ub(
                 return method
         raise KeyError(f"Given layer name {name} does not exist.")
 
+    def get_default_config(name):
+        method = get_method(name)
+        default_cfg = {
+            'method': method,
+            'num_splits': tp_size if method == "ring_exchange" else 4,
+            'cga_size': 1 if method == "ring_exchange" else 2,
+            'num_sm': 1 if method == "ring_exchange" else 16,
+            'set_sm_margin': name in layers_reduce_scatter_overlap,
+            'use_ce': method == "ring_exchange",
+            'atomic_gemm': False,
+            'aggregate': False,
+            'is_reduce_scatter': name in layers_reduce_scatter_overlap,
+            'fp8_buf': "wgrad" not in name,
+        }
+        return default_cfg
+
     def add_ub(
         name: str,
         method: str,
         num_splits: int = 4,
         cga_size: int = 2,
-        num_comm_sm: int = 16,
+        num_sm: int = 16,
         set_sm_margin: bool = False,
         use_ce: bool = True,
         atomic_gemm: bool = False,
@@ -173,7 +180,7 @@ def initialize_ub(
                 tp_size,  # TP size
                 tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
                 cga_size,  # CGA cluster size
-                num_comm_sm,  # Number of communication SMs
+                num_sm,  # Number of communication SMs
                 set_sm_margin,  # Set SM margin
                 use_ce,  # Use copy engine
                 atomic_gemm,  # Use a single GEMM with atomic-counters
@@ -190,7 +197,7 @@ def initialize_ub(
                 num_splits,  # Number of communication splits
                 tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
                 cga_size,  # CGA cluster size
-                num_comm_sm,  # Number of communication SMs
+                num_sm,  # Number of communication SMs
                 set_sm_margin,  # Set SM margin
                 use_ce,  # Use copy engine
                 atomic_gemm,  # use a single GEMM with atomic-counters
@@ -223,48 +230,16 @@ def initialize_ub(
         for name in dgrad_reduce_scatter_overlap:
             if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
                 wgrad_name = name.replace("dgrad", "wgrad")
-                assert wgrad_name not in ub_cfgs
+                assert wgrad_name not in ub_cfgs, \
+                    f"Cannot overlap reduce-scatter for both {name} and {wgrad_name}."
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_reduce_scatter_overlap.append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+        ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
-            ub_cfg = ub_cfgs[name]
-            method = ub_cfg.get("method", get_method(name))
-            num_comm_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
-            cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else tp_size)
-            aggregate = ub_cfg.get("aggregate", 0)
-            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
-            use_ce = ub_cfg.get("use_ce", True)
-            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
-            set_sm_margin = ub_cfg.get("set_sm_margin", is_reduce_scatter or atomic_gemm)
-            # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
-            fp8_buf = (name in layers_all_gather_overlap) or (
-                ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
-            )
-            add_ub(
-                name,
-                method,
-                num_splits,
-                cga_size,
-                num_comm_sm,
-                set_sm_margin,
-                use_ce,
-                atomic_gemm,
-                aggregate,
-                is_reduce_scatter,
-                fp8_buf,
-            )
-        else:
-            method = get_method(name)
-            add_ub(
-                name,
-                method=method,
-                is_reduce_scatter=name in layers_reduce_scatter_overlap,
-                num_splits=4 if method == "pipeline" else 0,
-                fp8_buf=name in layers_all_gather_overlap,
-            )
+            ub_cfg.update(ub_cfgs[name])  # replaces default options with user configuration
+        add_ub(name, **ub_cfg)
 
 
 def get_ub(name: str):

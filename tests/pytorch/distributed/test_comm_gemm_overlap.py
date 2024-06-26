@@ -18,13 +18,22 @@ SEQ_LENGTH: int = 2024
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 64
 HEAD_DIM: int = 128
-HIDDEN_SIZE: int = NUM_HEADS * HEAD_DIM
 
 TEST_PATH = Path(__file__).parent.resolve() / "run_gemm_with_overlap.py"
 TEST_CMD_BASE = [
     "torchrun",
     f"--nproc-per-node={min(torch.cuda.device_count(), 4)}",
     str(TEST_PATH),
+    "-s",
+    str(SEQ_LENGTH),
+    "-b",
+    str(BATCH_SIZE),
+    "-n",
+    str(NUM_HEADS),
+    "-d",
+    str(HEAD_DIM),
+    "--seed",
+    str(RNG_SEED),
     "--check-numerics",
     "--warmup-iters",
     str(0),
@@ -41,7 +50,7 @@ if not tex.comm_overlap_supports_multicast():
 @pytest.mark.parametrize(
     "fp8,p2p,comm_type,aggregate,atomic",
     [
-        # FP8        P2P        Type        Aggregate        Atomic
+        # FP8, P2P, Type, Aggregate, Atomic
         (False, True, "AG", False, False),
         (False, True, "AG", True, False),
         (True, True, "AG", False, False),
@@ -50,7 +59,6 @@ if not tex.comm_overlap_supports_multicast():
         (False, True, "RS", False, False),
         (True, False, "RS", False, False),
         (True, True, "RS", False, False),
-        # (True,      False,     "RS",       False,           True),
         (True, True, "RS", False, True),
     ],
     ids=[
@@ -62,7 +70,6 @@ if not tex.comm_overlap_supports_multicast():
         " SPLIT GEMM + RS | BF16 | RING-EXCHANGE",
         " SPLIT GEMM + RS | FP8  | PIPELINE",
         " SPLIT GEMM + RS | FP8  | RING-EXCHANGE",
-        # "ATOMIC GEMM + RS | FP8  | PIPELINE",
         "ATOMIC GEMM + RS | FP8  | RING-EXCHANGE",
     ],
 )

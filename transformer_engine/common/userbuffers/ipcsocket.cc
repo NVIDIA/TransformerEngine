@@ -16,6 +16,31 @@
 #define IPC_SOCKNAME_STR "/tmp/ipc-socket-%d-%lx"
 
 /*
+ * Get error message associated with an IPC socket error code.
+ */
+const char *getIpcSocketErrorString(ipcSocketResult_t res) {
+  switch (res) {
+    case ipcSocketUnhandledCudaError:
+      return "Unhandled CUDA error";
+    case ipcSocketSystemError:
+      return "System error";
+    case ipcSocketInternalError:
+      return "Internal error";
+    case ipcSocketInvalidArgument:
+      return "Invalid argument";
+    case ipcSocketInvalidUsage:
+      return "Invalid usage";
+    case ipcSocketRemoteError:
+      return "Remote error";
+    case ipcSocketInProgress:
+      return "Operation in progress";
+    case ipcSocketSuccess:
+    default:
+      return "Success";
+  }
+}
+
+/*
  * Create a Unix Domain Socket
  */
 ipcSocketResult_t ipcSocketInit(ipcSocket *handle, int rank, uint64_t hash,
