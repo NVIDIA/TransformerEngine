@@ -2,16 +2,16 @@
 #
 # See LICENSE for license information.
 
-import math
 import functools
-from importlib.metadata import version
+import logging
+import math
 import os
+from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union
 
-from pkg_resources import packaging
 import pytest
 import torch
-import logging
+from pkg_resources import packaging
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
@@ -148,21 +148,21 @@ def _is_fused_attention_supported(
     return False, backends
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_available() -> bool:
     """Check if flash-attn 2.0+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2")
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_1() -> bool:
     """Check if flash-attn 2.1+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2.1")
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_3() -> bool:
     """Check if flash-attn 2.3+ is available"""
     Version = packaging.version.Version
