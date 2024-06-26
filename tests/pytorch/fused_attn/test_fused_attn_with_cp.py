@@ -66,6 +66,8 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 def test_cp_with_fused_attention(dtype, model, qkv_format):
+    if qkv_format == 'thd' and get_device_compute_capability() < (9, 0):
+        pytest.skip("THD format is only supported on sm90+.")
     subprocess.run(
         get_bash_arguments(
             dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FusedAttention"
