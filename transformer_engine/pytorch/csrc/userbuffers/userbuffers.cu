@@ -1720,7 +1720,7 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
   callranks_rs_oop_stride(2)
   callranks_rs_oop_stride(4)
   callranks_rs_oop_stride(8)
-#if MNNVL
+#if UB_WITH_MNNVL
   callranks_rs_oop_stride(16)
   callranks_rs_oop_stride(32)
 #endif
@@ -1749,7 +1749,7 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
   callranks_rs_oop_stride_atomic(2)
   callranks_rs_oop_stride_atomic(4)
   callranks_rs_oop_stride_atomic(8)
-#if MNNVL
+#if UB_WITH_MNNVL
   callranks_rs_oop_stride_atomic(16)
   callranks_rs_oop_stride_atomic(32)
 #endif
@@ -1782,7 +1782,7 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
   callranks_rs_oop_atomic_fp8(2)
   callranks_rs_oop_atomic_fp8(4)
   callranks_rs_oop_atomic_fp8(8)
-#if MNNVL
+#if UB_WITH_MNNVL
   callranks_rs_oop_atomic_fp8(16)
   callranks_rs_oop_atomic_fp8(32)
 #endif
@@ -1834,7 +1834,7 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
   callranks_rs_oop_stride_multiatomic(2)
   callranks_rs_oop_stride_multiatomic(4)
   callranks_rs_oop_stride_multiatomic(8)
-#if MNNVL
+#if UB_WITH_MNNVL
   callranks_rs_oop_stride_multiatomic(16)
   callranks_rs_oop_stride_multiatomic(32)
 #endif
@@ -1861,18 +1861,18 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
     callranks_agMC(2)
     callranks_agMC(4)
     callranks_agMC(8)
-  #if MNNVL
+#if UB_WITH_MNNVL
     callranks_agMC(16)
     callranks_agMC(32)
-  #endif
+#endif
   } else {
     callranks_ag(2)
     callranks_ag(4)
     callranks_ag(8)
-  #if MNNVL
+#if UB_WITH_MNNVL
     callranks_ag(16)
     callranks_ag(32)
-  #endif
+#endif
   }
 }
 
@@ -1912,7 +1912,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
     callranks_rsMC(2)
     callranks_rsMC(4)
     callranks_rsMC(8)
-#if MNNVL
+#if UB_WITH_MNNVL
     callranks_rsMC(16)
     callranks_rsMC(32)
 #endif
@@ -1920,7 +1920,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
     callranks_rs(2)
     callranks_rs(4)
     callranks_rs(8)
-#if MNNVL
+#if UB_WITH_MNNVL
     callranks_rs(16)
     callranks_rs(32)
 #endif
@@ -1950,7 +1950,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
     callranks_rs_oopMC(2)
     callranks_rs_oopMC(4)
     callranks_rs_oopMC(8)
-#if MNNVL
+#if UB_WITH_MNNVL
     callranks_rs_oopMC(16)
     callranks_rs_oopMC(32)
 #endif
@@ -1958,7 +1958,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
     callranks_rs_oop(2)
     callranks_rs_oop(4)
     callranks_rs_oop(8)
-#if MNNVL
+#if UB_WITH_MNNVL
     callranks_rs_oop(16)
     callranks_rs_oop(32)
 #endif
@@ -1993,7 +1993,7 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
   callranks_rs_oop_fp8(2)
   callranks_rs_oop_fp8(4)
   callranks_rs_oop_fp8(8)
-#if MNNVL
+#if UB_WITH_MNNVL
   callranks_rs_oop_fp8(16)
   callranks_rs_oop_fp8(32)
 #endif
@@ -2397,9 +2397,9 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
 
     if (comm->use_ce) {
-      LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+      LAUNCH_CE_CHECK_INC(comm, stream, ce_send_start_ptr);
       CUDACHECK(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-      LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+      LAUNCH_CE_CHECK_INC(comm, stream, ce_send_end_ptr);
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
     int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
@@ -2429,9 +2429,9 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                       + send_offset;
 
   if (comm->use_ce) {
-    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, ce_send_start_ptr);
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, ce_send_end_ptr);
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
@@ -2484,9 +2484,9 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   void *send_dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal])
                       + send_offset;
   if (comm->use_ce) {
-    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_start_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, ce_send_start_ptr);
     CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-    LAUNCH_CE_CHECK_INC(comm, stream, (reinterpret_cast<int *>(ce_send_end_ptr)));
+    LAUNCH_CE_CHECK_INC(comm, stream, ce_send_end_ptr);
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 

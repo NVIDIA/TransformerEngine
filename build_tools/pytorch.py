@@ -74,7 +74,7 @@ def setup_pytorch_extension(
             include_dirs.append(mpi_home / "include")
         cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
         nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
-        if os.getenv("NVTE_WITH_MNNVL"):
+        if int(os.getenv("NVTE_WITH_MNNVL", 0)):
             cxx_flags.append("-DNVTE_WITH_MNNVL")
             nvcc_flags.append("-DNVTE_WITH_MNNVL")
 

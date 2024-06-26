@@ -86,7 +86,7 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                              \
   } while (0)
 
-#if MNNVL
+#if UB_WITH_MNNVL
 static int mnnvl_init(communicator **comm) {
   int gpu_device;
   int flag = 0;
@@ -261,7 +261,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
   int rank = (*comm)->myrank, size = (*comm)->nranks;
 
-#if MNNVL
+#if UB_WITH_MNNVL
   if (mnnvl_init(comm))
     exit(EXIT_FAILURE);
 
@@ -402,7 +402,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     memset(&mcProp, 0, sizeof(CUmulticastObjectProp));
     mcProp.numDevices = (*comm)->ar2_nvsize;
     mcProp.size = mc_maxsize;
-#if MNNVL
+#if UB_WITH_MNNVL
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
 #else
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
@@ -415,7 +415,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
 
-#if MNNVL
+#if UB_WITH_MNNVL
     if ((*comm)->ar2_nvrank == 0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
     }
@@ -587,7 +587,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.location.id = comm->mydev;
-#if MNNVL
+#if UB_WITH_MNNVL
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
 #else
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
@@ -611,7 +611,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         reinterpret_cast<CUmemGenericAllocationHandle *>(malloc(nranks *
                                                          sizeof(CUmemGenericAllocationHandle)));
     CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
-#if MNNVL
+#if UB_WITH_MNNVL
     CUmemFabricHandle *exphndl = reinterpret_cast<CUmemFabricHandle *>
                                   (malloc(nranks * sizeof(CUmemFabricHandle)));
     CUmemFabricHandle myhndl;
@@ -699,7 +699,7 @@ error:
     if (!comm->myrank)
       printf("UB: warning region %d size %ld MB allocated using cudaMalloc"
              " - deprecated(no MC available)\n", hndl, aligned_size / 1024 / 1024);
-#if MNNVL
+#if UB_WITH_MNNVL
     exit(2);
 #endif
     assert(comm->nvsize <= 8);

@@ -16,12 +16,12 @@
 
 #if defined(NVTE_WITH_MNNVL) && CUDA_VERSION >= 12040
 #include "nvml.h"
-#define MNNVL 1
+#define UB_WITH_MNNVL 1
 #else
-#define MNNVL 0
+#define UB_WITH_MNNVL 0
 #endif
 
-#if MNNVL
+#if UB_WITH_MNNVL
 #define NVTE_MAX_REGIONS 32
 #else
 #define NVTE_MAX_REGIONS 16
@@ -33,7 +33,7 @@
 #define NVTE_MAX_REQUESTS 1024
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
-#if MNNVL
+#if UB_WITH_MNNVL
 #define NVTE_MAX_NVLINK 32
 #else
 #define NVTE_MAX_NVLINK 8
@@ -71,7 +71,7 @@
 #define NVTE_MAX_SHARP 16
 
 // Strip the path from a full filename
-#define FILENAME(file) ({ \
+#define UB_FILENAME(file) ({ \
     const char* filename = file; \
     const char* basename = filename; \
     for (const char* ptr = filename; *ptr != '\0'; ptr++) { \
@@ -83,7 +83,7 @@
 })
 
 // Printf to provide enough information so it is easier to attribute failures
-#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__),              \
+#define UB_PRINT(message, ...) printf("[%s:%s:%d] " message "\n", UB_FILENAME(__FILE__),           \
                                                                   __FUNCTION__,                    \
                                                                   __LINE__, __VA_ARGS__)
 
@@ -169,7 +169,7 @@ struct communicator {
   int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
-#if MNNVL
+#if UB_WITH_MNNVL
   nvmlGpuFabricInfoV_t nvml_fabric_info;
 #endif
   int ce_deadlock_check;
