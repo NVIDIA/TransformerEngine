@@ -31,7 +31,8 @@ disable=too-many-locals,
         global-variable-not-assigned,
         redefined-argument-from-local,
         line-too-long,
-        too-many-return-statements
+        too-many-return-statements,
+        too-many-nested-blocks
 
 [TYPECHECK]
 ignored-modules=torch
