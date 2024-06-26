@@ -21,7 +21,12 @@
 #define MNNVL 0
 #endif
 
+#if MNNVL
+#define NVTE_MAX_REGIONS 32
+#else
 #define NVTE_MAX_REGIONS 16
+#endif
+
 #define NVTE_MAX_SMS 32
 #define NVTE_MAX_OPS 32
 #define NVTE_MAX_PEERS 8192
