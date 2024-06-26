@@ -16,6 +16,8 @@
 
 #include <chrono>
 #include <iostream>
+#include <map>
+#include <utility>
 
 #include "ipcsocket.h"
 #include "userbuffers.h"
@@ -44,16 +46,33 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                       \
   } while (0)
 
-#define CUCHECK(cmd)                                                               \
-  do {                                                                             \
-    CUresult retval = cmd;                                                         \
-    if (retval != CUDA_SUCCESS) {                                                  \
-      const char *error_string;                                                    \
-      cuGetErrorString(retval, &error_string);                                     \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string); \
-      exit(EXIT_FAILURE);                                                          \
-    }                                                                              \
-  } while (0);
+// Call-by-symbol tool for CUDA driver API -- this helps avoid linking to libcuda.so at compile
+static std::map<const char*, void *> _cudaDriverEntryPoints;
+
+template<typename... Args>
+cudaError_t cudaCallDriverEntryPoint(const char *symbol, Args... args) {
+  // Try to recover the function pointer from the cache of previously used entry points
+  void *entry_point;
+  auto it = _cudaDriverEntryPoints.find(symbol);
+  if (it == _cudaDriverEntryPoints.end()) {
+    // This is the first time we're trying to use this entry point so we need to get it from
+    // CUDA runtime API first and cache it for re-use later
+    cudaDriverEntryPointQueryResult driverResult;
+    cudaError_t e = cudaGetDriverEntryPoint(symbol, &entry_point, cudaEnableDefault, &driverResult);
+    if (e != cudaSuccess || driverResult != cudaDriverEntryPointSuccess) {
+      printf("Failed: Unsupported CUDA driver function: %s\n", symbol);
+      exit(EXIT_FAILURE);
+    }
+    _cudaDriverEntryPoints.insert(std::make_pair(symbol, entry_point));
+  } else {
+    // Re-use previously cached entry point
+    entry_point = it->second;
+  }
+  CUresult retval = reinterpret_cast<CUresult (*)(Args...)>(entry_point)(args...);
+  return static_cast<cudaError_t>(retval);
+}
+
+#define CUCALL(symbol, ...) CUDACHECK(cudaCallDriverEntryPoint(symbol, __VA_ARGS__))
 
 #define NVTE_UB_ERROR(x)                                                            \
   do {                                                                              \
@@ -96,7 +115,7 @@ int create_communicator_grouped2(
     int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
     std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
     int pipenodes, int tensorgpus, int tensornodes) {
-  *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
+  *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
   (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
@@ -211,7 +230,8 @@ int create_communicator_grouped2(
     mcProp.size = (*comm)->mc_maxsize;
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
-    CUCHECK(cuMulticastGetGranularity(&gran, &mcProp, CU_MULTICAST_GRANULARITY_RECOMMENDED));
+    CUCALL("cuMulticastGetGranularity", &gran, &mcProp,
+           static_cast<CUmemAllocationGranularity_flags>(CU_MULTICAST_GRANULARITY_RECOMMENDED));
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
@@ -230,9 +250,10 @@ int create_communicator_grouped2(
     (*comm)->_barrier((*comm)->comm_world);
 
     if ((*comm)->ar2_nvrank == 0) {
-      CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
-      CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle,
-                                           CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+      CUCALL("cuMulticastCreate", &(*comm)->mc_handle, &mcProp);
+      CUCALL("cuMemExportToShareableHandle", reinterpret_cast<void *>(&fd), (*comm)->mc_handle,
+             static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
+             (unsigned long long)0);
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
@@ -242,23 +263,25 @@ int create_communicator_grouped2(
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
         (*comm)->_barrier((*comm)->comm_intra);
-      CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+      CUCALL("cuMemImportFromShareableHandle", &(*comm)->mc_handle, reinterpret_cast<void *>(fd),
+             static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
   error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
     close(fd);
-    CUCHECK(cuMulticastAddDevice((*comm)->mc_handle, (*comm)->mydev));
+    CUCALL("cuMulticastAddDevice", (*comm)->mc_handle, (CUdeviceptr)(*comm)->mydev);
 
     CUdeviceptr mc_va;
-    CUCHECK(cuMemAddressReserve(&mc_va, mc_maxsize, 0, 0U, 0));
-    CUCHECK(cuMemMap(mc_va, mc_maxsize, 0, (*comm)->mc_handle, 0));
+    CUCALL("cuMemAddressReserve", &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
+           (unsigned long long)0);
+    CUCALL("cuMemMap", mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (unsigned long long)0);
 
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     accessDesc.location.id = (*comm)->mydev;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    CUCHECK(cuMemSetAccess(mc_va, mc_maxsize, &accessDesc, 1));
+    CUCALL("cuMemSetAccess", mc_va, mc_maxsize, const_cast<CUmemAccessDesc *>(&accessDesc),
+           (size_t)1);
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
     (*comm)->_barrier((*comm)->comm_world);
@@ -402,10 +425,10 @@ int create_communicator_mpi(communicator **comm) {
 void destroy_communicator(communicator *comm) {
   for (int hndl = 0; hndl < comm->free_region; hndl++) {
     if (comm->mem_dealloc[hndl]) {
-      cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
-                       comm->mem_size[hndl] * comm->nvsize);
+      CUCALL("cuMemAddressFree", reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
+             comm->mem_size[hndl] * comm->nvsize);
       for (int rank = 0; rank < comm->nvsize; rank++) {
-        cuMemRelease(comm->uchandles[hndl][rank]);
+        CUCALL("cuMemRelease", comm->uchandles[hndl][rank]);
       }
       free(reinterpret_cast<void *>(comm->uchandles[hndl]));
     } else {
@@ -424,14 +447,14 @@ void destroy_communicator(communicator *comm) {
   cudaFree(reinterpret_cast<void *>(comm->recv_id));
   cudaFree(reinterpret_cast<void *>(comm->send_id));
   if (comm->use_mc) {
-    cuMemAddressFree(reinterpret_cast<CUdeviceptr>(comm->mc_baseptr), comm->mc_maxsize);
-    cuMemRelease(comm->mc_handle);
+    CUCALL("cuMemAddressFree", reinterpret_cast<CUdeviceptr>(comm->mc_baseptr), comm->mc_maxsize);
+    CUCALL("cuMemRelease", comm->mc_handle);
   }
   if (comm->mem_dealloc[0]) {
     cudaFree(comm->gpu_ptrs);
   }
   free(comm->fifo);
-  free(comm);
+  delete comm;
 }
 
 void destroy_communicator_mpi(communicator *comm) {
@@ -466,7 +489,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;  // CU_MEM_HANDLE_TYPE_FABRIC;
 
     size_t granularity = 0;
-    CUCHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+    CUCALL("cuMemGetAllocationGranularity", &granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
     // MPI_Allreduce MAX of granularity check
     aligned_size = (bytes + granularity - 1) / granularity * granularity;
 
@@ -475,18 +498,22 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       mcProp.numDevices = nranks;
       mcProp.size = aligned_size;
       mcProp.handleTypes = prop.requestedHandleTypes;
-      CUCHECK(cuMulticastGetGranularity(&granularity, &mcProp, CU_MULTICAST_GRANULARITY_MINIMUM));
+      CUCALL("cuMulticastGetGranularity", &granularity, &mcProp,
+             static_cast<CUmemAllocationGranularity_flags>(CU_MULTICAST_GRANULARITY_MINIMUM));
       aligned_size = (aligned_size + granularity - 1) / granularity * granularity;
     }
 
     prop.location.id = comm->mydev;
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
-    CUCHECK(cuMemCreate(&(comm->uchandles[hndl][myrank]), aligned_size, &prop, 0));
+    CUCALL("cuMemCreate", &(comm->uchandles[hndl][myrank]), aligned_size, &prop,
+           (unsigned long long)0);
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
-    CUCHECK(cuMemExportToShareableHandle(&peerfd[myrank], comm->uchandles[hndl][myrank],
-                                         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
+    CUCALL("cuMemExportToShareableHandle", reinterpret_cast<void *>(&peerfd[myrank]),
+           comm->uchandles[hndl][myrank],
+           static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
+           (unsigned long long)0);
 
     volatile uint32_t abortFlag = 0;
     struct ncclIpcSocket ipcSock = {0};
@@ -512,13 +539,14 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
-        CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
-                                               reinterpret_cast<void *>(peerfd[p]),
-                                               CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        CUCALL("cuMemImportFromShareableHandle", &comm->uchandles[hndl][p],
+               reinterpret_cast<void *>(peerfd[p]),
+               static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
       close(peerfd[p]);
     }
     CUdeviceptr ptr;
-    CUCHECK(cuMemAddressReserve(&ptr, aligned_size * nranks, 0, 0, 0));
+    CUCALL("cuMemAddressReserve", &ptr, (size_t)(aligned_size * nranks), (size_t)0, (CUdeviceptr)0,
+           (unsigned long long)0);
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -526,7 +554,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     accessDesc.location.id = comm->mydev;
 
     for (int i = 0; i < nranks; i++) {
-      CUCHECK(cuMemMap(ptr + (aligned_size * i), aligned_size, 0, comm->uchandles[hndl][i], 0));
+      CUCALL("cuMemMap", (CUdeviceptr)(ptr + (aligned_size * i)), aligned_size, (size_t)0,
+             comm->uchandles[hndl][i], (unsigned long long)0);
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
       if (i == comm->nvrank) {
         if (hndl)
@@ -536,7 +565,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       }
       comm->peer_ptr[hndl][i] = remptrs[i];
     }
-    CUCHECK(cuMemSetAccess(ptr, aligned_size * nranks, &accessDesc, 1));
+    CUCALL("cuMemSetAccess", ptr, (size_t)(aligned_size * nranks),
+           const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
     if (hndl == 0) CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
     CUDACHECK(
@@ -547,8 +577,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
-      CUCHECK(cuMulticastBindMem(comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
-                                 0 /*memOffset*/, aligned_size, 0));
+      CUCALL("cuMulticastBindMem", comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
+             (size_t)0 /*memOffset*/, aligned_size, (unsigned long long)0);
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
