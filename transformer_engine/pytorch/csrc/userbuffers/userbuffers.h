@@ -33,7 +33,11 @@
 #define NVTE_MAX_REQUESTS 1024
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
+#if MNNVL
+#define NVTE_MAX_NVLINK 32
+#else
 #define NVTE_MAX_NVLINK 8
+#endif
 
 #define UB_MEM_UC_CONTIG 1
 #define UB_MEM_MC_CREATED 2
