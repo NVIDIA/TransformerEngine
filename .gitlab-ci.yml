@@ -1,0 +1,940 @@
+######################################################
+## Variables used by the test runs
+######################################################
+
+variables:
+    EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+    DATADIR: /mnt/nvdl/datasets
+
+    # framework containers
+    PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+    JAX_IMAGE: ghcr.io/nvidia/jax:pax
+    PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
+
+    # container tags are in the form <TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>
+    TAG_ROOT: ""
+
+    # variables that may be overridden by the pipeline vars
+    BUILD_PYTORCH: 1
+    BUILD_JAX: 1
+    BUILD_PADDLE: 1
+    RUN_L0_TESTS: 1
+    RUN_L1_TESTS: 0
+    RUN_L2_TESTS: 0
+    RUN_L3_TESTS: 0
+    API_LOGGING: 0
+    VIRTUAL: 0
+    JOB_START_STRING: "=== JOB START ==="
+    JOB_END_STRING: "=== JOB END ==="
+
+    # the following will be overridden by jobs of the pipeline that actually need to check out the sources
+    GIT_STRATEGY: none
+    GIT_SUBMODULE_STRATEGY: none
+
+#########################################################
+## Build steps.
+##    DO NOT MODIFY THIS SECTION
+#########################################################
+
+stages:
+    - create branch
+    - build base
+    - build devel
+    - build stage
+    - trigger
+    - test
+    - finalize
+
+before_script:
+    - export FRAMEWORK=${FRAMEWORK:-pytorch}                                                       && echo "${FRAMEWORK}"
+    - export PYVER=3.8   && echo "${PYVER}"
+    - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
+    - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
+    - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
+    - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
+    - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
+    - test ${TAG_ROOT} || export TAG_ROOT=${RELEASE_BRANCH_NAME_SLUG}                              && echo "${TAG_ROOT}"
+    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${TAG_ROOT}-${FRAMEWORK}-py${PYVER%.*}"         && echo "${IMAGE_NAME_ROOT}"
+    - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
+    - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
+    - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
+    - export DEVEL_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-devel"               && echo "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME_PIPELINEID="${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}-devel"            && echo "${DEVEL_IMAGE_NAME_PIPELINEID}"
+    - export STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"                                           && echo "${STAGE_IMAGE_NAME}"
+    - export QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa"                                                 && echo "${QA_IMAGE_NAME}"
+    - export DOCS_IMAGE_NAME="${IMAGE_NAME_ROOT}-docs"                                             && echo "${DOCS_IMAGE_NAME}"
+    - export ORIGIN1="${CI_REPOSITORY_URL##*@}"
+    - export ORIGIN_SSH=ssh://git@${ORIGIN1/\//:12051\/}                                           && echo "${ORIGIN_SSH}"
+    - export ORIGIN_HTTPS=https://${ORIGIN1}                                                       && echo "${ORIGIN_HTTPS}"
+    - export GITHUB_REPO="https://github.com/NVIDIA/TransformerEngine.git"                         && echo "${GITHUB_REPO}"
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+
+.create_branch_hidden: &CREATE_BRANCH
+    stage: create branch
+    tags:
+      - vm-builder
+    variables:
+      GIT_STRATEGY: clone
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
+    script:
+    - export CI_TIMESTAMP=$(date +%Y%m%d)                                                          && echo "${CI_TIMESTAMP}"
+    - export REPO="${ORIGIN1/${CI_PROJECT_NAME}/${CI_JOB_NAME}}"
+    - git config --global user.name "gitlab-runner"
+    - git config --global user.email "gitlab-runner@${REPO%%/*}"
+    - git config --global push.default simple
+    - git remote -v
+    - git remote remove github || true
+    - git remote add github ${GITHUB_REPO}
+    - git fetch github
+    - export GIT_SHA=$(git show-ref --hash github/${GH_BRANCH})                                    && echo "${GIT_SHA}"
+    - git rebase --abort || true
+    - git am --abort || true
+    - git merge --abort || true
+    - git clean -f
+    # sometimes HEAD is not what we think is so use explicitly CI_COMMIT_SHA
+    - git reset --hard ${CI_COMMIT_SHA}
+    # to avoid conflicts during rebase squash everything into one commit
+    - git reset $(git commit-tree HEAD^{tree} -m "CI on branch ${GH_BRANCH}")
+    - git rebase github/${GH_BRANCH}
+    - BUILD_BRANCH_NAME=test
+    - test ${RELEASE} && BUILD_BRANCH_NAME=build
+    - test ${GH_NIGHTLY} && BUILD_BRANCH_NAME=nightly_${CI_TIMESTAMP}
+    - test ${GH_WEEKLY} && BUILD_BRANCH_NAME=weekly_${CI_TIMESTAMP}
+    - test ${GH_PR} && BUILD_BRANCH_NAME=pr_${GH_PR}
+    - test ${GL_MR} && BUILD_BRANCH_NAME=pr_gl${GL_MR}
+    - test ${GL_MR_BRANCH} && BUILD_BRANCH_NAME=pr_gl_${GL_MR_BRANCH}
+    - BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${GH_BRANCH}
+    - export BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${CI_PIPELINE_ID}_CI  && echo "${BUILD_BRANCH_NAME}"
+    - git branch -D ${BUILD_BRANCH_NAME} || true
+    - test ${GH_PR} &&
+      FETCH_BRANCH=fetch_${GH_PR} &&
+      git remote -v &&
+      (git remote remove github || true) &&
+      (git branch -D ${FETCH_BRANCH} || true) &&
+      git remote add github ${GITHUB_REPO} &&
+      git fetch github pull/${GH_PR}/head:${FETCH_BRANCH} &&
+      export GIT_SHA=$(git rev-list $FETCH_BRANCH -n 1) &&
+      echo $TEST_COMMIT_SHA &&
+      git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git checkout -b ${BUILD_BRANCH_NAME} &&
+      git submodule add ../../devops/dlfw-ci &&
+      git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git remote remove github &&
+      git branch -D ${FETCH_BRANCH} &&
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    - test ${GL_MR} &&
+      FETCH_BRANCH=fetch_gl${GL_MR} &&
+      git remote -v &&
+      (git branch -D ${FETCH_BRANCH} || true) &&
+      git fetch ${ORIGIN_SSH} merge-requests/${GL_MR}/head:${FETCH_BRANCH} &&
+      git merge ${FETCH_BRANCH} -m "Merged MR gitlab${GL_MR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git checkout -b ${BUILD_BRANCH_NAME} &&
+      git submodule add ../../devops/dlfw-ci &&
+      git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git branch -D ${FETCH_BRANCH} &&
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    - echo "test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} || git checkout -b ${BUILD_BRANCH_NAME} && git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force"
+    - test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} ||
+      git checkout -b ${BUILD_BRANCH_NAME} &&
+      git submodule add ../../devops/dlfw-ci &&
+      git commit -m "CI on branch ${GH_BRANCH}" &&
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    # version is available only after checkout so provide it here only once
+    - export CODE_VERSION=$(cat VERSION)                                                           && echo "${DALI_VERSION}"
+    - tmp_file="${BUILD_BRANCH_NAME}_output"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --form token=${CI_JOB_TOKEN} \
+            --form ref=${BUILD_BRANCH_NAME} \
+            --form "variables[GH_BRANCH]=${GH_BRANCH}" \
+            --form "variables[GIT_SHA]=${GIT_SHA}" \
+            --form "variables[GH_PR]=${GH_PR}" \
+            --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[PYTORCH_IMAGE]=${PYTORCH_IMAGE}" \
+            --form "variables[JAX_IMAGE]=${JAX_IMAGE}" \
+            --form "variables[PADDLE_IMAGE]=${PADDLE_IMAGE}" \
+            --form "variables[TAG_ROOT]=${TAG_ROOT}" \
+            --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
+            --form "variables[BUILD_JAX]=${BUILD_JAX}" \
+            --form "variables[BUILD_PADDLE]=${BUILD_PADDLE}" \
+            --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
+            --form "variables[RUN_L1_TESTS]=${RUN_L1_TESTS}" \
+            --form "variables[RUN_L2_TESTS]=${RUN_L2_TESTS}" \
+            --form "variables[RUN_L3_TESTS]=${RUN_L3_TESTS}" \
+            --form "variables[GH_NIGHTLY]=${GH_NIGHTLY}" \
+            --form "variables[GH_WEEKLY]=${GH_WEEKLY}" \
+            --form "variables[RELEASE]=${RELEASE}" \
+            --form "variables[PUBLISH_DOCS]=${PUBLISH_DOCS}" \
+            --form "variables[PUBLISH_MAIN_DOCS]=${PUBLISH_MAIN_DOCS}" \
+            --form "variables[PUBLISH_RELEASE_DOCS]=${PUBLISH_RELEASE_DOCS}" \
+            --form "variables[PUBLISH_WHL]=${PUBLISH_WHL}" \
+            --form "variables[PUBLISH_RELEASE_WHL]=${PUBLISH_RELEASE_WHL}" \
+            --form "variables[PUBLISH_DEV_WHL]=${PUBLISH_DEV_WHL}" \
+            --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
+            --form "variables[CODE_VERSION]=${CODE_VERSION}" \
+            --form "variables[githubData]=${githubData}" \
+            https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
+      done
+    - exit 1
+
+create_branch:
+    <<: *CREATE_BRANCH
+    tags:
+    - vm-builder
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE =~ /^(web|schedule|trigger)$/
+
+.base_template:
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - echo ${JOB_START_STRING}
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=b --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+    - echo ${JOB_END_STRING}
+    tags:
+    - builder
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+pytorch-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PYTORCH_IMAGE
+      FRAMEWORK: pytorch
+    extends:
+    - .base_template
+
+jax-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_IMAGE
+      FRAMEWORK: jax
+    extends:
+    - .base_template
+
+paddle-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PADDLE_IMAGE
+      FRAMEWORK: paddle
+    extends:
+    - .base_template
+
+.devel_template:
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=d --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+pytorch-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-base ]
+    extends:
+    - .devel_template
+
+jax-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-base ]
+    extends:
+    - .devel_template
+
+paddle-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-base ]
+    extends:
+    - .devel_template
+
+.stage_template : &STAGE
+    environment: staging
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
+    dependencies: []
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=s --push
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
+
+pytorch-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-base, pytorch-py3-devel ]
+    extends:
+    - .stage_template
+
+jax-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-base, jax-py3-devel ]
+    extends:
+    - .stage_template
+
+paddle-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-base, paddle-py3-devel ]
+    extends:
+    - .stage_template
+
+.test_template: &TEST_TEMPLATE
+    environment: "${CI_JOB_NAME}"
+    variables:
+      TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
+      TEST_SCRIPT: "./test.sh"
+      FRAMEWORK: pytorch
+    script:
+    - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - test "${CI_JOB_NAME:0:3}" == "L3_" && export TEST_TIMEOUT=$((24*60*60)) || export TEST_TIMEOUT=$((3*60*60))
+    - test "${API_LOGGING}" == "0" && export LOGGER="" || export LOGGER="cudnnLog.sh"
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker stop "${CONTAINER_NAME}") &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data:ro,rslave
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             -w ${TEST_WORK_DIR}
+             ${DEVEL_IMAGE_NAME_VERSIONED}
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
+      echo ${JOB_END_STRING};
+      if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
+      set +x;
+      rm -rf logs/;
+      docker cp "${CONTAINER_NAME}:/logs/" "logs/" 2>/dev/null || true;
+      for LOGNAME in logs/*; do
+          mv "${LOGNAME}" $(echo "${LOGNAME}" | sed "s/-.....\./-${CI_JOB_NAME}./") 2>/dev/null || true;
+      done;
+      if [ $(cat logs/cudnnapilog-*.txt 2>/dev/null | wc -l) -eq 0 ]; then rm -f logs/cudnnapilog-* 2>/dev/null; fi;
+      gzip logs/*.txt 2>/dev/null || true;
+      docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1;
+      pkill -HUP sleep >/dev/null 2>&1 || true;
+      exit ${RV:-0}
+    artifacts:
+      name: "${CI_JOB_NAME}"
+      paths:
+      - logs/*
+      expire_in: 3 days
+      when: always
+    tags:
+    - must_specify_runner
+    needs: [ pytorch-py3-devel ]
+
+.docs_template: &DOCS_BUILD
+    stage: test
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
+    script:
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - export TEST_TIMEOUT=$((20*60))
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - docker build --progress=plain
+                   -t ${DOCS_IMAGE_NAME}
+                   --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
+                   --build-arg "GIT_SHA=${GIT_SHA}"
+                   -f Dockerfile.docs .
+    - echo ${JOB_START_STRING}
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data:ro
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             $(eval echo ${DOCS_IMAGE_NAME})
+             /bin/bash -ec "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
+      echo ${JOB_END_STRING};
+      set +x;
+      pkill -HUP sleep || true;
+      test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
+    - docker cp "${CONTAINER_NAME}:/opt/transformerengine/docs/_build/html/." "html"
+    - docker rm -f ${CONTAINER_NAME}
+    - docker rmi ${DOCS_IMAGE_NAME}
+    artifacts:
+      name: "${CI_JOB_NAME}.${CI_PIPELINE_ID}"
+      paths:
+      - html/
+      expire_in: 1 month
+    tags:
+    - 1GPU
+    needs: [ pytorch-py3-devel ]
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+gather:
+    stage: finalize
+    script:
+    - /bin/true
+    artifacts:
+      name: "${CI_PIPELINE_ID}"
+      paths:
+      - logs/*
+      - wheelhouse/*
+      expire_in: 1 month
+      when: always
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $API_LOGGING == "0"
+      when: never
+    - when: manual
+      allow_failure: true
+
+upload_logs:
+  stage: finalize
+  variables:
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
+  script:
+    - tmp_file="${CI_PIPELINE_ID}_upload_tmp"
+    - echo "Uploading logs for the commit ${GIT_SHA}"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --user ptredak:${JENKINS_TOKEN} \
+            --data token="${JENKINS_CI_TOKEN}" \
+            --data PIPELINE_ID="${CI_PIPELINE_ID}" \
+            --data githubData="${githubData}" \
+            --data COMMIT_SHA="${GIT_SHA}" \
+            "https://prod.blsm.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
+      done
+    - exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
+      when: always
+  tags:
+    - vm-builder
+
+.manual_test_trigger: &MANUAL_TEST_TRIGGER
+    stage: trigger
+    script:
+    - export SCOPE1=${CI_JOB_NAME%% tests}; export SCOPE=${SCOPE1##Run all }
+    - docker pull ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler
+    - docker run --init --rm ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler ${CI_PIPELINE_ID} ${CI_PROJECT_PATH} ${SCOPE}
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+      allow_failure: true
+
+.L0_test: &L0_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L0_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L1_test: &L1_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L1_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L2_test: &L2_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L2_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L3_test: &L3_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L3_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+"Run all L1 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+"Run all L2 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+.P100_4GPU: &P100_4GPU
+    tags:
+    - P100
+    - 4GPU
+
+.V100_4GPU: &V100_4GPU
+    tags:
+    - V100
+    - 4GPU
+
+.V100_1GPU: &V100_1GPU
+    tags:
+    - V100
+    - 1GPU
+
+.V100_R410_8GPU: &V100_R410_8GPU
+    tags:
+    - V100
+    - R410
+    - 8GPU
+
+.TU102_R445_1GPU: &TU102_R445_1GPU
+    tags:
+    - TU102
+    - R445
+    - 1GPU
+
+.TU104_1GPU: &TU104_1GPU
+    tags:
+    - TU104
+    - 1GPU
+
+.TitanXP_R384_2GPU: &TitanXP_R384_2GPU
+    tags:
+    - TitanXP
+    - R384
+    - 2GPU
+
+.P40_R384_1GPU: &P40_R384_1GPU
+    tags:
+    - P40
+    - R384
+    - 1GPU
+
+.A100_1GPU: &A100_1GPU
+    tags:
+    - A100
+    - 1GPU
+
+.A100_vGPU: &A100_vGPU
+    tags:
+    - A100-vGPU
+
+.A100_2GPU_P2P: &A100_2GPU_P2P
+    tags:
+    - A100
+    - 2GPU
+    - P2P
+
+.A102_1GPU: &A102_1GPU
+    tags:
+    - A102
+    - 1GPU
+
+.M40_R384_1GPU: &M40_R384_1GPU
+    tags:
+    - M40
+    - R384
+    - 1GPU
+
+.DGX2_R410_16GPU: &DGX2_R410_16GPU
+    tags:
+    - V100
+    - R410
+    - 16GPU
+
+.H100_1GPU:
+    tags:
+      - dlcluster_h100
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      CI_SLURM_TIME: 240
+      DATADIR: /mnt/nvdl
+
+.H100_4GPU:
+    tags:
+      - dlcluster_h100x4
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
+      CI_SLURM_TIME: 240
+      DATADIR: /mnt/nvdl/datasets
+
+.L40_1GPU:
+    tags:
+    - dlcluster_l40
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      CI_SLURM_TIME: 240
+      DATADIR: /mnt/nvdl
+
+######################################################
+##
+## Test definitions.
+##
+##   By convention, test names should be prefixed
+##   with "L0_" or "L1_" etc.
+##
+##   Normally qa/ will be a submodule that pulls in
+##   all of the stuff needed to run the tests into the
+##   *-devel images.
+##
+##   The CI script templates above expect each test to
+##   be defined in /opt/<project>/qa/<testname>/test.sh.
+##   This behavior is specified by the variables
+##   $TEST_WORK_DIR and $TEST_SCRIPT.  You can override
+##   either of those variables for a given test, but if
+##   you do, you have to override them both together,
+##   like this:
+##
+##   L0_mytest:
+##      variables:
+##        FRAMEWORK: pytorch
+##        TEST_WORK_DIR: "/some/other/path"
+##        TEST_SCRIPT: "./test.sh"
+##      extends:
+##      - .L0_test
+##
+######################################################
+
+# L0_license:
+#     variables:
+#       FRAMEWORK: pytorch
+#     extends:
+#     - .L0_test
+#     tags:
+#     - 1GPU
+
+L0_pytorch_lint:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_jax_lint:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_paddle_lint:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_pytorch_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_pytorch_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_pytorch_unittest--TU102_R445_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .TU102_R445_1GPU
+
+L0_pytorch_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_pytorch_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L1_pytorch_context_parallel_test--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_4GPU
+
+L1_pytorch_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_4GPU
+
+L0_jax_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_jax_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L1_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_4GPU
+
+L0_paddle_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_paddle_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_paddle_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_paddle_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_cppunittest--V100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_cppunittest--A100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_cppunittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+docs:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .docs_template
