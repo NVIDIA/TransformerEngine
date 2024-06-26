@@ -253,7 +253,7 @@ int create_communicator_grouped2(
       CUCALL("cuMulticastCreate", &(*comm)->mc_handle, &mcProp);
       CUCALL("cuMemExportToShareableHandle", reinterpret_cast<void *>(&fd), (*comm)->mc_handle,
              static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-             (unsigned long long)0);
+             (uint64_t)0);
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
@@ -273,8 +273,8 @@ int create_communicator_grouped2(
 
     CUdeviceptr mc_va;
     CUCALL("cuMemAddressReserve", &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
-           (unsigned long long)0);
-    CUCALL("cuMemMap", mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (unsigned long long)0);
+           (uint64_t)0);
+    CUCALL("cuMemMap", mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (uint64_t)0);
 
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -507,13 +507,13 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
     CUCALL("cuMemCreate", &(comm->uchandles[hndl][myrank]), aligned_size, &prop,
-           (unsigned long long)0);
+           (uint64_t)0);
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
     CUCALL("cuMemExportToShareableHandle", reinterpret_cast<void *>(&peerfd[myrank]),
            comm->uchandles[hndl][myrank],
            static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-           (unsigned long long)0);
+           (uint64_t)0);
 
     volatile uint32_t abortFlag = 0;
     struct ncclIpcSocket ipcSock = {0};
@@ -546,7 +546,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
     CUdeviceptr ptr;
     CUCALL("cuMemAddressReserve", &ptr, (size_t)(aligned_size * nranks), (size_t)0, (CUdeviceptr)0,
-           (unsigned long long)0);
+           (uint64_t)0);
     comm->ucbase_ptr[hndl] = reinterpret_cast<void *>(ptr);
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -554,9 +554,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     accessDesc.location.id = comm->mydev;
 
     for (int i = 0; i < nranks; i++) {
-      CUCALL("cuMemMap", (CUdeviceptr)(ptr + (aligned_size * i)), aligned_size, (size_t)0,
-             comm->uchandles[hndl][i], (unsigned long long)0);
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
+      CUCALL("cuMemMap", reinterpret_cast<CUdeviceptr>(remptrs[i]), aligned_size, (size_t)0,
+             comm->uchandles[hndl][i], (uint64_t)0);
       if (i == comm->nvrank) {
         if (hndl)
           *gpubuff = remptrs[i];
@@ -578,7 +578,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
       CUCALL("cuMulticastBindMem", comm->mc_handle, comm->mc_offset, comm->uchandles[hndl][myrank],
-             (size_t)0 /*memOffset*/, aligned_size, (unsigned long long)0);
+             (size_t)0 /*memOffset*/, aligned_size, (uint64_t)0);
       comm->memflags[hndl] |= UB_MEM_MC_CREATED;
       comm->mc_ptr[hndl] = reinterpret_cast<char *>(comm->mc_baseptr) + comm->mc_offset;
       comm->mc_offset += aligned_size;
