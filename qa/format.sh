@@ -7,7 +7,9 @@
 
 set -e
 
+: "${TE_PATH:=.}"
+
+cd $TE_PATH
+
 pip install pre-commit
-pre-commit install
 pre-commit run --all-files
-rm .git/hooks/pre-commit*
