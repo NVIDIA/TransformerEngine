@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <cuda.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
 #if __CUDA_ARCH__ >= 800
@@ -15,7 +16,6 @@
 #endif
 
 #include <assert.h>
-#include <cuda_fp8.h>
 #include <stdio.h>
 #include <unistd.h>
 
