@@ -93,13 +93,13 @@ enum NVTE_Mask_Type {
   NVTE_NO_MASK = 0,
   /*! Padding attention mask */
   NVTE_PADDING_MASK = 1,
-  /*! Causal attention mask */
+  /*! Causal attention mask (aligned to the top left corner) */
   NVTE_CAUSAL_MASK = 2,
-  /*! Padding and causal attention mask */
+  /*! Padding and causal attention mask (aligned to the top left corner) */
   NVTE_PADDING_CAUSAL_MASK = 3,
-  /*! Causal attention mask with bottom right diagonal */
+  /*! Causal attention mask (aligned to the bottom right corner) */
   NVTE_CAUSAL_BOTTOM_RIGHT_MASK = 4,
-  /*! Padding and causal attention mask with bottom right diagonal */
+  /*! Padding and causal attention mask (aligned to the bottom right corner) */
   NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK = 5,
 };
 

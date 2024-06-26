@@ -23,13 +23,13 @@ TE_DType = {
 }
 
 AttnMaskTypes = (
-    "causal",
-    "causal_bottom_right",
+    "no_mask",
     "padding",
+    "causal",
     "padding_causal",
+    "causal_bottom_right",
     "padding_causal_bottom_right",
     "arbitrary",
-    "no_mask",
 )
 
 AttnTypes = ("self", "cross")

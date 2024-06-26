@@ -2071,7 +2071,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
-        attn_mask_type = "causal" if attn_mask_type == "causal_bottom_right" else attn_mask_type
+        # self-attention: causal_bottom_right and causal are equivalent
+        # cross-attention: filtered out by DotProductAttention
+        if attn_mask_type == "causal_bottom_right":
+            attn_mask_type = "causal" 
 
         assert (
             qkv_layout in QKVLayouts
@@ -4300,24 +4303,35 @@ class DotProductAttention(TransformerEngineBaseModule):
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: str, default = `causal`
                    type of attention mask passed into softmax operation, options are "`no_mask`",
-                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`", and
-                   "`arbitrary`", where "`padding,causal`" and "`causal,padding`" are equivalent.
-                   This arg can be overridden by :attr:`attn_mask_type` in the `forward` method.
-                   It is useful for cases involving compilation/tracing, e.g. ONNX export, and the
-                   forward arg is useful for dynamically changing mask types, e.g. a different mask
-                   for training and inference. For "`no_mask`", no attention mask is applied. For
-                   "`causal`" or the causal mask in "`padding,causal`", TransformerEngine calculates
-                   and applies an upper triangular mask to the softmax input. No user input is
-                   needed. For "`padding`" or the padding mask in "`padding,causal`", users need to
-                   provide the locations of padded tokens either via :attr:`cu_seqlens_q` and
-                   :attr:`cu_seqlens_kv` in the shape of [batch_size + 1] or :attr:`attention_mask`
-                   in the shape [batch_size, 1, 1, max_seq_len]. For the "`arbitrary`" mask, users
-                   need to provide a mask that is broadcastable to the shape of softmax input.
+                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`",
+                   "`padding_causal`", "`causal_bottom_right`", "`padding_causal_bottom_right`", and
+                   "`arbitrary`", where "`padding,causal`", "`causal,padding`" and "`padding_causal`"
+                   are equivalent. This arg can be overridden by :attr:`attn_mask_type` in the
+                   `forward` method. It is useful for cases involving compilation/tracing, e.g.
+                   ONNX export, and the forward arg is useful for dynamically changing mask types,
+                   e.g. a different mask for training and inference.
+                   1. For "`no_mask`", no attention mask is applied.
+                   2. For "`causal`", "`causal_bottom_right`", or the causal mask in
+                   "`padding_causal`" and "`padding_causal_bottom_right`", TransformerEngine
+                   calculates and applies an upper triangular mask to the softmax input.
+                   No user input is needed. Causal masks without the "`bottom_right`" appendix align
+                   the diagonal line to the top left corner of the softmax matrix. With
+                   "`bottom_right`", the causal mask is aligned to the bottom right corner, which is
+                   often used in inference/KV caching.
+                   3. For "`padding`", or the padding mask in "`padding_causal`" and
+                   "`padding_causal_bottom_right`", users need to provide the locations of padded
+                   tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both in shape
+                   [batch_size + 1]), or via :attr:`attention_mask` (one tensor for self-attention
+                   in shape [batch_size, 1, 1, max_seqlen_q], or two tensors in a tuple for
+                   cross-attention in shapes [batch_size, 1, 1, max_seqlen_q] and
+                   [batch_size, 1, 1, max_seqlen_kv]).
+                   4. For "`arbitrary`", users need to provide a mask that is broadcastable to
+                   the shape of softmax input [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     window_size: Optional[Tuple[int, int]], default = `None`
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and "`causal`" mask specifically. Similar to :attr:`attn_mask_type`, it can
                 be overridden by :attr:`window_size` in `forward` as well.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
@@ -4620,13 +4634,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                      Value tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be 'None' for 'causal' and 'no_mask' types. For 'padding' masks, it should be
+             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
              a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
              two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For the 'arbitrary' mask type, it should be in a shape that is
-             broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value
-             means the corresponding position is masked out and a `False` means that position is
-             allowed to participate in attention.
+             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable
+             to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
+             the corresponding position is masked out and a `False` means that position
+             is allowed to participate in attention.
         qkv_format: str, default = `None`
                    If provided, overrides :attr:`qkv_format` from initialization.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
@@ -4651,9 +4665,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
                        Calculated from `cu_seqlens_kv` if not provided.
-        attn_mask_type: {`no_mask`, `padding`, `causal`, `padding,causal`, `causal,padding`,
-                       `arbitrary`}, default = `None`. Type of attention mask passed into
-                       softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
+        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
+                       'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
+                       'arbitrary'}, default = `None`. Type of attention mask passed into
+                       softmax operation. 'padding,causal', 'causal,padding' and 'padding_causal'
+                       are equivalent. By default, causal masks are aligned to the top left corner
+                       of the softmax matrix. When "`bottom_right`" is specified in the mask type,
+                       causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     Sliding window size for local attention.
         checkpoint_core_attention : bool, default = `False`
@@ -4812,6 +4830,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
+                if cu_seqlens_q_padded is None:
+                    cu_seqlens_q_padded = cu_seqlens_q
+                if cu_seqlens_kv_padded is None:
+                    cu_seqlens_kv_padded = cu_seqlens_kv
                 assert (
                     cu_seqlens_q.shape == cu_seqlens_kv.shape
                     and len(cu_seqlens_q.shape) == 1
@@ -4873,9 +4895,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Filter: QKV layout.
             if qkv_format == "thd":
                 if use_unfused_attention:
-                    self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
+                    self.logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
                     use_unfused_attention = False
-                if use_fused_attention and (
+                if use_flash_attention and (
                     (
                         cu_seqlens_q_padded is not None
                         and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
@@ -4963,25 +4985,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention = False
 
             # Filter: cross attention + causal mask.
-            # (in training mode)
             if (
                 use_flash_attention
-                and inference_params is None
                 and _flash_attn_2_1_plus
-                and "causal_bottom_right" in attn_mask_type
+                and attn_mask_type in ["causal", "padding_causal"]
                 and max_seqlen_q != max_seqlen_kv
             ):
                 self.logger.warning(
-                    "In training mode, disable the use of FlashAttention since version 2.1+ has "
-                    "changed its behavior for causal mask in cross attention. See "
+                    "Disabling FlashAttention as it only supports bottom-right-diagonal "
+                    "causal mask since version 2.1. See "
                     "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
                 )
-                # use_flash_attention = False
-                # if "causal_bottom_right" in attn_mask_type and get_cudnn_version() < (9,3,0):
-                #    self.logger.warning(
-                #        "Disabling FusedAttention as bottom-right causal mask requires cuDNN 9.3+"
-                #    )
-                #    use_fused_attention = False
+                use_flash_attention = False
 
             context_parallel = (
                 self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1
@@ -5018,14 +5033,19 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if use_fused_attention:
                     self.logger.debug("Disabling FusedAttention for arbitrary mask")
                 use_fused_attention = False
-
             if (
                 use_unfused_attention
-                and inference_params is None
-                and "causal" in attn_mask_type
+                and "padding" in attn_mask_type
+            ):
+                self.logger.debug("Disabling UnfusedDotProductAttention for padding masks")
+                use_unfused_attention = False
+            if (
+                use_unfused_attention
+                and "bottom_right" in attn_mask_type
                 and max_seqlen_q != max_seqlen_kv
             ):
-                self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
+                self.logger.debug("Disabling UnfusedDotProductAttention for "
+                "bottom-right-diagonal causal masks for cross-attention")
                 use_unfused_attention = False
 
             # Filter: bias.
@@ -5377,7 +5397,8 @@ class MultiheadAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal' 'arbitrary'},
+    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+                   'padding_causal_bottom_right','arbitrary'},
                    default = `causal`
                    type of attention mask passed into softmax operation. Overridden by
                    :attr:`attn_mask_type` in the `forward` method. The forward
@@ -5388,7 +5409,7 @@ class MultiheadAttention(torch.nn.Module):
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and "`causal`" mask specifically. Similar to :attr:`attn_mask_type`, it can
                 be overridden by :attr:`window_size` in `forward` as well.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
@@ -5768,16 +5789,20 @@ class MultiheadAttention(torch.nn.Module):
              Input tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be 'None' for 'causal' and 'no_mask' types. For 'padding' masks, it should be
+             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
              a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
              two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For the 'arbitrary' mask type, it should be in a shape that is
-             broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value
-             means the corresponding position is masked out and a `False` means that position is
-             allowed to participate in attention.
-        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
+             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable to
+             [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
+             the corresponding position is masked out and a `False` means that position
+             is allowed to participate in attention.
+        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+                       'padding_causal_bottom_right','arbitrary'},
                        default = `None`
-                       type of attention mask passed into softmax operation.
+                       type of attention mask passed into softmax operation. By default,
+                       causal masks are aligned to the top left corner of the softmax matrix.
+                       When "`bottom_right`" is specified in the mask type, causal masks are
+                       aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
