@@ -13,10 +13,15 @@ import paddle
 import paddle.distributed.fleet.base.topology as tp
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 from paddle.distributed.fleet.layers.mpu import mp_ops
-from paddle.distributed.fleet.meta_parallel import (
-    PipelineParallelMicroStepLocations,
-    register_global_pipeline_parallel_hook,
-)
+
+try:
+    # This feature is only supported in the latest version of Paddle.
+    from paddle.distributed.fleet.meta_parallel import (
+        PipelineParallelMicroStepLocations,
+        register_global_pipeline_parallel_hook,
+    )
+except ImportError:
+    register_global_pipeline_parallel_hook = None
 
 from .constants import dist_group_type
 
@@ -66,9 +71,10 @@ def is_pp_enabled() -> bool:
 
 
 def register_pp_fwd_begin_hook(forward_begin_hook):
-    register_global_pipeline_parallel_hook(
-        PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
-    )
+    if register_global_pipeline_parallel_hook is not None:
+        register_global_pipeline_parallel_hook(
+            PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
+        )
 
 
 @contextmanager
