@@ -119,7 +119,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {
       flag_m512 = true;
     }
-    if (// architecture
+    if (  // architecture
         ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80) ||
          (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90))) &&
         // sequence length
@@ -133,7 +133,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          // TODO (cyang): add is_training to nvte_get_fused_attn_backend
          // d=256 only supported for forward
          (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && head_dim <= 256 &&
-             head_dim % 8 == 0)) &&
+          head_dim % 8 == 0)) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
          ((cudnn_runtime_version >= 8906) &&
@@ -154,10 +154,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          ((cudnn_runtime_version >= 90300) &&
           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-          (qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
-           qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
-          max_seqlen_q <= max_seqlen_kv &&
-          dropout == 0.0)) &&
+          (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
+          max_seqlen_q <= max_seqlen_kv && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
            (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||

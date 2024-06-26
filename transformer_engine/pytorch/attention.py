@@ -2074,7 +2074,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # self-attention: causal_bottom_right and causal are equivalent
         # cross-attention: filtered out by DotProductAttention
         if attn_mask_type == "causal_bottom_right":
-            attn_mask_type = "causal" 
+            attn_mask_type = "causal"
 
         assert (
             qkv_layout in QKVLayouts
@@ -5033,10 +5033,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if use_fused_attention:
                     self.logger.debug("Disabling FusedAttention for arbitrary mask")
                 use_fused_attention = False
-            if (
-                use_unfused_attention
-                and "padding" in attn_mask_type
-            ):
+            if use_unfused_attention and "padding" in attn_mask_type:
                 self.logger.debug("Disabling UnfusedDotProductAttention for padding masks")
                 use_unfused_attention = False
             if (
@@ -5044,8 +5041,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and "bottom_right" in attn_mask_type
                 and max_seqlen_q != max_seqlen_kv
             ):
-                self.logger.debug("Disabling UnfusedDotProductAttention for "
-                "bottom-right-diagonal causal masks for cross-attention")
+                self.logger.debug(
+                    "Disabling UnfusedDotProductAttention for "
+                    "bottom-right-diagonal causal masks for cross-attention"
+                )
                 use_unfused_attention = False
 
             # Filter: bias.
