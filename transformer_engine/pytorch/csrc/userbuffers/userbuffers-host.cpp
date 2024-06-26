@@ -47,9 +47,9 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
   } while (0)
 
 // Call-by-symbol tool for CUDA driver API -- this helps avoid linking to libcuda.so at compile
-static std::map<const char*, void *> _cudaDriverEntryPoints;
+static std::map<const char *, void *> _cudaDriverEntryPoints;
 
-template<typename... Args>
+template <typename... Args>
 cudaError_t cudaCallDriverEntryPoint(const char *symbol, Args... args) {
   // Try to recover the function pointer from the cache of previously used entry points
   void *entry_point;
