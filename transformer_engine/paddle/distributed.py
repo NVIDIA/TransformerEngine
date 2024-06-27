@@ -15,7 +15,7 @@ from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 from paddle.distributed.fleet.layers.mpu import mp_ops
 
 try:
-    # This feature is only supported in the latest version of Paddle.
+    # This feature is not supported as of Paddle 2.6.
     from paddle.distributed.fleet.meta_parallel import (
         PipelineParallelMicroStepLocations,
         register_global_pipeline_parallel_hook,
