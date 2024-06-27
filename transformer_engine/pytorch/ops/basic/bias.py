@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for bias."""
+"""Fusible operation for bias."""
 
 from __future__ import annotations
 from typing import Optional
@@ -121,11 +121,11 @@ class Bias(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
-        x = input
+        x = input_
         b = self.bias.reshape([1] * (x.dim() - 1) + [self.local_size])
         return x + b
 

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for linear layer without bias."""
+"""Fusible operation for linear layer without bias."""
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
@@ -262,11 +262,7 @@ class BasicLinear(BasicOperation):
         )
 
     def num_fp8_scales(self, mode: str) -> int:
-        if mode == "input":
-            return 1
-        if mode == "param":
-            return 1
-        if mode == "grad_output":
+        if mode in ("input", "param", "grad_output"):
             return 1
         return 0
 
@@ -948,7 +944,7 @@ class BasicLinear(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
@@ -971,7 +967,7 @@ class BasicLinear(BasicOperation):
 
         # Linear forward
         output, x_local, _ = BasicLinear._functional_forward(
-            input=input,
+            input=input_,
             weight=self.weight,
             device=self.device,
             dtype=self.dtype,
@@ -990,8 +986,8 @@ class BasicLinear(BasicOperation):
         ctx.weight_fp8_meta = weight_fp8_meta
         ctx.grad_output_fp8_meta = grad_output_fp8_meta
         ctx.grad_input_fp8_meta = grad_input_fp8_meta
-        ctx.input_dims = input.size()
-        ctx.input_requires_grad = input.requires_grad
+        ctx.input_dims = input_.size()
+        ctx.input_requires_grad = input_.requires_grad
         ctx.weight_requires_grad = self.weight.requires_grad
         ctx.has_prev_op = prev_op is not None
 

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for linear layer."""
+"""Fusible operation for linear layer."""
 
 from __future__ import annotations
 from collections.abc import Callable

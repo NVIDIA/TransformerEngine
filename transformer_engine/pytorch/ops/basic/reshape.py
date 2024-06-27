@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for reshape."""
+"""Fusible operation for reshape."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -37,12 +37,12 @@ class Reshape(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
-        ctx.input_shape = input.size()
-        return reshape(input, self._shape)
+        ctx.input_shape = input_.size()
+        return reshape(input_, self._shape)
 
     def op_backward(
         self,

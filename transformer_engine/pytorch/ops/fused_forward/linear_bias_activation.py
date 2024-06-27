@@ -13,8 +13,8 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
-    FusableOperation,
     FusedOperation,
+    FusibleOperation,
     OperationContext,
 )
 
@@ -132,8 +132,8 @@ class ForwardLinearBiasActivation(FusedOperation):
 
 
 def fuse_forward_linear_bias_activation(
-    ops: list[tuple[FusableOperation, list[int]]],
-) -> list[tuple[FusableOperation, list[int]]]:
+    ops: list[tuple[FusibleOperation, list[int]]],
+) -> list[tuple[FusibleOperation, list[int]]]:
     """Fuse GEMM, bias, activation in the forward pass
 
     Parameters

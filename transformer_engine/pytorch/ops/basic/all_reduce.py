@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for all-reduce."""
+"""Fusible operation for all-reduce."""
 
 from __future__ import annotations
 from typing import Optional
@@ -43,17 +43,17 @@ class AllReduce(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Trivial case
         if torch.distributed.get_world_size(self.process_group) == 1:
-            return input
+            return input_
 
         # Perform all-reduce
-        x = input
+        x = input_
         if is_float8_tensor(x):
             x = x.from_float8()
         x = x.contiguous()

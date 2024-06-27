@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Sequential container for fusable operations."""
+"""Sequential container for fusible operations."""
 
 from __future__ import annotations
 from collections import OrderedDict
@@ -11,30 +11,30 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops import FusableOperation
+from transformer_engine.pytorch.ops import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
 class Sequential(torch.nn.Module):
-    """Sequential container for fusable operations
+    """Sequential container for fusible operations
 
     This is a drop-in replacement for `torch.nn.Sequential`, with
-    support for fusing `FusableOperation`s.
+    support for fusing `FusibleOperation`s.
 
     Parameters
     ----------
-    *args: FusableOperation or torch.nn.Module
+    *args: FusibleOperation or torch.nn.Module
         Neural network modules
 
     """
 
     def __init__(
         self,
-        *args: FusableOperation | torch.nn.Module,
+        *args: FusibleOperation | torch.nn.Module,
     ) -> None:
         super().__init__()
 
-        # List of modules, with fusable operations grouped together
+        # List of modules, with fusible operations grouped together
         self._module_groups: Optional[list[OperationFuser | torch.nn.Module]]
         self._module_groups = None
 
@@ -142,19 +142,19 @@ class Sequential(torch.nn.Module):
         cls,
         modules: Iterable[torch.nn.Module],
     ) -> list[OperationFuser | torch.nn.Module]:
-        """Make list of modules, with fusable operations grouped together"""
+        """Make list of modules, with fusible operations grouped together"""
         module_groups = []
-        fusable_ops = []
+        fusible_ops = []
 
         def maybe_add_fuser():
-            nonlocal fusable_ops
-            if fusable_ops:
-                module_groups.append(OperationFuser(fusable_ops, fuse_ops=True))
-                fusable_ops = []
+            nonlocal fusible_ops
+            if fusible_ops:
+                module_groups.append(OperationFuser(fusible_ops, fuse_ops=True))
+                fusible_ops = []
 
         for module in modules:
-            if isinstance(module, FusableOperation):
-                fusable_ops.append(module)
+            if isinstance(module, FusibleOperation):
+                fusible_ops.append(module)
             else:
                 maybe_add_fuser()
                 module_groups.append(module)

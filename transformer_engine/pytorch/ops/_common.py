@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Helper functions used in fusable operations."""
+"""Helper functions used in fusible operations."""
 
 from __future__ import annotations
 from typing import Any, Iterable, Optional

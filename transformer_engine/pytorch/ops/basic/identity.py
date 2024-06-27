@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for identity."""
+"""Fusible operation for identity."""
 
 from __future__ import annotations
 from typing import Optional
@@ -21,11 +21,11 @@ class Identity(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
-        return input
+        return input_
 
     def op_backward(
         self,

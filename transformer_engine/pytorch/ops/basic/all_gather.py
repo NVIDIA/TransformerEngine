@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for all-gather."""
+"""Fusible operation for all-gather."""
 
 from __future__ import annotations
 from typing import Optional
@@ -41,17 +41,17 @@ class AllGather(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Trivial case
         if self.process_group_size == 1:
-            return input
+            return input_
 
         # Tensor dimensions
-        input_dims = input.size()
+        input_dims = input_.size()
         if not input_dims:
             raise RuntimeError(
                 "Attempted to all-gather a tensor "
@@ -62,7 +62,7 @@ class AllGather(BasicOperation):
         output_dims[0] *= self.process_group_size
 
         # Perform all-gather
-        x = convert_tensor(input, memory_format=torch.contiguous_format)
+        x = convert_tensor(input_, memory_format=torch.contiguous_format)
         y = None
         if is_float8_tensor(x):
             y = Float8Tensor.make_like(

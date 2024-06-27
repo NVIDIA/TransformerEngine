@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for reduce-scatter."""
+"""Fusible operation for reduce-scatter."""
 
 from __future__ import annotations
 from typing import Optional
@@ -41,17 +41,17 @@ class ReduceScatter(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Trivial case
         if self.process_group_size == 1:
-            return input
+            return input_
 
         # Tensor dimensions
-        input_dims = input.size()
+        input_dims = input_.size()
         if not input_dims or input_dims[0] % self.process_group_size != 0:
             raise RuntimeError(
                 "Attempted to reduce-scatter a tensor "
@@ -62,7 +62,7 @@ class ReduceScatter(BasicOperation):
         output_dims[0] //= self.process_group_size
 
         # Check input tensor
-        x = input
+        x = input_
         if is_float8_tensor(x):
             x = x.from_float8()
         x = x.contiguous()

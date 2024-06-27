@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Manager class for a pipeline of fusable operations."""
+"""Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
 from typing import Any, Optional
@@ -13,7 +13,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
-    FusableOperation,
+    FusibleOperation,
     OperationContext,
 )
 from transformer_engine.pytorch.ops.fused_forward import (
@@ -34,8 +34,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
     def forward(
         func_ctx: torch.autograd.function.FunctionCtx,
         input_: torch.Tensor,
-        forward_ops: list[tuple[FusableOperation, list[int]]],
-        backward_ops: list[tuple[FusableOperation, list[int]]],
+        forward_ops: list[tuple[FusibleOperation, list[int]]],
+        backward_ops: list[tuple[FusibleOperation, list[int]]],
         basic_ops: list[BasicOperation],
         basic_op_kwargs: list[dict[str, Any]],
         *params: torch.nn.Parameter,
@@ -185,7 +185,7 @@ class OperationFuser:
 
     Parameters
     ----------
-    ops: list of FusableOperation
+    ops: list of FusibleOperation
         Pipeline of operations
     fuse_ops: bool, default = `True`
         Whether to attempt fusing operations
@@ -194,7 +194,7 @@ class OperationFuser:
 
     def __init__(
         self,
-        ops: list[FusableOperation],
+        ops: list[FusibleOperation],
         fuse_ops: bool = True,
     ) -> None:
 
@@ -209,8 +209,8 @@ class OperationFuser:
         self._basic_ops: list[BasicOperation] = basic_ops
 
         # Ops for forward and backward pass
-        self._forward_ops: list[tuple[FusableOperation, list[int]]]
-        self._backward_ops: list[tuple[FusableOperation, list[int]]]
+        self._forward_ops: list[tuple[FusibleOperation, list[int]]]
+        self._backward_ops: list[tuple[FusibleOperation, list[int]]]
         self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
 
@@ -221,8 +221,8 @@ class OperationFuser:
     @classmethod
     def _fuse_forward_ops(
         cls,
-        ops: list[tuple[FusableOperation, list[int]]],
-    ) -> list[tuple[FusableOperation, list[int]]]:
+        ops: list[tuple[FusibleOperation, list[int]]],
+    ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
@@ -230,8 +230,8 @@ class OperationFuser:
     @classmethod
     def _fuse_backward_ops(
         cls,
-        ops: list[tuple[FusableOperation, list[int]]],
-    ) -> list[tuple[FusableOperation, list[int]]]:
+        ops: list[tuple[FusibleOperation, list[int]]],
+    ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
         return ops
 

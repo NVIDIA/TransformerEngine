@@ -357,7 +357,7 @@ class TestBasicOps:
         y_ref = x_ref
         dx_ref = dy_ref
 
-        # Implementation with fusable operation
+        # Implementation with fusible operation
         op = te_ops.Identity()
         y_test = op(x_test)
         y_test.backward(dy_test)
@@ -430,7 +430,7 @@ class TestBasicOps:
         y_ref = x_ref.reshape(out_shape)
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operation
+        # Implementation with fusible operation
         op = te_ops.Reshape(out_shape)
         y_test = op(x_test)
         y_test.backward(dy_test)
@@ -497,7 +497,7 @@ class TestBasicOps:
         y_ref = x_ref + b_ref.reshape([1] * (len(in_shape) - 1) + [size])
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operation
+        # Implementation with fusible operation
         op = te_ops.Bias(size, device=device, dtype=dtype)
         with torch.no_grad():
             op.bias.copy_(b_test)
@@ -581,7 +581,7 @@ class TestBasicOps:
         y_ref = torch.nn.functional.linear(x_ref, w_ref)
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operation
+        # Implementation with fusible operation
         with te.fp8_model_init(enabled=fp8_weight):
             op = te_ops.BasicLinear(
                 in_features,
@@ -698,7 +698,7 @@ class TestBasicOps:
         y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operation
+        # Implementation with fusible operation
         with te.fp8_model_init(enabled=fp8_weight):
             op = te_ops.Linear(
                 in_features,
@@ -822,7 +822,7 @@ class TestFusedOps:
         y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operations
+        # Implementation with fusible operations
         with te.fp8_model_init(enabled=fp8_weight):
             model = te_ops.Sequential(
                 te_ops.Linear(
@@ -915,7 +915,7 @@ class TestFusedOps:
         y_ref = torch.nn.functional.linear(y_ref, w1_ref)
         y_ref.backward(dy_ref)
 
-        # Implementation with fusable operations
+        # Implementation with fusible operations
         with te.fp8_model_init(enabled=True):
             model = te_ops.Sequential(
                 te_ops.BasicLinear(

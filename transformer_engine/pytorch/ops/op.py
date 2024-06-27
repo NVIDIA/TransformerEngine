@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Base classes for fusable operations."""
+"""Base classes for fusible operations."""
 
 from __future__ import annotations
 import abc
@@ -52,7 +52,7 @@ class OperationContext:
         self.to_save = tensors
 
 
-class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
+class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     """Tensor operation supported by the operation fuser"""
 
     @property
@@ -148,7 +148,7 @@ class FusableOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         )
 
 
-class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
+class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     """Single tensor operation supported by the operation fuser
 
     This class holds parameters and state, even if the actual forward
@@ -219,7 +219,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         )
 
     @classmethod
-    def _check_fp8_meta(cls, fp8_meta: Optional[dict[str, Any]]) -> None:
+    def _maybe_update_fp8_meta(cls, fp8_meta: Optional[dict[str, Any]]) -> None:
         if fp8_meta is None:
             return
 
@@ -272,9 +272,8 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas = self._make_fp8_metas()
 
             # Make sure FP8 metadata matches FP8 autocast context
-            # if any(fp8_meta is not None for fp8_meta in self._fp8_metas):
             for fp8_meta in self._fp8_metas.values():
-                self._check_fp8_meta(fp8_meta)
+                self._maybe_update_fp8_meta(fp8_meta)
 
             # Register FP8 metadata for amax and scale update
             if not FP8GlobalStateManager.fp8_graph_capturing():
@@ -297,7 +296,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
     def op_forward(
         self,
         ctx: OperationContext,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
         **kwargs: Any,
@@ -308,7 +307,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         ----------
         ctx: OperationContext
             Context to coordinate between forward and backward passes
-        input: torch.Tensor
+        input_: torch.Tensor
             Input tensor
 
         Returns
@@ -377,7 +376,7 @@ class BasicOperation(FusableOperation, metaclass=abc.ABCMeta):
         return OperationFuser([self], fuse_ops=False)(input, [kwargs])
 
 
-class FusedOperation(FusableOperation):
+class FusedOperation(FusibleOperation):
     """Compound tensor operation supported by the operation fuser
 
     If the forward or backward passes are defined, they must be
@@ -387,14 +386,14 @@ class FusedOperation(FusableOperation):
 
     Parameters
     ----------
-    basic_ops: iterable of FusableOperation
+    basic_ops: iterable of FusibleOperation
         Basic ops that are interchangeable with this op
 
     """
 
     def __init__(
         self,
-        basic_ops: Iterable[FusableOperation],
+        basic_ops: Iterable[FusibleOperation],
     ) -> None:
         super().__init__()
 

@@ -163,7 +163,7 @@ def _test_all_reduce(
         x_test = x_test[rank].clone()
     x_test.requires_grad_()
 
-    # Implementation with fusable operation
+    # Implementation with fusible operation
     op = te_ops.AllReduce(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
@@ -221,7 +221,7 @@ def _test_all_gather(
         dy_test = dy_test[rank].clone()
     x_test.requires_grad_()
 
-    # Implementation with fusable operation
+    # Implementation with fusible operation
     op = te_ops.AllGather(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
@@ -279,7 +279,7 @@ def _test_reduce_scatter(
         dy_test = dy_test[rank].clone()
     x_test.requires_grad_()
 
-    # Implementation with fusable operation
+    # Implementation with fusible operation
     op = te_ops.ReduceScatter(process_group=process_group)
     y_test = op(x_test)
     y_test.backward(dy_test)
@@ -390,7 +390,7 @@ def _test_basic_linear(
                 dy_test = dy_test[local_slice, ...].clone()
     x_test.requires_grad_()
 
-    # Implementation with fusable operation
+    # Implementation with fusible operation
     with te.fp8_model_init(enabled=fp8_weight):
         op = te_ops.BasicLinear(
             in_features,
@@ -551,7 +551,7 @@ def _test_linear(
                 dy_test = dy_test[local_slice, ...].clone()
     x_test.requires_grad_()
 
-    # Implementation with fusable operation
+    # Implementation with fusible operation
     with te.fp8_model_init(enabled=fp8_weight):
         model = te_ops.Sequential(
             te_ops.Linear(
@@ -688,7 +688,7 @@ def _test_fp8_scale_update(
             x_test = x_test[..., local_slice].clone()
     x_test.requires_grad_()
 
-    # Initialize fusable operation
+    # Initialize fusible operation
     op = te_ops.BasicLinear(
         in_features,
         out_features,
