@@ -1729,7 +1729,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         rotary_percent: float = 1.0,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
-        rotary_base: int = 10000,
+        rotary_base: float = 10000.0,
     ):
         """
         Parameters
