@@ -4872,7 +4872,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Filter: QKV layout.
             if qkv_format == "thd":
                 if use_unfused_attention:
-                    self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
+                    self.logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
                     use_unfused_attention = False
                 if use_fused_attention and (
                     (
@@ -5011,15 +5011,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if use_fused_attention:
                     self.logger.debug("Disabling FusedAttention for arbitrary mask")
                 use_fused_attention = False
-
-            if (
-                use_unfused_attention
-                and inference_params is None
-                and "causal" in attn_mask_type
-                and max_seqlen_q != max_seqlen_kv
-            ):
-                self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
-                use_unfused_attention = False
 
             # Filter: bias.
             global _alibi_cache

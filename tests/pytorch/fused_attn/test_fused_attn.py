@@ -192,8 +192,6 @@ def _is_unfused_attention_supported(
     """Check if UnfusedDotProductAttention supports a model configuration"""
     if "padding" in config.attn_mask_type:
         return False
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        return False
     if qkv_format == "thd":
         return False
     return True
