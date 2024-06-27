@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 """JAX/TE base custom ops"""
+import os
+import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
 
@@ -16,6 +18,16 @@ class BasePrimitive(metaclass=ABCMeta):
     """
     jax primitive
     """
+
+    name = None
+
+    @classmethod
+    def enabled(cls):
+        pattern = os.getenv("NVTE_CUSTOM_CALLS_RE", r".*")
+        pattern = re.compile(pattern)
+        is_enabled = pattern.match(cls.name) is not None
+        print(f"{pattern=} {cls.name=} {is_enabled=}")
+        return is_enabled
 
     @staticmethod
     @abstractmethod
