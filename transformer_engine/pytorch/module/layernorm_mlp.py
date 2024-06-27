@@ -1301,6 +1301,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             and not get_ub("fc1_fprop").is_atomic_gemm()
         )
 
+        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_rs, ub_overlap_ag, ub_overlap_rs_dgrad]):
+            assert tex.userbuf_comm_available(), "Userbuffer communication backend not available."
+
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:

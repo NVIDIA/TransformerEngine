@@ -36,8 +36,6 @@ from ..cpp_extensions import (
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
 
-__all__ = ["initialize_ub", "destroy_ub"]
-
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
@@ -79,7 +77,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
 
 def initialize_ub(
     shape: list,
-    tp_group: dist_group_type,
+    tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
@@ -89,9 +87,6 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
     rank_id = torch.distributed.get_rank()
-    world_size = torch.distributed.get_world_size()
-    tp_id = torch.distributed.get_rank(tp_group)
-    tp_size = torch.distributed.get_world_size(tp_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -130,13 +125,13 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
-        is_reduce_scatter: int,
+        is_reduce_scatter: bool,
         num_sm: int = 16,
         cga_size: int = 2,
         set_sm_margin: int = 0,
         num_splits: int = 0,
-        aggregate: int = 0,
-        atomic_gemm: int = 0,
+        aggregate: bool = False,
+        atomic_gemm: bool = False,
         use_ce: bool = True,
         fp8_buf: bool = False,
     ) -> None:
@@ -181,8 +176,6 @@ def initialize_ub(
             ub_obj = tex.UbufP2PCommOverlap(
                 sample_buffer,  # Sample userbuffer
                 rank_id,  # Rank id
-                world_size,  # World size
-                tp_id,  # TP id
                 tp_size,  # TP size
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
@@ -191,15 +184,13 @@ def initialize_ub(
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
                 is_reduce_scatter,  # overlap with reduce scatter
                 atomic_gemm,  # use a single GEMM with atomic-counters
-                use_ce,  # use copy engine for P2P communications
+                use_ce,  # use copy engine for send/recv
                 torch.Tensor(),  # empty tensor to pass to counters
             )
         else:
             ub_obj = tex.UbufCommOverlap(
                 sample_buffer,  # Sample userbuffer
                 rank_id,  # Rank id
-                world_size,  # World size
-                tp_id,  # TP id
                 tp_size,  # TP size
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
@@ -210,22 +201,6 @@ def initialize_ub(
                 torch.Tensor(),  # empty tensor to pass to counters
             )
         _ub_communicators[name] = ub_obj
-
-    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
-        pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
-
-    def barrier_callback(group: str) -> None:
-        pg = None if group == "world" else tp_group
-        torch.distributed.barrier(group=pg)
-
-    def free_callback(data: torch.Tensor) -> None:
-        data.data = torch.Tensor()
-
-    tex.set_ubuf_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -243,12 +218,12 @@ def initialize_ub(
             method = ub_cfg.get("method", get_method(name))
             num_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
             cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
-            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
-            aggregate = ub_cfg.get("aggregate", 0)
-            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
+            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else tp_size)
+            aggregate = ub_cfg.get("aggregate", False)
+            atomic_gemm = ub_cfg.get("atomic_gemm", False)
             use_ce = ub_cfg.get("use_ce", True)
-            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
+            is_reduce_scatter = name in layers_reduce_scatter_overlap
+            set_sm_margin = ub_cfg.get("set_sm_margin", is_reduce_scatter)
             # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
                 ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
@@ -271,7 +246,7 @@ def initialize_ub(
             add_ub(
                 name,
                 method=method,
-                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
+                is_reduce_scatter=name in layers_reduce_scatter_overlap,
                 num_splits=4 if method == "pipeline" else 0,
                 fp8_buf=name in layers_all_gather_overlap,
             )
@@ -283,14 +258,6 @@ def get_ub(name: str):
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
     return _ub_communicators[name]
-
-
-def destroy_ub():
-    """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators
-    _ub_communicators = None
-    global layers_atomic_ring_exchange
-    layers_atomic_ring_exchange = []
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):

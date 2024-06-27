@@ -755,6 +755,7 @@ class Linear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         if ub_overlap_rs or ub_overlap_ag:
             assert ub_name is not None, "Userbuffer name [string] is not set."
+            assert tex.userbuf_comm_available(), "Userbuffer communication backend not available."
         self.ub_name = ub_name
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name

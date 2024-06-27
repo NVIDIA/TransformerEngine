@@ -4,9 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
-#define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
-
 #include "common.h"
 #include "common/common.h"
 
@@ -376,6 +373,10 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+bool userbuf_comm_available();
+
+void placeholder();
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
@@ -439,5 +440,3 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
-
-#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

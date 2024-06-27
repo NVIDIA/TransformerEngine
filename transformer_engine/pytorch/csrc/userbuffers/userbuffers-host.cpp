@@ -9,32 +9,34 @@
 #include <cuda_runtime_api.h>
 #include <inttypes.h>
 #include <math.h>
+#include <mpi.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <chrono>
-#include <iostream>
-#include <map>
-#include <utility>
-
-#include "../util/cuda_driver.h"
+#include "common/util/cuda_driver.h"
 #include "ipcsocket.h"
 #include "userbuffers.h"
 
-#ifdef UB_MPI_BOOTSTRAP
-#include <mpi.h>
-static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
-static MPI_Comm EXT_COMM_INTRA;
-static MPI_Comm EXT_COMM_INTER;
-#else
-static char EXT_COMM_WORLD[] = "world";
-static char EXT_COMM_INTRA[] = "intra";
-static char EXT_COMM_INTER[] = "inter";
-#endif
-
 #define MULTICAST_GB_TOTAL 512
+
+static int oob_bcast(void *comm_context, void *buf, int size, int root) {
+  MPI_Bcast(buf, size, MPI_BYTE, root,
+            (reinterpret_cast<communicator *>(comm_context))->comm_inter);
+  return 0;
+}
+
+static int oob_barrier(void *comm_context) {
+  MPI_Barrier((reinterpret_cast<communicator *>(comm_context))->comm_inter);
+  return 0;
+}
+
+static int oob_gather(void *comm_context, int root, void *sbuf, void *rbuf, int len) {
+  MPI_Gather(sbuf, len, MPI_BYTE, rbuf, len, MPI_BYTE, root,
+             (reinterpret_cast<communicator *>(comm_context))->comm_inter);
+  return 0;
+}
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
@@ -83,23 +85,18 @@ int pipe_rank(communicator *comm, int step) {
   return newnode * numlocal + newlocal;
 }
 
-int create_communicator_grouped2(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes) {
-  *comm = new communicator();
+int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
+                                 int tensornodes) {
+  *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
-  (*comm)->comm_world = EXT_COMM_WORLD;
-  (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
-  (*comm)->_barrier = ext_barrier;
-  (*comm)->_free = ext_free;
-  (*comm)->nranks = numranks;
+  int myrank, nranks, cur_dev, ndev;
+  MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+  MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+  (*comm)->nranks = nranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
   (*comm)->launch_mode = NVTE_LAUNCH_GPU | NVTE_LAUNCH_CPU;
 
-  int cur_dev, ndev;
   cudaDeviceProp device_prop;
   CUDACHECK(cudaGetDevice(&cur_dev));
   CUDACHECK(cudaGetDeviceCount(&ndev));
@@ -126,7 +123,32 @@ int create_communicator_grouped2(
            (*comm)->ub_timeout, device_clock);
   }
 
-  (*comm)->comm_intra = EXT_COMM_INTRA;
+  int ret = 0;
+  // split communicator
+  char host_name[MPI_MAX_PROCESSOR_NAME];
+  char(*host_names)[MPI_MAX_PROCESSOR_NAME];
+  int namelen, bytes, color, my_node, mylocal, numlocal, num_nodes;
+  int rank = (*comm)->myrank, size = (*comm)->nranks;
+  MPI_Get_processor_name(host_name, &namelen);
+  bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
+  host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
+  strcpy(host_names[rank], host_name);  // NOLINT(*)
+  for (int n = 0; n < size; n++)
+    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, MPI_COMM_WORLD);
+  qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
+
+  color = 0;
+  for (int n = 0; n < size; n++) {
+    if (n > 0 && strcmp(host_names[n - 1], host_names[n])) color++;
+    if (strcmp(host_name, host_names[n]) == 0) break;
+  }
+  free(host_names);
+
+  MPI_Comm_split(MPI_COMM_WORLD, color, rank, &(*comm)->comm_intra);
+  // find intranode numbers and make internode communicator
+  // figure out mylocal
+  MPI_Comm_rank((*comm)->comm_intra, &mylocal);
+  MPI_Comm_size((*comm)->comm_intra, &numlocal);
   (*comm)->nvrank = mylocal;
   (*comm)->nvsize = numlocal;
 
@@ -153,7 +175,7 @@ int create_communicator_grouped2(
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
-      printf("%d: device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev, mylocal);
+      printf("%d: device used %d[%d] ,resetting device to %d\n", rank, cur_dev, ndev, mylocal);
     CUDACHECK(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
@@ -169,22 +191,31 @@ int create_communicator_grouped2(
   (*comm)->ar2_firstgpu = mylocal - mylocal % tensorgpus;
   (*comm)->ar2_nvrank = mylocal - (*comm)->ar2_firstgpu;
   // ar2 has step equal to ar_nvsize
-  int allnodes = numranks / numlocal;
-  int nodeid = myrank / numlocal;
+  int allnodes = nranks / numlocal;
+  int mynode = myrank / numlocal;
   int datanodes = allnodes / pipenodes / tensornodes;
   int pipenodegroup_id = myrank / numlocal / (datanodes * tensornodes);
 
   (*comm)->pipe_id = pipegpus * pipenodegroup_id + mylocal / (datagpus * tensorgpus);
 
-  (*comm)->comm_inter = EXT_COMM_INTER;
-  (*comm)->first_node = nodeid - mynode;
-  (*comm)->num_nodes = numnodes;
-  (*comm)->my_node = mynode;
+  CUDACHECK(cudaFree(0));
+  int datanodegroup_id =
+      myrank / numlocal / datanodes;  // data reduction group node belongs, equals 0 for all if both
+                                      // pipenodes=1 and tensornodes=1
+  // mpi communicator only needed for SHARP which is always
+  // allreduce1/data-parallel
+  MPI_Comm_split(MPI_COMM_WORLD, mylocal + numlocal * datanodegroup_id, rank, &(*comm)->comm_inter);
+  // different rails from same group are in different subcommunicators
+
+  MPI_Comm_size((*comm)->comm_inter, &num_nodes);
+  MPI_Comm_rank((*comm)->comm_inter, &my_node);
+  (*comm)->first_node = mynode - my_node;
+  (*comm)->num_nodes = num_nodes;
+  (*comm)->my_node = my_node;
 
   (*comm)->num2_nodes = tensornodes;
   (*comm)->my2_node = (mynode / datanodes) % tensornodes;
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
-
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
@@ -210,18 +241,13 @@ int create_communicator_grouped2(
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
 
-    // Broadcast the a POSIX file descriptor from the local root rank to other local ranks.
-    // NOTE: This cannot be done via MPI_Bcast or other external comm libraries. They mangle the
-    //       file descriptor and prevent cuMemImportFromShareableHandle() from correctly
-    //       interpreting the file. Instead, we use system socket to send/recv the file handle
-    //       without mangling.
     int fd;
     volatile uint32_t abortFlag = 0;
     struct ncclIpcSocket ipcSock = {0};
     uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
     ncclResult_t ret = ncclSuccess;
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
-    (*comm)->_barrier((*comm)->comm_world);
+    MPI_Barrier(MPI_COMM_WORLD);
 
     if ((*comm)->ar2_nvrank == 0) {
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastCreate, &(*comm)->mc_handle, &mcProp);
@@ -231,17 +257,17 @@ int create_communicator_grouped2(
           (uint64_t)0);
 
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-        (*comm)->_barrier((*comm)->comm_intra);
+        MPI_Barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
-      for (int i = 0; i < (*comm)->ar2_nvrank; i++) (*comm)->_barrier((*comm)->comm_intra);
+      for (int i = 0; i < (*comm)->ar2_nvrank; i++) MPI_Barrier((*comm)->comm_intra);
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
       for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
-        (*comm)->_barrier((*comm)->comm_intra);
-      NVTE_CALL_CHECK_CUDA_DRIVER(
-          cuMemImportFromShareableHandle, &(*comm)->mc_handle, reinterpret_cast<void *>(fd),
-          static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        MPI_Barrier((*comm)->comm_intra);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &(*comm)->mc_handle,
+                                  reinterpret_cast<void *>(fd),
+                                  CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
     }
   error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
@@ -263,7 +289,7 @@ int create_communicator_grouped2(
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
-    (*comm)->_barrier((*comm)->comm_world);
+    MPI_Barrier(MPI_COMM_WORLD);
     if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
     if (!(*comm)->myrank) printf("MC NOT initialized and used\n");
@@ -275,10 +301,12 @@ int create_communicator_grouped2(
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
-  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs, LOCALSIZE));  // flags and pointers, no block data yet
+  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs,
+                       LOCALSIZE));  // flags and pointers, no block data yet
   CUDACHECK(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
   CUDACHECK(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, false);
+  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE,
+                                  *comm);  // will use handler 0
   CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
@@ -292,12 +320,12 @@ int create_communicator_grouped2(
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
 
   CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
+  unsigned int flag = 1;
   CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags =
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
   using namespace std;
-
   sched_param param;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -310,144 +338,23 @@ int create_communicator_grouped2(
     printf(
         "%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
         "%dx%d PIPE_ID %d/%d\n",
-        myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
-        (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
-        (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
-        pipegpus * pipenodes);
+        myrank, nranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node, (*comm)->ar_nvrank,
+        (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes, (*comm)->ar_nvsize,
+        (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id, pipegpus * pipenodes);
   fflush(NULL);
 
   return 0;
 }
 
-int create_communicator_grouped(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, pipegpus,
-                                      pipenodes, 1, 1);
+int create_communicator_grouped(communicator **comm, int pipegpus, int pipenodes) {
+  return create_communicator_grouped2(comm, pipegpus, pipenodes, 1, 1);
 }
 
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free) {
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, 1, 1, 1, 1);
+int create_communicator(communicator **comm) {
+  return create_communicator_grouped2(comm, 1, 1, 1, 1);
 }
 
-int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
-                                     int tensorgpus, int tensornodes) {
-#ifdef UB_MPI_BOOTSTRAP
-  // get global numbers
-  int myrank, numranks;
-  MPI_Comm_rank(EXT_COMM_WORLD, &myrank);
-  MPI_Comm_size(EXT_COMM_WORLD, &numranks);
-
-  // find intranode numbers and make internode communicator
-  char host_name[MPI_MAX_PROCESSOR_NAME];
-  char(*host_names)[MPI_MAX_PROCESSOR_NAME];
-  int namelen, bytes, color;
-  int rank = (*comm)->myrank, size = (*comm)->nranks;
-  MPI_Get_processor_name(host_name, &namelen);
-  bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
-  host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
-  strcpy(host_names[rank], host_name);  // NOLINT(*)
-  for (int n = 0; n < size; n++)
-    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, EXT_COMM_WORLD);
-  qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
-
-  color = 0;
-  for (int n = 0; n < size; n++) {
-    if (n > 0 && strcmp(host_names[n - 1], host_names[n])) color++;
-    if (strcmp(host_name, host_names[n]) == 0) break;
-  }
-  free(host_names);
-
-  int mylocal, numlocal;
-  MPI_Comm_split(EXT_COMM_WORLD, color, rank, &EXT_COMM_INTRA);
-  MPI_Comm_rank(EXT_COMM_INTRA, &mylocal);
-  MPI_Comm_size(EXT_COMM_INTRA, &numlocal);
-
-  // find internode numbers and make internode communicator
-  CUDACHECK(cudaFree(0));
-  int allnodes = numranks / numlocal;
-  int datanodes = allnodes / pipenodes / tensornodes;
-  // data reduction group node belongs, equals 0 for all if both pipenodes=1 and tensornodes=1
-  int datanodegroup_id = myrank / numlocal / datanodes;
-  // mpi communicator only needed for SHARP which is always allreduce1/data-parallel
-  MPI_Comm_split(EXT_COMM_WORLD, mylocal + numlocal * datanodegroup_id, rank, &EXT_COMM_INTER);
-  // different rails from same group are in different subcommunicators
-  int mynode, numnodes;
-  MPI_Comm_size(EXT_COMM_INTER, &numnodes);
-  MPI_Comm_rank(EXT_COMM_INTER, &mynode);
-
-  // finally call the abstracted constructor with MPI info
-  return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      &ub_alloc_copy_allgather, &ub_barrier, &ub_free, pipegpus,
-                                      pipenodes, tensorgpus, tensornodes);
-#else
-  NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
-                std::string("building Transformer Engine with UB_MPI_BOOTSTRAP=1"));
-#endif
-}
-
-int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipenodes) {
-  return create_communicator_grouped2_mpi(comm, pipegpus, pipenodes, 1, 1);
-}
-
-int create_communicator_mpi(communicator **comm) {
-  return create_communicator_grouped2_mpi(comm, 1, 1, 1, 1);
-}
-
-void destroy_communicator(communicator *comm) {
-  for (int hndl = 0; hndl < comm->free_region; hndl++) {
-    if (comm->mem_dealloc[hndl]) {
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree,
-                                  reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
-                                  comm->mem_size[hndl] * comm->nvsize);
-      for (int rank = 0; rank < comm->nvsize; rank++) {
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
-      }
-      free(reinterpret_cast<void *>(comm->uchandles[hndl]));
-    } else {
-      for (int rank = 0; rank < comm->nvsize; rank++) {
-        if (rank != comm->nvrank) {
-          cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]);
-        } else {
-          comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
-        }
-      }
-      free(comm->peer_ptr[hndl]);
-    }
-    comm->mem_ptr[hndl] = nullptr;
-  }
-  cudaFree(reinterpret_cast<void *>(comm->flags));
-  cudaFree(reinterpret_cast<void *>(comm->recv_id));
-  cudaFree(reinterpret_cast<void *>(comm->send_id));
-  if (comm->use_mc) {
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
-                                comm->mc_maxsize);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
-  }
-  if (comm->mem_dealloc[0]) {
-    cudaFree(comm->gpu_ptrs);
-  }
-  free(comm->fifo);
-  delete comm;
-}
-
-void destroy_communicator_mpi(communicator *comm) {
-#ifdef UB_MPI_BOOTSTRAP
-  MPI_Comm_free(comm->comm_inter);
-  MPI_Comm_free(comm->comm_intra);
-  destroy_communicator(comm);
-#else
-  NVTE_UB_ERROR(std::string("Communicator is not bootstrapped with MPI and ") +
-                std::string("can only be deallocated with destroy_communicator()."));
-#endif
-}
+void destroy_communicator(communicator *comm) {}
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
   if (comm->free_region > NVTE_MAX_REGIONS) return -1;
@@ -455,7 +362,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
   size_t aligned_size = bytes;
   comm->memflags[hndl] = 0;
-  comm->mem_dealloc[hndl] = alloc;
 
   if (alloc) {
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
@@ -505,14 +411,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     uint64_t opId = 0xdeadcafebeef;
     ncclResult_t ret = ncclSuccess;
 
-    // All-gather POSIX file descriptors across local ranks.
-    // NOTE: This cannot be done via MPI_Allgather or other external comm libraries. They mangle
-    //       the file descriptor and prevent cuMemImportFromShareableHandle() from correctly
-    //       interpreting the file. Instead, we use system socket to send/recv the file handle
-    //       without mangling.
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
     for (int p = 1; p < nranks; p++) {
-      comm->_barrier(comm->comm_intra);
+      MPI_Barrier(comm->comm_intra);
       NCCLCHECKGOTO(
           ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
           error);
@@ -576,19 +477,18 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
   } else {
     assert(comm->nvsize <= 8);
-    cudaIpcMemHandle_t memhndl;
-    CUDACHECK(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+    cudaIpcMemHandle_t *memhndl =
+        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize)));
 
-    cudaIpcMemHandle_t *tmp;
-    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
-                                sizeof(cudaIpcMemHandle_t), comm->comm_intra);
+    CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
 
-    for (int i = 0; i < comm->nvsize; i++) {
-      if (i != comm->nvrank) {
-        CUDACHECK(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
-                                       cudaIpcMemLazyEnablePeerAccess));
-      }
-    }
+    MPI_Allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl,
+                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, comm->comm_intra);
+
+    for (int i = 0; i < comm->nvsize; i++)
+      if (i != comm->nvrank)
+        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
+                                       memhndl[i], cudaIpcMemLazyEnablePeerAccess));
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
     CUDACHECK(cudaDeviceSynchronize());
 
@@ -597,7 +497,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     CUDACHECK(cudaDeviceSynchronize());
-    comm->_free(tmp);
+    free(memhndl);
   }
   comm->mem_size[hndl] = aligned_size;
 
