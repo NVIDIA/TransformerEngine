@@ -250,8 +250,8 @@ int create_communicator_grouped2(
                                 (CUdeviceptr)(*comm)->mydev);
 
     CUdeviceptr mc_va;
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0,
-                                (CUdeviceptr)0U, (uint64_t)0);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
+                                (uint64_t)0);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle,
                                 (uint64_t)0);
 
@@ -490,8 +490,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     prop.location.id = comm->mydev;
     comm->uchandles[hndl] = reinterpret_cast<CUmemGenericAllocationHandle *>(
         malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemCreate, &(comm->uchandles[hndl][myrank]), aligned_size,
-                                &prop, (uint64_t)0);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemCreate, &(comm->uchandles[hndl][myrank]), aligned_size, &prop,
+                                (uint64_t)0);
 
     int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
     NVTE_CALL_CHECK_CUDA_DRIVER(
@@ -541,8 +541,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int i = 0; i < nranks; i++) {
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, reinterpret_cast<CUdeviceptr>(remptrs[i]),
-                                  aligned_size, (size_t)0, comm->uchandles[hndl][i], (uint64_t)0);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, reinterpret_cast<CUdeviceptr>(remptrs[i]), aligned_size,
+                                  (size_t)0, comm->uchandles[hndl][i], (uint64_t)0);
       if (i == comm->nvrank) {
         if (hndl)
           *gpubuff = remptrs[i];
