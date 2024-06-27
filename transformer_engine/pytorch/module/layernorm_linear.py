@@ -544,7 +544,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 clear_tensor_data(grad_output_c)
             else:
-                logger.debug("Running backward in %s", activation_dtype)
+                logger.debug("Running backward in %s", ctx.activation_dtype)
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(

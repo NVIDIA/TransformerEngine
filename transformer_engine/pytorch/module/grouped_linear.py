@@ -401,7 +401,7 @@ class _GroupedLinear(torch.autograd.Function):
                         [d[: ctx.m_splits[i]] for i, d in enumerate(dgrad_list)], dim=0
                     )
                 else:
-                    logger.debug("Running backward in %s", activation_dtype)
+                    logger.debug("Running backward in %s", ctx.activation_dtype)
 
                     dgrad = torch.empty(
                         (sum(ctx.m_splits), weights[0].size(1)),

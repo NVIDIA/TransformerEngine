@@ -496,7 +496,7 @@ class _Linear(torch.autograd.Function):
                             dtype=ctx.activation_dtype,
                         )
                 else:
-                    logger.debug("Running backward in %s", activation_dtype)
+                    logger.debug("Running backward in %s", ctx.activation_dtype)
 
                     dgrad, _, _ = gemm(
                         weight,
