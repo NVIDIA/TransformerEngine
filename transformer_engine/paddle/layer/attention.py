@@ -407,8 +407,8 @@ class DotProductAttention(paddle.nn.Layer):
     .. warning::
 
         Fused attention backward uses a non-deterministic algorithm when workspace
-        optimization is not enabled. To use a deterministic algorithm, set the environment
-        variable :attr:`FLAGS_cudnn_deterministic=1`.
+        optimization is not enabled. To use a deterministic algorithm, set the
+        environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`
 
     Parameters
     ----------
@@ -464,7 +464,7 @@ class DotProductAttention(paddle.nn.Layer):
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
-        self.deterministic = bool(int(os.getenv("FLAGS_cudnn_deterministic", "0")))
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
         if not self.use_fused_attention and backend == "transformer_engine":
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")

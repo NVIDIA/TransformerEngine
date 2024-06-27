@@ -1080,12 +1080,12 @@ class TestFusedAttn:
         ):
             pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
-        os.environ["FLAGS_cudnn_deterministic"] = "1"
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = (
             self._get_fused_attention_with_separate_qkv()
         )
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_with_separate_qkv()
-        os.environ["FLAGS_cudnn_deterministic"] = "0"
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
         assert_allclose(reference_out, fused_attention_out, rtol=1e-12, atol=1e-12)
         assert_allclose(q_grad_ref, q_grad, rtol=1e-12, atol=1e-12)
         assert_allclose(k_grad_ref, k_grad, rtol=1e-12, atol=1e-12)
