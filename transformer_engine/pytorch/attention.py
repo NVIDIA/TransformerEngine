@@ -2383,18 +2383,23 @@ def check_set_window_size(
     window_size: Tuple[int, int] = None,
 ):
     """Check if sliding window size is compliant with mask type and if not,
-    assert or set it to the appropriate size
+    assert or set it to the appropriate size.
+        no_mask, padding      : window_size = (-1, -1) or (>=0, >=0)
+        causal, padding_causal: window_size = (-1,  0)
+        arbitrary             : window_size = (-1, -1)
     """
     if "causal" in attn_mask_type:
-        if window_size is None:
-            window_size = (-1, 0)
-        else:
-            assert (
-                window_size[1] == 0
-            ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
-    else:
-        if window_size is None:
+        window_size = (-1, 0)
+    elif attn_mask_type in ["padding", "no_mask"]:
+        if window_size is None or window_size in [(-1, -1), (-1, 0)]:
             window_size = (-1, -1)
+            warnings.warn(
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="+attn_mask_type)
+        elif window_size[0] < 0 or window_size[0] < 0:
+            assert False, "window_size should be (-1, -1) or (>=0, >=0) " \
+                "for attn_mask_type="+attn_mask_type
+    elif attn_mask_type == "arbitrary":
+        window_size = (-1, -1)
     return window_size
 
 
@@ -4384,8 +4389,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if attn_mask_type == "causal_padding":
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
-        self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, window_size)
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -4726,8 +4730,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
 
-            if attn_mask_type is not None:
-                window_size = check_set_window_size(attn_mask_type, window_size)
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
@@ -4743,6 +4745,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "padding" in attn_mask_type
                 ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
 
+            if window_size is None:
+                window_size = self.window_size
+            window_size = check_set_window_size(attn_mask_type, window_size)
+
             if self.rng_states_tracker is not None and is_graph_capturing():
                 assert isinstance(
                     self.rng_states_tracker, CudaRNGStatesTracker
@@ -4750,9 +4756,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     graph_safe_rng_available()
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
-
-            if window_size is None:
-                window_size = self.window_size
 
             if qkv_format is None:
                 qkv_format = self.qkv_format
@@ -5512,8 +5515,7 @@ class MultiheadAttention(torch.nn.Module):
 
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
-        self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, window_size)
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -5811,12 +5813,11 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if attn_mask_type is not None:
-            window_size = check_set_window_size(attn_mask_type, window_size)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
             window_size = self.window_size
+        window_size = check_set_window_size(attn_mask_type, window_size)
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for i, _ in enumerate(attention_mask):
