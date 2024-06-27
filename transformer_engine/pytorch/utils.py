@@ -3,9 +3,10 @@
 # See LICENSE for license information.
 
 """Utility functions for Transformer Engine modules"""
-import math
 import functools
+import math
 from typing import Any, Callable, Optional, Tuple
+
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 
@@ -242,7 +243,7 @@ def is_bf16_compatible() -> None:
     return torch.cuda.get_device_capability()[0] >= 8
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     encoded_version = ext.get_cudnn_version()

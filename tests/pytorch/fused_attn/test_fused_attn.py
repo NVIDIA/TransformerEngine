@@ -2,16 +2,16 @@
 #
 # See LICENSE for license information.
 
-import math
 import functools
-from importlib.metadata import version
+import logging
+import math
 import os
+from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union
 
-from pkg_resources import packaging
 import pytest
 import torch
-import logging
+from pkg_resources import packaging
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
@@ -148,21 +148,21 @@ def _is_fused_attention_supported(
     return False, backends
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_available() -> bool:
     """Check if flash-attn 2.0+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2")
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_1() -> bool:
     """Check if flash-attn 2.1+ is available"""
     Version = packaging.version.Version
     return Version(version("flash-attn")) >= Version("2.1")
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _is_flash_attention_2_3() -> bool:
     """Check if flash-attn 2.3+ is available"""
     Version = packaging.version.Version
@@ -832,24 +832,6 @@ def _run_dot_product_attention(
         inp[i].requires_grad = True
         inp_orig[i].requires_grad = True
 
-    # Create ragged offsets for q/k/v
-    seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o = None, None, None, None
-    qkv_group = "".join([x for x in qkv_layout if x not in "bst"])
-    if qkv_format == "thd":
-        seq_offsets_o = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-        if qkv_group == "hd_hd_hd":
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * cu_seqlens_kv_after_pad
-        if qkv_group in ["3hd", "h3d"]:
-            seq_offsets_q = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-            seq_offsets_v = config.num_heads * config.head_dim * 3 * cu_seqlens_q_after_pad
-        if qkv_group in ["hd_2hd", "hd_h2d"]:
-            seq_offsets_q = config.num_heads * config.head_dim * cu_seqlens_q_after_pad
-            seq_offsets_k = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
-            seq_offsets_v = config.num_gqa_groups * config.head_dim * 2 * cu_seqlens_kv_after_pad
-
     # Create output gradient
     qkv_format_kv = "_".join(qkv_format)
     qkv_format_kv = qkv_format_kv.replace("s", "sq")
@@ -928,10 +910,8 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        seq_offsets_q=seq_offsets_q,
-        seq_offsets_k=seq_offsets_k,
-        seq_offsets_v=seq_offsets_v,
-        seq_offsets_o=seq_offsets_o,
+        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,
@@ -1957,8 +1937,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
             fp8_meta["scaling_fwd"].scale_inv[META_QKV],
             fp8_meta["scaling_fwd"].scale_inv[META_S],
             fp8_meta["scaling_fwd"].scale[META_S],
@@ -2036,8 +2014,6 @@ class _custom_mha_fp8(torch.autograd.Function):
                 fp8_dtype_backward,
                 ctx.aux_ctx_tensors,
                 FusedAttnBackend["FP8"],
-                None,
-                None,
                 None,
                 None,
                 fwd_scale_inverses[META_QKV],  # d_scale_qkv,
