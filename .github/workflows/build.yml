@@ -12,9 +12,13 @@ jobs:
     name: 'Core'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/nvhpc:24.5-devel-cuda_multi-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:12.5.0-devel-ubuntu22.04
       options: --user root
     steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
