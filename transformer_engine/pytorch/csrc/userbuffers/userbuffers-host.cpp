@@ -648,6 +648,8 @@ error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
 
     for (int p = 0; p < nranks; p++) {
+      if (getenv("NVTE_UBDEBUG"))
+          printf(">>> Debug information nranks %d p %d myrank %d mydev %d aligned size %ld\n", nranks, p, myrank, comm->mydev, aligned_size);
       if (p != myrank)
         CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
                                                reinterpret_cast<void *>(peerfd[p]),
