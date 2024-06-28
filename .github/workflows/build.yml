@@ -28,7 +28,7 @@ jobs:
         env:
           NVTE_FRAMEWORK: none
       - name: 'Sanity check'
-        run: python -c "import transformer_engine"
+        run: python3 -c "import transformer_engine"
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest
