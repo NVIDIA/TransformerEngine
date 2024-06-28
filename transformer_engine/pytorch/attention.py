@@ -2385,12 +2385,15 @@ def check_set_window_size(
     """Check if sliding window size is compliant with mask type and if not,
     assert or set it to the appropriate size.
         no_mask, padding      : window_size = (-1, -1) or (>=0, >=0)
-        causal, padding_causal: window_size = (-1,  0)
+        causal, padding_causal: window_size = (-1,  0) or (>=0, 0)
         arbitrary             : window_size = (-1, -1)
     """
     if "causal" in attn_mask_type:
-        window_size = (-1, 0)
-    elif attn_mask_type in ["padding", "no_mask"]:
+        if window_size is None:
+            window_size = (-1, 0)
+        else:
+            window_size = (window_size[0], 0)
+    elif attn_mask_type in ["no_mask", "padding"]:
         if window_size is None or window_size in [(-1, -1), (-1, 0)]:
             window_size = (-1, -1)
             warnings.warn(
