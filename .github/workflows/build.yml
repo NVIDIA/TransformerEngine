@@ -18,7 +18,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cmake ninja-build cudnn9-cuda-12
+          apt-get install -y git python3.9 pip cmake cudnn9-cuda-12
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
