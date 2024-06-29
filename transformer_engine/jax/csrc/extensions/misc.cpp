@@ -3,10 +3,10 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <cstring>
-
 #include "jax/csrc/extensions/misc.h"
 
+#include <cstring>
+#include <numeric>
 
 namespace transformer_engine {
 namespace jax {
