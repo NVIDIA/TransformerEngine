@@ -135,8 +135,8 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
 
 def jax_version_meet_requirement(version: str = "0.4.29"):
     """
-      Helper function checking if required JAX version is available
-      """
+    Helper function checking if required JAX version is available
+    """
     jax_version = PkgVersion(get_pkg_version("jax"))
     jax_version_required = PkgVersion(version)
     return jax_version >= jax_version_required

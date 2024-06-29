@@ -14,6 +14,13 @@ pybind11::capsule EncapsulateFunction(T *fn) {
   return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
 }
 
+template <typename T>
+pybind11::capsule EncapsulateFFI(T *fn) {
+  static_assert(std::is_invocable_r_v<XLA_FFI_Error *, T, XLA_FFI_CallFrame *>,
+                "Encapsulated function must be an XLA FFI handler");
+  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
+}
+
 pybind11::dict Registrations() {
   pybind11::dict dict;
   dict["te_transpose"] = EncapsulateFunction(Transpose);
@@ -44,18 +51,15 @@ pybind11::dict Registrations() {
       EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
-  return dict;
-}
 
-pybind11::dict RegistrationsWithFFI() {
-    pybind11::dict dict;
-    dict["te_cast_transpose_ffi"] = EncapsulateFunction(CastTransposeFFI);
-    return dict;
+  dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
+  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
+  return dict;
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("registrations_with_ffi", &RegistrationsWithFFI);
   m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
         pybind11::arg(), pybind11::arg("act_num") = 0);
   m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor, pybind11::arg(),

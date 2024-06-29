@@ -4,9 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/transformer_engine.h>
 #include <xla/ffi/api/ffi.h>
 
-#include <transformer_engine/transformer_engine.h>
+#include <numeric>
 
 namespace transformer_engine {
 namespace jax {
@@ -17,7 +18,8 @@ using Error_Type = xla::ffi::Error;
 using FFI = xla::ffi::Ffi;
 using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 
-DType convert_ffi_datatype_to_te_dtype(xla::ffi::DataType type);
+DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type);
+Error_Type ffi_with_cuda_error_check();
 
 }  // namespace jax
 }  // namespace transformer_engine

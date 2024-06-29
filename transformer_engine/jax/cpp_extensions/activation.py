@@ -16,12 +16,13 @@ from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
+from .custom_call import custom_caller, CustomCallArgsWrapper, custom_caller_with_ffi
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
     get_padded_spec,
+    jax_version_meet_requirement,
 )
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
@@ -120,14 +121,24 @@ class ActLuPrimitive(BasePrimitive):
         operand_shapes = [ir_x_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        hidden_size = ir_x_shape[-1]
-        batch_size = reduce(operator.mul, ir_x_shape[:-2])
-        in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (batch_size, hidden_size), in_dtype, in_dtype, act_enum
-        )
+        if jax_version_meet_requirement():
+            name = "te_act_lu_ffi"
+            # One can store additional attr here, i.e activation_type etc
+            # backend_config={'attr_name' : ir.IntegerAttr.get(bits, value)})
+            backend_config = dict(
+                act_enum=ir.IntegerAttr.get(ir.IntegerType.get_signless(64), act_enum)
+            )
 
-        out = custom_caller(ActLuPrimitive.name, args, opaque, False)
+            out = custom_caller_with_ffi(name, args, backend_config)
+        else:
+            hidden_size = ir_x_shape[-1]
+            batch_size = reduce(operator.mul, ir_x_shape[:-2])
+            in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                (batch_size, hidden_size), in_dtype, in_dtype, act_enum
+            )
+
+            out = custom_caller(ActLuPrimitive.name, args, opaque, False)
 
         return out
 
@@ -253,12 +264,23 @@ class DActLuPrimitive(BasePrimitive):
         operand_shapes = [ir_in_shape, gi_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
-        )
+        if jax_version_meet_requirement():
+            name = "te_dact_lu_ffi"
+            # One can store additional attr here, i.e activation_type etc
+            # backend_config={'attr_name' : ir.IntegerAttr.get(bits, value)})
+            backend_config = dict(
+                act_enum=ir.IntegerAttr.get(ir.IntegerType.get_signless(64), act_enum)
+            )
 
-        out = custom_caller(DActLuPrimitive.name, args, opaque, False)
+            out = custom_caller_with_ffi(name, args, backend_config)
+        else:
+
+            in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
+            )
+
+            out = custom_caller(DActLuPrimitive.name, args, opaque, False)
 
         return out
 

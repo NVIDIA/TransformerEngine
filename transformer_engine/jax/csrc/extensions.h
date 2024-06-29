@@ -7,34 +7,31 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
+#include <cublasLt.h>
+#include <cublas_v2.h>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <transformer_engine/transformer_engine.h>
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <iostream>
 #include <stdexcept>
 #include <string>
-#include <iostream>
+#include <vector>
 
-#include <cuda_runtime_api.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cudnn.h>
-
-#include <transformer_engine/transformer_engine.h>
-#include "transformer_engine/activation.h"
 #include "common/common.h"
 #include "common/util/logging.h"
-#include "utils.h"
 #include "extensions/misc.h"
 #include "jax/csrc/extensions/ffi.h"
-
+#include "transformer_engine/activation.h"
+#include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
-
 
 // Phuong: These 3 functions need to stay in the header file for compilation purpose
 // 1.
@@ -53,8 +50,6 @@ const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
   }
   return reinterpret_cast<const T *>(opaque);
 }
-
-std::vector<size_t> MakeShapeVector(NVTEShape shape);
 
 // Packing
 
@@ -157,13 +152,9 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
 
-Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
-                      Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
-                      Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
-                      Result_Type amax_out_buf);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
 
-void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
-                             size_t opaque_len);
+void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 // Activation
 
@@ -174,6 +165,10 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                         DType in_dtype, DType out_dtype);

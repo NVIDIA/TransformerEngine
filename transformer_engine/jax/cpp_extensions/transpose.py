@@ -16,11 +16,7 @@ from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import (
-    custom_caller,
-    custom_caller_with_ffi,
-    CustomCallArgsWrapper
-)
+from .custom_call import custom_caller, custom_caller_with_ffi, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
@@ -29,7 +25,7 @@ from .misc import (
     get_padded_spec,
     multidim_transpose,
     normalize_axis_boundary,
-    jax_version_meet_requirement
+    jax_version_meet_requirement,
 )
 from .activation import ActivationEnum
 from .activation import _jax_act_lu
@@ -292,27 +288,27 @@ class CastTransposePrimitive(BasePrimitive):
         operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        if jax_version_meet_requirement():
-            CastTransposePrimitive.name = "te_cast_transpose_ffi"
+        if not jax_version_meet_requirement():
             # One can store additional attr here, i.e activation_type etc
-            # backend_config={'attr_name' : ir.IntegerAttr.get(bits, value)}) 
-            backend_config = None
+            # backend_config={'attr_name' : ir.IntegerAttr.get(bits, value)})
+            backend_config = {}
 
-            out = custom_caller_with_ffi(CastTransposePrimitive.name,
-                                     args,
-                                     backend_config,
-                                     operand_output_aliases={1: 2})
+            out = custom_caller_with_ffi(
+                "te_cast_transpose_ffi", args, backend_config, operand_output_aliases={1: 2}
+            )
         else:
-            contracted_x_shape = (reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
-                              reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
-            opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
-                                                               jax_dtype_to_te_dtype(x_aval.dtype),
-                                                               jax_dtype_to_te_dtype(out_dtype))
-            out = custom_caller(CastTransposePrimitive.name,
-                            args,
-                            opaque,
-                            False,
-                            operand_output_aliases={1: 2})
+            contracted_x_shape = (
+                reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
+                reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),
+            )
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                contracted_x_shape,
+                jax_dtype_to_te_dtype(x_aval.dtype),
+                jax_dtype_to_te_dtype(out_dtype),
+            )
+            out = custom_caller(
+                CastTransposePrimitive.name, args, opaque, False, operand_output_aliases={1: 2}
+            )
         return out
 
     @staticmethod
@@ -401,6 +397,7 @@ class CastTransposePrimitive(BasePrimitive):
             return local_cx, local_cxt, global_updated_amax
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
 
 register_primitive(CastTransposePrimitive)
 
