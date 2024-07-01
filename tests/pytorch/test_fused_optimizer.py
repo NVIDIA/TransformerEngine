@@ -10,6 +10,9 @@ import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 
 
 class TestFusedOptimizer(unittest.TestCase):
@@ -169,6 +172,83 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
+    def test_bf16_model_weight_cast(self):
+        dtype = torch.bfloat16
+        model = MultiheadAttention(
+            hidden_size=1024,
+            num_attention_heads=16,
+            layer_number=1,
+            params_dtype=dtype,
+            fuse_qkv_params=True,
+        ).cuda()
+        ref_params = []
+        master_params = []
+        model_params = []
+        for p in model.parameters():
+            if p.requires_grad:
+                ref_params.append(p.detach().clone().float())
+                master_params.append(p.detach().clone().float())
+                model_params.append(p)
+        options = {
+            "lr": 5e-4,
+            "betas": (0.9, 0.999),
+            "eps": 1e-08,
+            "weight_decay": 0,
+            "amsgrad": False,
+        }
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(master_params, extra_param_out=True, **options)
+        tst_optim.param_groups[0]["extra_params"] = model_params
+
+        for i in range(self.iters):
+            self.gen_grad(ref_params, master_params)
+            ref_optim.step()
+            tst_optim.step()
+            torch.testing.assert_close(ref_params, master_params)
+            model_params_to_fp32 = [p.float() for p in model_params]
+            torch.testing.assert_close(
+                ref_params, model_params_to_fp32, rtol=1e-3, atol=1e-3, equal_nan=True
+            )
+
+    def test_fp8_model_weight_cast(self):
+        dtype = torch.bfloat16
+        with fp8_model_init(enabled=True):
+            model = MultiheadAttention(
+                hidden_size=1024,
+                num_attention_heads=16,
+                layer_number=1,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            ).cuda()
+        ref_params = []
+        master_params = []
+        model_params = []
+        for p in model.parameters():
+            if p.requires_grad:
+                ref_params.append(p.detach().clone().float())
+                master_params.append(p.detach().clone().float())
+                model_params.append(p)
+        options = {
+            "lr": 5e-4,
+            "betas": (0.9, 0.999),
+            "eps": 1e-08,
+            "weight_decay": 0,
+            "amsgrad": False,
+        }
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(master_params, extra_param_out=True, **options)
+        tst_optim.param_groups[0]["extra_params"] = model_params
+
+        for i in range(self.iters):
+            self.gen_grad(ref_params, master_params)
+            ref_optim.step()
+            tst_optim.step()
+            torch.testing.assert_close(ref_params, master_params)
+            model_params_to_fp32 = [p.float() for p in model_params]
+            torch.testing.assert_close(
+                ref_params, model_params_to_fp32, rtol=1e-2, atol=1e-2, equal_nan=True
+            )
+
 
 class TestFusedSGD(TestFusedOptimizer):
     def __init__(self, *args, **kwargs):
@@ -183,7 +263,7 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
+    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
         for current_dev, tensor_dev in product(devices, devices):
@@ -447,8 +527,8 @@ class AdamTest(unittest.TestCase):
 
     @largeTensorTest("60GB", "cuda")
     def testLargeTensor(self):
-        t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
-        t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
+        t = torch.zeros(2359332864, dtype=torch.half, device='cuda')
+        t2 = torch.zeros(2359332864, dtype=torch.half, device='cuda')
         grad = torch.randn_like(t)
         t.grad = grad
         t2.grad = grad
