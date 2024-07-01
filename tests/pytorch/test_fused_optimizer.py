@@ -263,7 +263,7 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
+    @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
         for current_dev, tensor_dev in product(devices, devices):
@@ -527,8 +527,8 @@ class AdamTest(unittest.TestCase):
 
     @largeTensorTest("60GB", "cuda")
     def testLargeTensor(self):
-        t = torch.zeros(2359332864, dtype=torch.half, device='cuda')
-        t2 = torch.zeros(2359332864, dtype=torch.half, device='cuda')
+        t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
+        t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)
         t.grad = grad
         t2.grad = grad
