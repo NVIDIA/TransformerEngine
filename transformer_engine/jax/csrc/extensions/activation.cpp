@@ -102,7 +102,7 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 }
 
 Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf,
-                    std::int64_t act_enum) {
+                    int64_t act_enum) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.dtype);
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->dtype);
 
