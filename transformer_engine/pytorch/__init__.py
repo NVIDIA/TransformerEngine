@@ -41,6 +41,7 @@ from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.permutation import Permute, Unpermute
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
