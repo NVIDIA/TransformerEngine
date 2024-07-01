@@ -124,7 +124,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGELU", NVTE_Activation_Type::QGELU)
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
-      .value("SREGLU", NVTE_Activation_Type::SREGLU);
+      .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .export_values()
+      .def("__int__", [](const NVTE_Activation_Type &e) { return static_cast<int>(e); });
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
