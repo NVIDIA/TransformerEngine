@@ -6,8 +6,8 @@
 
 #include "extensions.h"
 
-constexpr int block_size = 512;
-constexpr int ctas_per_sm = 4;
+//constexpr int block_size = 512;
+//constexpr int ctas_per_sm = 4;
 
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
@@ -24,39 +24,39 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q
   return fused_attention_backend;
 }
 
-// fast zero-fills of tensors
-template <typename scalar_t>
-__global__ void __launch_bounds__(block_size)
-    mha_fill_kernel(scalar_t *out_tensor, const int32_t *const start_row, const size_t num_rows) {
-  size_t row_stride = gridDim.y * blockDim.x;
-  size_t row_index = blockIdx.x + static_cast<size_t>(start_row[0]);
-  size_t col_index = blockIdx.y * blockDim.x + threadIdx.x;
-  while (row_index < num_rows) {
-    out_tensor[row_index * row_stride + col_index] = 0;
-    row_index += gridDim.x;
-  }
-}
-
-// fast zero-fills of tensors
-void mha_fill(const at::Tensor &self, const at::Tensor &start_index) {
-  auto max_tokens = self.size(0);
-  auto self_2d = self.view({max_tokens, -1});
-  auto fcd_size = self_2d.size(1);
-  TORCH_CHECK(self.is_contiguous(), "input not contiguous");
-  TORCH_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
-  const int num_mp = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  uint64_t num_blk_y = (uint64_t)(fcd_size / block_size);
-  uint64_t num_blk_x = (uint64_t)((num_mp * ctas_per_sm + num_blk_y - 1) / num_blk_y);
-  dim3 dim_grid(num_blk_x, num_blk_y);
-  dim3 dim_block(block_size);
-  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, self_2d.scalar_type(), "mha_fill", [&]() {
-        mha_fill_kernel<<<dim_grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(
-            self_2d.data_ptr<scalar_t>(), static_cast<int32_t *>(start_index.data_ptr()),
-            max_tokens);
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-      });
-}
+//// fast zero-fills of tensors
+//template <typename scalar_t>
+//__global__ void __launch_bounds__(block_size)
+//    mha_fill_kernel(scalar_t *out_tensor, const int32_t *const start_row, const size_t num_rows) {
+//  size_t row_stride = gridDim.y * blockDim.x;
+//  size_t row_index = blockIdx.x + static_cast<size_t>(start_row[0]);
+//  size_t col_index = blockIdx.y * blockDim.x + threadIdx.x;
+//  while (row_index < num_rows) {
+//    out_tensor[row_index * row_stride + col_index] = 0;
+//    row_index += gridDim.x;
+//  }
+//}
+//
+//// fast zero-fills of tensors
+//void mha_fill(const at::Tensor &self, const at::Tensor &start_index) {
+//  auto max_tokens = self.size(0);
+//  auto self_2d = self.view({max_tokens, -1});
+//  auto fcd_size = self_2d.size(1);
+//  TORCH_CHECK(self.is_contiguous(), "input not contiguous");
+//  TORCH_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
+//  const int num_mp = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+//  uint64_t num_blk_y = (uint64_t)(fcd_size / block_size);
+//  uint64_t num_blk_x = (uint64_t)((num_mp * ctas_per_sm + num_blk_y - 1) / num_blk_y);
+//  dim3 dim_grid(num_blk_x, num_blk_y);
+//  dim3 dim_block(block_size);
+//  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND2(
+//      at::ScalarType::Half, at::ScalarType::BFloat16, self_2d.scalar_type(), "mha_fill", [&]() {
+//        mha_fill_kernel<<<dim_grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(
+//            self_2d.data_ptr<scalar_t>(), static_cast<int32_t *>(start_index.data_ptr()),
+//            max_tokens);
+//        C10_CUDA_KERNEL_LAUNCH_CHECK();
+//      });
+//}
 
 // extract seed and offset from PhiloxCudaState
 __global__ void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
@@ -108,14 +108,14 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens, te_cu_seqlens_padded;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    auto h = q_shape[q_shape.size() - 2];
-    auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      O.fill_(0);
-    }
+    //auto h = q_shape[q_shape.size() - 2];
+    //auto d = q_shape[q_shape.size() - 1];
+    //if (set_zero && ((h * d) % block_size == 0) &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  O.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!scale_S.has_value()) ||
         (!scale_O.has_value()) || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
@@ -259,13 +259,13 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   TensorWrapper te_QKV, te_O, te_dO, te_S, te_dP, te_dQKV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(dQKV, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      dQKV.fill_(0);
-    }
+    //auto d = q_shape[q_shape.size() - 1];
+    //if (set_zero && ((h * d) % block_size == 0) &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(dQKV, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  dQKV.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!descale_O.has_value()) ||
         (!descale_dO.has_value()) || (!descale_dP.has_value()) || (!scale_S.has_value()) ||
         (!scale_dP.has_value()) || (!scale_dQKV.has_value()) || (!amax_dP.has_value()) ||
@@ -405,14 +405,14 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    auto h = q_shape[q_shape.size() - 2];
-    auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      O.fill_(0);
-    }
+    //auto h = q_shape[q_shape.size() - 2];
+    //auto d = q_shape[q_shape.size() - 1];
+    //if (set_zero && ((h * d) % block_size == 0) &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  O.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!scale_S.has_value()) ||
         (!scale_O.has_value()) || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
@@ -578,14 +578,14 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   TensorWrapper te_Q, te_KV, te_O, te_dO, te_S, te_dP, te_dQ, te_dKV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h_q * d) % block_size == 0) && ((h_kv * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      mha_fill(dKV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      dQ.fill_(0);
-      dKV.fill_(0);
-    }
+    //if (set_zero && ((h_q * d) % block_size == 0) && ((h_kv * d) % block_size == 0) &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //  mha_fill(dKV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  dQ.fill_(0);
+    //  dKV.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!descale_O.has_value()) ||
         (!descale_dO.has_value()) || (!descale_dP.has_value()) || (!scale_S.has_value()) ||
         (!scale_dP.has_value()) || (!scale_dQKV.has_value()) || (!amax_dP.has_value()) ||
@@ -749,12 +749,12 @@ std::vector<at::Tensor> fused_attn_fwd(
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      O.fill_(0);
-    }
+    //if (set_zero && ((h * d) % block_size == 0) &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  O.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!scale_S.has_value()) ||
         (!scale_O.has_value()) || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, descale_S, scale_S, scale_O, amax_S and amax_O ";
@@ -988,17 +988,17 @@ std::vector<at::Tensor> fused_attn_bwd(
   TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h_q * d) % block_size == 0) && ((h_kv * d) % block_size == 0) &&
-        dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous() &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      mha_fill(dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      mha_fill(dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      dQ.fill_(0);
-      dK.fill_(0);
-      dV.fill_(0);
-    }
+    //if (set_zero && ((h_q * d) % block_size == 0) && ((h_kv * d) % block_size == 0) &&
+    //    dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous() &&
+    //    (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    //  mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //  mha_fill(dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //  mha_fill(dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    //} else {
+    //  dQ.fill_(0);
+    //  dK.fill_(0);
+    //  dV.fill_(0);
+    //}
     if ((!descale_QKV.has_value()) || (!descale_S.has_value()) || (!descale_O.has_value()) ||
         (!descale_dO.has_value()) || (!descale_dP.has_value()) || (!scale_S.has_value()) ||
         (!scale_dP.has_value()) || (!scale_dQKV.has_value()) || (!amax_dP.has_value()) ||
