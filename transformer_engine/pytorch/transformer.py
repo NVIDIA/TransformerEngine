@@ -270,8 +270,7 @@ class TransformerLayer(torch.nn.Module):
         super().__init__()
 
         self.self_attn_mask_type = self_attn_mask_type
-        self.window_size = window_size
-        self.window_size = check_set_window_size(self_attn_mask_type, self.window_size)
+        self.window_size = check_set_window_size(self_attn_mask_type, window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -582,12 +581,11 @@ class TransformerLayer(torch.nn.Module):
                          to efficienly calculate and store the context during inference.
         """
 
-        if self_attn_mask_type is not None:
-            window_size = check_set_window_size(self_attn_mask_type, window_size)
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
             window_size = self.window_size
+        window_size = check_set_window_size(self_attn_mask_type, window_size)
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -641,6 +639,7 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
+                window_size=window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
