@@ -16,7 +16,7 @@ from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, custom_caller_with_ffi, CustomCallArgsWrapper
+from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
