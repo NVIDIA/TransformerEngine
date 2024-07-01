@@ -124,10 +124,10 @@ def _get_attention_backends(
             alibi_slopes_shape = [config.batch_size, config.num_heads]
 
     core_attention_bias_shape = config.bias_shape
-    core_attention_bias_requires_grad=False
+    core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
     if config.attn_bias_type == "post_scale_bias" and config.head_dim <= 128:
-        core_attention_bias_requires_grad=True
+        core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
     available_backends = None
@@ -185,7 +185,7 @@ def _get_attention_backends(
             fused_attn_backends.append(fused_attention_backend)
     else:
         fused_attn_backends.append(fused_attention_backend)
-    return available_backends, fused_attn_backends 
+    return available_backends, fused_attn_backends
 
 
 model_configs_base = {
@@ -253,7 +253,7 @@ def test_dot_product_attention(
         window_size=window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends 
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -987,7 +987,7 @@ def test_transformer_layer(
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends 
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:

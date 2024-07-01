@@ -248,15 +248,12 @@ def get_attention_backend(
 
     # Filter: CPU offload
     if cpu_offload and use_unfused_attention:
-        logger.debug(
-            "Disabling UnfusedDotProductAttention as it does not support CPU offload"
-        )
+        logger.debug("Disabling UnfusedDotProductAttention as it does not support CPU offload")
         use_unfused_attention = False
 
     # Filter: Data type
     if use_flash_attention and (
-        qkv_dtype not in [torch.bfloat16, torch.float16]
-        or qkv_type == Float8Tensor
+        qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type == Float8Tensor
     ):
         logger.debug(
             "Disabling FlashAttention due to unsupported QKV data type. "
@@ -266,9 +263,7 @@ def get_attention_backend(
             qkv_dtype,
         )
         use_flash_attention = False
-    if use_fused_attention and (
-        qkv_dtype not in [torch.bfloat16, torch.float16]
-    ):
+    if use_fused_attention and (qkv_dtype not in [torch.bfloat16, torch.float16]):
         logger.debug(
             "Disabling FusedAttention due to unsupported QKV data types. "
             "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
@@ -290,10 +285,7 @@ def get_attention_backend(
     if use_flash_attention and (
         head_dim > 256
         or head_dim % 8 != 0
-        or (
-            head_dim > 192
-            and device_compute_capability not in ((8, 0), (9, 0))
-        )
+        or (head_dim > 192 and device_compute_capability not in ((8, 0), (9, 0)))
     ):
         logger.debug(
             "Disabling FlashAttention due to unsupported head_dim. "
@@ -380,7 +372,8 @@ def get_attention_backend(
 
     # Filter: Attention bias
     if use_flash_attention and (
-        core_attention_bias_type not in ["no_bias", "alibi"] or core_attention_bias_shape is not None
+        core_attention_bias_type not in ["no_bias", "alibi"]
+        or core_attention_bias_shape is not None
     ):
         logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
@@ -388,7 +381,11 @@ def get_attention_backend(
     fu_core_attention_bias_type = core_attention_bias_type
     fu_core_attention_bias_shape = core_attention_bias_shape
     fu_core_attention_bias_requires_grad = core_attention_bias_requires_grad
-    if use_fused_attention and core_attention_bias_type == "alibi" and alibi_slopes_shape is not None:
+    if (
+        use_fused_attention
+        and core_attention_bias_type == "alibi"
+        and alibi_slopes_shape is not None
+    ):
         fu_core_attention_bias_type = "post_scale_bias"
         fu_core_attention_bias_requires_grad = False
         if (
@@ -397,12 +394,9 @@ def get_attention_backend(
             and alibi_slopes_shape[1] == num_heads
         ):
             fu_core_attention_bias_shape = "bhss"
-        elif (
-            len(alibi_slopes_shape) == 1
-            and alibi_slopes_shape[0] == num_heads
-        ):
+        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
             fu_core_attention_bias_shape = "1hss"
-            
+
     if (
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
@@ -439,8 +433,7 @@ def get_attention_backend(
             head_dim,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"] or (
-            context_parallel
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+            context_parallel and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
         ):
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
@@ -521,7 +514,7 @@ def get_attention_backend(
         "Available backends: FlashAttention=%s, FusedAttention=%s, UnfusedDotProductAttention=%s",
         available_backends[0],
         available_backends[1],
-        available_backends[2]
+        available_backends[2],
     )
     logger.debug("Selected backend: %s", selected_backend)
 
@@ -5162,8 +5155,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), "DotProductAttention only supports CUDA tensors."
             assert (
-                query_layer.dtype == key_layer.dtype
-                and query_layer.dtype == value_layer.dtype
+                query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
             assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
 
@@ -5339,11 +5331,19 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             core_attention_bias_shape = None
             if core_attention_bias is not None:
-                if core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == query_layer.shape[-2]:
+                if (
+                    core_attention_bias.shape[0] == batch_size
+                    and core_attention_bias.shape[1] == query_layer.shape[-2]
+                ):
                     core_attention_bias_shape = "bhss"
-                elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == query_layer.shape[-2]:
+                elif (
+                    core_attention_bias.shape[0] == 1
+                    and core_attention_bias.shape[1] == query_layer.shape[-2]
+                ):
                     core_attention_bias_shape = "1hss"
-                elif core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == 1:
+                elif (
+                    core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == 1
+                ):
                     core_attention_bias_shape = "b1ss"
                 elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
                     core_attention_bias_shape = "11ss"
@@ -5353,11 +5353,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss} shapes"
 
             pad_between_seqs = (
-                (cu_seqlens_q_padded is not None and not torch.equal(cu_seqlens_q_padded, cu_seqlens_q))
-                or (
-                    cu_seqlens_kv_padded is not None
-                    and not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
-                )
+                cu_seqlens_q_padded is not None
+                and not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+            ) or (
+                cu_seqlens_kv_padded is not None
+                and not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
             )
 
             from .cpu_offload import CPUOffloadEnabled
@@ -5383,7 +5383,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
-                core_attention_bias_requires_grad=core_attention_bias.requires_grad if core_attention_bias is not None else False,
+                core_attention_bias_requires_grad=(
+                    core_attention_bias.requires_grad if core_attention_bias is not None else False
+                ),
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
