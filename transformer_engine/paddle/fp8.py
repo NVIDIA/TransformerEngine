@@ -266,6 +266,7 @@ def amax_and_scale_update(
                 non_weight_mask=non_weight_mask,
                 current_step_id_tensor=current_step_id_tensor,
                 update_weight_scale_inv=update_weight_scale_inv,
+                fwd_update=fwd_update,
                 fp8_max=fp8_meta[fp8_max_key],
                 margin=float(fp8_meta["recipe"].margin),
                 amax_compute=amax_compute,

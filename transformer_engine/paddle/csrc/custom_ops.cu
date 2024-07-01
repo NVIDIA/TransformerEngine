@@ -1351,7 +1351,8 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
                                           paddle::Tensor &scale_inv,     // NOLINT
                                           const paddle::Tensor &non_weight_mask,
                                           const paddle::Tensor &current_step_id_tensor,
-                                          bool update_weight_scale_inv, float fp8_max, float margin,
+                                          bool update_weight_scale_inv, bool fwd_update,
+                                          float fp8_max, float margin,
                                           const std::string &amax_compute) {
   NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
 
@@ -1369,10 +1370,14 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
   auto amax_numel = amax.numel();
   size_t num_blocks = (amax_history_numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-  auto parameterSetter = [&current_step_id_tensor](phi::backends::gpu::CUDAKernelParams &params) {
-    if (!current_step_id_tensor.initialized()) return;
-    int current_step_id = (*current_step_id_tensor.data<int>());
-    params.As<bool>(7) = (current_step_id == 0);
+  const int *current_step_id_ptr = nullptr;
+  if (fwd_update) current_step_id_ptr = current_step_id_tensor.data<int>();
+  auto parameterSetter = [current_step_id_ptr,
+                          fwd_update](phi::backends::gpu::CUDAKernelParams &params) {
+    if (fwd_update) {
+      int current_step_id = *current_step_id_ptr;
+      params.As<bool>(7) = (current_step_id == 0);
+    }
   };
 
   const float *amax_ptr = amax.data<float>();
@@ -1744,7 +1749,7 @@ PD_BUILD_OP(amax_and_scale_update_inplace_legacy)
     .SetInplaceMap({{"_amax_history", "amax_history"},
                     {"_scale", "scale"},
                     {"_scale_inv", "scale_inv"}})
-    .Attrs({"update_weight_scale_inv: bool", "fp8_max: float", "margin: float",
+    .Attrs({"update_weight_scale_inv: bool", "fwd_update: bool", "fp8_max: float", "margin: float",
             "amax_compute: std::string"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace_legacy));
 

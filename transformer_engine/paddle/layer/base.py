@@ -305,7 +305,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
                     amax_and_scale_update(
                         self.fp8_meta,
-                        True,
+                        fwd_update=True,
                         update_weight_scale_inv=update_weight_scale_inv,
                         current_step_id_tensor=self.current_step_id,
                         use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
@@ -314,7 +314,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 else:
                     amax_and_scale_update(
                         self.fp8_meta,
-                        True,
+                        fwd_update=True,
                         update_weight_scale_inv=update_weight_scale_inv,
                         current_step_id_tensor=self.current_step_id,
                         use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
@@ -375,7 +375,9 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             if fp8_meta["recipe"].reduce_amax:
                 global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
                 amax_and_scale_update(
-                    fp8_meta, False, use_cudagraph=get_global_fp8_state().is_cudagraph_enabled()
+                    fp8_meta,
+                    fwd_update=False,
+                    use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                 )
                 global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
 
@@ -383,7 +385,9 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
             else:
                 amax_and_scale_update(
-                    fp8_meta, False, use_cudagraph=get_global_fp8_state().is_cudagraph_enabled()
+                    fp8_meta,
+                    fwd_update=False,
+                    use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                 )
 
         with nvtx_range(name + " backward"):

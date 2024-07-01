@@ -21,6 +21,7 @@ try:
         register_global_pipeline_parallel_hook,
     )
 except ImportError:
+    print("Cannot find register_global_pipeline_parallel_hook !")
     register_global_pipeline_parallel_hook = None
 
 from .constants import dist_group_type
