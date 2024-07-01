@@ -89,6 +89,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8", py::call_guard<py::gil_scoped_release>());
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");  /// TODO Think
+  m.def("te_grouped_gemm", &te_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
         "Fused Attention FP8/BF16/FP16 FWD with packed QKV",
         py::call_guard<py::gil_scoped_release>());
