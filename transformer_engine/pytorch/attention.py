@@ -335,9 +335,7 @@ def get_attention_backend(
             )
             use_unfused_attention = False
         if use_fused_attention:
-            logger.debug(
-                "Disabling FusedAttention as it does not support sliding window attention"
-            )
+            logger.debug("Disabling FusedAttention as it does not support sliding window attention")
             use_fused_attention = False
         if use_flash_attention and (not _flash_attn_2_3_plus or context_parallel):
             logger.debug(
@@ -376,11 +374,7 @@ def get_attention_backend(
 
     fu_core_attention_bias_type = core_attention_bias_type
     fu_core_attention_bias = core_attention_bias
-    if (
-        use_fused_attention
-        and core_attention_bias_type == "alibi"
-        and alibi_slopes is not None
-    ):
+    if use_fused_attention and core_attention_bias_type == "alibi" and alibi_slopes is not None:
         fu_core_attention_bias_type = "post_scale_bias"
         _, fu_core_attention_bias = get_alibi(
             query_layer.shape[-2],
@@ -431,12 +425,9 @@ def get_attention_backend(
             max_seqlen_kv,
             query_layer.shape[-1],  # head_dim
         )
-        if (
-            fused_attention_backend != FusedAttnBackend["No_Backend"]
-            and (
-                not context_parallel
-                or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-            )
+        if fused_attention_backend != FusedAttnBackend["No_Backend"] and (
+            not context_parallel
+            or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
         ):
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
@@ -448,7 +439,10 @@ def get_attention_backend(
                 or fu_core_attention_bias.shape[1] != query_layer.shape[-2]
             )
         ):
-            logger.debug("Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in [1, H, S, S] shape")
+            logger.debug(
+                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
+                " [1, H, S, S] shape"
+            )
             use_fused_attention = False
 
     # Filter: Determinism
