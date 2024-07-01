@@ -2,12 +2,12 @@
 #
 # See LICENSE for license information.
 
-from typing import List, Tuple, Union
+import functools
+import os
 import pytest
 import subprocess
-import os
-from dataclasses import dataclass, asdict
-from functools import lru_cache
+from dataclasses import asdict, dataclass
+from typing import List, Tuple, Union
 
 import torch
 
@@ -46,7 +46,7 @@ te_path = os.getenv("TE_PATH", "/opt/transformerengine")
 mlm_log_dir = os.path.join(te_path, "ci_logs")
 
 
-@lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
 def get_parallel_configs() -> List[Tuple[int, int]]:
     """Returns valid combinations of (tp, pp)."""
     sizes = [1, 2, 4]

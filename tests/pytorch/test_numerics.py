@@ -24,6 +24,7 @@ from transformer_engine.pytorch import (
     LayerNormLinear,
     LayerNormMLP,
     Linear,
+    GroupedLinear,
     MultiheadAttention,
     RMSNorm,
     TransformerLayer,
@@ -31,7 +32,9 @@ from transformer_engine.pytorch import (
     InferenceParams,
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-
+from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
+from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
+import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -1211,6 +1214,99 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
+def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    m = config.seq_len // 16
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    m_splits = m_splits * 16
+    assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+
+    with fp8_autocast(enabled=fp8):
+        if isinstance(block, GroupedLinear):
+            m_splits = m_splits * bs
+            out = block(inp_hidden_states, m_splits.tolist())
+        else:
+            out = torch.cat(
+                [
+                    block[i](inp)
+                    for i, inp in enumerate(torch.split(inp_hidden_states, m_splits.tolist()))
+                ]
+            )
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=True,
+                    params_dtype=dtype,
+                    device="cuda",
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+
+    outputs = _test_grouped_linear_accuracy(grouped_linear, num_gemms, bs, dtype, config, fp8)
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear, num_gemms, bs, dtype, config, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     reset_rng_states()
 
@@ -1563,3 +1659,157 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 127, 128, 512),
+        (8, 15, 128, 512),
+        (8, 1027, 128, 512),
+        (16, 10027, 128, 512),
+    ],
+)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_grouped_gemm(shape, dtype, layout, accumulate):
+    torch.manual_seed(0)
+    z, m, k, n = shape
+
+    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    assert m_splits.sum() == m and len(m_splits) == z
+    m_splits = m_splits.tolist()
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+        out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+        grad = False
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        out = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # dgrad
+        grad = True
+    else:  # layout == "NT"
+        A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+
+    out_ref = [o.clone() for o in out]
+    for i in range(z):
+        gemm(
+            A[i],
+            B[i],
+            dtype,
+            get_workspace(),
+            grad=grad,
+            accumulate=accumulate,
+            layout=layout,
+            out=out_ref[i],
+        )
+
+    grouped_gemm(
+        A,
+        B,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        grad=grad,
+        accumulate=accumulate,
+        layout=layout,
+    )
+
+    # should be bit-wise match
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 128, 128, 512),
+        (8, 1024, 128, 512),
+        (16, 4096, 128, 512),
+    ],
+)
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    z, m, k, n = shape
+    m_splits = m // z
+
+    dtype = torch.bfloat16
+    A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+    B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+    out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+    out_ref = [o.clone() for o in out]
+
+    # fp8 should be robust enough to this fake scale
+    scale = 1 + torch.rand(z * 3, dtype=torch.float32, device="cuda")
+    scale_inv = 1 / scale
+    amax = torch.zeros(1024, z * 3, dtype=torch.float32, device="cuda")
+
+    A_fp8 = [
+        torch.ops.tex_ts.cast_to_fp8_ts(
+            A[i],
+            scale,
+            amax,
+            scale_inv,
+            i,  # fp8 meta tensor index
+            tex.DType.kFloat8E4M3,
+        )
+        for i in range(z)
+    ]
+    B_fp8 = [
+        torch.ops.tex_ts.cast_to_fp8_ts(
+            B[i],
+            scale,
+            amax,
+            scale_inv,
+            z + i,  # fp8 meta tensor index
+            fp8_dtype,
+        )
+        for i in range(z)
+    ]
+
+    fp8_grouped_gemm(
+        A_fp8,
+        scale_inv,
+        0,  # A_offset
+        tex.DType.kFloat8E4M3,
+        B_fp8,
+        scale_inv,
+        z,  # B_offset
+        fp8_dtype,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        accumulate=accumulate,
+    )
+
+    # baseline
+    for i in range(z):
+        fp8_gemm(
+            A_fp8[i],
+            scale_inv,
+            i,
+            tex.DType.kFloat8E4M3,
+            B_fp8[i],
+            scale_inv,
+            z + i,
+            fp8_dtype,
+            dtype,
+            get_workspace(),
+            out=out_ref[i],
+            accumulate=accumulate,
+        )
+
+    # should be bit-wise match
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)

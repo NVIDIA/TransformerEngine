@@ -4,19 +4,19 @@
 
 """Installation script."""
 
+import functools
+import glob
 import os
 import re
-import glob
 import shutil
 import subprocess
 import sys
-from functools import cache
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
 
 
-@cache
+@functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:
@@ -28,10 +28,12 @@ def debug_build_enabled() -> bool:
     return False
 
 
-def all_files_in_dir(path):
+def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
+            if name_extension is not None and name_extension not in name:
+                continue
             all_files.append(Path(dirname, name))
     return all_files
 
@@ -136,7 +138,7 @@ def found_pybind11() -> bool:
     return False
 
 
-@cache
+@functools.lru_cache(maxsize=None)
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
