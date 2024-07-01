@@ -5,9 +5,10 @@
 import os
 import pytest
 import subprocess
-from test_fused_attn import (
-    ModelConfig,
-    _is_flash_attention_2_available,
+from test_fused_attn import ModelConfig
+from transformer_engine.pytorch.attention import (
+    _flash_attn_2_plus,
+    _flash_attn_2_3_plus,
 )
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -33,7 +34,7 @@ def get_bash_arguments(**kwargs):
     return args
 
 
-@pytest.mark.skipif(not _is_flash_attention_2_available(), reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
