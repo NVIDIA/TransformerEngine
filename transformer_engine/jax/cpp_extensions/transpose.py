@@ -17,7 +17,7 @@ from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, custom_caller_with_ffi, CustomCallArgsWrapper
+from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
@@ -266,10 +266,9 @@ class CastTransposePrimitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         if jax_version_meet_requirement():
             name = "te_cast_transpose_ffi"
-            out = ffi.ffi_lowering(name)(
+            out = ffi.ffi_lowering(name, operand_output_aliases={1: 2})(
                 ctx, x, amax, scale, scale_inv, transpose_axis=transpose_axis_boundary
             )
-            # TODO: add operand_output_aliases={1: 2} when ffi_lowering supports it
         else:
             ir_x_type = ir.RankedTensorType(x.type)
             ir_x_shape = ir_x_type.shape
