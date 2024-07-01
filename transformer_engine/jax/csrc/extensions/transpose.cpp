@@ -71,9 +71,7 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
                             Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
                             Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
-                            Result_Type amax_out_buf,
-                            int64_t transpose_axis) {
-
+                            Result_Type amax_out_buf, int64_t transpose_axis) {
   auto in_dtype =
       convert_ffi_datatype_to_te_dtype(static_cast<xla::ffi::DataType>(input_buf.dtype));
   auto out_dtype =
@@ -97,10 +95,10 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto &input_dims = input_buf.dimensions;
   if (transpose_axis < 0) transpose_axis += input_dims.size();
-  auto m = std::accumulate(input_dims.begin(), input_dims.begin()
-                           + transpose_axis, 1, std::multiplies<>());
-  auto n = std::accumulate(input_dims.begin() + transpose_axis,
-                           input_dims.end(), 1, std::multiplies<>());
+  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
+                           std::multiplies<>());
+  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
+                           std::multiplies<>());
   auto input_shape = std::vector<size_t>{m, n};
   auto input_trans_shape = std::vector<size_t>{n, m};
 

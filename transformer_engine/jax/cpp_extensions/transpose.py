@@ -266,9 +266,10 @@ class CastTransposePrimitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         if jax_version_meet_requirement():
             name = "te_cast_transpose_ffi"
-            out = ffi.ffi_lowering(name)(ctx, x, amax, scale, scale_inv,
-                                         transpose_axis=transpose_axis_boundary)
-            #TODO: add operand_output_aliases={1: 2} when ffi_lowering supports it
+            out = ffi.ffi_lowering(name)(
+                ctx, x, amax, scale, scale_inv, transpose_axis=transpose_axis_boundary
+            )
+            # TODO: add operand_output_aliases={1: 2} when ffi_lowering supports it
         else:
             ir_x_type = ir.RankedTensorType(x.type)
             ir_x_shape = ir_x_type.shape
