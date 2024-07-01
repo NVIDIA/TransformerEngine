@@ -489,7 +489,7 @@ def get_attention_backend(
     if use_flash_attention:
         available_backends.append("FlashAttention")
     if use_fused_attention:
-        available_backends.append(f"FusedAttention (sub-backend {(int)fused_attention_backend}")
+        available_backends.append(f"FusedAttention (sub-backend {int(fused_attention_backend)})")
     if use_unfused_attention:
         available_backends.append("UnfusedDotProductAttention")
 
@@ -512,7 +512,7 @@ def get_attention_backend(
         use_fused_attention = False
         use_unfused_attention = False
     elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {(int)fused_attention_backend}"
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)}"
         use_unfused_attention = False
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
