@@ -3,7 +3,6 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include "jax/csrc/extensions.h"
 
 namespace transformer_engine {
@@ -11,6 +10,13 @@ namespace jax {
 
 template <typename T>
 pybind11::capsule EncapsulateFunction(T *fn) {
+  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
+}
+
+template <typename T>
+pybind11::capsule EncapsulateFFI(T *fn) {
+  static_assert(std::is_invocable_r_v<XLA_FFI_Error *, T, XLA_FFI_CallFrame *>,
+                "Encapsulated function must be an XLA FFI handler");
   return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
 }
 
@@ -44,6 +50,10 @@ pybind11::dict Registrations() {
       EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
+
+  dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
+  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
   return dict;
 }
 
@@ -104,7 +114,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGELU", NVTE_Activation_Type::QGELU)
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
-      .value("SREGLU", NVTE_Activation_Type::SREGLU);
+      .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .export_values()
+      .def("__int__", [](const NVTE_Activation_Type &e) { return static_cast<int>(e); });
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
