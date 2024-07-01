@@ -15,8 +15,7 @@ from utils import make_causal_mask, make_self_mask
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
-    fused_attn_qkvpacked,
-    fused_attn_kvpacked,
+    fused_attn,
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
@@ -120,10 +119,14 @@ class TestDistributedSelfAttn:
 
         def target_func(qkv, bias, mask):
             return jnp.mean(
-                fused_attn_qkvpacked(
-                    qkv,
+                fused_attn(
+                    (qkv,),
                     bias,
                     mask,
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     attn_bias_type=attn_bias_type,
                     attn_mask_type=attn_mask_type,
@@ -252,11 +255,14 @@ class TestDistributedCrossAttn:
 
         def target_func(q, kv, mask):
             return jnp.mean(
-                fused_attn_kvpacked(
-                    q,
-                    kv,
+                fused_attn(
+                    (q, kv),
                     None,
                     mask,
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     attn_bias_type=attn_bias_type,
                     attn_mask_type=attn_mask_type,
