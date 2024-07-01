@@ -21,8 +21,11 @@ except ImportError:
 for _name, _value in transformer_engine_jax.registrations().items():
     if "_ffi" in _name:
         if jax_version_meet_requirement():
-            # TODO: add prep, init, exec and cudaGraph support later
-            xla_client.register_custom_call_target(_name, _value, platform="CUDA", api_version=1)
+            # TODO: add prep, init, exec
+            # traits = 1 (i.e. COMMAND_BUFFER_COMPATIBLE) enabled cudaGraph
+            xla_client.register_custom_call_target(
+                _name, _value, platform="CUDA", api_version=1, traits=1
+            )
     else:
         xla_client.register_custom_call_target(_name, _value, platform="CUDA", api_version=0)
 
@@ -128,7 +131,6 @@ def custom_caller_with_ffi(name, args, backend_config, **kwargs):
     """
     New XLA custom call warpper
     """
-
     return mlir.custom_call(
         call_target_name=name,
         result_types=args.output_types,
@@ -137,6 +139,3 @@ def custom_caller_with_ffi(name, args, backend_config, **kwargs):
         api_version=4,
         **kwargs,
     ).results
-    """ operand_layouts=args.operand_layouts, """
-    """ result_layouts=args.output_layouts, """
-    """ result_shapes=args.output_shapes, """
