@@ -528,14 +528,13 @@ def mask_to_cu_seqlens(
     # mask shape: [b, 1, s_q, s_kv]
     if get_global_fp8_state().is_cudagraph_enabled():
         raise RuntimeError("mask_to_cu_seqlens is not supported with cuda graphs.")
-    else:
-        q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
-        q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
-        q_cu_seqlens[0] = 0
-        kv_cu_seqlens = None
-        if need_kv:
-            kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
-            kv_cu_seqlens[0] = 0
+    q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
+    q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+    q_cu_seqlens[0] = 0
+    kv_cu_seqlens = None
+    if need_kv:
+        kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+        kv_cu_seqlens[0] = 0
     tex.mask_to_cu_seqlens(mask, q_cu_seqlens, kv_cu_seqlens, q_seqlen, kv_seqlen, need_kv)
     return q_cu_seqlens, kv_cu_seqlens
 

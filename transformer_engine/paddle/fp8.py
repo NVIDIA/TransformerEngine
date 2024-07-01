@@ -118,9 +118,11 @@ class FP8State:
         return self._fp8_recompute_buffer
 
     def is_cudagraph_enabled(self) -> bool:
+        """Is CUDAGraph enabled"""
         return self._use_cudagraph
 
     def enable_cudagraph(self):
+        """Enable CUDA Graphs. Once CUDA Graphs are enabled, they cannot be disabled within the same execution context at current implementation."""
         self._use_cudagraph = True
         self._fp8_fwd_buffer.enable_cudagraph()
         self._fp8_bwd_buffer.enable_cudagraph()

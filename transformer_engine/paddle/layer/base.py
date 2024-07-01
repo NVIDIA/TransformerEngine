@@ -87,7 +87,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         self.current_step_id = paddle.to_tensor([1], dtype=paddle.int32, place=paddle.CPUPlace())
 
-        def current_step_id_callback(step_id=None, **kwargs):
+        def current_step_id_callback(step_id=None, **kwargs):  # pylint: disable=unused-argument
             self.current_step_id.copy_(
                 paddle.to_tensor([step_id], dtype=paddle.int32, place=paddle.CPUPlace()), True
             )
@@ -484,7 +484,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             return [None, None] * len(self.fp8_weights)
 
         out_list = []
-        for i, weight in enumerate(self.fp8_weights, start=1):
+        for i, _ in enumerate(self.fp8_weights, start=1):
             weight_cast_key = f"weight{i}_fp8"
             weight_transpose_key = f"weight{i}_t_fp8"
 
@@ -510,7 +510,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
             fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
 
-            def cast_callback(step_id=None, **kwargs):
+            def cast_callback(step_id=None, **kwargs):  # pylint: disable=unused-argument
                 update_fp8_weights = step_id == 0
 
                 for i, weight in enumerate(self.fp8_weights, start=1):

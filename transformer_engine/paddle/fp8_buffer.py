@@ -60,7 +60,6 @@ class FP8MetaBufferBase(ABC):
         chunk_sizes: List[int],
         amax_buffer_key: str,
         wait_handle: Union[bool, None],
-        fp8_meta: Dict[str, Any],
     ) -> None:
         """Wait for amax reduction to finish and then copy reduced amax to buffer"""
         if wait_handle is not None:
@@ -142,7 +141,6 @@ class FP8MetaBufferBase(ABC):
             chunk_sizes,
             amax_buffer_key,
             wait_handle,
-            fp8_meta,
         )
 
     def add_amax(self, fp8_meta: Dict[str, Any]) -> None:
@@ -212,6 +210,7 @@ class FP8MetaBufferBase(ABC):
             self._global_amax[k] = [paddle.to_tensor(arr) for arr in v]
 
     def enable_cudagraph(self):
+        """Enable CUDA Graphs."""
         self._use_cudagraph = True
 
 

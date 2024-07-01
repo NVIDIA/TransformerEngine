@@ -65,13 +65,15 @@ def get_tp_group_and_world_size(
 
 
 def is_pp_enabled() -> bool:
-    if not (paddle.distributed.is_initialized()):
+    """Check if pipeline parallel is enabled"""
+    if not paddle.distributed.is_initialized():
         return False
 
     return tp._HYBRID_PARALLEL_GROUP.get_pipe_parallel_world_size() > 1
 
 
 def register_pp_fwd_begin_hook(forward_begin_hook):
+    """Register the pp hook if register_global_pipeline_parallel_hook exist"""
     if register_global_pipeline_parallel_hook is not None:
         register_global_pipeline_parallel_hook(
             PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
