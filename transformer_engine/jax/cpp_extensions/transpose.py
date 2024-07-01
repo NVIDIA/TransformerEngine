@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
@@ -263,40 +264,37 @@ class CastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        if static_axis_boundary >= 0:
-            for i in range(static_axis_boundary + 1):
-                assert ir_x_shape[i] == 1
-        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-        ir_amax_type = ir.RankedTensorType(amax.type)
-        ir_amax_dtype = ir_amax_type.element_type
-        ir_amax_shape = ir_amax_type.shape
-        ir_scale_shape = ir_amax_shape
-        ir_scale_inv_shape = ir_amax_shape
-
-        transposed_x_shape = multidim_transpose(
-            ir_x_shape, static_axis_boundary, transpose_axis_boundary
-        )
-
-        out_types = [
-            ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
-            ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
-            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-        ]
-        operands = [x, amax, scale, scale_inv]
-        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        if not jax_version_meet_requirement():
-            # One can store additional attr here, i.e activation_type etc
-            # backend_config={'attr_name' : ir.IntegerAttr.get(bits, value)})
-            backend_config = {}
-
-            out = custom_caller_with_ffi(
-                "te_cast_transpose_ffi", args, backend_config, operand_output_aliases={1: 2}
-            )
+        if jax_version_meet_requirement():
+            name = "te_cast_transpose_ffi"
+            out = ffi.ffi_lowering(name)(ctx, x, amax, scale, scale_inv,
+                                         transpose_axis=transpose_axis_boundary)
+            #TODO: add operand_output_aliases={1: 2} when ffi_lowering supports it
         else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            if static_axis_boundary >= 0:
+                for i in range(static_axis_boundary + 1):
+                    assert ir_x_shape[i] == 1
+            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+            ir_amax_type = ir.RankedTensorType(amax.type)
+            ir_amax_dtype = ir_amax_type.element_type
+            ir_amax_shape = ir_amax_type.shape
+            ir_scale_shape = ir_amax_shape
+            ir_scale_inv_shape = ir_amax_shape
+
+            transposed_x_shape = multidim_transpose(
+                ir_x_shape, static_axis_boundary, transpose_axis_boundary
+            )
+
+            out_types = [
+                ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
+                ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
+                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ]
+            operands = [x, amax, scale, scale_inv]
+            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
             contracted_x_shape = (
                 reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
                 reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),

@@ -71,9 +71,8 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
                             Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
                             Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
-                            Result_Type amax_out_buf) {
-  // XLA_FFI_DataType num = static_cast<XLA_FFI_DataType>(static_cast<xla::ffi::DataType>(input_buf.dtype));
-  // printf("XLA_FFI_DataType ENUM %d\n", static_cast<int>(num));
+                            Result_Type amax_out_buf,
+                            int64_t transpose_axis) {
 
   auto in_dtype =
       convert_ffi_datatype_to_te_dtype(static_cast<xla::ffi::DataType>(input_buf.dtype));
@@ -95,8 +94,13 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     scale_inv = nullptr;
     amax_out = nullptr;
   }
-  auto m = input_buf.dimensions[0];
-  auto n = input_buf.dimensions[1];
+
+  auto &input_dims = input_buf.dimensions;
+  if (transpose_axis < 0) transpose_axis += input_dims.size();
+  auto m = std::accumulate(input_dims.begin(), input_dims.begin()
+                           + transpose_axis, 1, std::multiplies<>());
+  auto n = std::accumulate(input_dims.begin() + transpose_axis,
+                           input_dims.end(), 1, std::multiplies<>());
   auto input_shape = std::vector<size_t>{m, n};
   auto input_trans_shape = std::vector<size_t>{n, m};
 
@@ -120,7 +124,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CastTransposeHandler, CastTransposeFFI,
                                   .Arg<Buffer_Type>()      // scale_inv
                                   .Ret<Buffer_Type>()      // input_cast
                                   .Ret<Buffer_Type>()      // input_cast_trans
-                                  .Ret<Buffer_Type>());    // amax_out
+                                  .Ret<Buffer_Type>()      // amax_out
+                                  .Attr<int64_t>("transpose_axis"));
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype) {
