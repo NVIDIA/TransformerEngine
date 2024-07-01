@@ -4601,9 +4601,10 @@ class FusedAttention(torch.nn.Module):
                 and cu_seqlens_q is not None
                 and cu_seqlens_kv is not None
             ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
-            if cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None:
-                cu_seqlens_q_padded = cu_seqlens_q
-                cu_seqlens_kv_padded = cu_seqlens_kv
+
+        if cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None:
+            cu_seqlens_q_padded = cu_seqlens_q
+            cu_seqlens_kv_padded = cu_seqlens_kv
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
