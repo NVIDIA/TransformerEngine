@@ -22,7 +22,15 @@ TE_DType = {
     torch.bfloat16: tex.DType.kBFloat16,
 }
 
-AttnMaskTypes = ("causal", "padding", "padding_causal", "arbitrary", "no_mask")
+AttnMaskTypes = (
+    "no_mask",
+    "padding",
+    "causal",
+    "padding_causal",
+    "causal_bottom_right",
+    "padding_causal_bottom_right",
+    "arbitrary",
+)
 
 AttnTypes = ("self", "cross")
 

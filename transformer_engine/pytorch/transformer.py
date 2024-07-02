@@ -130,7 +130,8 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of query-key-value channels per attention head. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
+    self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+                        'padding_causal_bottom_right', 'arbitrary'},
                         default = `causal`
                         type of attention mask passed into softmax operation. Overridden by
                         :attr:`self_attn_mask_type` in the `forward` method. The forward
@@ -141,8 +142,8 @@ class TransformerLayer(torch.nn.Module):
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Similar to :attr:`self_attn_mask_type`, it can
-                be overridden by :attr:`window_size` in `forward` as well.
+                window and "`causal`" mask specifically. Similar to :attr:`self_attn_mask_type`,
+                it can be overridden by :attr:`window_size` in `forward` as well.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -524,15 +525,19 @@ class TransformerLayer(torch.nn.Module):
         hidden_states : torch.Tensor
              Input tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
-                        Boolean tensor used to mask out self-attention softmax input.
-                        It should be in [batch_size, 1, 1, seqlen_q] for 'padding' mask,
-                        and broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
-                        for 'arbitrary'. It should be 'None' for 'causal' and 'no_mask'.
+                        Boolean tensor used to mask out self-attention softmax input. It should be
+                        in [batch_size, 1, 1, seqlen_q] for padding masks, and broadcastable
+                        to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] for "`arbitrary`"
+                        mask. It should be `None` for causal masks and "`no_mask`" type.
                         A `True` value means the corresponding position is masked out and
                         a `False` means that position is allowed to participate in attention.
-        self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
+        self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal',
+                            'causal_bottom_right', 'padding_causal_bottom_right','arbitrary'},
                             default = `causal`
-                            Type of attention mask passed into softmax operation.
+                            Type of attention mask passed into softmax operation. By default,
+                            causal masks are aligned to the top left corner of the softmax matrix.
+                            When "`bottom_right`" is specified in the mask type, causal masks are
+                            aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
@@ -541,11 +546,11 @@ class TransformerLayer(torch.nn.Module):
         enc_dec_attn_mask : Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = `None`. Boolean tensors used to mask out inter-attention softmax input if
              using `layer_type="decoder"`. It should be a tuple of two masks in
-             [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for 'padding' mask.
+             [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for padding masks.
              It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
-             for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'. A `True` value
-             means the corresponding position is masked out and a `False` means that position is
-             allowed to participate in attention.
+             for "`arbitrary`" mask. It should be `None` for causal masks and "`no_mask`".
+             A `True` value means the corresponding position is masked out and a `False`
+             means that position is allowed to participate in attention.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
