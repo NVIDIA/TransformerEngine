@@ -137,7 +137,6 @@ def get_attention_backend(
     attention_dropout: float = 0.0,
     context_parallel: bool = False,
     deterministic: bool = False,
-    cpu_offload: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
 ):
@@ -186,8 +185,6 @@ def get_attention_backend(
         Whether context parallelism is used or not.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
-    cpu_offload: bool, default = `False`
-        Whether CPU offload is enabled.
     fp8: bool, default = `False`
         Whether `DotProductAttention` is in an `fp8_autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
@@ -244,11 +241,6 @@ def get_attention_backend(
         logger.debug(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
-        use_unfused_attention = False
-
-    # Filter: CPU offload
-    if cpu_offload and use_unfused_attention:
-        logger.debug("Disabling UnfusedDotProductAttention as it does not support CPU offload")
         use_unfused_attention = False
 
     # Filter: Data type
@@ -5365,8 +5357,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
             )
 
-            from .cpu_offload import CPUOffloadEnabled
-
             (
                 use_flash_attention,
                 use_fused_attention,
@@ -5395,7 +5385,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 deterministic=deterministic,
-                cpu_offload=CPUOffloadEnabled,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
@@ -5529,6 +5518,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_stream=self.cp_stream,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
+                )
+
+            from .cpu_offload import CPUOffloadEnabled
+
+            if CPUOffloadEnabled:
+                warnings.warn(
+                    "Attention activation Offloading is only implemented"
+                    "with Flash Attention and Fused Attention!"
                 )
 
             if use_unfused_attention:

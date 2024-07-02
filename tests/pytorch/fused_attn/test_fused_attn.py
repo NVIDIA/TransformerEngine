@@ -110,7 +110,6 @@ def _get_attention_backends(
     pad_between_seqs: bool = False,
     context_parallel: bool = False,
     deterministic: bool = False,
-    cpu_offload: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List, List]:
@@ -157,7 +156,6 @@ def _get_attention_backends(
         attention_dropout=config.dropout_p,
         context_parallel=context_parallel,
         deterministic=deterministic,
-        cpu_offload=cpu_offload,
         fp8=fp8,
         fp8_meta=fp8_meta,
     )
@@ -183,7 +181,6 @@ def _get_attention_backends(
             attention_dropout=config.dropout_p,
             context_parallel=context_parallel,
             deterministic=deterministic,
-            cpu_offload=cpu_offload,
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
