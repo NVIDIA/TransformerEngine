@@ -351,6 +351,18 @@ def get_attention_backend(
             "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
         )
         use_flash_attention = False
+    if (
+        use_flash_attention
+        and not _flash_attn_2_1_plus
+        and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        logger.warning(
+            "Disabling FlashAttention as it only supports top-left-diagonal "
+            "causal mask before flash-attn 2.1. See "
+            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+        )
+        use_flash_attention = False
 
     # Filter: Sliding window attention
     if window_size not in ((-1, -1), (-1, 0)):
