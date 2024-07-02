@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
 
 
@@ -28,6 +27,25 @@ def debug_build_enabled() -> bool:
     return False
 
 
+def get_max_jobs_for_parallel_build() -> str:
+    """Whether to limit the ninja build resource"""
+
+    num_jobs = 0
+    # Check environment variable
+    if os.getenv("NVTE_MAX_JOBS"):
+        num_jobs = os.getenv("NVTE_MAX_JOBS")
+    elif os.getenv("MAX_JOBS"):
+        num_jobs = os.getenv("MAX_JOBS")
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--parallel="):
+            num_jobs = arg.replace("--parallel=", "")
+            sys.argv.remove(arg)
+
+    return num_jobs
+
+
 def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
@@ -36,36 +54,6 @@ def all_files_in_dir(path, name_extension=None):
                 continue
             all_files.append(Path(dirname, name))
     return all_files
-
-
-def remove_dups(_list: List):
-    return list(set(_list))
-
-
-def found_cmake() -> bool:
-    """ "Check if valid CMake is available
-
-    CMake 3.18 or newer is required.
-
-    """
-
-    # Check if CMake is available
-    try:
-        _cmake_bin = cmake_bin()
-    except FileNotFoundError:
-        return False
-
-    # Query CMake for version info
-    output = subprocess.run(
-        [_cmake_bin, "--version"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    match = re.search(r"version\s*([\d.]+)", output.stdout)
-    version = match.group(1).split(".")
-    version = tuple(int(v) for v in version)
-    return version >= (3, 18)
 
 
 def cmake_bin() -> Path:
@@ -96,46 +84,6 @@ def cmake_bin() -> Path:
     if _cmake_bin is None:
         raise FileNotFoundError("Could not find CMake executable")
     return _cmake_bin
-
-
-def found_ninja() -> bool:
-    """ "Check if Ninja is available"""
-    return shutil.which("ninja") is not None
-
-
-def found_pybind11() -> bool:
-    """ "Check if pybind11 is available"""
-
-    # Check if Python package is installed
-    try:
-        import pybind11
-    except ImportError:
-        pass
-    else:
-        return True
-
-    # Check if CMake can find pybind11
-    if not found_cmake():
-        return False
-    try:
-        subprocess.run(
-            [
-                "cmake",
-                "--find-package",
-                "-DMODE=EXIST",
-                "-DNAME=pybind11",
-                "-DCOMPILER_ID=CXX",
-                "-DLANGUAGE=CXX",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-    except (CalledProcessError, OSError):
-        pass
-    else:
-        return True
-    return False
 
 
 @functools.lru_cache(maxsize=None)
