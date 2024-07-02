@@ -421,7 +421,7 @@ def _make_graphed_callables(
             # module parameters)
             # Assumes module params didn't change since capture.
             flatten_user_args, _ = _tree_flatten(user_args)
-            flatten_user_kwargs, _ = _tree_flatten([kwargs[key] for key in kwargs_keys])
+            flatten_user_kwargs, _ = _tree_flatten([user_kwargs[key] for key in kwargs_keys])
             func_args = tuple(flatten_user_args) + tuple(flatten_user_kwargs) + module_params
             out = Graphed.apply(skip_fp8_weight_update, *func_args)
             return _tree_unflatten(out, output_unflatten_spec)

@@ -385,7 +385,7 @@ def test_make_graphed_callables_with_kwargs(
     dtype: torch.dtype = torch.float32,
     model: str = "small",
 ) -> None:
-    """Test CUDA graphs with Megatron-LM interleaved pipeline parallelism."""
+    """Test CUDA graphs with keyword arguments."""
     config = model_configs[model]
     kwargs = dict(config=config, dtype=dtype)
     outputs = _test_cuda_graphs_with_kwargs(with_graph=False, **kwargs)
@@ -439,7 +439,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             _order=layer_order,
         )
         layer_forwards = {
-            (i % num_layers, i // num_layers): forward for i, forward in enumerate(layer_forwards)
+            (i // num_microbatches, i % num_microbatches): forward for i, forward in enumerate(layer_forwards)
         }
 
     # Optimizer.
@@ -473,14 +473,14 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         forward(1, 0)
         forward(0, 1)
         forward(1, 1)
-        backward(0, 0)
         backward(1, 0)
+        backward(0, 0)
         forward(0, 2)
         forward(1, 2)
-        backward(0, 1)
         backward(1, 1)
-        backward(0, 2)
+        backward(0, 1)
         backward(1, 2)
+        backward(0, 2)
 
         # Optimizer step.
         optimizer.step()
