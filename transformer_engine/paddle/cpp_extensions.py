@@ -9,7 +9,7 @@ import paddle
 import paddle.nn.functional as F
 from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
-from .fp8 import FP8TensorMeta
+from .fp8 import FP8TensorMeta, get_global_fp8_state
 
 BACKEND_F16m512_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -526,6 +526,8 @@ def mask_to_cu_seqlens(
 ) -> paddle.Tensor:
     """Convert mask to cu_seqlens"""
     # mask shape: [b, 1, s_q, s_kv]
+    if get_global_fp8_state().is_cudagraph_enabled():
+        raise RuntimeError("mask_to_cu_seqlens is not supported with cuda graphs.")
     q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
     q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
     q_cu_seqlens[0] = 0
