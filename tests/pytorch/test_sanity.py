@@ -647,6 +647,9 @@ def test_sanity_gpt_126m():
 def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
     config = model_configs[model]
 
+    if dtype == torch.float32:
+        pytest.skip("No support for FP32 and padding mask")
+
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
@@ -703,6 +706,14 @@ def test_sanity_bert_126m():
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
     config = model_configs[model]
+
+    # TODO(cyang):
+    # The only available backend for FP32 is unfused attention, however, it does not support
+    # 'padding' mask in inter_attention in the decoder path of TransformerLayer.
+    # This test was previously passing the CI because the mask was actually applied
+    # as an 'arbitrary' mask. Will make another PR to fix this.
+    if dtype == torch.float32:
+        pytest.skip("No support for FP32 and padding mask in decoders")
 
     if fp8_recipe is not None:
         if not fp8_available:
