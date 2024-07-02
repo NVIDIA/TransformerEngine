@@ -303,11 +303,9 @@ def _linear_bwd_fp8(
         if parallel_mode == "column" and sequence_parallel:
             if handle is not None:
                 handle.wait()
-            reduced_dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
+            dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
         elif parallel_mode == "column" and tensor_parallel:
-            reduced_dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
-        else:
-            reduced_dgrad = dgrad
+            dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
 
     if requires_wgrad:
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
@@ -353,7 +351,7 @@ def _linear_bwd_fp8(
     if parallel_mode == "column" and sequence_parallel:
         handle.wait()
 
-    return reduced_dgrad, wgrad
+    return dgrad, wgrad
 
 
 def _linear_bwd_non_fp8(
