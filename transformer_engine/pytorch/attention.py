@@ -257,7 +257,7 @@ def get_attention_backend(
         use_flash_attention = False
     if use_fused_attention and (qkv_dtype not in [torch.bfloat16, torch.float16]):
         logger.debug(
-            "Disabling FusedAttention due to unsupported QKV data types. "
+            "Disabling FusedAttention due to unsupported QKV data type. "
             "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
             "Found: qkv_dtype = %s.",
             qkv_dtype,
@@ -323,7 +323,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
     if use_unfused_attention and "padding" in attn_mask_type:
-        logger.debug("Disabling UnfusedDotProductAttention for padding masks")
+        logger.debug("Disabling UnfusedDotProductAttention for %s mask", attn_mask_type)
         use_unfused_attention = False
     if use_unfused_attention and attn_mask_type == "causal" and max_seqlen_q != max_seqlen_kv:
         logger.debug(
@@ -518,9 +518,9 @@ def get_attention_backend(
 
     logger.debug(
         "Available backends: FlashAttention=%s, FusedAttention=%s, UnfusedDotProductAttention=%s",
-        available_backends[0],
-        available_backends[1],
-        available_backends[2],
+        bool(available_backends[0]),
+        bool(available_backends[1]),
+        bool(available_backends[2]),
     )
     logger.debug("Selected backend: %s", selected_backend)
 
