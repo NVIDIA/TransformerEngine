@@ -332,9 +332,8 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.attn_mask_type == "arbitrary":
             return False  # Custom masks not supported
 
-        if (
-            self.attn_mask_type == "causal_bottom_right"
-            or (self.attn_mask_type == "causal" and sq == sk)
+        if self.attn_mask_type == "causal_bottom_right" or (
+            self.attn_mask_type == "causal" and sq == sk
         ):  # fused causal softmax kernel
             return True
 

@@ -127,7 +127,9 @@ def _get_attention_backends(
         if config.bias_shape == "bhss":
             alibi_slopes_shape = [config.batch_size, config.num_heads]
 
-    core_attention_bias_shape = config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
+    core_attention_bias_shape = (
+        config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
+    )
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
     if config.attn_bias_type == "post_scale_bias" and config.head_dim <= 128:
@@ -187,7 +189,10 @@ def _get_attention_backends(
         )
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             fused_attn_backends.append(fused_attention_backend)
-    elif fused_attention_backend != FusedAttnBackend["No_Backend"] and fused_attention_backend is not None:
+    elif (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+        and fused_attention_backend is not None
+    ):
         fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
@@ -384,8 +389,12 @@ model_configs_mask = {
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
     "mask_7_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "mask_7_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "mask_8_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
+    "mask_8_0": ModelConfig(
+        2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_8_1": ModelConfig(
+        1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
 }
 
 
