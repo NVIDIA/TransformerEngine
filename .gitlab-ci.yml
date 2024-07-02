@@ -7,22 +7,51 @@ variables:
     DATADIR: /mnt/nvdl/datasets
 
     # framework containers
-    PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
-    JAX_IMAGE: ghcr.io/nvidia/jax:pax
-    PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
+    PYTORCH_IMAGE:
+      description: Base Docker container for PyTorch build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+    JAX_IMAGE:
+      description: Base Docker container for JAX build
+      value: ghcr.io/nvidia/jax:pax
+    PADDLE_IMAGE:
+      description: Base Docker container for PaddlePaddle build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
 
     # container tags are in the form <TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>
     TAG_ROOT: ""
 
     # variables that may be overridden by the pipeline vars
-    BUILD_PYTORCH: 1
-    BUILD_JAX: 1
-    BUILD_PADDLE: 1
-    RUN_L0_TESTS: 1
-    RUN_L1_TESTS: 0
-    RUN_L2_TESTS: 0
-    RUN_L3_TESTS: 0
-    API_LOGGING: 0
+    GH_BRANCH:
+      description: GitHub branch
+      value: main
+    GH_PR:
+      description: GitHub PR number (overrides GH_BRANCH)
+    GL_MR:
+      description: GitLab MR number (overrides GH_BRANCH)
+    BUILD_PYTORCH:
+      description: Enable PyTorch build and tests
+      value: 1
+    BUILD_JAX:
+      description: Enable JAX build and tests
+      value: 1
+    BUILD_PADDLE:
+      description: Enable PaddlePaddle build and tests
+      value: 1
+    RUN_L0_TESTS:
+      description: Run L0 tests automatically (otherwise run tests manually)
+      value: 1
+    RUN_L1_TESTS:
+      description: Run L1 tests automatically (otherwise run tests manually)
+      value: 0
+    RUN_L2_TESTS:
+      description: Run L2 tests automatically (otherwise run tests manually)
+      value: 0
+    RUN_L3_TESTS:
+      description: Run L3 tests automatically (otherwise run tests manually)
+      value: 0
+    API_LOGGING:
+      description: Log API
+      value: 0
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
     JOB_END_STRING: "=== JOB END ==="
