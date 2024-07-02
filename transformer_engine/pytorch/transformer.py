@@ -238,6 +238,8 @@ class TransformerLayer(torch.nn.Module):
         kv_channels: Optional[int] = None,
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        enc_dec_attn_mask_type: str = "padding",
+        enc_dec_window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -271,6 +273,8 @@ class TransformerLayer(torch.nn.Module):
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = check_set_window_size(self_attn_mask_type, window_size)
+        self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
+        self.enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -367,7 +371,7 @@ class TransformerLayer(torch.nn.Module):
             self.inter_attention = MultiheadAttention(
                 *attention_args,
                 **common_attention_kwargs,
-                attn_mask_type="padding",
+                attn_mask_type=enc_dec_attn_mask_type,
                 input_layernorm=True,
                 attention_type="cross",
                 bias=bias,
@@ -501,6 +505,8 @@ class TransformerLayer(torch.nn.Module):
         window_size: Optional[Tuple[int, int]] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        enc_dec_attn_mask_type: Optional[str] = None,
+        enc_dec_window_size: Optional[Tuple[int, int]] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -531,9 +537,9 @@ class TransformerLayer(torch.nn.Module):
                         a `False` means that position is allowed to participate in attention.
         self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                             default = `causal`
-                            Type of attention mask passed into softmax operation.
+                            Type of attention mask passed into softmax operation for encoder.
         window_size: Optional[Tuple[int, int]], default = `None`
-                    sliding window size for local attention.
+                    Sliding window size for local attention in encoder.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -545,6 +551,11 @@ class TransformerLayer(torch.nn.Module):
              for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'. A `True` value
              means the corresponding position is masked out and a `False` means that position is
              allowed to participate in attention.
+        enc_dec_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
+                            default = `None`
+                            Type of attention mask passed into softmax operation for decoder.
+        enc_dec_window_size: Optional[Tuple[int, int]], default = `None`
+                    Sliding window size for local attention in decoder.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -586,10 +597,18 @@ class TransformerLayer(torch.nn.Module):
         if window_size is None:
             window_size = self.window_size
         window_size = check_set_window_size(self_attn_mask_type, window_size)
+        if enc_dec_attn_mask_type is None:
+            enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
+        if enc_dec_window_size is None:
+            enc_dec_window_size = self.enc_dec_window_size
+        enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
 
         assert (
             self_attn_mask_type in AttnMaskTypes
         ), f"self_attn_mask_type {self_attn_mask_type} not supported"
+        assert (
+            enc_dec_attn_mask_type in AttnMaskTypes
+        ), f"enc_dec_attn_mask_type {enc_dec_attn_mask_type} not supported"
 
         hidden_states = hidden_states.contiguous()
 
@@ -602,6 +621,13 @@ class TransformerLayer(torch.nn.Module):
             "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
         ) and attention_mask is not None:
             assert attention_mask.dtype == torch.bool, "Attention mask must be a boolean tensor"
+        if (
+            "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
+        ) and enc_dec_attn_mask is not None:
+            assert (
+                all(enc_dec_attn_mask[i].dtype == torch.bool
+                for i in range(len(enc_dec_attn_mask)))
+            ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
         # For AMP
         if torch.is_autocast_enabled():
@@ -639,7 +665,7 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
-                window_size=window_size,
+                window_size=enc_dec_window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,

@@ -2382,29 +2382,40 @@ def check_set_window_size(
     attn_mask_type: str,
     window_size: Tuple[int, int] = None,
 ):
-    """Check if sliding window size is compliant with mask type and if not,
-    assert or set it to the appropriate size.
-        no_mask, padding      : window_size = (-1, -1) or (>=0, >=0)
-        causal, padding_causal: window_size = (-1,  0) or (>=0, 0)
-        arbitrary             : window_size = (-1, -1)
+    """Check if sliding window size is compliant with attention mask type.
+    If not, set it to the appropriate size.
+
+         attn_mask_type                              |   window_size
+    -------------------------------------------------------------------------
+    no_mask, padding, arbitrary                      | (-1, -1) or (>=0, >=0)
+    causal, padding_causal                           | (-1,  0) or (>=0, 0)
+    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
     """
+    orig_window_size = window_size
     if "causal" in attn_mask_type:
-        if window_size is None:
+        if orig_window_size is None or (orig_window_size[0] == -1 and orig_window_size[1] == 0):
             window_size = (-1, 0)
+        elif orig_window_size[0] >= 0:
+            window_size = (orig_window_size[0], 0)
+            warnings.warn(
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
+            )
         else:
-            window_size = (window_size[0], 0)
-    elif attn_mask_type in ["no_mask", "padding"]:
-        if window_size is None or window_size in [(-1, -1), (-1, 0)]:
+            assert False, (
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
+            )
+    elif attn_mask_type in ["no_mask", "padding", "arbitrary"]:
+        if orig_window_size is None or (orig_window_size[0] == -1 and orig_window_size[1] in [-1, 0]):
             window_size = (-1, -1)
             warnings.warn(
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
-        elif window_size[0] < 0 or window_size[0] < 0:
+        elif orig_window_size[0] < 0 or orig_window_size[0] < 0:
             assert False, (
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
-    elif attn_mask_type == "arbitrary":
-        window_size = (-1, -1)
+    else:
+        assert False, "Invalid attn_mask_type: " + attn_mask_type
     return window_size
 
 
