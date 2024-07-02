@@ -357,7 +357,7 @@ def get_attention_backend(
         use_flash_attention = False
 
     # Filter: Sliding window attention
-    if window_size not in ((-1, -1), (-1, 0)):
+    if window_size is not None and window_size[0] != -1 and window_size[1] not in [-1, 0]:
         if use_unfused_attention:
             logger.debug(
                 "Disabling UnfusedDotProductAttention as "
