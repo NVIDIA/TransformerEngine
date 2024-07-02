@@ -26,6 +26,16 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP
 __all__ = ["cast_fp8"]
 
 
+def _quantize(x, scale, q_dtype):
+    """
+    Quantize with scale
+    """
+    dtype_max = (jnp.finfo(q_dtype).max).astype(x.dtype)
+    scale = scale.astype(x.dtype)
+    clipped_scaled_x = jnp.clip((x * scale), -dtype_max, dtype_max)
+    return clipped_scaled_x.astype(q_dtype)
+
+
 class CastFP8Primitive(BasePrimitive):
     """
     Cast Primitive
