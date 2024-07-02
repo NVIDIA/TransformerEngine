@@ -6,6 +6,7 @@ from functools import partial, reduce
 from typing import Tuple, Sequence, Union, Callable
 import operator
 
+import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
@@ -26,6 +27,7 @@ from .misc import (
     normalize_axis_boundary,
 )
 from .activation import ActivationEnum
+from .quantization import _quantize
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -36,6 +38,26 @@ __all__ = [
     "dact_lu_dbias_cast_transpose",
     "dgated_act_lu_cast_transpose",
 ]
+
+
+def _transpose(inputs, static_axis_boundary, transpose_axis_boundary):
+    """
+    JAX native transpose implementation
+    """
+    axes = multidim_transpose(range(inputs.ndim), static_axis_boundary, transpose_axis_boundary)
+    return jnp.transpose(inputs, axes=axes)
+
+
+def _cast_transpose(inputs, scale, amax, out_dtype, static_axis_boundary, transpose_axis_boundary):
+    """
+    JAX native cast_transpose implementation
+    """
+    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(inputs)).astype(amax.dtype))
+    casted_output = _quantize(inputs, scale, q_dtype=out_dtype)
+    casted_transposed_output = _transpose(
+        casted_output, static_axis_boundary, transpose_axis_boundary
+    )
+    return casted_output, casted_transposed_output, updated_amax
 
 
 class TransposePrimitive(BasePrimitive):
@@ -176,6 +198,8 @@ def transpose(
     """
     transpose wrapper
     """
+    if not TransposePrimitive.enabled():
+        return _transpose(x, static_axis_boundary, transpose_axis_boundary)
     return TransposePrimitive.outer_primitive.bind(
         x,
         static_axis_boundary=static_axis_boundary,
@@ -381,6 +405,15 @@ def cast_transpose(
     cast transpose wrapper
     Return two tensors, FP8(inputs) and FP8(inputs.T), which are scaled by `scale`
     """
+    if not CastTransposePrimitive.enabled():
+        return _cast_transpose(
+            x,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary,
+        )
     return CastTransposePrimitive.outer_primitive.bind(
         x,
         amax,
