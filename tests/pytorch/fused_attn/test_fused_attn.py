@@ -116,6 +116,10 @@ def _get_attention_backends(
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
         if config.bias_shape == "1hss":
@@ -123,7 +127,7 @@ def _get_attention_backends(
         if config.bias_shape == "bhss":
             alibi_slopes_shape = [config.batch_size, config.num_heads]
 
-    core_attention_bias_shape = config.bias_shape
+    core_attention_bias_shape = config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
     if config.attn_bias_type == "post_scale_bias" and config.head_dim <= 128:
@@ -132,7 +136,7 @@ def _get_attention_backends(
     fused_attn_backends = []
     available_backends = None
     os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    _, _, _, fused_attention_backend, available_backends = get_attention_backend(
+    _, _, _, available_backends, fused_attention_backend = get_attention_backend(
         qkv_dtype=qkv_dtype,
         qkv_layout=qkv_layout,
         batch_size=config.batch_size,
@@ -145,7 +149,7 @@ def _get_attention_backends(
         window_size=window_size,
         alibi_slopes_shape=alibi_slopes_shape,
         core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias_shape=config.bias_shape,
+        core_attention_bias_shape=core_attention_bias_shape,
         core_attention_bias_requires_grad=core_attention_bias_requires_grad,
         pad_between_seqs=pad_between_seqs,
         attention_dropout=config.dropout_p,
@@ -158,7 +162,7 @@ def _get_attention_backends(
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
         fused_attn_backends.append(fused_attention_backend)
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-        _, _, _, fused_attention_backend, available_backends = get_attention_backend(
+        _, _, _, available_backends, fused_attention_backend = get_attention_backend(
             qkv_dtype=qkv_dtype,
             qkv_layout=qkv_layout,
             batch_size=config.batch_size,
@@ -183,7 +187,7 @@ def _get_attention_backends(
         )
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             fused_attn_backends.append(fused_attention_backend)
-    else:
+    elif fused_attention_backend != FusedAttnBackend["No_Backend"] and fused_attention_backend is not None:
         fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
@@ -380,6 +384,8 @@ model_configs_mask = {
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
     "mask_7_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "mask_7_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_8_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
+    "mask_8_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
 }
 
 

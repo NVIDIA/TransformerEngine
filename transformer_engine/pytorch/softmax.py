@@ -332,7 +332,10 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.attn_mask_type == "arbitrary":
             return False  # Custom masks not supported
 
-        if self.attn_mask_type == "causal":  # unfused causal softmax kernel
+        if (
+            self.attn_mask_type == "causal_bottom_right"
+            or (self.attn_mask_type == "causal" and sq == sk)
+        ):  # fused causal softmax kernel
             return True
 
         if (
@@ -361,7 +364,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Fused masked softmax kernel"""
         scale = 1.0 if scale is None else scale
 
-        if self.attn_mask_type == "causal":
+        if "causal" in self.attn_mask_type:
             return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
 
         # input is 4D tensor (b, np, sq, sk)
@@ -379,7 +382,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         if scale is not None:
             inp = inp * scale
 
-        if self.attn_mask_type == "causal":
+        if "causal" in self.attn_mask_type:
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
                 assert self.kvcache_max_seq >= seq_len_k

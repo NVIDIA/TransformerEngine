@@ -499,12 +499,14 @@ def get_attention_backend(
 
     # Selected backend
     if use_flash_attention:
-        selected_backend = "FlashAttention"
         use_fused_attention = False
         use_unfused_attention = False
     elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
         use_unfused_attention = False
+    if use_flash_attention:
+        selected_backend = "FlashAttention"
+    elif use_fused_attention:
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
     else:
@@ -522,8 +524,8 @@ def get_attention_backend(
         use_flash_attention,
         use_fused_attention,
         use_unfused_attention,
-        fused_attention_backend if use_fused_attention else None,
         available_backends,
+        fused_attention_backend,
     )
 
 
@@ -2482,11 +2484,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
-        # self-attention: causal_bottom_right and causal are equivalent
-        # cross-attention: filtered out by DotProductAttention
-        if attn_mask_type == "causal_bottom_right":
-            attn_mask_type = "causal"
-
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
@@ -5243,10 +5240,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
-                if cu_seqlens_q_padded is None:
-                    cu_seqlens_q_padded = cu_seqlens_q
-                if cu_seqlens_kv_padded is None:
-                    cu_seqlens_kv_padded = cu_seqlens_kv
                 assert (
                     cu_seqlens_q.shape == cu_seqlens_kv.shape
                     and len(cu_seqlens_q.shape) == 1
@@ -5366,8 +5359,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention,
                 use_fused_attention,
                 use_unfused_attention,
-                fused_attention_backend,
                 _,
+                fused_attention_backend,
             ) = get_attention_backend(
                 qkv_type=type(query_layer),
                 qkv_dtype=query_layer.dtype,
