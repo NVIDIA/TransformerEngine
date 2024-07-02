@@ -12,10 +12,6 @@ import setuptools
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.utils import (
-    found_cmake,
-    found_ninja,
-    found_pybind11,
-    remove_dups,
     get_frameworks,
     install_and_import,
 )
@@ -58,7 +54,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0; python_version<'3.8'",
@@ -66,20 +61,12 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
-    # Requirements that may be installed outside of Python
-    if not found_cmake():
-        setup_reqs.append("cmake>=3.18")
-    if not found_ninja():
-        setup_reqs.append("ninja")
-    if not found_pybind11():
-        setup_reqs.append("pybind11")
-
-    return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
+    return [install_reqs, test_reqs]
 
 
 if __name__ == "__main__":
     # Dependencies
-    setup_requires, install_requires, test_requires = setup_requirements()
+    install_requires, test_requires = setup_requirements()
 
     __version__ = te_version()
 
@@ -133,7 +120,6 @@ if __name__ == "__main__":
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=True,

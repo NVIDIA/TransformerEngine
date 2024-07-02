@@ -20,9 +20,9 @@ import setuptools
 from .utils import (
     cmake_bin,
     debug_build_enabled,
-    found_ninja,
     get_frameworks,
     cuda_path,
+    get_max_jobs_for_parallel_build,
 )
 
 
@@ -60,8 +60,9 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
         configure_command += self.cmake_flags
-        if found_ninja():
-            configure_command.append("-GNinja")
+
+        # Enforcing build with ninja for all frameworks
+        configure_command.append("-GNinja")
 
         import pybind11
 
@@ -72,6 +73,11 @@ class CMakeExtension(setuptools.Extension):
         # CMake build and install commands
         build_command = [_cmake_bin, "--build", build_dir]
         install_command = [_cmake_bin, "--install", build_dir]
+
+        # Check whether parallel build is restricted
+        max_jobs = get_max_jobs_for_parallel_build()
+        if int(max_jobs) > 0:
+            build_command.extend(["--parallel", max_jobs])
 
         # Run CMake commands
         for command in [configure_command, build_command, install_command]:
