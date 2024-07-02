@@ -978,7 +978,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
+                        out = torch.zeros_like(q)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
@@ -1139,11 +1139,11 @@ class AttnFuncWithCP(torch.autograd.Function):
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
         # Flash Attn outputs
-        dq = torch.empty_like(q)
+        dq = torch.zeros_like(q)
 
         p2p_comm_buffers = [
-            torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-            torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+            torch.zeros((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+            torch.zeros((2, *kv.shape), dtype=kv.dtype, device=kv.device),
         ]
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
@@ -1501,10 +1501,16 @@ class AttnFuncWithCP(torch.autograd.Function):
 
             if causal:
                 if i > (cp_size - rank - 1):
-                    dq.add_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.add_(dq_)
+                    else:
+                        dq[: cu_seqlens_q[-1]].add_(dq_[: cu_seqlens_q[-1]])
                 elif i == (cp_size - rank - 1):
                     if rank == (cp_size - 1):
-                        dq.copy_(dq_)
+                        if ctx.qkv_format != "thd":
+                            dq.copy_(dq_)
+                        else:
+                            dq[: cu_seqlens_q[-1]].copy_(dq_[: cu_seqlens_q[-1]])
                     else:
                         if ctx.qkv_format == "bshd":
                             dq[:, 0, ...].copy_(dq_[:, 0, ...])
@@ -1530,9 +1536,15 @@ class AttnFuncWithCP(torch.autograd.Function):
                         tex.thd_grad_correction(dq, dq_, cu_seqlens_q, "none", "copy")
             else:
                 if i == 0:
-                    dq.copy_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.copy_(dq_)
+                    else:
+                        dq[: cu_seqlens_q[-1]].copy_(dq_[: cu_seqlens_q[-1]])
                 else:
-                    dq.add_(dq_)
+                    if ctx.qkv_format != "thd":
+                        dq.add_(dq_)
+                    else:
+                        dq[: cu_seqlens_q[-1]].add_(dq_[: cu_seqlens_q[-1]])
 
             if attn_dbias is not None:
                 idx = (rank + i + 1) % cp_size
@@ -1581,7 +1593,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                         elif ctx.qkv_format == "thd":
                             tex.thd_grad_correction(dkv, dkv_, cu_seqlens_k, "add", "copy")
                     else:
-                        dkv.add_(dkv_)
+                        if ctx.qkv_format != "thd":
+                            dkv.add_(dkv_)
+                        else:
+                            dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
                 elif i >= (cp_size - rank - 1):
                     if i == 0 and rank == (cp_size - 1):
                         if ctx.qkv_format == "bshd":
@@ -1598,14 +1613,26 @@ class AttnFuncWithCP(torch.autograd.Function):
                         elif ctx.qkv_format == "thd":
                             tex.thd_grad_correction(dkv, dkv_, cu_seqlens_k, "add", "none")
                 elif i > 0:
-                    dkv.add_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.add_(dkv_)
+                    else:
+                        dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
                 else:
-                    dkv.copy_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.copy_(dkv_)
+                    else:
+                        dkv[:, : cu_seqlens_k[-1]].copy_(dkv_[:, : cu_seqlens_k[-1]])
             else:
                 if i == 0:
-                    dkv.copy_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.copy_(dkv_)
+                    else:
+                        dkv[:, : cu_seqlens_k[-1]].copy_(dkv_[:, : cu_seqlens_k[-1]])
                 else:
-                    dkv.add_(dkv_)
+                    if ctx.qkv_format != "thd":
+                        dkv.add_(dkv_)
+                    else:
+                        dkv[:, : cu_seqlens_k[-1]].add_(dkv_[:, : cu_seqlens_k[-1]])
 
         if causal:
             if ctx.qkv_format == "bshd":
