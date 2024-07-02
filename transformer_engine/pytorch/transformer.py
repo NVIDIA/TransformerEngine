@@ -281,7 +281,9 @@ class TransformerLayer(torch.nn.Module):
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = check_set_window_size(self_attn_mask_type, window_size)
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
-        self.enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
+        self.enc_dec_window_size = check_set_window_size(
+            enc_dec_attn_mask_type, enc_dec_window_size
+        )
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -635,9 +637,8 @@ class TransformerLayer(torch.nn.Module):
         if (
             "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
         ) and enc_dec_attn_mask is not None:
-            assert (
-                all(enc_dec_attn_mask[i].dtype == torch.bool
-                for i in range(len(enc_dec_attn_mask)))
+            assert all(
+                enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
         # For AMP
