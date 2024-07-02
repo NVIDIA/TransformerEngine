@@ -814,7 +814,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         set_weight_tensor_dist_attr(
             self.fc1_weight, self.tensor_parallel, parallel_mode="column", backend=self.backend
         )
-        self.fp8_weight_shapes.append(self.fc1_weight.shape)
+        self.fp8_weights.append(self.fc1_weight)
 
         self.has_bias = self._bias_attr is not False
         use_default_bias = self._bias_attr is None or self._bias_attr is True
@@ -846,7 +846,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         set_weight_tensor_dist_attr(
             self.fc2_weight, self.tensor_parallel, parallel_mode="row", backend=self.backend
         )
-        self.fp8_weight_shapes.append(self.fc2_weight.shape)
+        self.fp8_weights.append(self.fc2_weight)
 
         if self.has_bias:
             self.fc2_bias = self.create_parameter(
@@ -892,7 +892,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
             fc1_weight_fp8, fc1_weight_t_fp8, fc2_weight_fp8, fc2_weight_t_fp8 = (
-                self.get_fp8_weights_scratchpad(is_first_microbatch)
+                self.get_fp8_weights_scratchpad_and_cast(is_first_microbatch)
             )
 
             out = _LayerNormMLP.apply(

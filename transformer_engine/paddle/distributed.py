@@ -14,6 +14,16 @@ import paddle.distributed.fleet.base.topology as tp
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 from paddle.distributed.fleet.layers.mpu import mp_ops
 
+try:
+    # This feature is not supported as of Paddle 2.6.
+    from paddle.distributed.fleet.meta_parallel import (
+        PipelineParallelMicroStepLocations,
+        register_global_pipeline_parallel_hook,
+    )
+except ImportError:
+    print("Cannot find register_global_pipeline_parallel_hook !")
+    register_global_pipeline_parallel_hook = None
+
 from .constants import dist_group_type
 
 _weight_split_axis = {
@@ -52,6 +62,22 @@ def get_tp_group_and_world_size(
         )
 
     return model_parallel_group, world_size
+
+
+def is_pp_enabled() -> bool:
+    """Check if pipeline parallel is enabled"""
+    if not paddle.distributed.is_initialized():
+        return False
+
+    return tp._HYBRID_PARALLEL_GROUP.get_pipe_parallel_world_size() > 1
+
+
+def register_pp_fwd_begin_hook(forward_begin_hook):
+    """Register the pp hook if register_global_pipeline_parallel_hook exist"""
+    if register_global_pipeline_parallel_hook is not None:
+        register_global_pipeline_parallel_hook(
+            PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
+        )
 
 
 @contextmanager
