@@ -460,16 +460,19 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
                 inputs[idxs] = x[0]
                 grad_outputs[idxs] = dy
 
-        # Forward and backward steps.
+        # Cache for layer outputs.
         outputs = {}
 
         def forward(layer_idx: int, microbatch_idx: int):
+            """Helper function for forward steps"""
             idxs = (layer_idx, microbatch_idx)
             outputs[idxs] = layer_forwards[idxs](inputs[idxs])
 
         def backward(layer_idx: int, microbatch_idx: int):
+            """Helper function for backward steps"""
             outputs[layer_idx, microbatch_idx].backward(grad_outputs[layer_idx, microbatch_idx])
 
+        # Forward and backward steps.
         forward(0, 0)
         forward(1, 0)
         forward(0, 1)
