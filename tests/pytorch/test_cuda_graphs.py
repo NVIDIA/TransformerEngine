@@ -439,7 +439,8 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             _order=layer_order,
         )
         layer_forwards = {
-            (i // num_microbatches, i % num_microbatches): forward for i, forward in enumerate(layer_forwards)
+            (i // num_microbatches, i % num_microbatches): forward
+            for i, forward in enumerate(layer_forwards)
         }
 
     # Optimizer.
