@@ -510,6 +510,7 @@ class TransformerLayer(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
+        compare_update: bool = False,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -623,6 +624,7 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
+            compare_update=compare_update,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:

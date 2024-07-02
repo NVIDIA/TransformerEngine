@@ -5681,6 +5681,27 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+        # attributes for checking kv updates
+        self._curr_key_layer = None
+        self._curr_value_layer = None
+        self._minibatch_key_layers = []
+        self._minibatch_value_layers = []
+        self._minibatch_key_layers_gradient = []
+        self._minibatch_value_layers_gradient = []
+
+        # kv update records
+        self.batch_k_diff = []
+        self.batch_abs_k_diff = []
+        self.batch_k_grad = []
+        self.batch_abs_k_grad = []
+        self.batch_k_grad_corr = []
+
+        self.batch_v_diff = []
+        self.batch_abs_v_diff = []
+        self.batch_v_grad = []
+        self.batch_abs_v_grad = []
+        self.batch_v_grad_corr = []
+
     def _allocate_memory(
         self, inference_max_sequence_len: int, batch_size: int, dtype: torch.dtype
     ) -> torch.Tensor:
@@ -5746,6 +5767,7 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
+        compare_update: bool = False,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
         Forward propagation for MultiheadAttention layer.
@@ -5996,6 +6018,64 @@ class MultiheadAttention(torch.nn.Module):
             )
             query_layer = query_layer.view(*new_tensor_shape)
 
+
+        if compare_update:
+            prev_minibatch_key_layer = self._minibatch_key_layers.pop(0)
+            prev_minibatch_key_layer_gradient = \
+                self._minibatch_key_layers_gradient.pop(0)
+
+            # calculation on cpu
+            _key_layer = key_layer.to(prev_minibatch_key_layer)
+            k_diff = (_key_layer - prev_minibatch_key_layer)
+            # overall diff
+            k_diff_mean = k_diff.mean()
+            self.batch_k_diff.append(k_diff_mean)
+            self.batch_abs_k_diff.append(k_diff.abs().mean())
+
+            k_grad_mean = prev_minibatch_key_layer_gradient.mean()
+            self.batch_k_grad.append(k_grad_mean)
+            self.batch_abs_k_grad.append(
+                prev_minibatch_key_layer_gradient.abs().mean())
+
+
+            dev_k_diff = (k_diff - k_diff_mean)
+            dev_k_grad = (prev_minibatch_key_layer_gradient - k_grad_mean)
+
+            self.batch_k_grad_corr.append((dev_k_diff * dev_k_grad).sum() / (
+                torch.sqrt((dev_k_diff ** 2).sum())
+                * torch.sqrt((dev_k_grad ** 2).sum())))
+
+
+            # value update data
+            prev_minibatch_value_layer = self._minibatch_value_layers.pop(0)
+            prev_minibatch_value_layer_gradient = \
+                self._minibatch_value_layers_gradient.pop(0)
+
+            _value_layer = value_layer.to(prev_minibatch_value_layer)
+            v_diff = (_value_layer - prev_minibatch_value_layer)
+            # overall diff
+            v_diff_mean = k_diff.mean()
+            self.batch_v_diff.append(v_diff_mean)
+            self.batch_abs_v_diff.append(v_diff.abs().mean())
+
+            v_grad_mean = prev_minibatch_value_layer_gradient.mean()
+            self.batch_v_grad.append(v_grad_mean)
+            self.batch_abs_v_grad.append(
+                prev_minibatch_value_layer_gradient.abs().mean())
+
+
+            dev_v_diff = (v_diff - v_diff_mean)
+            dev_v_grad = (prev_minibatch_value_layer_gradient - v_grad_mean)
+
+            self.batch_v_grad_corr.append((dev_v_diff * dev_v_grad).sum() / (
+                torch.sqrt((dev_v_diff ** 2).sum())
+                * torch.sqrt((dev_v_grad ** 2).sum())))
+        else:
+            self._curr_key_layer = key_layer
+            self._curr_value_layer = value_layer
+            self._minibatch_key_layers.append(key_layer.to(device='cpu'))
+            self._minibatch_value_layers.append(value_layer.to(device='cpu'))
+
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
@@ -6068,3 +6148,11 @@ class MultiheadAttention(torch.nn.Module):
         if self.input_layernorm and self.return_layernorm_output:
             outputs += (layernorm_output,)
         return outputs if len(outputs) > 1 else outputs[0]
+
+    def save_kv_gardient(self):
+        if self._curr_key_layer is not None:
+            self._minibatch_key_layers_gradient.append(
+                self._curr_key_layer.grad.to('cpu'))
+        if self._curr_value_layer is not None:
+            self._minibatch_value_layers_gradient.append(
+                self._curr_value_layer.grad.to('cpu'))
