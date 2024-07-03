@@ -76,12 +76,9 @@ class CMakeExtension(setuptools.Extension):
         max_jobs = get_max_jobs_for_parallel_build()
         if found_ninja():
             configure_command.append("-GNinja")
-            if max_jobs > 0:
-                build_command.extend(["--parallel", str(max_jobs)])
-        else:
-            build_command.extend(["-j"])
-            if max_jobs > 0:
-                build_command.extend([str(max_jobs)])
+        build_command.append("--parallel")
+        if max_jobs > 0:
+            build_command.append(str(max_jobs))
 
         # Run CMake commands
         for command in [configure_command, build_command, install_command]:
