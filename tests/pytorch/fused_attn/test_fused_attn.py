@@ -216,6 +216,7 @@ def get_swa(seq_q, seq_kv, w=None):
     and create its equivalent attention mask in [seq_q, seq_kv] shape"""
     if w is None:
         w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
+    print('wwwwwwwwwwwwwwww',w)
     m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
     mu = torch.triu(m, diagonal=seq_kv - seq_q - w[0])
     ml = torch.tril(mu, diagonal=seq_kv - seq_q + w[1])
@@ -500,10 +501,14 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 model_configs_swa = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
-    "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    #"swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
+    #"swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
+    #"swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    #"swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    "swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
+    "swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
+    "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
 }
 
 
