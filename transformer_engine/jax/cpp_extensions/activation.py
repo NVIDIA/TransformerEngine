@@ -4,8 +4,9 @@
 """JAX/TE custom ops for activation"""
 from typing import Tuple, Sequence, Union, Callable
 import operator
-from functools import reduce
+from functools import reduce, partial
 
+import jax
 import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters.mlir import ir
@@ -22,6 +23,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     get_padded_spec,
 )
+from .quantization import _cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
@@ -40,6 +42,38 @@ ActivationEnum = {
     ("squared_relu",): NVTE_Activation_Type.SRELU,
     ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
 }
+
+
+def _act_lu(inputs, activation_type):
+    """
+    JAX native activation implementation
+    """
+    act_type_id = ActivationEnum[activation_type]
+    match act_type_id:
+        case NVTE_Activation_Type.GELU | NVTE_Activation_Type.SILU | NVTE_Activation_Type.RELU:
+            output = getattr(jax.nn, activation_type[0])(inputs)
+        case NVTE_Activation_Type.GEGLU | NVTE_Activation_Type.SWIGLU | NVTE_Activation_Type.REGLU:
+            activation, linear = activation_type
+            assert linear == "linear"
+            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
+            output = getattr(jax.nn, activation)(act_input) * linear_input
+        case NVTE_Activation_Type.QGELU:
+            output = jax.nn.sigmoid(1.702 * inputs) * inputs
+        case NVTE_Activation_Type.QGEGLU:
+            activation, linear = activation_type
+            assert linear == "linear"
+            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
+            output = jax.nn.sigmoid(1.702 * act_input) * act_input * linear_input
+        case NVTE_Activation_Type.SRELU:
+            output = jnp.where(inputs > 0, inputs * inputs, 0)
+        case NVTE_Activation_Type.SREGLU:
+            activation, linear = activation_type
+            assert linear == "linear"
+            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
+            output = jnp.where(act_input > 0, act_input * act_input, 0) * linear_input
+        case _:
+            raise ValueError(f"Unregonized {activation_type=}")
+    return jnp.squeeze(output, axis=-2)
 
 
 class ActLuPrimitive(BasePrimitive):
@@ -155,6 +189,9 @@ def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]])
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
+    if not ActLuPrimitive.enabled():
+        return _act_lu(inputs, activation_type)
+
     act_type_id = ActivationEnum[activation_type]
     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
 
@@ -286,6 +323,11 @@ def dact_lu(
     dact_lu fusion wrapper
     Return dgated_act_lu(inputs)
     """
+
+    if not DActLuPrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), act_lu_inputs)
+        return vjp_func(inputs)[0]
+
     act_type_id = ActivationEnum[activation_type]
     return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
 
@@ -443,6 +485,11 @@ def act_lu_fp8(
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
+    if not ActLuFp8Primitive.enabled():
+        act_lu_output = _act_lu(x, activation_type)
+        casted_output, updated_amax = _cast_fp8(act_lu_output, scale, amax, out_dtype)
+        return casted_output, updated_amax
+
     act_type_id = ActivationEnum[activation_type]
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
