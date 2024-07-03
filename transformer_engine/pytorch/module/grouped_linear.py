@@ -162,9 +162,9 @@ class _GroupedLinear(torch.autograd.Function):
             assert all(isinstance(w, Float8Tensor) for w in weights_fp8)
 
             out = torch.empty(
-                    [sum(m_splits), weights_fp8[0].size(0)],
-                    dtype=activation_dtype,
-                    device=inputmats[0].device,
+                [sum(m_splits), weights_fp8[0].size(0)],
+                dtype=activation_dtype,
+                device=inputmats[0].device,
             )
 
             _ = fp8_grouped_gemm(
@@ -358,9 +358,9 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.fp8:
                     logger.debug("Running backward in FP8")
                     dgrad = torch.empty(
-                            (sum(ctx.m_splits), weights_fp8[i].size(1)),
-                            dtype=ctx.activation_dtype,
-                            device=grad_output.device,
+                        (sum(ctx.m_splits), weights_fp8[i].size(1)),
+                        dtype=ctx.activation_dtype,
+                        device=grad_output.device,
                     )
                     fp8_grouped_gemm(
                         [w.transpose_2d() for w in weights_fp8],
