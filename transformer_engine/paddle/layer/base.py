@@ -20,7 +20,7 @@ except ImportError:
     from paddle.fluid import core
     from paddle.fluid.framework import _dygraph_tracer
 
-from ..constants import FP8BwdTensors, dist_group_type
+from ..constants import FP8FwdTensors, FP8BwdTensors, dist_group_type
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8, transpose
 from ..fp8 import (
     FP8State,
@@ -29,7 +29,7 @@ from ..fp8 import (
     get_global_fp8_state,
     get_fp8_te_dtype,
 )
-from ..distributed import allgather
+from ..distributed import allgather, register_pp_fwd_begin_hook, is_pp_enabled
 from ..profile import nvtx_range
 from ..recompute import is_in_recompute_phase
 from ..fp8_buffer import FP8RecomputeBuffer
@@ -80,8 +80,19 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
-        self.fp8_weight_shapes = []
+        # weights that stored in fp16 would be cast into fp8 every first microstep
+        self.fp8_weights = []
         self.fp8_weight_cache = {}
+        self.registered_pp_start_callback = False
+
+        self.current_step_id = paddle.to_tensor([1], dtype=paddle.int32, place=paddle.CPUPlace())
+
+        def current_step_id_callback(step_id=None, **kwargs):  # pylint: disable=unused-argument
+            self.current_step_id.copy_(
+                paddle.to_tensor([step_id], dtype=paddle.int32, place=paddle.CPUPlace()), True
+            )
+
+        register_pp_fwd_begin_hook(current_step_id_callback)
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -157,23 +168,23 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         if not self.fp8_enabled:
             return
 
-        for i, shape in enumerate(self.fp8_weight_shapes, start=1):
+        for i, weight in enumerate(self.fp8_weights, start=1):
             weight_cast_key = f"weight{i}_fp8"
             weight_transpose_key = f"weight{i}_t_fp8"
 
             if (
                 weight_cast_key in self.fp8_weight_cache
-                and self.fp8_weight_cache[weight_cast_key].shape == shape
+                and self.fp8_weight_cache[weight_cast_key].shape == weight.shape
             ):
                 return
 
             self.fp8_weight_cache[weight_cast_key] = paddle.empty(
-                shape=shape,
+                shape=weight.shape,
                 dtype=paddle.uint8,
             )
 
             self.fp8_weight_cache[weight_transpose_key] = paddle.empty(
-                shape=[shape[1], shape[0]],
+                shape=[weight.shape[1], weight.shape[0]],
                 dtype=paddle.uint8,
             )
 
@@ -293,12 +304,20 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 if self.fp8_meta["recipe"].reduce_amax:
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
                     amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        self.fp8_meta,
+                        fwd_update=True,
+                        update_weight_scale_inv=update_weight_scale_inv,
+                        current_step_id_tensor=self.current_step_id,
+                        use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                     )
                     global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
                 else:
                     amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        self.fp8_meta,
+                        fwd_update=True,
+                        update_weight_scale_inv=update_weight_scale_inv,
+                        current_step_id_tensor=self.current_step_id,
+                        use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
                     )
 
             if self.fp8_enabled and self.training:
@@ -355,13 +374,21 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
             if fp8_meta["recipe"].reduce_amax:
                 global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
-                amax_and_scale_update(fp8_meta, False)
+                amax_and_scale_update(
+                    fp8_meta,
+                    fwd_update=False,
+                    use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
+                )
                 global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
 
                 # Get new backward key.
                 fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
             else:
-                amax_and_scale_update(fp8_meta, False)
+                amax_and_scale_update(
+                    fp8_meta,
+                    fwd_update=False,
+                    use_cudagraph=get_global_fp8_state().is_cudagraph_enabled(),
+                )
 
         with nvtx_range(name + " backward"):
             yield
@@ -439,14 +466,13 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                     fp8_dtype_backward,
                 )
             bgrad = None
-
         return grad_output_mat, grad_output_c, grad_output_t, bgrad
 
     @abstractmethod
     def forward(self):
         """Needs override."""
 
-    def get_fp8_weights_scratchpad(
+    def get_fp8_weights_scratchpad_and_cast(
         self,
         is_first_microbatch: Union[bool, None],
     ) -> List[Optional[paddle.Tensor]]:
@@ -455,10 +481,10 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         `is_first_microbatch` is not `None`)
         """
         if not self.fp8_enabled or is_first_microbatch is None:
-            return [None, None] * len(self.fp8_weight_shapes)
+            return [None, None] * len(self.fp8_weights)
 
         out_list = []
-        for i, _ in enumerate(self.fp8_weight_shapes, start=1):
+        for i, _ in enumerate(self.fp8_weights, start=1):
             weight_cast_key = f"weight{i}_fp8"
             weight_transpose_key = f"weight{i}_t_fp8"
 
@@ -466,10 +492,67 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 weight_cast_key in self.fp8_weight_cache
             ), "TE internal error: fp8 weight buffer is not found"
 
-            out_list.extend(
-                [
-                    self.fp8_weight_cache[weight_cast_key],
-                    self.fp8_weight_cache[weight_transpose_key],
-                ]
-            )
+            weight_fp8 = self.fp8_weight_cache[weight_cast_key]
+            weight_t_fp8 = self.fp8_weight_cache[weight_transpose_key]
+
+            # Disable fp8 weight cache
+            # is_first_microbatch is None -> we cast the weights into fp8 every micro step
+            # Enalbe fp8 weight cache
+            # is_first_microbatch == true -> we cast the weights into fp8 every micro step
+
+            out_list.extend([weight_fp8, weight_t_fp8])
+
+        # is cudagraph is enabled we cast the weight before the pp pipe
+        # we only register the callback once
+        if get_global_fp8_state().is_cudagraph_enabled() and (
+            not self.registered_pp_start_callback and is_pp_enabled()
+        ):
+
+            fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
+
+            def cast_callback(step_id=None, **kwargs):  # pylint: disable=unused-argument
+                update_fp8_weights = step_id == 0
+
+                for i, weight in enumerate(self.fp8_weights, start=1):
+                    weight_cast_key = f"weight{i}_fp8"
+                    weight_transpose_key = f"weight{i}_t_fp8"
+
+                    assert (
+                        weight_cast_key in self.fp8_weight_cache
+                    ), "TE internal error: fp8 weight buffer is not found"
+
+                    weight_fp8 = self.fp8_weight_cache[weight_cast_key]
+                    weight_t_fp8 = self.fp8_weight_cache[weight_transpose_key]
+
+                    if paddle.is_grad_enabled():
+                        if update_fp8_weights:
+                            cast_transpose(
+                                weight,
+                                self.fp8_meta["scaling_fwd"],
+                                (
+                                    FP8FwdTensors.GEMM1_WEIGHT
+                                    if i == 1
+                                    else FP8FwdTensors.GEMM2_WEIGHT
+                                ),
+                                fp8_dtype_forward,
+                                cast_out=weight_fp8,
+                                transpose_out=weight_t_fp8,
+                            )
+                    else:
+                        if update_fp8_weights:
+                            cast_to_fp8(
+                                weight,
+                                self.fp8_meta["scaling_fwd"],
+                                (
+                                    FP8FwdTensors.GEMM1_WEIGHT
+                                    if i == 1
+                                    else FP8FwdTensors.GEMM2_WEIGHT
+                                ),
+                                fp8_dtype_forward,
+                                out=weight_fp8,
+                            )
+
+            cast_callback(0 if is_first_microbatch else 1)
+            register_pp_fwd_begin_hook(cast_callback)
+            self.registered_pp_start_callback = True
         return out_list
