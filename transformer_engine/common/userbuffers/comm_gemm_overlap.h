@@ -11,7 +11,6 @@
 #include <cstring>
 
 // External includes
-#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 
@@ -20,6 +19,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../util/logging.h"
+#include "../util/cuda_driver.h"
 #include "../util/system.h"
 #include "userbuffers.h"
 
@@ -51,9 +51,9 @@ bool nvte_comm_overlap_supports_multicast() {
   CUdevice cudev;
 
   NVTE_CHECK_CUDA(cudaGetDevice(&dev));
-  NVTE_CHECK_CUDRIVER(cuDeviceGet(&cudev, dev));
-  NVTE_CHECK_CUDRIVER(
-      cuDeviceGetAttribute(&supports_multicast, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev));
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, dev);
+  NVTE_CALL_CHECK_CUDA_DRIVER(
+      cuDeviceGetAttribute, &supports_multicast, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
 
   return static_cast<bool>(supports_multicast);
 }
@@ -168,7 +168,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
 };  // CommGemmOverlapBase
 
 struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
-  int _rs_kernel_type = 0;
+  int _rs_kernel_type = 1;
   cudaStream_t _stream_comm;
 
   CommGemmOverlap(int worldrank, int worldsize, int localrank, int localsize, int nodeid,
@@ -182,7 +182,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
                             use_ce, atomic_gemm, alloc_copy_allgather_handle, barrier_handle,
                             free_handle) {
     if (_atomic_gemm) {
-      _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 0);
+      _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 1);
       NVTE_CHECK(0 <= _rs_kernel_type && _rs_kernel_type < 3,
                  "Invalid choice for NVTE_RS_STRIDED_ATOMIC");
       if (worldrank == 0 && _rs_kernel_type == 1) {
@@ -296,7 +296,7 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
                                                   {workspace_size_chunk}, workspace.dtype());
     nvte_cublas_atomic_gemm(A.data(), B.data(), ubuf.data(), bias.data(), pre_gelu_out.data(),
                             A_trans, B_trans, grad, workspace_chunk.data(), accumulate,
-                            use_split_accumulator, _math_sms, _num_splits, 0,true, counters.data(),
+                            use_split_accumulator, _math_sms, _num_splits, 0, true, counters.data(),
                             stream_main);
 
     for (int i = 0; i < _num_splits; i++) {

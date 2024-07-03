@@ -8,7 +8,6 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
 #include <cublas_v2.h>
-#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <cudnn.h>
 #include <nvrtc.h>
@@ -38,16 +37,6 @@
     if (status_NVTE_CHECK_CUDA != cudaSuccess) {                              \
       NVTE_ERROR("CUDA Error: ", cudaGetErrorString(status_NVTE_CHECK_CUDA)); \
     }                                                                         \
-  } while (false)
-
-#define NVTE_CHECK_CUDRIVER(expr)                           \
-  do {                                                      \
-    const CUresult status_NVTE_CHECK_CUDRIVER = (expr);     \
-    if (status_NVTE_CHECK_CUDRIVER != CUDA_SUCCESS) {       \
-      const char *error;                                    \
-      cuGetErrorString(status_NVTE_CHECK_CUDRIVER, &error); \
-      NVTE_ERROR("CUDA Driver API Error: ", error);         \
-    }                                                       \
   } while (false)
 
 #define NVTE_CHECK_CUBLAS(expr)                                                      \

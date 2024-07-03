@@ -141,6 +141,7 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     if (_atomic_gemm) {
       auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
       _counters = torch::zeros({_num_splits * 2}, counter_options);
+      _counters = _counters.index_put_({Slice(None, _num_splits)}, 1);
     }
   }
 
@@ -268,6 +269,9 @@ struct PYBIND11_EXPORT UbufCommOverlap : torch::CustomClassHolder, CommGemmOverl
     auto workspace_ =
         makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
 
+    // Reset all counters to "not ready" (1)
+    _counters = _counters.zero_();
+    _counters = _counters.index_put_({Slice(None, _num_splits)}, 1);
     auto counters_ = makeTransformerEngineTensor(
         _counters.data_ptr(), {static_cast<size_t>(_counters.size(0))}, DType::kInt32);
 
@@ -448,9 +452,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     if (_atomic_gemm) {
       auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
       _counters = torch::zeros({_tp_size * 2}, counter_options);
-      _counters.index_put_({Slice(None, _tp_size)}, 1);
+      _counters = _counters.index_put_({Slice(None, _tp_size)}, 1);
       if (!_is_reduce_scatter) {
-        _counters.index_put_({_self_chunk_id /* = 0 for AG + atomic GEMM */}, 0);
+        _counters = _counters.index_put_({_self_chunk_id /* = 0 for AG + atomic GEMM */}, 0);
       }
     }
   }
@@ -520,6 +524,10 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     auto workspace_ =
         makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
 
+    // Reset all counters to "not ready" (1) except the local chunk that is always "ready" (0)
+    _counters = _counters.zero_();
+    _counters = _counters.index_put_({Slice(None, _tp_size)}, 1);
+    _counters = _counters.index_put_({_self_chunk_id}, 0);
     auto counters_ = makeTransformerEngineTensor(
         _counters.data_ptr(), {static_cast<size_t>(_counters.size(0))}, DType::kInt32);
 
@@ -672,6 +680,9 @@ struct PYBIND11_EXPORT UbufP2PCommOverlap : torch::CustomClassHolder, CommGemmOv
     auto workspace_ =
         makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
 
+    // Reset all counters to "not ready" 1
+    _counters = _counters.zero_();
+    _counters = _counters.index_put_({Slice(None, _tp_size)}, 1);
     auto counters_ = makeTransformerEngineTensor(
         _counters.data_ptr(), {static_cast<size_t>(_counters.size(0))}, DType::kInt32);
 

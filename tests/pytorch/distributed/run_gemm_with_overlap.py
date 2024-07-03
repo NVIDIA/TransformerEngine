@@ -18,6 +18,9 @@ import torch.distributed as dist
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 torch_dtypes = {
     "fp32": torch.float32,
     "fp16": torch.float16,
@@ -451,7 +454,7 @@ def main(opts):
                 gemm2_inp = tex.cast_to_fp8(
                     torch.mul(all_outputs[0], opts.scale),
                     fp8_meta,
-                    tex.FP8FwdTensprs.GEMM2_INPUT,
+                    tex.FP8FwdTensors.GEMM2_INPUT,
                     fp8_dtype,
                 )
                 all_outputs = tex.fp8_gemm(

@@ -89,7 +89,7 @@ BwdFunction &get_bwd_launcher(DType wtype, DType itype, DType otype, DType ctype
   if (params.rows % 4 == 0 && is_aligned(params.x) && is_aligned(params.rs) &&
       is_aligned(params.gamma) && is_aligned(params.dz) && is_aligned(params.dx) &&
       is_aligned(params.dgamma) && is_aligned(params.dgamma_part) &&
-      layer_norm::BWD_TUNED_FUNCS.count(tuned_key) > 0) {
+      BWD_TUNED_FUNCS.count(tuned_key) > 0) {
     return BWD_TUNED_FUNCS.at(tuned_key);
   }
 
