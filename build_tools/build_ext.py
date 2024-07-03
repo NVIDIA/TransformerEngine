@@ -23,7 +23,7 @@ from .utils import (
     found_ninja,
     get_frameworks,
     cuda_path,
-    get_max_jobs_for_parallel_build
+    get_max_jobs_for_parallel_build,
 )
 
 
