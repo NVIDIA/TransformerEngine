@@ -27,6 +27,7 @@ jobs:
         run: pip install . -v
         env:
           NVTE_FRAMEWORK: none
+          NVTE_MAX_BUILD_JOBS: 4
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
