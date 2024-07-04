@@ -17,7 +17,7 @@
 NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
                                                const transformer_engine::DType kv_dtype,
                                                NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                               NVTE_Mask_Type attn_mask_type, const std::vector<size_t> window_size, float p_dropout,
+                                               NVTE_Mask_Type attn_mask_type, float p_dropout,
                                                size_t num_attn_heads, size_t num_gqa_groups,
                                                size_t max_seqlen_q, size_t max_seqlen_kv,
                                                size_t head_dim);

@@ -50,7 +50,7 @@ namespace fused_attn {
 void fused_attn_arbitrary_seqlen_fwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d, int64_t bias_b,
     int64_t bias_h, bool is_training, float scaling_factor, float dropout_probability,
-    NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, size_t window_size_left, size_t window_size_right, void *devPtrQ,
+    NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right, void *devPtrQ,
     void *devPtrK, void *devPtrV, void *devPtrBias, void *devPtrSoftmaxStats, void *devPtrO,
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
     void *devPtrCuSeqlensKV, void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV,
@@ -63,6 +63,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
                           (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
+  if (is_bottom_right && s_q == s_kv) {
+    is_causal = true;
+    is_bottom_right = false;
+  }
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
@@ -368,7 +372,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 void fused_attn_arbitrary_seqlen_bwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d, int64_t bias_b,
     int64_t bias_h, float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, size_t window_size_left, size_t window_size_right, void *devPtrQ, void *devPtrKTranspose,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right, void *devPtrQ, void *devPtrKTranspose,
     void *devPtrVTranspose, void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias,
     void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
@@ -382,6 +386,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
                           (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
+  if (is_bottom_right && s_q == s_kv) {
+    is_causal = true;
+    is_bottom_right = false;
+  }
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (dropout_probability != 0.0f);

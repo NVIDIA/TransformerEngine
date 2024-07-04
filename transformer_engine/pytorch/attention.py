@@ -325,12 +325,6 @@ def get_attention_backend(
     if use_unfused_attention and "padding" in attn_mask_type:
         logger.debug("Disabling UnfusedDotProductAttention for %s mask", attn_mask_type)
         use_unfused_attention = False
-    if use_unfused_attention and attn_mask_type == "causal" and max_seqlen_q != max_seqlen_kv:
-        logger.debug(
-            "Disabling UnfusedDotProductAttention for "
-            "top-left-diagonal causal masks for cross-attention"
-        )
-        use_unfused_attention = False
     if (
         use_flash_attention
         and _flash_attn_2_1_plus
@@ -357,27 +351,30 @@ def get_attention_backend(
         use_flash_attention = False
 
     # Filter: Sliding window attention
-    if window_size is not None and window_size[0] != -1 and window_size[1] not in [-1, 0]:
+    if window_size is not None and window_size[0] != -1:
         if use_fused_attention:
-            if context_parallel:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with context parallelism"
-                )
-                use_fused_attention = False
             if window_size[1] != 0:
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with causal mask" 
                 )
                 use_fused_attention = False
-            if attn_mask_type in ["no_mask", "padding", "causal", "padding_causal"]:
+            elif context_parallel:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s", attn_mask_type, 
+                    "with context parallelism"
                 )
                 use_fused_attention = False
-        if use_flash_attention and (not _flash_attn_2_3_plus or context_parallel):
+            elif (
+                max_seqlen_q != max_seqlen_kv
+                and attn_mask_type in ["no_mask", "padding", "causal_bottom_right", "padding_causal_bottom_right"]
+            ):
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with attn_mask_type = %s for cross-attention", attn_mask_type, 
+                )
+                use_fused_attention = False
+        if use_flash_attention and (window_size[1] not in [-1, 0]) and (not _flash_attn_2_3_plus or context_parallel):
             logger.debug(
                 "Disabling FlashAttention as sliding window attention requires "
                 "flash-attn 2.3+ and no context parallelism"
@@ -453,6 +450,7 @@ def get_attention_backend(
         ):
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
+            fused_attention_backend = None
         elif (
             fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
             and fu_core_attention_bias_type == "post_scale_bias"
@@ -463,6 +461,7 @@ def get_attention_backend(
                 " [1, H, S, S] shape"
             )
             use_fused_attention = False
+            fused_attention_backend = None
 
     # Filter: Determinism
     # backend                      | deterministic
@@ -601,6 +600,8 @@ def get_swa_mask(
 ) -> torch.Tensor:
     """
     Convert sliding window `window_size` to an equivalent "`arbitrary`" mask.
+    For "`causal`" mask type, the sliding window diagonal is aligned to the top left corner,
+    and for other mask types, the bottom right corner.
 
     Parameters
     ----------
@@ -629,22 +630,20 @@ def get_swa_mask(
     """
     mask = torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device="cuda")
     if attn_mask_type in ["causal"]:
-        for _ in range(2):
-            window_size[i] = window_size[i] if window_size[i] != -1 else max_seqlen_q
+        left = window_size[0] if window_size[0] != -1 else max_seqlen_q
+        right = window_size[1] if window_size[1] != -1 else max_seqlen_q
         mask_upper = torch.triu(mask, diagonal=-window_size[0])
         mask_lower = torch.tril(mask_upper, diagonal=window_size[1])
-    elif attn_mask_type in ["no_mask", "padding_causal", "arbitrary"]:
-        for _ in range(2):
-            window_size[i] = window_size[i] if window_size[i] != -1 else max_seqlen_kv
+    else:
+        left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
+        right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
         mask_upper = torch.triu(mask, diagonal=max_seqlen_kv-max_seqlen_q-window_size[0])
         mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv-max_seqlen_q+window_size[1])
-    else:
-        assert False, ("get_swa_mask does not support attn_mask_type = %s", attn_mask_type)
-
+    attn_mask_type = "arbitrary"
     mask = mask_lower.logical_not()
     if attention_mask is not None:
         mask = torch.logical_and(attention_mask, mask)
-    return mask
+    return attn_mask_type, mask
 
 
 @torch.no_grad()
@@ -5655,7 +5654,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.logger.info("Running with UnfusedDotProductAttention backend")
                 self.logger.debug("Running with config=%s", run_config)
                 if window_size is not None:
-                    attention_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask)
+                    attn_mask_type, attention_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask)
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
