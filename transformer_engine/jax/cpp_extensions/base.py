@@ -6,6 +6,7 @@ import os
 import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
+import logging
 
 from jax import core
 from jax.interpreters import xla, mlir
@@ -25,7 +26,7 @@ class BasePrimitive(metaclass=ABCMeta):
     def enabled(cls):
         pattern = os.getenv("NVTE_CUSTOM_CALLS_RE", r".*")
         pattern = re.compile(pattern)
-        is_enabled = pattern.match(cls.name) is not None
+        is_enabled = pattern.fullmatch(cls.name) is not None
         print(f"{pattern=} {cls.name=} {is_enabled=}")
         return is_enabled
 
