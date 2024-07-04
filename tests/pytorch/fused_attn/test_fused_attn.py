@@ -220,6 +220,7 @@ def test_dot_product_attention(
         pytest.skip("No need to test this layout for cross attention")
 
     # Test backend availability
+    window_size = (-1, -1)
     if swa:
         window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)

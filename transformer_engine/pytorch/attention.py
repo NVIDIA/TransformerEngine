@@ -3193,6 +3193,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
@@ -3327,6 +3328,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -3429,6 +3431,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
                     if ctx.fp8_meta["recipe"].fp8_mha:
                         dqkv = Float8Tensor(
@@ -3482,6 +3485,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -3508,6 +3512,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -3518,6 +3523,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             dqkv,
             None,
             rest[0],
+            None,
             None,
             None,
             None,
@@ -3564,6 +3570,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
@@ -3722,6 +3729,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -3832,6 +3840,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
                     if ctx.fp8_meta["recipe"].fp8_mha:
                         dq = Float8Tensor(
@@ -3904,6 +3913,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -3934,6 +3944,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -3948,6 +3959,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             dkv,
             None,
             rest[0],
+            None,
             None,
             None,
             None,
@@ -3995,6 +4007,7 @@ class FusedAttnFunc(torch.autograd.Function):
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc")
         if fp8:
@@ -4234,6 +4247,7 @@ class FusedAttnFunc(torch.autograd.Function):
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -4349,6 +4363,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
 
                     if ctx.fp8_meta["recipe"].fp8_mha:
@@ -4474,6 +4489,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -4505,6 +4521,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -4520,6 +4537,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dv,
             None,
             rest[0],
+            None,
             None,
             None,
             None,
@@ -4585,21 +4603,7 @@ class FusedAttention(torch.nn.Module):
             "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
         ) == "1" and get_device_compute_capability() == (9, 0)
         self.layer_number = 1 if layer_number is None else layer_number
-        if deterministic:
-            # workspace optimization path is deterministic
-            os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
-
-        # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-        # - unset:       enables workspace optimization when required workspace is <= 256MB
-        #                or when bias gradient needs to be computed
-        # - n:           enables workspace optimization when required workspace is <= n bytes
-        # - -1:          enables workspace optimization always
-        # - 0:           disables workspace optimization always
-        if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-            if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-            if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+        self.deterministic = deterministic
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -4796,6 +4800,7 @@ class FusedAttention(torch.nn.Module):
                     use_FAv2_bwd,
                     fp8,
                     fp8_meta,
+                    self.deterministic,
                 )
 
         # ...hd -> ...(hd)
@@ -4968,35 +4973,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(kv_channels)
 
-        self.device_compute_capability = get_device_compute_capability()
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
+            or bool(int(os.getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", "0")))
         )
-
-        self.use_flash_attention = int(
-            os.getenv("NVTE_FLASH_ATTN", "1")
-        ) and self.device_compute_capability >= (8, 0)
-        if int(os.getenv("NVTE_FLASH_ATTN", "1")) == 0:
-            self.logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
-        if self.device_compute_capability < (8, 0):
-            self.logger.debug("Disabling FlashAttention for compute capability < sm80")
-
-        if not _flash_attn_2_4_1_plus and self.deterministic:
-            self.use_flash_attention = False
-            self.logger.warning(
-                "Disabling usage of FlashAttention since version <2.4.1 does not support "
-                "deterministic execution. In order to use FA with deterministic behavior,"
-                " please install FlashAttention version >=2.4.1."
-            )
-
-        self.use_fused_attention = int(
-            os.getenv("NVTE_FUSED_ATTN", "1")
-        ) and self.device_compute_capability >= (8, 0)
-        if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-            self.logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
-        if self.device_compute_capability < (8, 0):
-            self.logger.debug("Disabling FusedAttention for compute capability < sm80")
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -5008,25 +4989,23 @@ class DotProductAttention(TransformerEngineBaseModule):
             "attention_dropout_ctx": attention_dropout_ctx,
         }
 
-        if self.use_flash_attention:
-            self.flash_attention = FlashAttention(
-                softmax_scale,
-                attention_type=attention_type,
-                layer_number=layer_number,
-                deterministic=self.deterministic,
-                **attn_kwargs,
-            )
+        self.flash_attention = FlashAttention(
+            softmax_scale,
+            attention_type=attention_type,
+            layer_number=layer_number,
+            deterministic=self.deterministic,
+            **attn_kwargs,
+        )
 
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
-        if self.use_fused_attention:
-            self.fused_attention = FusedAttention(
-                softmax_scale,
-                attention_type=attention_type,
-                layer_number=layer_number,
-                deterministic=self.deterministic,
-                **attn_kwargs,
-            )
+        self.fused_attention = FusedAttention(
+            softmax_scale,
+            attention_type=attention_type,
+            layer_number=layer_number,
+            deterministic=self.deterministic,
+            **attn_kwargs,
+        )
 
         self.unfused_attention = UnfusedDotProductAttention(
             softmax_scale, **attn_kwargs, layer_number=layer_number
@@ -5436,11 +5415,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
-            deterministic = (
-                not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-                or torch.are_deterministic_algorithms_enabled()
-            )
-
             context_parallel = (
                 self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1
             )
@@ -5503,16 +5477,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
-                deterministic=deterministic,
+                deterministic=self.deterministic,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
 
+            device_compute_capability = get_device_compute_capability()
             run_config = {
                 "compute_capability": "sm"
                 + str(
                     (lambda x, y: x * 10 + y)(
-                        self.device_compute_capability[0], self.device_compute_capability[1]
+                        device_compute_capability[0], device_compute_capability[1]
                     )
                 ),
                 "q_dtype": query_layer.dtype,
