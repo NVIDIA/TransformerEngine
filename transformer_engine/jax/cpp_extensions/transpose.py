@@ -674,7 +674,17 @@ def dbias_cast_transpose(
             static_axis_boundary=static_axis_boundary,
             transpose_axis_boundary=transpose_axis_boundary,
         )
-        dbias = jnp.sum(dz, axis=0, keepdims=False)
+        dbias = jnp.sum(
+            dz,
+            axis=tuple(
+                range(
+                    transpose_axis_boundary
+                    if transpose_axis_boundary > 0
+                    else transpose_axis_boundary + dz.ndim
+                )
+            ),
+            keepdims=False,
+        )
         return casted_dz, cast_transposed_dz, dbias, updated_amax
 
     return DBiasCastTransposePrimitive.outer_primitive.bind(
@@ -1002,9 +1012,20 @@ def dact_lu_dbias_cast_transpose(
             amax,
             out_dtype=out_dtype,
             static_axis_boundary=static_axis_boundary,
-            transpose_axis_boundary=-2,
+            transpose_axis_boundary=transpose_axis_boundary,
         )
-        dbias = jnp.squeeze(jnp.sum(dx, axis=0))
+        dbias = jnp.squeeze(
+            jnp.sum(
+                dx,
+                axis=tuple(
+                    range(
+                        transpose_axis_boundary
+                        if transpose_axis_boundary > 0
+                        else transpose_axis_boundary + dx.ndim
+                    )
+                ),
+            )
+        )
         return casted_dx, cast_transposed_dx, dbias, updated_amax
 
     act_type_id = ActivationEnum[activation_type]
