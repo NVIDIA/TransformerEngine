@@ -23,6 +23,8 @@ from transformer_engine.pytorch.attention import (
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
     check_set_window_size,
+    AttentionParams,
+    _attention_backends,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -118,9 +120,9 @@ def _get_attention_backends(
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
-    os.environ["NVTE_FLASH_ATTN"] = "1"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    #os.environ["NVTE_FLASH_ATTN"] = "1"
+    #os.environ["NVTE_FUSED_ATTN"] = "1"
+    #os.environ["NVTE_UNFUSED_ATTN"] = "1"
 
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -142,7 +144,7 @@ def _get_attention_backends(
     fused_attention_backend = None
 
     def test():
-        _, _, _, available_backends, fused_attention_backend = get_attention_backend(
+        attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
             qkv_layout=qkv_layout,
             batch_size=config.batch_size,
@@ -164,11 +166,14 @@ def _get_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
+        _, _, fused_attention_backend, _, available_backends = get_attention_backend(attention_params)
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    global _attention_backends
     for i in range(3):
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
         available_backends, fused_attention_backend = test()
         if fused_attention_backend == FusedAttnBackend[backends[i]]:
             fused_attn_backends.append(fused_attention_backend)
