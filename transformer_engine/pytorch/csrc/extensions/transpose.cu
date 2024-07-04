@@ -285,9 +285,9 @@ at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype) {
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
-  if (M == 0 || N == 0) return input;
 
   auto output = allocateTorchTensor(input.size(1), input.size(0), DType::kByte);
+  if (M == 0 || N == 0) return output;
 
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
   auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {N, M}, otype);
