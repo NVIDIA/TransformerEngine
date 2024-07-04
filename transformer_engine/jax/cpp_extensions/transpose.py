@@ -27,6 +27,7 @@ from .misc import (
     normalize_axis_boundary,
 )
 from .activation import ActivationEnum
+from .activation import _act_lu
 from .quantization import _quantize
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
@@ -664,6 +665,18 @@ def dbias_cast_transpose(
     if static_axis_boundary < 0:
         static_axis_boundary = -1  # means no static axes
 
+    if not DBiasCastTransposePrimitive.enabled():
+        casted_dz, cast_transposed_dz, updated_amax = _cast_transpose(
+            dz,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary,
+        )
+        dbias = jnp.sum(dz, axis=0, keepdims=False)
+        return casted_dz, cast_transposed_dz, dbias, updated_amax
+
     return DBiasCastTransposePrimitive.outer_primitive.bind(
         dz,
         amax,
@@ -980,6 +993,20 @@ def dact_lu_dbias_cast_transpose(
     if static_axis_boundary < 0:
         static_axis_boundary = -1  # means no static axes
 
+    if not DActLuDBiasCastTransposePrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), x)
+        (dx,) = vjp_func(dz)
+        casted_dx, cast_transposed_dx, updated_amax = _cast_transpose(
+            dx,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=-2,
+        )
+        dbias = jnp.squeeze(jnp.sum(dx, axis=0))
+        return casted_dx, cast_transposed_dx, dbias, updated_amax
+
     act_type_id = ActivationEnum[activation_type]
     return DActLuDBiasCastTransposePrimitive.outer_primitive.bind(
         dz,
@@ -1194,6 +1221,17 @@ def dgated_act_lu_cast_transpose(
     Return FP8(dgated_act_lu(inputs))
     """
     act_type_id = ActivationEnum[activation_type]
+    if not DgatedActLuCastTransposePrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), x)
+        (dx,) = vjp_func(dz)
+        return _cast_transpose(
+            dx,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=-2,
+        )
     return DgatedActLuCastTransposePrimitive.outer_primitive.bind(
         dz,
         x,
