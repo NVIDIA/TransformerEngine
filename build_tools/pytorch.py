@@ -74,10 +74,9 @@ def setup_pytorch_extension(
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-    # Libraries -- PyTorch CUDAExtension links to libcudart.so but not to libcuda.so
-    cuda_home, _ = cuda_path()
-    library_dirs = [cuda_home / "compat" / "lib"]
-    libraries = ["cuda"]
+    # Libraries
+    library_dirs = []
+    libraries = []
     if os.getenv("UB_MPI_BOOTSTRAP"):
         assert (
             os.getenv("MPI_HOME") is not None

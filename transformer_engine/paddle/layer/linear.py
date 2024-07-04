@@ -31,7 +31,7 @@ from ..distributed import (
     set_weight_tensor_dist_attr,
     mark_as_sequence_parallel_parameter,
 )
-from ..fp8 import get_fp8_te_dtype
+from ..fp8 import get_fp8_te_dtype, get_global_fp8_state
 from ..utils import (
     assert_dim_for_fp8_forward_exec,
     cast_if_needed,
@@ -74,27 +74,29 @@ def _linear_fwd_fp8(
     else:
         inputmat_total = inputmat
 
-    update_fp8_weights = is_first_microbatch is None or is_first_microbatch
-    if is_grad_enabled:
-        if update_fp8_weights:
-            weight_fp8, weight_t_fp8 = cast_transpose(
-                weight,
-                fp8_meta["scaling_fwd"],
-                weight_fp8_index,
-                fp8_dtype_forward,
-                cast_out=weight_fp8,
-                transpose_out=weight_t_fp8,
-            )
-    else:
-        weight_t_fp8 = None
-        if update_fp8_weights:
-            weight_fp8 = cast_to_fp8(
-                weight,
-                fp8_meta["scaling_fwd"],
-                weight_fp8_index,
-                fp8_dtype_forward,
-                out=weight_fp8,
-            )
+    if not get_global_fp8_state().is_cudagraph_enabled():
+        # if cuda graph is not enabled, we cast the weight here
+        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
+        if is_grad_enabled:
+            if update_fp8_weights:
+                weight_fp8, weight_t_fp8 = cast_transpose(
+                    weight,
+                    fp8_meta["scaling_fwd"],
+                    weight_fp8_index,
+                    fp8_dtype_forward,
+                    cast_out=weight_fp8,
+                    transpose_out=weight_t_fp8,
+                )
+        else:
+            weight_t_fp8 = None
+            if update_fp8_weights:
+                weight_fp8 = cast_to_fp8(
+                    weight,
+                    fp8_meta["scaling_fwd"],
+                    weight_fp8_index,
+                    fp8_dtype_forward,
+                    out=weight_fp8,
+                )
 
     out, _ = fp8_gemm(
         weight_fp8,
@@ -346,6 +348,8 @@ def _linear_bwd_fp8(
 
     if parallel_mode == "column" and tensor_parallel and handle is not None:
         handle.wait()
+    if parallel_mode == "column" and sequence_parallel:
+        handle.wait()
 
     return dgrad, wgrad
 
@@ -416,8 +420,9 @@ def _linear_bwd_non_fp8(
 
     elif requires_bgrad:
         bgrad = grad_output.sum(axis=0)
-
     if parallel_mode == "column" and tensor_parallel and handle is not None:
+        handle.wait()
+    if parallel_mode == "column" and sequence_parallel and handle is not None:
         handle.wait()
 
     return dgrad, wgrad, bgrad
@@ -804,7 +809,7 @@ class Linear(TransformerEngineBaseLayer):
         else:
             self.bias = None
 
-        self.fp8_weight_shapes.append(self.weight.shape)
+        self.fp8_weights.append(self.weight)
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -828,7 +833,7 @@ class Linear(TransformerEngineBaseLayer):
             inp = cast_if_needed(inp, self.activation_dtype)
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
-            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad_and_cast(is_first_microbatch)
 
             out = _Linear.apply(
                 self.weight,
