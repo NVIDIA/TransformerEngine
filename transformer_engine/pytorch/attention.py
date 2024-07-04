@@ -117,7 +117,7 @@ _attention_backends = {
     "backend_selection_requires_update": False,
 }
 
-@dataclass
+@dataclass(eq=True)
 class AttentionParams:
     """
     Attention parameters used to determine which backend to be used.
@@ -145,7 +145,7 @@ class AttentionParams:
     attn_mask_type: str, default = `no_mask`
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
-    window_size: Tuple[int, int], default = (-1, -1)
+    window_size: Tuple[int, int], default = None
         Sliding window attention size.
     alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
@@ -180,8 +180,8 @@ class AttentionParams:
     max_seqlen_kv: int = 128
     head_dim: int = 64
     attn_mask_type: str = "no_mask"
-    window_size: Tuple[int, int] = (-1, -1)
-    alibi_slopes_shape: Optional[Union[torch.Size, List]] = None
+    window_size: Union[Tuple[int, int], None] = None
+    alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
     core_attention_bias_requires_grad: bool = True
@@ -190,7 +190,7 @@ class AttentionParams:
     context_parallel: bool = False
     deterministic: bool = False
     fp8: bool = False
-    fp8_meta: Optional[Dict[str, Any]] = None
+    fp8_meta: Union[Dict[str, Any], None] = None
 
 _alibi_cache = {
     "_num_heads": None,
@@ -230,7 +230,7 @@ def get_attention_backend(
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
     """
-    qkv_type = attention_params.qkv_typ
+    qkv_type = attention_params.qkv_type
     qkv_dtype = attention_params.qkv_dtype
     qkv_layout = attention_params.qkv_layout
     batch_size = attention_params.batch_size
@@ -265,7 +265,6 @@ def get_attention_backend(
         ),
         "flash_attn_version": _flash_attn_version,
         "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]),
-        "is_training": self.training,
     }
     run_config.update(asdict(attention_params))
     if fp8:
@@ -273,6 +272,10 @@ def get_attention_backend(
     logger.debug("Running with config=%s", run_config)
 
     # Filter: Environment variables
+    global _NVTE_FLASH_ATTN, _NVTE_FUSED_ATTN, _NVTE_UNFUSED_ATTN
+    _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+    _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+    _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
     use_flash_attention = _NVTE_FLASH_ATTN
     use_fused_attention = _NVTE_FUSED_ATTN
     use_unfused_attention = _NVTE_UNFUSED_ATTN
@@ -590,15 +593,21 @@ def get_attention_backend(
         use_unfused_attention = False
     elif use_fused_attention:
         use_unfused_attention = False
+    selected_backend = "NoBackend"
     if use_flash_attention:
-        logger.info("Running with FlashAttention backend")
+        selected_backend = "FlashAttention"
     elif use_fused_attention:
-        logger.info(
-            "Running with FusedAttention backend (sub-backend %s)",
-            int(fused_attention_backend),
-        )
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
-        logger.info("Running with UnfusedDotProductAttention backend")
+        selected_backend = "UnfusedDotProductAttention"
+    logger.debug("Selected backend = %s", selected_backend)
+
+    global _attention_backends
+    _attention_backends["use_flash_attention"] = use_flash_attention
+    _attention_backends["use_fused_attention"] = use_fused_attention
+    _attention_backends["fused_attention_backend"] = fused_attention_backend
+    _attention_backends["use_unfused_attention"] = use_unfused_attention
+    _attention_backends["backend_selection_requires_update"] = False
 
     return (
         use_flash_attention,
@@ -3023,8 +3032,6 @@ class FlashAttention(torch.nn.Module):
         cp_stream: torch.cuda.Stream = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
-
-        window_size = check_set_window_size(attn_mask_type, window_size)
 
         assert (
             query_layer.dtype in [torch.float16, torch.bfloat16]
@@ -5543,10 +5550,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
             )
             global _attention_backends
-            if _attention_backends["attention_params"] is None or not attention_params.eq(_attention_backends["attention_params"]):
+            if _attention_backends["attention_params"] is None or attention_params != _attention_backends["attention_params"]:
                 _attention_backends["attention_params"] = attention_params
                 _attention_backends["backend_selection_requires_update"] = True
-            if _attention_backends["backend_selection_requires_update"] = True:
+            if _attention_backends["backend_selection_requires_update"] == True:
                 (
                     use_flash_attention,
                     use_fused_attention,
@@ -5554,6 +5561,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_unfused_attention,
                     _,
                 ) = get_attention_backend(attention_params)
+                if use_flash_attention:
+                    self.logger.info("Running with FlashAttention backend")
+                elif use_fused_attention:
+                    self.logger.info(
+                        "Running with FusedAttention backend (sub-backend %s)",
+                        int(fused_attention_backend),
+                    )
+                elif use_unfused_attention:
+                    self.logger.info("Running with UnfusedDotProductAttention backend")
             else:
                 use_flash_attention = _attention_backends["use_flash_attention"]
                 use_fused_attention = _attention_backends["use_fused_attention"]

@@ -120,9 +120,11 @@ def _get_attention_backends(
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
-    #os.environ["NVTE_FLASH_ATTN"] = "1"
-    #os.environ["NVTE_FUSED_ATTN"] = "1"
-    #os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -170,7 +172,6 @@ def _get_attention_backends(
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    global _attention_backends
     for i in range(3):
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
         _attention_backends["backend_selection_requires_update"] = True
@@ -611,6 +612,8 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
@@ -1090,6 +1093,8 @@ def _run_transformer_layer(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
     inp = torch.randn(
@@ -1248,6 +1253,8 @@ def _rmse(a, b):
 def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
     config = model_configs_fp8_vs_f16[model]
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
@@ -1710,6 +1717,8 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
         -100,
@@ -1763,6 +1772,8 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
     inp.requires_grad = True
