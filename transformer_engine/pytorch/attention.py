@@ -571,8 +571,11 @@ def get_attention_backend(
             and context_parallel
             and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
         ):
-            logger.debug("Disabling FusedAttention as only sub-backend %s does not support "
-                "context parallellism", int(fused_attention_backend))
+            logger.debug(
+                "Disabling FusedAttention as only sub-backend %s does not support "
+                "context parallellism",
+                int(fused_attention_backend),
+            )
             use_fused_attention = False
             fused_attention_backend = None
         if (
@@ -581,8 +584,11 @@ def get_attention_backend(
             and window_size[0] != -1
             and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
         ):
-            logger.debug("Disabling FusedAttention as only sub-backend %s does not support "
-                "slidng window attention", int(fused_attention_backend))
+            logger.debug(
+                "Disabling FusedAttention as only sub-backend %s does not support "
+                "slidng window attention",
+                int(fused_attention_backend),
+            )
             use_fused_attention = False
             fused_attention_backend = None
         if (
