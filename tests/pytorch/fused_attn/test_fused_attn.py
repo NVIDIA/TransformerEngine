@@ -168,7 +168,9 @@ def _get_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
-        _, _, fused_attention_backend, _, available_backends = get_attention_backend(attention_params)
+        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
+            attention_params
+        )
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}

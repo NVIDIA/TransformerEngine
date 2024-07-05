@@ -117,6 +117,7 @@ _attention_backends = {
     "backend_selection_requires_update": False,
 }
 
+
 @dataclass(eq=True)
 class AttentionParams:
     """
@@ -195,6 +196,7 @@ class AttentionParams:
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
 
+
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
@@ -265,14 +267,14 @@ def get_attention_backend(
         "transformer_engine_version": te.__version__,
         "compute_capability": "sm"
         + str(
-            (lambda x, y: x * 10 + y)(
-                device_compute_capability[0], device_compute_capability[1]
-            )
+            (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
         ),
         "flash_attn_version": _flash_attn_version,
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
-    attention_params_dict = {field.name: getattr(attention_params, field.name) for field in fields(attention_params)}
+    attention_params_dict = {
+        field.name: getattr(attention_params, field.name) for field in fields(attention_params)
+    }
     run_config.update(attention_params_dict)
     if fp8:
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
@@ -436,12 +438,15 @@ def get_attention_backend(
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
         if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if (fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)) and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+            if (fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)) and (
+                window_size[0] != -1 or window_size[1] not in [-1, 0]
+            ):
                 logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention for FP8"
+                    "Disabling FusedAttention as it does not support sliding window attention"
+                    " for FP8"
                 )
                 use_fused_attention = False
-            elif (window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == 'thd'):
+            elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with causal mask, no dropout, and qkv_format = bshd/sbhd"
@@ -453,22 +458,30 @@ def get_attention_backend(
                     "with context parallelism"
                 )
                 use_fused_attention = False
-            elif (
-                max_seqlen_q != max_seqlen_kv
-                and attn_mask_type in ["no_mask", "padding", "causal_bottom_right", "padding_causal_bottom_right"]
-            ):
+            elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
+                "no_mask",
+                "padding",
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            ]:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s for cross-attention", attn_mask_type,
+                    "with attn_mask_type = %s for cross-attention",
+                    attn_mask_type,
                 )
                 use_fused_attention = False
             elif "padding" in attn_mask_type:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s", attn_mask_type,
+                    "with attn_mask_type = %s",
+                    attn_mask_type,
                 )
                 use_fused_attention = False
-        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]) and (not _flash_attn_2_3_plus or context_parallel):
+        if (
+            use_flash_attention
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+            and (not _flash_attn_2_3_plus or context_parallel)
+        ):
             logger.debug(
                 "Disabling FlashAttention as sliding window attention requires "
                 "flash-attn 2.3+ and no context parallelism"
@@ -549,10 +562,17 @@ def get_attention_backend(
             window_size[0],
             window_size[1],
         )
-        if fused_attention_backend == FusedAttnBackend["No_Backend"] or (
-            context_parallel and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-        ) or (
-            window_size is not None and window_size[0] != -1 and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        if (
+            fused_attention_backend == FusedAttnBackend["No_Backend"]
+            or (
+                context_parallel
+                and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+            )
+            or (
+                window_size is not None
+                and window_size[0] != -1
+                and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+            )
         ):
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
@@ -591,10 +611,7 @@ def get_attention_backend(
     if (
         use_fused_attention
         and (
-            (
-                fused_attention_backend == FusedAttnBackend["FP8"]
-                and is_training
-            )
+            (fused_attention_backend == FusedAttnBackend["FP8"] and is_training)
             or (
                 fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
                 and is_training
@@ -613,10 +630,15 @@ def get_attention_backend(
     # All available backends
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
     logger.debug(
-        "Available backends = {FlashAttention=%s, FusedAttention=%s%s, UnfusedDotProductAttention=%s}",
+        "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
+        " UnfusedDotProductAttention=%s}",
         bool(available_backends[0]),
         bool(available_backends[1]),
-        f" (sub-backend {int(fused_attention_backend)})" if fused_attention_backend is not None else "",
+        (
+            f" (sub-backend {int(fused_attention_backend)})"
+            if fused_attention_backend is not None
+            else ""
+        ),
         bool(available_backends[2]),
     )
 
@@ -757,8 +779,8 @@ def get_swa_mask(
     else:
         left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
         right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
-        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv-max_seqlen_q-window_size[0])
-        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv-max_seqlen_q+window_size[1])
+        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv - max_seqlen_q - window_size[0])
+        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv - max_seqlen_q + window_size[1])
     attn_mask_type = "arbitrary"
     mask = mask_lower.logical_not()
     if attention_mask is not None:
@@ -831,9 +853,9 @@ def get_alibi(
                 1, 1, 1, max_seqlen_kv
             )
         else:
-            bias = torch.arange(1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda").view(
-                1, 1, 1, max_seqlen_kv
-            )
+            bias = torch.arange(
+                1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda"
+            ).view(1, 1, 1, max_seqlen_kv)
         bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
             1, 1, max_seqlen_q, 1
         )
@@ -2767,7 +2789,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
                 _, core_attention_bias = get_alibi(
-                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes,
+                    output_size[1],
+                    output_size[2],
+                    output_size[3],
+                    alibi_slopes=alibi_slopes,
                     bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                 )
             matmul_result = torch.baddbmm(
@@ -5574,7 +5599,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-            bottom_right_alignment = attn_mask_type not in ["causal", "padding_causal"],
+            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -5651,7 +5676,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
             )
             global _attention_backends
-            if _attention_backends["attention_params"] is None or attention_params != _attention_backends["attention_params"]:
+            if (
+                _attention_backends["attention_params"] is None
+                or attention_params != _attention_backends["attention_params"]
+            ):
                 _attention_backends["attention_params"] = attention_params
                 _attention_backends["backend_selection_requires_update"] = True
             if _attention_backends["backend_selection_requires_update"] == True:
@@ -5706,7 +5734,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
-                if core_attention_bias_type == "alibi" and (alibi_slopes is not None or max_seqlen_q != max_seqlen_kv):
+                if core_attention_bias_type == "alibi" and (
+                    alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
+                ):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = get_alibi(
                         query_layer.shape[-2],
@@ -5776,8 +5806,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                if window_size is not None and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-                    attn_mask_type, attention_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask)
+                if window_size is not None and (
+                    window_size[0] != -1 or window_size[1] not in [-1, 0]
+                ):
+                    attn_mask_type, attention_mask = get_swa_mask(
+                        window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask
+                    )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
