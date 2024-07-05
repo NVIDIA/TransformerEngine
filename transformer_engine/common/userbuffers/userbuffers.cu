@@ -2484,6 +2484,18 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
   }
 }
 
+// reset_counters
+static __global__ void set_counters_kernel(void *atomic_ptr, int first_chunk_i, int num_chunks,
+                                             unsigned int val) {
+  // Set specified range of counters to the given value -- 0: ready, 1: not ready
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    for (int i = first_chunk_i; i < num_chunks; i++) {
+      static_cast<unsigned int *>(atomic_ptr)[i] = val;
+      asm volatile("fence.sc.gpu;\n");
+    }
+  }
+}
+
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
@@ -2500,6 +2512,19 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
   dim3 block(1);
   dim3 grid(1);
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
+}
+
+void reset_counters(void *atomic_ptr, int num_chunks, int self_chunk_id, cudaStream_t stream) {
+  dim3 block(1);
+  dim3 grid(1);
+  // Zero out all counters incl. extended buffers
+  set_counters_kernel<<<grid, block, 0, stream>>>(atomic_ptr, 0, num_chunks * 2, 0);
+  // Set all work chunks to "not ready" (1)
+  set_counters_kernel<<<grid, block, 0, stream>>>(atomic_ptr, 0, num_chunks, 1);
+  if (self_chunk_id >= 0) {
+    // If self_chunk_id is valid, then it's always "ready" (0) to be consumed (all-gather overlap)
+    producer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, self_chunk_id);
+  }
 }
 
 template <typename fp8type>

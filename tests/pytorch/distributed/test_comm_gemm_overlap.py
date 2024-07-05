@@ -59,6 +59,7 @@ if not tex.comm_overlap_supports_multicast():
         (False, True, "RS", False, False),
         (True, False, "RS", False, False),
         (True, True, "RS", False, False),
+        (True, False, "RS", False, True),
         (True, True, "RS", False, True),
     ],
     ids=[
@@ -70,6 +71,7 @@ if not tex.comm_overlap_supports_multicast():
         " SPLIT GEMM + RS | BF16 | RING-EXCHANGE",
         " SPLIT GEMM + RS | FP8  | PIPELINE",
         " SPLIT GEMM + RS | FP8  | RING-EXCHANGE",
+        "ATOMIC GEMM + RS | FP8  | PIPELINE",
         "ATOMIC GEMM + RS | FP8  | RING-EXCHANGE",
     ],
 )

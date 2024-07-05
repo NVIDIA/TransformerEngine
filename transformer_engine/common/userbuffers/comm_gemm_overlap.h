@@ -286,6 +286,9 @@ struct PYBIND11_EXPORT CommGemmOverlap : CommGemmOverlapBase {
     int *counter_ptr = reinterpret_cast<int *>(counters.dptr());
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
 
+    // Reset counters to "not ready" (1)
+    reset_counters(counter_ptr, _num_splits, -1, stream_main);
+
     // Catch up the default torch stream
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_compute, 0));
@@ -571,6 +574,9 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     int *counter_ptr = reinterpret_cast<int *>(counters.dptr());
     size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
+    // Reset atomic counters
+    reset_counters(counter_ptr, _tp_size, _self_chunk_id, stream_main);
+
     assert(pre_gelu_out.numel() == 0);
 
     // Catch up the default torch stream
@@ -623,9 +629,6 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
       NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
     }
-
-    // Reset atomic counters
-    consumer_batch(counter_ptr, 1, _tp_size, (cudaStream_t)stream_main);
 
     // Copy the first GEMM output chunk to the end chunk position of D_buffer
     char *src_ptr = reinterpret_cast<char *>(D_buffer.dptr());
@@ -842,6 +845,9 @@ struct PYBIND11_EXPORT CommGemmOverlapP2P : CommGemmOverlapBase {
     char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
     int *counter_ptr = reinterpret_cast<int *>(counters.dptr());
     size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+
+    // Reset counters to "not ready" (1)
+    reset_counters(counter_ptr, _tp_size, -1, stream_main);
 
     // Catch up the main stream
     NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));

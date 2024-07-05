@@ -409,36 +409,34 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
 
 void destroy_communicator(communicator *comm) {
   for (int hndl = 0; hndl < comm->free_region; hndl++) {
-    if (comm->mem_dealloc[hndl]) {
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree,
-                                  reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
-                                  comm->mem_size[hndl] * comm->nvsize);
-      for (int rank = 0; rank < comm->nvsize; rank++) {
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
-      }
-      free(reinterpret_cast<void *>(comm->uchandles[hndl]));
-    } else {
+    if (hndl == 0 || !comm->use_mc) { // CUDA IPC handle allocation (handle=0 is always CUDA IPC)
       for (int rank = 0; rank < comm->nvsize; rank++) {
         if (rank != comm->nvrank) {
           cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]);
+        } else if (comm->mem_dealloc[hndl]) {
+          cudaFree(comm->peer_ptr[hndl][rank]);
         } else {
-          comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
+          comm->peer_ptr[hndl][rank] = nullptr;
         }
       }
-      free(comm->peer_ptr[hndl]);
+    } else {  // CUDA Multicast handle allocation
+      NVTE_CALL_CUDA_DRIVER(cuMemAddressFree, reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
+                            (size_t)(comm->mem_size[hndl] * comm->nvsize));
+      for (int rank = 0; rank < comm->nvsize; rank++) {
+        NVTE_CALL_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
+      }
+      free(reinterpret_cast<void *>(comm->uchandles[hndl]));
     }
+    free(comm->peer_ptr[hndl]);
     comm->mem_ptr[hndl] = nullptr;
   }
   cudaFree(reinterpret_cast<void *>(comm->flags));
   cudaFree(reinterpret_cast<void *>(comm->recv_id));
   cudaFree(reinterpret_cast<void *>(comm->send_id));
   if (comm->use_mc) {
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
-                                comm->mc_maxsize);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
-  }
-  if (comm->mem_dealloc[0]) {
-    cudaFree(comm->gpu_ptrs);
+    NVTE_CALL_CUDA_DRIVER(cuMemAddressFree, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
+                          comm->mc_maxsize);
+    NVTE_CALL_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
   }
   free(comm->fifo);
   delete comm;
@@ -463,7 +461,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
 
-  if (alloc) {
+  if ((alloc) && (comm->use_mc)) {
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
     int myrank = comm->nvrank;
     void **remptrs = reinterpret_cast<void **>(malloc(nranks * sizeof(void *)));
@@ -582,6 +580,10 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
   } else {
+    if (alloc) {
+      NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
+      NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
+    }
     assert(comm->nvsize <= 8);
 
     cudaIpcMemHandle_t memhndl;
