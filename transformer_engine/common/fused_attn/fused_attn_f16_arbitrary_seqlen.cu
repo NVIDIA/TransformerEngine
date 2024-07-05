@@ -74,6 +74,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   if (is_ragged) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
   }
+  if (window_size_left == -1) {
+    window_size_left = s_q;
+  }
+  auto cudnn_runtime_version = cudnnGetVersion();
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -210,8 +214,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          .set_is_inference(false)
                          .set_causal_mask(is_causal)
                          .set_causal_mask_bottom_right(is_bottom_right)
-                         .set_sliding_window_length(window_size_left)
                          .set_attn_scale(attn_scale);
+
+      if (cudnn_runtime_version >= 90200 && window_size_left != s_q) {
+          sdpa_options.set_sliding_window_length(window_size_left);
+      }
 
       sdpa_options.set_alibi_mask(is_alibi);
 
@@ -394,6 +401,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
+  if (window_size_left == -1) {
+    window_size_left = s_q;
+  }
+  auto cudnn_runtime_version = cudnnGetVersion();
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -559,8 +570,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_name("flash_attention_backward")
                                   .set_causal_mask(is_causal)
                                   .set_causal_mask_bottom_right(is_bottom_right)
-                                  .set_sliding_window_length(window_size_left)
                                   .set_attn_scale(attn_scale);
+
+      if (cudnn_runtime_version >= 90200 && window_size_left != s_q) {
+          sdpa_backward_options.set_sliding_window_length(window_size_left);
+      }
 
       sdpa_backward_options.set_alibi_mask(is_alibi);
 

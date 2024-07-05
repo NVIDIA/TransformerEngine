@@ -16,11 +16,11 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q
                                                NVTE_Mask_Type attn_mask_type, float p_dropout,
                                                size_t num_attn_heads, size_t num_gqa_groups,
                                                size_t max_seqlen_q, size_t max_seqlen_kv,
-                                               size_t head_dim) {
+                                               size_t head_dim, int64_t window_size_left, int64_t window_size_right) {
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
                                   qkv_layout, bias_type, attn_mask_type, p_dropout, num_attn_heads,
-                                  num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim);
+                                  num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, window_size_left, window_size_right);
   return fused_attention_backend;
 }
 

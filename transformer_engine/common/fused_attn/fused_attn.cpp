@@ -72,7 +72,7 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim) {
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, int64_t window_size_left, int64_t window_size_right) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   const int device_id = cuda::current_device();
@@ -116,7 +116,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) ||
-         (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {
+         (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)) &&
+        ((window_size_left == -1) &&
+         (window_size_right == -1 || window_size_right == 0))) {
       flag_m512 = true;
     }
     if (  // architecture
@@ -165,7 +167,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         ((qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
          (sm_arch_ >= 90 && cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups &&
           qkv_format == NVTE_QKV_Format::NVTE_THD) ||
-         (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
+         (qkv_format == NVTE_QKV_Format::NVTE_BSHD)) &&
+        // sliding window
+        ((cudnn_runtime_version < 90200 &&
+          window_size_left == -1 &&
+          (window_size_right == -1 || window_size_right == 0)) ||
+         (cudnn_runtime_version >= 90200 &&
+          (window_size_left == -1 || window_size_left >= 0) &&
+          window_size_right == 0 &&
+          (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
+            max_seqlen_q == max_seqlen_kv)) &&
+          dropout == 0.0 &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+          (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
+           qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {
@@ -244,7 +260,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type,
-                                  dropout, h, h, max_seqlen, max_seqlen, d);
+                                  dropout, h, h, max_seqlen, max_seqlen, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -319,7 +335,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type,
-                                  dropout, h, h, max_seqlen, max_seqlen, d);
+                                  dropout, h, h, max_seqlen, max_seqlen, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -411,7 +427,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout,
-                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
+                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -493,7 +509,7 @@ void nvte_fused_attn_bwd_kvpacked(
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout,
-                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
+                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -581,7 +597,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout,
-                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
+                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -657,7 +673,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout,
-                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
+                                  h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)

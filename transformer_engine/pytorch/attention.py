@@ -14,7 +14,7 @@ import logging
 
 import numpy as np
 from packaging.version import Version as PkgVersion
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, fields
 
 import torch
 import torch.nn.functional as F
@@ -266,7 +266,8 @@ def get_attention_backend(
         "flash_attn_version": _flash_attn_version,
         "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]),
     }
-    run_config.update(asdict(attention_params))
+    attention_params_dict = {field.name: getattr(attention_params, field.name) for field in fields(attention_params)}
+    run_config.update(attention_params_dict)
     if fp8:
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
     logger.debug("Running with config=%s", run_config)
@@ -419,12 +420,14 @@ def get_attention_backend(
         use_flash_attention = False
 
     # Filter: Sliding window attention
-    if window_size is not None and window_size[0] != -1:
+    if window_size is None:
+        window_size = check_set_window_size(attn_mask_type, window_size)
+    else:
         if use_fused_attention:
-            if window_size[1] != 0:
+            if (not (fp8 and fp8_meta["recipe"].fp8_dpa)) and window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == 'thd':
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
-                    "with causal mask"
+                    "with causal mask, no dropout, and qkv_format = bshd/sbhd"
                 )
                 use_fused_attention = False
             elif context_parallel:
@@ -442,7 +445,13 @@ def get_attention_backend(
                     "with attn_mask_type = %s for cross-attention", attn_mask_type,
                 )
                 use_fused_attention = False
-        if use_flash_attention and (window_size[1] not in [-1, 0]) and (not _flash_attn_2_3_plus or context_parallel):
+            elif "padding" in attn_mask_type:
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with attn_mask_type = %s", attn_mask_type,
+                )
+                use_fused_attention = False
+        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]) and (not _flash_attn_2_3_plus or context_parallel):
             logger.debug(
                 "Disabling FlashAttention as sliding window attention requires "
                 "flash-attn 2.3+ and no context parallelism"
@@ -510,6 +519,8 @@ def get_attention_backend(
             max_seqlen_q,
             max_seqlen_kv,
             head_dim,
+            window_size[0],
+            window_size[1],
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"] or (
             context_parallel and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -570,7 +581,7 @@ def get_attention_backend(
         "Available backends = {FlashAttention=%s, FusedAttention=%s%s, UnfusedDotProductAttention=%s}",
         bool(available_backends[0]),
         bool(available_backends[1]),
-        f" (sub-backend int(fused_attention_backend))" if fused_attention_backend is not None else "",
+        f" (sub-backend {int(fused_attention_backend)})" if fused_attention_backend is not None else "",
         bool(available_backends[2]),
     )
 
