@@ -296,8 +296,6 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   // Figure out mylocal
   MPI_Comm_rank((*comm)->comm_intra, &mylocal);
   MPI_Comm_size((*comm)->comm_intra, &numlocal);
-  MPI_Comm_rank(MPI_COMM_WORLD, &mylocal);
-  MPI_Comm_size(MPI_COMM_WORLD, &numlocal);
   (*comm)->nvrank = mylocal;
   (*comm)->nvsize = numlocal;
 
@@ -648,8 +646,8 @@ error:
     NCCLCHECK(ncclIpcSocketClose(&ipcSock));
 
     for (int p = 0; p < nranks; p++) {
-      if (getenv("NVTE_UBDEBUG"))
-          printf(">>> Debug information nranks %d p %d myrank %d mydev %d aligned size %ld\n", nranks, p, myrank, comm->mydev, aligned_size);
+      //if (getenv("NVTE_UBDEBUG"))
+      //    printf(">>> Debug information nranks %d p %d myrank %d mydev %d aligned size %ld\n", nranks, p, myrank, comm->mydev, aligned_size);
       if (p != myrank)
         CUCHECK(cuMemImportFromShareableHandle(&comm->uchandles[hndl][p],
                                                reinterpret_cast<void *>(peerfd[p]),
@@ -713,7 +711,7 @@ error:
     CUDACHECK(cudaIpcGetMemHandle(&myhndl, *gpubuff));
 
     MPI_Allgather(&myhndl, sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl,
-                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD);
+                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, comm->comm_intra);
 
     for (int i = 0; i < comm->nvsize; i++)
       if (i != comm->nvrank) {
