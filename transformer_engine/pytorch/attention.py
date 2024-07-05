@@ -12,9 +12,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
+from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
-from dataclasses import dataclass, fields
 
 import torch
 import torch.nn.functional as F
@@ -562,23 +562,32 @@ def get_attention_backend(
             window_size[0],
             window_size[1],
         )
-        if (
-            fused_attention_backend == FusedAttnBackend["No_Backend"]
-            or (
-                context_parallel
-                and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-            )
-            or (
-                window_size is not None
-                and window_size[0] != -1
-                and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-            )
-        ):
+        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        elif (
-            fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
+        if (
+            use_fused_attention
+            and context_parallel
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
+            logger.debug("Disabling FusedAttention as only sub-backend %s does not support "
+                "context parallellism", int(fused_attention_backend))
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention
+            and window_size is not None
+            and window_size[0] != -1
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
+            logger.debug("Disabling FusedAttention as only sub-backend %s does not support "
+                "slidng window attention", int(fused_attention_backend))
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention
+            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
             and fu_core_attention_bias_type == "post_scale_bias"
             and fu_core_attention_bias_shape != "1hss"
         ):
@@ -608,24 +617,21 @@ def get_attention_backend(
             "please install flash-attn >= 2.4.1."
         )
         use_flash_attention = False
-    if (
-        use_fused_attention
-        and (
-            (fused_attention_backend == FusedAttnBackend["FP8"] and is_training)
-            or (
-                fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-                and is_training
-                and (
-                    device_compute_capability < (9, 0)
-                    or core_attention_bias_requires_grad
-                    or cudnn_version < (8, 9, 5)
-                )
+    if use_fused_attention and deterministic:
+        if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
+        if (
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            and is_training
+            and (
+                device_compute_capability < (9, 0)
+                or core_attention_bias_requires_grad
+                or cudnn_version < (8, 9, 5)
             )
-        )
-        and deterministic
-    ):
-        logger.debug("Disabling FusedAttention for determinism reasons")
-        use_fused_attention = False
+        ):
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
 
     # All available backends
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
@@ -774,13 +780,13 @@ def get_swa_mask(
     if attn_mask_type in ["causal"]:
         left = window_size[0] if window_size[0] != -1 else max_seqlen_q
         right = window_size[1] if window_size[1] != -1 else max_seqlen_q
-        mask_upper = torch.triu(mask, diagonal=-window_size[0])
-        mask_lower = torch.tril(mask_upper, diagonal=window_size[1])
+        mask_upper = torch.triu(mask, diagonal=-left)
+        mask_lower = torch.tril(mask_upper, diagonal=right)
     else:
         left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
         right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
-        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv - max_seqlen_q - window_size[0])
-        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv - max_seqlen_q + window_size[1])
+        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv - max_seqlen_q - left)
+        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv - max_seqlen_q + right)
     attn_mask_type = "arbitrary"
     mask = mask_lower.logical_not()
     if attention_mask is not None:
@@ -5135,10 +5141,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
         # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 for cuDNN >=9.0.0.
         cudnn_version = get_cudnn_version()
-        if cudnn_version >= (8, 9, 5) and cudnn_version < (9, 0, 0):
+        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
             if self.deterministic:
                 os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
-                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
             # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
             # - unset:       enables workspace optimization when required workspace is <= 256MB
@@ -5682,7 +5687,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ):
                 _attention_backends["attention_params"] = attention_params
                 _attention_backends["backend_selection_requires_update"] = True
-            if _attention_backends["backend_selection_requires_update"] == True:
+            if _attention_backends["backend_selection_requires_update"]:
                 (
                     use_flash_attention,
                     use_fused_attention,
