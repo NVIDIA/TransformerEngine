@@ -405,6 +405,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     window_size_left = s_q;
   }
   auto cudnn_runtime_version = cudnnGetVersion();
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -574,6 +576,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
       if (cudnn_runtime_version >= 90200 && window_size_left != s_q) {
           sdpa_backward_options.set_sliding_window_length(window_size_left);
+      }
+
+      if (cudnn_runtime_version >= 90000 && sm_arch_ >= 90) {
+          sdpa_backward_options.set_deterministic_algorithm(deterministic);
       }
 
       sdpa_backward_options.set_alibi_mask(is_alibi);

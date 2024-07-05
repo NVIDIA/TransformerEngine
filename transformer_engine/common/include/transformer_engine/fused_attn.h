@@ -136,19 +136,19 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
- *  \param[in]     q_dtype          The data type of Tensor Q.
- *  \param[in]     kv_dtype         The data type of Tensors K, V.
- *  \param[in]     qkv_layout       The layout of Tensors Q, K, V.
- *  \param[in]     bias_type        The attention bias type.
- *  \param[in]     attn_mask_type   The attention mask type.
- *  \param[in]     dropout          The dropout probability.
- *  \param[in]     num_attn_heads   The number of heads in Q.
- *  \param[in]     num_gqa_groups   The number of heads in K, V.
- *  \param[in]     max_seqlen_q     The sequence length of Q.
- *  \param[in]     max_seqlen_kv    The sequence length of K, V.
- *  \param[in]     head_dim         The head dimension of Q, K, V.
- *  \param[in]     window_size_left         Sliding window size (the left half).
- *  \param[in]     window_size_right        Sliding window size (the right half).
+ *  \param[in]     q_dtype           The data type of Tensor Q.
+ *  \param[in]     kv_dtype          The data type of Tensors K, V.
+ *  \param[in]     qkv_layout        The layout of Tensors Q, K, V.
+ *  \param[in]     bias_type         The attention bias type.
+ *  \param[in]     attn_mask_type    The attention mask type.
+ *  \param[in]     dropout           The dropout probability.
+ *  \param[in]     num_attn_heads    The number of heads in Q.
+ *  \param[in]     num_gqa_groups    The number of heads in K, V.
+ *  \param[in]     max_seqlen_q      The sequence length of Q.
+ *  \param[in]     max_seqlen_kv     The sequence length of K, V.
+ *  \param[in]     head_dim          The head dimension of Q, K, V.
+ *  \param[in]     window_size_left  Sliding window size (the left half).
+ *  \param[in]     window_size_right Sliding window size (the right half).
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
