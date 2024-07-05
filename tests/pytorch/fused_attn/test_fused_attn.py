@@ -238,6 +238,10 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
+    # mannually pads and unpads the input and output of FlashAttention for testing purposes
+    if pad_between_seqs:
+        flash_attn_supported = True
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:

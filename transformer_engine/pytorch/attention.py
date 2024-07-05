@@ -164,6 +164,8 @@ class AttentionParams:
         Whether context parallelism is used or not.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
+    is_training: bool, default = `True`
+        Whether in training mode (`True`) or inference mode (`False`)
     fp8: bool, default = `False`
         Whether `DotProductAttention` is in an `fp8_autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
@@ -189,6 +191,7 @@ class AttentionParams:
     attention_dropout: float = 0.0
     context_parallel: bool = False
     deterministic: bool = False
+    is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
 
@@ -197,6 +200,7 @@ _alibi_cache = {
     "_alibi_slopes": None,
     "_max_seqlen_q": None,
     "_max_seqlen_kv": None,
+    "_bottom_right_alignment": True,
     "_alibi_bias": None,
     "_alibi_slopes_require_update": False,
     "_alibi_bias_require_update": False,
@@ -249,12 +253,14 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     deterministic = attention_params.deterministic
+    is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
     device_compute_capability = get_device_compute_capability()
+    cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
         "compute_capability": "sm"
@@ -264,7 +270,7 @@ def get_attention_backend(
             )
         ),
         "flash_attn_version": _flash_attn_version,
-        "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]),
+        "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
     attention_params_dict = {field.name: getattr(attention_params, field.name) for field in fields(attention_params)}
     run_config.update(attention_params_dict)
@@ -423,8 +429,13 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
-        if use_fused_attention:
-            if (not (fp8 and fp8_meta["recipe"].fp8_dpa)) and window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == 'thd':
+        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+            if (fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)) and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention for FP8"
+                )
+                use_fused_attention = False
+            elif (window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == 'thd'):
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with causal mask, no dropout, and qkv_format = bshd/sbhd"
@@ -472,18 +483,20 @@ def get_attention_backend(
     if (
         use_fused_attention
         and core_attention_bias_type == "alibi"
-        and alibi_slopes_shape is not None
+        and (alibi_slopes_shape is not None or max_seqlen_q != max_seqlen_kv)
     ):
         fu_core_attention_bias_type = "post_scale_bias"
         fu_core_attention_bias_requires_grad = False
-        if (
+        if alibi_slopes_shape is None:
+            fu_core_attention_bias_shape = "1hss"
+        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
+            fu_core_attention_bias_shape = "1hss"
+        elif (
             len(alibi_slopes_shape) == 2
             and alibi_slopes_shape[0] == batch_size
             and alibi_slopes_shape[1] == num_heads
         ):
             fu_core_attention_bias_shape = "bhss"
-        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
-            fu_core_attention_bias_shape = "1hss"
 
     if (
         use_fused_attention
@@ -564,10 +577,18 @@ def get_attention_backend(
     if (
         use_fused_attention
         and (
-            fused_attention_backend == FusedAttnBackend["FP8"]
+            (
+                fused_attention_backend == FusedAttnBackend["FP8"]
+                and is_training
+            )
             or (
                 fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-                and device_compute_capability < (9, 0)
+                and is_training
+                and (
+                    device_compute_capability < (9, 0)
+                    or core_attention_bias_requires_grad
+                    or cudnn_version < (8, 9, 5)
+                )
             )
         )
         and deterministic
@@ -738,6 +759,7 @@ def get_alibi(
     max_seqlen_kv: int,
     alibi_slopes: Optional[torch.Tensor] = None,
     bias_dtype: Optional[torch.dtype] = None,
+    bottom_right_alignment: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Parameters
@@ -752,6 +774,9 @@ def get_alibi(
         Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
     bias_dtype: Optional[torch.dtype], default = `None`
         Dtype of the generated ALiBi bias. If None, use torch.float32.
+    bottom_right_alignment: bool, default = `True`
+        Whether to align the diagonal of the ALiBi bias to the bottom right corner of
+        the matrix (`True`) or top left (`False`).
 
     Returns
     ----------
@@ -787,15 +812,21 @@ def get_alibi(
             slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
         if _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
-        bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
-            1, 1, 1, max_seqlen_kv
-        )
+        if bottom_right_alignment:
+            bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
+                1, 1, 1, max_seqlen_kv
+            )
+        else:
+            bias = torch.arange(1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda").view(
+                1, 1, 1, max_seqlen_kv
+            )
         bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
             1, 1, max_seqlen_q, 1
         )
         bias = bias.abs().mul(-1)
         bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
+        _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
         _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
         _alibi_cache["_alibi_bias_require_update"] = False
@@ -2722,7 +2753,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
                 _, core_attention_bias = get_alibi(
-                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes
+                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes,
+                    bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -5061,6 +5093,25 @@ class DotProductAttention(TransformerEngineBaseModule):
             or torch.are_deterministic_algorithms_enabled()
             or bool(int(os.getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", "0")))
         )
+        # To use the workspace optimization path for determinism, please
+        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
+        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 for cuDNN >=9.0.0.
+        cudnn_version = get_cudnn_version()
+        if cudnn_version >= (8, 9, 5) and cudnn_version < (9, 0, 0):
+            if self.deterministic:
+                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+
+            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+            # - unset:       enables workspace optimization when required workspace is <= 256MB
+            #                or when bias gradient needs to be computed
+            # - n:           enables workspace optimization when required workspace is <= n bytes
+            # - -1:          enables workspace optimization always
+            # - 0:           disables workspace optimization always
+            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -5465,6 +5516,28 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv <= max_seqlen_kv
                     ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
                         the sequence dimention in 'key_layer' and 'value_layer'!"""
+                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                    if "padding" in attn_mask_type:
+                        assert (
+                            attention_mask is not None
+                        ), "Please provide attention_mask for padding!"
+                        if max_seqlen_q == max_seqlen_kv:
+                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_kv = cu_seqlens_q
+                        else:
+                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                    else:
+                        cu_seqlens_q = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_q,
+                            query_layer.device,
+                        )
+                        cu_seqlens_kv = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_kv,
+                            key_layer.device,
+                        )
 
             if (
                 isinstance(query_layer, Float8Tensor)
@@ -5487,6 +5560,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
+            bottom_right_alignment = attn_mask_type not in ["causal", "padding_causal"],
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -5495,6 +5569,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
+                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
@@ -5557,6 +5632,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 deterministic=self.deterministic,
+                is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
@@ -5616,7 +5692,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
-                if core_attention_bias_type == "alibi" and alibi_slopes is not None:
+                if core_attention_bias_type == "alibi" and (alibi_slopes is not None or max_seqlen_q != max_seqlen_kv):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = get_alibi(
                         query_layer.shape[-2],
@@ -5624,6 +5700,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                         bias_dtype=query_layer.dtype,
+                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -5685,7 +5762,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                if window_size is not None:
+                if window_size is not None and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
                     attn_mask_type, attention_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask)
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
