@@ -426,6 +426,12 @@ def get_attention_backend(
         use_flash_attention = False
 
     # Filter: Sliding window attention
+    #    backend                 |      window_size       | diagonal alignment
+    # ---------------------------------------------------------------------------------
+    # FlashAttention             | (-1, -1) or (>=0, >=0) | bottom right
+    # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
+    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
+    #                            |                        | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
@@ -470,6 +476,14 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Attention bias
+    #    backend                 |      bias types              | ALiBi diagonal alignment
+    # ---------------------------------------------------------------------------------
+    # FlashAttention             | no_bias, alibi/alibi_slopes  | bottom right
+    # FusedAttention             | no_bias, post_scale_bias     |
+    #                            | alibi/alibi_slopes           | top left,
+    #                            |                              | bottom_right (converts to a 'post_scale_bias' bias)
+    # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
+    #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
     if use_flash_attention and (
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
