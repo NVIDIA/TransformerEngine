@@ -1257,6 +1257,7 @@ def _rmse(a, b):
 def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
     config = model_configs_fp8_vs_f16[model]
@@ -1437,6 +1438,9 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout)

@@ -5091,7 +5091,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
-            or bool(int(os.getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", "0")))
         )
         # To use the workspace optimization path for determinism, please
         # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
@@ -5099,6 +5098,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cudnn_version = get_cudnn_version()
         if cudnn_version >= (8, 9, 5) and cudnn_version < (9, 0, 0):
             if self.deterministic:
+                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
             # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
