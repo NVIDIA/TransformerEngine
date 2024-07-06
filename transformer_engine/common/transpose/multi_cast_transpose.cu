@@ -4,199 +4,71 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_runtime.h>
 #include <transformer_engine/transpose.h>
 
-#include <cfloat>
-#include <iostream>
+#include <string>
 #include <vector>
 
 #include "../common.h"
+#include "../util/rtc.h"
+#include "../util/string.h"
 #include "../utils.cuh"
 
 namespace transformer_engine {
 
 namespace {
 
+// String with RTC kernel implementation
+#include "string_code_transpose_rtc_multi_cast_transpose_cu.h"
+
 // Parameters to tune
-constexpr int n_warps_per_tile = 4;
-constexpr int threads_per_block = THREADS_PER_WARP * n_warps_per_tile;
-constexpr int desired_load_size = 8;
-constexpr int desired_store_size = 8;
-constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
-
-struct MultiCastTransposeArgs {
-  // (input) Data buffers for input tensors
-  void* input_list[kMaxTensorsPerKernel];
-  // (output) Data buffers for cast output tensors
-  void* output_c_list[kMaxTensorsPerKernel];
-  // (output) Data buffers for transpose output tensors
-  void* output_t_list[kMaxTensorsPerKernel];
-  // (input) Scaling factor for output tensors
-  void* scale_list[kMaxTensorsPerKernel];
-  // (output) AMAX's of input tensors
-  void* amax_list[kMaxTensorsPerKernel];
-  // Input matrix heights
-  int num_rows_list[kMaxTensorsPerKernel];
-  // Input matrix widths
-  int row_length_list[kMaxTensorsPerKernel];
-  // Prefix sum (with leading zero) of CUDA blocks needed for each
-  // tensor
-  int block_range[kMaxTensorsPerKernel + 1];
-  // Number of tensors being processed by kernel
-  int num_tensors;
-};
-
-template <int nvec_in, int nvec_out, bool aligned, typename CType, typename IType, typename OType>
-__global__ void __launch_bounds__(threads_per_block)
-    multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
-  using IVec = Vec<IType, nvec_in>;
-  using OVecC = Vec<OType, nvec_in>;
-  using OVecT = Vec<OType, nvec_out>;
-
-  // Thread indices
-  // Note: Block is interpreted as a warp_size x num_warps grid
-  constexpr int bdimx = THREADS_PER_WARP;
-  constexpr int bdimy = n_warps_per_tile;
-  const int tid = threadIdx.x;
-  const int tidx = tid % bdimx;
-  const int tidy = tid / bdimx;
-  const int bid = blockIdx.x;
-
-  // Input tensors are divided into tiles
-  // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  constexpr int tile_dim_m = THREADS_PER_WARP * nvec_out;
-  constexpr int tile_dim_n = THREADS_PER_WARP * nvec_in;
-
-  // Number of nvec_out x nvec_in subtiles for each thread to
-  // load/store
-  constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
-
-  // Find tensor corresponding to block
-  int tensor_id = 0;
-  while (args.block_range[tensor_id + 1] <= bid) {
-    ++tensor_id;
-  }
-  const IType* input = reinterpret_cast<const IType*>(args.input_list[tensor_id]);
-  OType* output_c = reinterpret_cast<OType*>(args.output_c_list[tensor_id]);
-  OType* output_t = reinterpret_cast<OType*>(args.output_t_list[tensor_id]);
-  const CType* scale_ptr = reinterpret_cast<CType*>(args.scale_list[tensor_id]);
-  const CType scale = scale_ptr == nullptr ? 1 : *scale_ptr;
-  CType* amax = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
-  const int num_rows = args.num_rows_list[tensor_id];
-  const int row_length = args.row_length_list[tensor_id];
-
-  // Find position of tile within tensor
-  const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
-  const int tile_id = bid - args.block_range[tensor_id];
-  const int tile_id_m = tile_id / num_tiles_n;
-  const int tile_id_n = tile_id % num_tiles_n;
-  const int tile_row = tile_id_m * tile_dim_m;
-  const int tile_col = tile_id_n * tile_dim_n;
-
-  // Load input and store to registers
-  // Note: Each thread loads n_iterations subtiles, casts to output
-  // type, and transposes in registers.
-  OVecT local_output_t[nvec_in][n_iterations];
-  CType local_amax = 0;
-#pragma unroll
-  for (int iter = 0; iter < n_iterations; ++iter) {
-    const int i1 = tidy + iter * bdimy;
-    const int j1 = tidx;
-#pragma unroll
-    for (int i2 = 0; i2 < nvec_out; ++i2) {
-      const int row = tile_row + i1 * nvec_out + i2;
-      const int col = tile_col + j1 * nvec_in;
-      IVec local_input;
-      OVecC local_output_c;
-      if constexpr (aligned) {
-        local_input.load_from(&input[row * row_length + col]);
-      } else {
-        local_input.clear();
-        if (row < num_rows) {
-#pragma unroll
-          for (int j2 = 0; j2 < nvec_in; ++j2) {
-            if (col + j2 < row_length) {
-              local_input.data.elt[j2] = input[row * row_length + col + j2];
-            }
-          }
-        }
-      }
-#pragma unroll
-      for (int j2 = 0; j2 < nvec_in; ++j2) {
-        const CType x = CType(local_input.data.elt[j2]);
-        const OType y = OType(scale * x);
-        local_output_c.data.elt[j2] = y;
-        local_output_t[j2][iter].data.elt[i2] = y;
-        __builtin_assume(local_amax >= 0);
-        local_amax = fmaxf(fabsf(x), local_amax);
-      }
-      if constexpr (aligned) {
-        local_output_c.store_to(&output_c[row * row_length + col]);
-      } else {
-        if (row < num_rows) {
-#pragma unroll
-          for (int j2 = 0; j2 < nvec_in; ++j2) {
-            if (col + j2 < row_length) {
-              output_c[row * row_length + col + j2] = local_output_c.data.elt[j2];
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Copy transposed output from registers to global memory
-  __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
-#pragma unroll
-  for (int j2 = 0; j2 < nvec_in; ++j2) {
-#pragma unroll
-    for (int iter = 0; iter < n_iterations; ++iter) {
-      const int i1 = tidy + iter * bdimy;
-      const int j1 = tidx;
-      shared_output_t[j1][i1] = local_output_t[j2][iter];
-    }
-    __syncthreads();
-#pragma unroll
-    for (int iter = 0; iter < n_iterations; ++iter) {
-      const int i1 = tidx;
-      const int j1 = tidy + iter * bdimy;
-      const int row = tile_row + i1 * nvec_out;
-      const int col = tile_col + j1 * nvec_in + j2;
-      if constexpr (aligned) {
-        shared_output_t[j1][i1].store_to(&output_t[col * num_rows + row]);
-      } else {
-        if (col < row_length) {
-#pragma unroll
-          for (int i2 = 0; i2 < nvec_out; ++i2) {
-            if (row + i2 < num_rows) {
-              output_t[col * num_rows + row + i2] = shared_output_t[j1][i1].data.elt[i2];
-            }
-          }
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  // Finalize fp8 factors
-  local_amax = reduce_max<n_warps_per_tile>(local_amax, tidy);
-  if (tid == 0) {
-    static_assert(std::is_same<CType, float>::value);
-    if (amax != nullptr) atomicMaxFloat(amax, local_amax);
-  }
-}
+constexpr size_t load_size = 8;
+constexpr size_t store_size = 8;
+constexpr size_t warps_per_tile = 4;
+constexpr size_t block_size = THREADS_PER_WARP * warps_per_tile;
+constexpr size_t max_tensors_per_kernel = 64;  // Args must be <4 KB
 
 }  // namespace
+
+namespace multi_cast_transpose_impl {
+
+// Kernel arguments
+// Note: Multi-cast-transpose kernel can handle a variable number of
+// tensors.
+struct KernelArgs {
+  // (input) Data buffers for input tensors
+  void* input_list[max_tensors_per_kernel];
+  // (output) Data buffers for cast output tensors
+  void* output_c_list[max_tensors_per_kernel];
+  // (output) Data buffers for transpose output tensors
+  void* output_t_list[max_tensors_per_kernel];
+  // (input) Scaling factor for output tensors
+  void* scale_list[max_tensors_per_kernel];
+  // (output) AMAX's of input tensors
+  void* amax_list[max_tensors_per_kernel];
+  // Input matrix heights
+  size_t num_rows_list[max_tensors_per_kernel];
+  // Input matrix widths
+  size_t row_length_list[max_tensors_per_kernel];
+  // Prefix sum (with leading zero) of CUDA blocks needed for each
+  // tensor
+  size_t block_range[max_tensors_per_kernel + 1];
+  // Number of tensors being processed by kernel
+  size_t num_tensors;
+};
+
+}  // namespace multi_cast_transpose_impl
 
 void multi_cast_transpose(const std::vector<Tensor*> input_list,
                           std::vector<Tensor*> cast_output_list,
                           std::vector<Tensor*> transposed_output_list, cudaStream_t stream) {
   // Check that number of tensors is valid
   NVTE_CHECK(cast_output_list.size() == input_list.size(),
-             "Number of input and C output tensors must match");
+             "Found ", input_list.size(), " input tensors and ",
+             cast_output_list.size(), " cast output tensors");
   NVTE_CHECK(transposed_output_list.size() == input_list.size(),
-             "Number of input and T output tensors must match");
+             "Found ", input_list.size(), " input tensors and ",
+             transposed_output_list.size(), " transposed output tensors");
   if (input_list.empty()) {
     return;
   }
@@ -227,94 +99,121 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
                "T output tensor shape does not match input tensor.");
   }
 
-  // Input matrices are divided into tiles
-  // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_store_size / typeToSize(otype);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_size / typeToSize(itype);
+  // Type names
+  std::string itype_name, otype_name;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      itype, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          otype, OutputType,
+          itype_name = TypeInfo<InputType>::name;
+          otype_name = TypeInfo<OutputType>::name;
+      );  // NOLINT(*)
+  );  // NOLINT(*)
 
-  // Add tensors to kernel argument struct
-  MultiCastTransposeArgs kernel_args_aligned, kernel_args_unaligned;
+  // Labels for NVRTC kernel cache
+  const std::string kernel_label_aligned = concat_strings(
+      "multi_cast_transpose"
+      ",itype=", itype_name, ",otype=", otype_name, ",aligned=", true);
+  const std::string kernel_label_unaligned = concat_strings(
+      "multi_cast_transpose"
+      ",itype=", itype_name, ",otype=", otype_name, ",aligned=", false);
+
+  // Arguments for NVRTC kernels
+  multi_cast_transpose_impl::KernelArgs kernel_args_aligned, kernel_args_unaligned;
   kernel_args_aligned.num_tensors = 0;
   kernel_args_aligned.block_range[0] = 0;
   kernel_args_unaligned.num_tensors = 0;
   kernel_args_unaligned.block_range[0] = 0;
+
+  // Helper function to compile and launch NVRTC kernels
+  auto launch_kernel = [&] (bool aligned) {
+    auto& label = aligned ? kernel_label_aligned : kernel_label_unaligned;
+    auto& args = aligned ? kernel_args_aligned : kernel_args_unaligned;
+    if (args.num_tensors == 0) {
+      return;
+    }
+    auto &rtc_manager = rtc::KernelManager::instance();
+    if (!rtc_manager.is_compiled(label)) {
+      std::string code = string_code_transpose_rtc_multi_cast_transpose_cu;
+      code = regex_replace(code, "__ITYPE__", itype_name);
+      code = regex_replace(code, "__OTYPE__", otype_name);
+      code = regex_replace(code, "__LOAD_SIZE__", load_size);
+      code = regex_replace(code, "__STORE_SIZE__", store_size);
+      code = regex_replace(code, "__WARPS_PER_TILE__", warps_per_tile);
+      code = regex_replace(code, "__BLOCK_SIZE__", block_size);
+      code = regex_replace(code, "__ALIGNED__", aligned);
+      code = regex_replace(code, "__MAX_TENSORS_PER_KERNEL__", max_tensors_per_kernel);
+      rtc_manager.compile(label, "multi_cast_transpose_kernel", code,
+                          "transformer_engine/common/transpose/rtc/multi_cast_transpose.cu");
+    }
+    const size_t num_blocks = args.block_range[args.num_tensors];
+    rtc_manager.launch(label, num_blocks, block_size, 0, stream, args);
+  };
+
+  // Helper function to add tensor to NVRTC kernel arguments
+  auto add_tensor_to_kernel_args = [&] (size_t tensor_id, bool aligned, size_t num_tiles) {
+
+    // Kernel arguments
+    auto& args = aligned ? kernel_args_aligned : kernel_args_unaligned;
+
+    // Launch kernel if arguments are already full
+    if (args.num_tensors == max_tensors_per_kernel) {
+      launch_kernel(aligned);
+      args.num_tensors = 0;
+    }
+
+    // Add tensor to arguments
+    const size_t i = args.num_tensors;
+    args.input_list[i] = const_cast<void*>(input_list[tensor_id]->data.dptr);
+    args.output_c_list[i] = cast_output_list[tensor_id]->data.dptr;
+    args.output_t_list[i] = transposed_output_list[tensor_id]->data.dptr;
+    args.scale_list[i] = cast_output_list[tensor_id]->scale.dptr;
+    args.amax_list[i] = cast_output_list[tensor_id]->amax.dptr;
+    args.num_rows_list[i] = input_list[tensor_id]->data.shape[0];
+    args.row_length_list[i] = input_list[tensor_id]->data.shape[1];
+    args.block_range[i + 1] = args.block_range[i] + num_tiles;
+    args.num_tensors++;
+
+  };
+
+  // Helper function to check pointer alignment to 16B
+  auto ptr_is_aligned = [](const void *ptr) -> bool {
+    return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
+  };
+
+  // Input matrices are divided into tiles
+  // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
+  const size_t tile_dim_m = THREADS_PER_WARP * store_size / typeToSize(otype);
+  const size_t tile_dim_n = THREADS_PER_WARP * load_size / typeToSize(itype);
+
+  // Add tensors to kernel arguments
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
-    // Launch kernel if argument struct is full
-    if (kernel_args_aligned.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-          itype, InputType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-              otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-              constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-              const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-              multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
-      );                                                                            // NOLINT(*)
-      kernel_args_aligned.num_tensors = 0;
-    }
-    if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-          itype, InputType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-              otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-              constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-              const int n_blocks =
-                  kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-              multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
-      );                                                                              // NOLINT(*)
-      kernel_args_unaligned.num_tensors = 0;
-    }
 
     // Calculate number of thread blocks needed for tensor
-    const int num_rows = input_list[tensor_id]->data.shape[0];
-    const int row_length = input_list[tensor_id]->data.shape[1];
-    const int num_tiles_m = (num_rows + tile_dim_m - 1) / tile_dim_m;
-    const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
-    const int num_tiles = num_tiles_m * num_tiles_n;
+    const size_t num_rows = input_list[tensor_id]->data.shape[0];
+    const size_t row_length = input_list[tensor_id]->data.shape[1];
+    const size_t num_tiles_m = (num_rows + tile_dim_m - 1) / tile_dim_m;
+    const size_t num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
+    const size_t num_tiles = num_tiles_m * num_tiles_n;
 
-    // Figure out whether to use aligned or unaligned kernel
+    // Choose whether to use aligned or unaligned kernel
     const bool aligned =
-        ((num_tiles_m * tile_dim_m == num_rows) && (num_tiles_n * tile_dim_n == row_length));
-    auto& kernel_args = aligned ? kernel_args_aligned : kernel_args_unaligned;
+      ((num_tiles_m * tile_dim_m == num_rows)
+       && (num_tiles_n * tile_dim_n == row_length)
+       && ptr_is_aligned(input_list[tensor_id]->data.dptr)
+       && ptr_is_aligned(cast_output_list[tensor_id]->data.dptr)
+       && ptr_is_aligned(transposed_output_list[tensor_id]->data.dptr));
 
-    // Add tensor to kernel argument struct
-    const int pos = kernel_args.num_tensors;
-    kernel_args.input_list[pos] = const_cast<void*>(input_list[tensor_id]->data.dptr);
-    kernel_args.output_c_list[pos] = cast_output_list[tensor_id]->data.dptr;
-    kernel_args.output_t_list[pos] = transposed_output_list[tensor_id]->data.dptr;
-    kernel_args.scale_list[pos] = cast_output_list[tensor_id]->scale.dptr;
-    kernel_args.amax_list[pos] = cast_output_list[tensor_id]->amax.dptr;
-    kernel_args.num_rows_list[pos] = num_rows;
-    kernel_args.row_length_list[pos] = row_length;
-    kernel_args.block_range[pos + 1] = kernel_args.block_range[pos] + num_tiles;
-    kernel_args.num_tensors++;
+    // Add tensor to kernel arguments
+    // Note: Launches kernel if arguments are already full
+    add_tensor_to_kernel_args(tensor_id, aligned, num_tiles);
+
   }
 
-  // Launch kernel
-  if (kernel_args_aligned.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-        itype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-            constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-            const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-            multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
-    );                                                                            // NOLINT(*)
-  }
-  if (kernel_args_unaligned.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-        itype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-            constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-            const int n_blocks =
-                kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-            multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
-    );                                                                              // NOLINT(*)
-  }
+  // Launch kernels if needed
+  launch_kernel(true);
+  launch_kernel(false);
+
 }
 
 }  // namespace transformer_engine

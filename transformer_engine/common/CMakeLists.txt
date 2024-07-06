@@ -102,10 +102,12 @@ list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
 make_string_header("${cuda_include_path}"
                    string_path_cuda_include)
 
-make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
-                             string_code_transpose_rtc_cast_transpose_fusion_cu)
 make_string_header_from_file(transpose/rtc/cast_transpose.cu
                              string_code_transpose_rtc_cast_transpose_cu)
+make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
+                             string_code_transpose_rtc_cast_transpose_fusion_cu)
+make_string_header_from_file(transpose/rtc/multi_cast_transpose.cu
+                             string_code_transpose_rtc_multi_cast_transpose_cu)
 make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(utils.cuh
