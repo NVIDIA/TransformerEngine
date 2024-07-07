@@ -1105,8 +1105,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q,
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0] if qkv_format == "thd" else kv_inputs[i % 2][..., 0, :, :],
-                                        kv_inputs[i % 2][1] if qkv_format == "thd" else kv_inputs[i % 2][..., 1, :, :],
+                                        (
+                                            kv_inputs[i % 2][0]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 0, :, :]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][1]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 1, :, :]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1178,8 +1186,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q,
                                         cu_seqlens_k // 2,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0] if qkv_format == "thd" else kv_inputs[i % 2][..., 0, :, :],
-                                        kv_inputs[i % 2][1] if qkv_format == "thd" else kv_inputs[i % 2][..., 1, :, :],
+                                        (
+                                            kv_inputs[i % 2][0]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 0, :, :]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][1]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 1, :, :]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1270,8 +1286,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q // 2,
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0] if qkv_format == "thd" else kv_inputs[i % 2][..., 0, :, :],
-                                        kv_inputs[i % 2][1] if qkv_format == "thd" else kv_inputs[i % 2][..., 1, :, :],
+                                        (
+                                            kv_inputs[i % 2][0]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 0, :, :]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][1]
+                                            if qkv_format == "thd"
+                                            else kv_inputs[i % 2][..., 1, :, :]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1345,8 +1369,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_q,
                                     cu_seqlens_k,
                                     q,
-                                    kv_inputs[i % 2][0] if qkv_format == "thd" else kv_inputs[i % 2][..., 0, :, :],
-                                    kv_inputs[i % 2][1] if qkv_format == "thd" else kv_inputs[i % 2][..., 1, :, :],
+                                    (
+                                        kv_inputs[i % 2][0]
+                                        if qkv_format == "thd"
+                                        else kv_inputs[i % 2][..., 0, :, :]
+                                    ),
+                                    (
+                                        kv_inputs[i % 2][1]
+                                        if qkv_format == "thd"
+                                        else kv_inputs[i % 2][..., 1, :, :]
+                                    ),
                                     TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale,
