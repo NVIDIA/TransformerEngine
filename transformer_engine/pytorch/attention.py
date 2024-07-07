@@ -2016,6 +2016,8 @@ class AttnFuncWithCP(torch.autograd.Function):
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
                 if ctx.qkv_format in ["bshd", "sbhd"]:
+                    # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
+                    # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
                     dkv = dkv.view(2, *dkv.shape[0:-3], *dkv.shape[-2:])
             if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
                 if ctx.qkv_format == "bshd":
