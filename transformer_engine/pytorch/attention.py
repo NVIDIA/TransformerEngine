@@ -1106,14 +1106,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
                                         (
-                                            kv_inputs[i % 2][0]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 0, :, :]
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
                                         ),
                                         (
-                                            kv_inputs[i % 2][1]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 1, :, :]
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
                                         ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
@@ -1187,14 +1187,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_k // 2,
                                         q_inputs[i % 2],
                                         (
-                                            kv_inputs[i % 2][0]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 0, :, :]
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
                                         ),
                                         (
-                                            kv_inputs[i % 2][1]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 1, :, :]
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
                                         ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
@@ -1287,14 +1287,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
                                         (
-                                            kv_inputs[i % 2][0]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 0, :, :]
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
                                         ),
                                         (
-                                            kv_inputs[i % 2][1]
-                                            if qkv_format == "thd"
-                                            else kv_inputs[i % 2][..., 1, :, :]
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
                                         ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
@@ -1370,14 +1370,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_k,
                                     q,
                                     (
-                                        kv_inputs[i % 2][0]
-                                        if qkv_format == "thd"
-                                        else kv_inputs[i % 2][..., 0, :, :]
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
                                     ),
                                     (
-                                        kv_inputs[i % 2][1]
-                                        if qkv_format == "thd"
-                                        else kv_inputs[i % 2][..., 1, :, :]
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
                                     ),
                                     TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
@@ -1662,8 +1662,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q,
                             cu_seqlens_k,
                             q_,
-                            kv_[0] if ctx.qkv_format == "thd" else kv_[..., 0, :, :],
-                            kv_[1] if ctx.qkv_format == "thd" else kv_[..., 1, :, :],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1741,8 +1741,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q,
                             cu_seqlens_k // 2,
                             q_,
-                            kv_[0] if ctx.qkv_format == "thd" else kv_[..., 0, :, :],
-                            kv_[1] if ctx.qkv_format == "thd" else kv_[..., 1, :, :],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1828,8 +1828,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q // 2,
                             cu_seqlens_k,
                             q_,
-                            kv_[0] if ctx.qkv_format == "thd" else kv_[..., 0, :, :],
-                            kv_[1] if ctx.qkv_format == "thd" else kv_[..., 1, :, :],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1897,8 +1897,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                         cu_seqlens_q,
                         cu_seqlens_k,
                         q,
-                        kv[0] if ctx.qkv_format == "thd" else kv[..., 0, :, :],
-                        kv[1] if ctx.qkv_format == "thd" else kv[..., 1, :, :],
+                        kv[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[0],
+                        kv[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[1],
                         out,
                         dout,
                         TE_DType[q.dtype],
