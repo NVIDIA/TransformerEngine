@@ -505,8 +505,11 @@ void __global__  CrossEntropyBwdKernel(dtype* grad_input_ptr, // grad_input_ptr 
                      softmax_update, label_smoothing, smoothing, average_grad, grad_output);
 
                 dtype row_bf16 = __float2bfloat16(data_fp32);
-                grad_input_ptr[cur_input_ptr_begin + i + k] = row_bf16;
+                bf_16_p[k] = row_bf16;
+                // grad_input_ptr[cur_input_ptr_begin + i + k] = row_bf16;
             }
+            int4_arr = *reinterpret_cast<int4*>(&bf_16_p[0]);
+            *reinterpret_cast<int4*>(&grad_input_ptr[cur_input_ptr_begin + i]) = int4_arr;
         }
 
         if(threadIdx.x == 0) {
