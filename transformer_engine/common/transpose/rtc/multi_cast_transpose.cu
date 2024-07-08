@@ -42,8 +42,8 @@ struct KernelArgs {
 };  // namespace multi_cast_transpose_impl
 };  // namespace transformer_engine
 
-__global__ void __launch_bounds__(block_size) multi_cast_transpose_kernel(multi_cast_transpose_impl::KernelArgs args) {
-
+__global__ void __launch_bounds__(block_size)
+    multi_cast_transpose_kernel(multi_cast_transpose_impl::KernelArgs args) {
   // Vectorized load/store sizes
   constexpr uint32_t nvec_in = load_size / sizeof(IType);
   constexpr uint32_t nvec_out = store_size / sizeof(OType);

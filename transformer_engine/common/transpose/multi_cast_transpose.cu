@@ -63,12 +63,10 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
                           std::vector<Tensor*> cast_output_list,
                           std::vector<Tensor*> transposed_output_list, cudaStream_t stream) {
   // Check that number of tensors is valid
-  NVTE_CHECK(cast_output_list.size() == input_list.size(),
-             "Found ", input_list.size(), " input tensors and ",
-             cast_output_list.size(), " cast output tensors");
-  NVTE_CHECK(transposed_output_list.size() == input_list.size(),
-             "Found ", input_list.size(), " input tensors and ",
-             transposed_output_list.size(), " transposed output tensors");
+  NVTE_CHECK(cast_output_list.size() == input_list.size(), "Found ", input_list.size(),
+             " input tensors and ", cast_output_list.size(), " cast output tensors");
+  NVTE_CHECK(transposed_output_list.size() == input_list.size(), "Found ", input_list.size(),
+             " input tensors and ", transposed_output_list.size(), " transposed output tensors");
   if (input_list.empty()) {
     return;
   }
@@ -103,20 +101,20 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
   std::string itype_name, otype_name;
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       itype, InputType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          otype, OutputType,
-          itype_name = TypeInfo<InputType>::name;
-          otype_name = TypeInfo<OutputType>::name;
-      );  // NOLINT(*)
-  );  // NOLINT(*)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(otype, OutputType,
+                                            itype_name = TypeInfo<InputType>::name;
+                                            otype_name = TypeInfo<OutputType>::name;);  // NOLINT(*)
+  );                                                                                    // NOLINT(*)
 
   // Labels for NVRTC kernel cache
   const std::string kernel_label_aligned = concat_strings(
       "multi_cast_transpose"
-      ",itype=", itype_name, ",otype=", otype_name, ",aligned=", true);
+      ",itype=",
+      itype_name, ",otype=", otype_name, ",aligned=", true);
   const std::string kernel_label_unaligned = concat_strings(
       "multi_cast_transpose"
-      ",itype=", itype_name, ",otype=", otype_name, ",aligned=", false);
+      ",itype=",
+      itype_name, ",otype=", otype_name, ",aligned=", false);
 
   // Arguments for NVRTC kernels
   multi_cast_transpose_impl::KernelArgs kernel_args_aligned, kernel_args_unaligned;
@@ -126,13 +124,13 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
   kernel_args_unaligned.block_range[0] = 0;
 
   // Helper function to compile and launch NVRTC kernels
-  auto launch_kernel = [&] (bool aligned) {
+  auto launch_kernel = [&](bool aligned) {
     auto& label = aligned ? kernel_label_aligned : kernel_label_unaligned;
     auto& args = aligned ? kernel_args_aligned : kernel_args_unaligned;
     if (args.num_tensors == 0) {
       return;
     }
-    auto &rtc_manager = rtc::KernelManager::instance();
+    auto& rtc_manager = rtc::KernelManager::instance();
     if (!rtc_manager.is_compiled(label)) {
       std::string code = string_code_transpose_rtc_multi_cast_transpose_cu;
       code = regex_replace(code, "__ITYPE__", itype_name);
@@ -151,8 +149,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
   };
 
   // Helper function to add tensor to NVRTC kernel arguments
-  auto add_tensor_to_kernel_args = [&] (size_t tensor_id, bool aligned, size_t num_tiles) {
-
+  auto add_tensor_to_kernel_args = [&](size_t tensor_id, bool aligned, size_t num_tiles) {
     // Kernel arguments
     auto& args = aligned ? kernel_args_aligned : kernel_args_unaligned;
 
@@ -173,11 +170,10 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     args.row_length_list[i] = input_list[tensor_id]->data.shape[1];
     args.block_range[i + 1] = args.block_range[i] + num_tiles;
     args.num_tensors++;
-
   };
 
   // Helper function to check pointer alignment to 16B
-  auto ptr_is_aligned = [](const void *ptr) -> bool {
+  auto ptr_is_aligned = [](const void* ptr) -> bool {
     return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
   };
 
@@ -188,7 +184,6 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
 
   // Add tensors to kernel arguments
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
-
     // Calculate number of thread blocks needed for tensor
     const size_t num_rows = input_list[tensor_id]->data.shape[0];
     const size_t row_length = input_list[tensor_id]->data.shape[1];
@@ -198,22 +193,19 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
 
     // Choose whether to use aligned or unaligned kernel
     const bool aligned =
-      ((num_tiles_m * tile_dim_m == num_rows)
-       && (num_tiles_n * tile_dim_n == row_length)
-       && ptr_is_aligned(input_list[tensor_id]->data.dptr)
-       && ptr_is_aligned(cast_output_list[tensor_id]->data.dptr)
-       && ptr_is_aligned(transposed_output_list[tensor_id]->data.dptr));
+        ((num_tiles_m * tile_dim_m == num_rows) && (num_tiles_n * tile_dim_n == row_length) &&
+         ptr_is_aligned(input_list[tensor_id]->data.dptr) &&
+         ptr_is_aligned(cast_output_list[tensor_id]->data.dptr) &&
+         ptr_is_aligned(transposed_output_list[tensor_id]->data.dptr));
 
     // Add tensor to kernel arguments
     // Note: Launches kernel if arguments are already full
     add_tensor_to_kernel_args(tensor_id, aligned, num_tiles);
-
   }
 
   // Launch kernels if needed
   launch_kernel(true);
   launch_kernel(false);
-
 }
 
 }  // namespace transformer_engine
