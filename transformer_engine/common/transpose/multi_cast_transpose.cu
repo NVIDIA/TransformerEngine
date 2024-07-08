@@ -26,7 +26,7 @@ constexpr size_t load_size = 8;
 constexpr size_t store_size = 8;
 constexpr size_t warps_per_tile = 16;
 constexpr size_t block_size = THREADS_PER_WARP * warps_per_tile;
-constexpr size_t max_tensors_per_kernel = 64;  // Args must be <4 KB
+constexpr size_t kMaxTensorsPerKernel = 64;  // Args must be <4 KB
 
 }  // namespace
 
@@ -39,22 +39,22 @@ struct KernelArgs {
   // Number of tensors being processed by kernel
   uint32_t num_tensors;
   // (input) Data buffers for input tensors
-  void* input_list[max_tensors_per_kernel];
+  void* input_list[kMaxTensorsPerKernel];
   // (output) Data buffers for cast output tensors
-  void* output_c_list[max_tensors_per_kernel];
+  void* output_c_list[kMaxTensorsPerKernel];
   // (output) Data buffers for transpose output tensors
-  void* output_t_list[max_tensors_per_kernel];
+  void* output_t_list[kMaxTensorsPerKernel];
   // (input) Scaling factor for output tensors
-  void* scale_list[max_tensors_per_kernel];
+  void* scale_list[kMaxTensorsPerKernel];
   // (output) AMAX's of input tensors
-  void* amax_list[max_tensors_per_kernel];
+  void* amax_list[kMaxTensorsPerKernel];
   // Input matrix heights
-  uint32_t num_rows_list[max_tensors_per_kernel];
+  uint32_t num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
-  uint32_t row_length_list[max_tensors_per_kernel];
+  uint32_t row_length_list[kMaxTensorsPerKernel];
   // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
-  uint32_t block_range[max_tensors_per_kernel + 1];
+  uint32_t block_range[kMaxTensorsPerKernel + 1];
 };
 
 }  // namespace multi_cast_transpose_impl
@@ -140,7 +140,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
       code = regex_replace(code, "__WARPS_PER_TILE__", warps_per_tile);
       code = regex_replace(code, "__BLOCK_SIZE__", block_size);
       code = regex_replace(code, "__ALIGNED__", aligned);
-      code = regex_replace(code, "__MAX_TENSORS_PER_KERNEL__", max_tensors_per_kernel);
+      code = regex_replace(code, "__MAX_TENSORS_PER_KERNEL__", kMaxTensorsPerKernel);
       rtc_manager.compile(label, "multi_cast_transpose_kernel", code,
                           "transformer_engine/common/transpose/rtc/multi_cast_transpose.cu");
     }
@@ -154,7 +154,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     auto& args = aligned ? kernel_args_aligned : kernel_args_unaligned;
 
     // Launch kernel if arguments are already full
-    if (args.num_tensors == max_tensors_per_kernel) {
+    if (args.num_tensors == kMaxTensorsPerKernel) {
       launch_kernel(aligned);
       args.num_tensors = 0;
     }

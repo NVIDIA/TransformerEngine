@@ -19,7 +19,7 @@ constexpr uint32_t store_size = __STORE_SIZE__;
 constexpr uint32_t warps_per_tile = __WARPS_PER_TILE__;
 constexpr uint32_t block_size = __BLOCK_SIZE__;
 constexpr bool aligned = __ALIGNED__;
-constexpr uint32_t max_tensors_per_kernel = __MAX_TENSORS_PER_KERNEL__;
+constexpr uint32_t kMaxTensorsPerKernel = __MAX_TENSORS_PER_KERNEL__;
 
 }  // namespace
 
@@ -29,14 +29,14 @@ namespace multi_cast_transpose_impl {
 // Duplicate definition from launching code
 struct KernelArgs {
   uint32_t num_tensors;
-  void* input_list[max_tensors_per_kernel];
-  void* output_c_list[max_tensors_per_kernel];
-  void* output_t_list[max_tensors_per_kernel];
-  void* scale_list[max_tensors_per_kernel];
-  void* amax_list[max_tensors_per_kernel];
-  uint32_t num_rows_list[max_tensors_per_kernel];
-  uint32_t row_length_list[max_tensors_per_kernel];
-  uint32_t block_range[max_tensors_per_kernel + 1];
+  void* input_list[kMaxTensorsPerKernel];
+  void* output_c_list[kMaxTensorsPerKernel];
+  void* output_t_list[kMaxTensorsPerKernel];
+  void* scale_list[kMaxTensorsPerKernel];
+  void* amax_list[kMaxTensorsPerKernel];
+  uint32_t num_rows_list[kMaxTensorsPerKernel];
+  uint32_t row_length_list[kMaxTensorsPerKernel];
+  uint32_t block_range[kMaxTensorsPerKernel + 1];
 };
 
 };  // namespace multi_cast_transpose_impl
