@@ -1079,13 +1079,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
                                     # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                        k.shape[0], -1, *k.shape[-3:]
+                                        k.shape[0], -1, 2, *k.shape[-2:]
                                     )
                                 elif qkv_format == "sbhd":
                                     # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                                     q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, *k.shape[-4:])
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, k.shape[2], 2, *k.shape[-2:])
                                 elif qkv_format == "thd":
                                     q_inputs[i % 2] = q
                                 if attn_bias is not None:
@@ -1259,13 +1259,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     q_inputs[i % 2] = q[:, 1, ...].contiguous()
                                     # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                        k.shape[0], -1, *k.shape[-3:]
+                                        k.shape[0], -1, 2, *k.shape[-2:]
                                     )
                                 elif qkv_format == "sbhd":
                                     # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                                     q_inputs[i % 2] = q[1].contiguous()
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, *k.shape[-4:])
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, k.shape[2], 2, *k.shape[-2:])
                                 elif qkv_format == "thd":
                                     # [t, np, hn] -> [t/2, np, hn]
                                     q_inputs[i % 2] = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
@@ -1433,7 +1433,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
+                        out = torch.zeros_like(q)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
@@ -1639,7 +1639,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             q_ = q.view(q.shape[0], -1, *q.shape[-2:])
                             # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
+                            kv_ = kv.view(kv.shape[0], -1, 2, *kv.shape[-2:])
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             out_ = out.view(out.shape[0], -1, *out.shape[-2:])
                             dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
@@ -1647,7 +1647,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             q_ = q.view(-1, *q.shape[-3:])
                             # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                            kv_ = kv.view(-1, *kv.shape[-4:])
+                            kv_ = kv.view(-1, kv.shape[2], 2, *kv.shape[-2:])
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
@@ -1801,7 +1801,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             q_ = q[:, 1, ...].contiguous()
                             # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
+                            kv_ = kv.view(kv.shape[0], -1, 2, *kv.shape[-2:])
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             out_ = out[:, 1, ...].contiguous()
                             dout_ = dout[:, 1, ...].contiguous()
@@ -1809,7 +1809,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             q_ = q[1].contiguous()
                             # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                            kv_ = kv.view(-1, *kv.shape[-4:])
+                            kv_ = kv.view(-1, kv.shape[2], 2, *kv.shape[-2:])
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             out_ = out[1].contiguous()
                             dout_ = dout[1].contiguous()
@@ -2072,14 +2072,14 @@ class AttnFuncWithCP(torch.autograd.Function):
         if causal:
             if ctx.qkv_format == "bshd":
                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
-                dq = dq.view(q.shape[0], -1, *q.shape[-2:])
+                dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                dkv = dkv.view(*dkv.shape[0:2], -1, *dkv.shape[-2:])
             elif ctx.qkv_format == "sbhd":
                 # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
-                dq = dq.view(-1, *q.shape[-3:])
+                dq = dq.view(-1, *dq.shape[-3:])
                 # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                dkv = dkv.view(kv.shape[0], -1, *kv.shape[-3:])
+                dkv = dkv.view(dkv.shape[0], -1, *dkv.shape[-3:])
 
         if attn_dbias is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
