@@ -1085,7 +1085,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                                     q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, k.shape[2], 2, *k.shape[-2:])
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
                                 elif qkv_format == "thd":
                                     q_inputs[i % 2] = q
                                 if attn_bias is not None:
@@ -1265,7 +1267,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                                     q_inputs[i % 2] = q[1].contiguous()
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(-1, k.shape[2], 2, *k.shape[-2:])
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
                                 elif qkv_format == "thd":
                                     # [t, np, hn] -> [t/2, np, hn]
                                     q_inputs[i % 2] = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
