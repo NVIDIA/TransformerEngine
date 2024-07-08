@@ -1643,7 +1643,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             q_ = q.view(q.shape[0], -1, *q.shape[-2:])
                             # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, 2, *kv.shape[-2:])
+                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             out_ = out.view(out.shape[0], -1, *out.shape[-2:])
                             dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
@@ -1651,7 +1651,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             q_ = q.view(-1, *q.shape[-3:])
                             # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                            kv_ = kv.view(-1, kv.shape[2], 2, *kv.shape[-2:])
+                            kv_ = kv.view(-1, *kv.shape[-4:])
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
@@ -1805,7 +1805,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             q_ = q[:, 1, ...].contiguous()
                             # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, 2, *kv.shape[-2:])
+                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             out_ = out[:, 1, ...].contiguous()
                             dout_ = dout[:, 1, ...].contiguous()
@@ -1813,7 +1813,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             q_ = q[1].contiguous()
                             # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                            kv_ = kv.view(-1, kv.shape[2], 2, *kv.shape[-2:])
+                            kv_ = kv.view(-1, *kv.shape[-4:])
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             out_ = out[1].contiguous()
                             dout_ = dout[1].contiguous()
