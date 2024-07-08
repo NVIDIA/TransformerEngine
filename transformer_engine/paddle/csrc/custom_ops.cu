@@ -10,6 +10,7 @@
 
 #include "common.h"
 #include "common/common.h"
+#include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
@@ -581,9 +582,42 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
   return {dx, dgamma};
 }
 
-__global__ void set_rng_state(std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
+__global__ void set_rng_state(
+    [[maybe_unused]] unsigned int
+        identifier,  // This is used to relate kernel to cudaGraph nodes please refer to https://github.com/PaddlePaddle/Paddle/pull/60516
+    std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
   rng_state_ptr[0] = static_cast<int64_t>(seed_offset.first);
   rng_state_ptr[1] = static_cast<int64_t>(seed_offset.second);
+}
+
+void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_per_thread,
+                           paddle::Tensor &rng_state) {
+  // extract random number generator seed and offset
+  const phi::DeviceContext *dev_ctx =
+      paddle::experimental::DeviceContextPool::Instance().Get(place);
+  phi::Generator *gen_cuda = dev_ctx->GetGenerator();
+  auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+  auto state_index = gen_cuda->GetStateIndex();
+  int64_t *rng_state_p = static_cast<int64_t *>(rng_state.data());
+
+  auto parameterSetter = [gen_cuda, state_index,
+                          rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
+    // ensure the generator use correct state index
+    gen_cuda->SetStateIndex(state_index);
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    params.As<std::pair<int64_t, int64_t>>(1) = seed_offset;
+  };
+
+  phi::backends::gpu::CUDAGraphNodeLauncher::cudaKernelCallback_t cudaKernelCallback =
+      [=](unsigned int id) {
+        void *functionPtr = reinterpret_cast<void *>(&set_rng_state);
+        cudaFunction_t cudaFunc;
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaGetFuncBySymbol(&cudaFunc, functionPtr));
+        set_rng_state<<<1, 1, 0, stream>>>(id, seed_offset, rng_state_p);
+        return cudaFunc;
+      };
+  phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
+                                                                         cudaKernelCallback);
 }
 
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
@@ -623,12 +657,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
   NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
   NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
-  // extract random number generator seed and offset
-  auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(QKV.place());
-  auto gen_cuda = dev_ctx->GetGenerator();
-  auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  set_rng_state<<<1, 1, 0, QKV.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
-
+  UpdateRandomGenerator(QKV.place(), QKV.stream(), rng_elts_per_thread, rng_state);
   auto te_rng_state = MakeNvteTensor(rng_state);
 
   // create auxiliary output tensors
@@ -799,10 +828,7 @@ void te_fused_attn_fwd_kvpacked(
   NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
   NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
-  auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
-  auto gen_cuda = dev_ctx->GetGenerator();
-  auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+  UpdateRandomGenerator(Q.place(), Q.stream(), rng_elts_per_thread, rng_state);
   auto te_rng_state = MakeNvteTensor(rng_state);
 
   // create auxiliary output tensors
@@ -979,7 +1005,27 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
   auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
   auto gen_cuda = dev_ctx->GetGenerator();
   auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+  auto state_index = gen_cuda->GetStateIndex();
+  auto rng_state_p = static_cast<int64_t *>(rng_state.data());
+  auto stream = Q.stream();
+  auto parameterSetter = [gen_cuda, state_index,
+                          rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
+    // ensure the generator use correct state index
+    gen_cuda->SetStateIndex(state_index);
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    params.As<std::pair<int64_t, int64_t>>(1) = seed_offset;
+  };
+
+  phi::backends::gpu::CUDAGraphNodeLauncher::cudaKernelCallback_t cudaKernelCallback =
+      [=](unsigned int id) {
+        void *functionPtr = reinterpret_cast<void *>(&set_rng_state);
+        cudaFunction_t cudaFunc;
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaGetFuncBySymbol(&cudaFunc, functionPtr));
+        set_rng_state<<<1, 1, 0, stream>>>(id, seed_offset, rng_state_p);
+        return cudaFunc;
+      };
+  phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
+                                                                         cudaKernelCallback);
 
   auto te_rng_state = MakeNvteTensor(rng_state);
 
@@ -1260,6 +1306,29 @@ void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads
       softmax_results.stream());
 }
 
+__global__ void UpdateFP8MetaKernel(
+    [[maybe_unused]] unsigned int
+        identifier,  // This is used to relate kernel to cudaGraph nodes please refer to https://github.com/PaddlePaddle/Paddle/pull/60516
+    const float *amax, const float *rolled_amax_history, const bool *non_weight_mask,
+    float *amax_history, float *scale, float *scale_inv, bool update_weight_scale_inv, float margin,
+    float fp8_max, size_t history_numel, size_t amax_numel) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx >= history_numel) {
+    return;
+  }
+
+  amax_history[idx] = rolled_amax_history[idx];
+
+  if (idx < amax_numel) {
+    float sf = (fp8_max / amax[idx]) / powf(2.0f, margin);
+    float scale_reg = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
+    scale[idx] = scale_reg;
+    if (update_weight_scale_inv || non_weight_mask[idx]) scale_inv[idx] = 1.0f / scale_reg;
+    amax_history[idx] = 0.0f;
+  }
+}
+
 constexpr int BLOCK_SIZE = 512;
 
 void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
@@ -1275,6 +1344,63 @@ void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
       amax_history_.data(), scale_.data(), scale_inv_.data(), non_weight_mask_.data(),
       amax_history_.data(), scale_.data(), scale_inv_.data(), amax_compute.c_str(),
       static_cast<NVTEDType>(fp8_dtype), margin, amax_history.stream());
+}
+
+void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLINT
+                                          paddle::Tensor &scale,         // NOLINT
+                                          paddle::Tensor &scale_inv,     // NOLINT
+                                          const paddle::Tensor &non_weight_mask,
+                                          const paddle::Tensor &current_step_id_tensor,
+                                          bool update_weight_scale_inv, bool fwd_update,
+                                          float fp8_max, float margin,
+                                          const std::string &amax_compute) {
+  NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
+
+  paddle::Tensor amax;
+
+  if (amax_compute == "max") {
+    amax = amax_history.max({0});
+  } else {
+    amax = amax_history.slice(0, 1);
+  }
+
+  const auto rolled_amax_history = amax_history.roll({-1}, {0});
+
+  auto amax_history_numel = amax_history.numel();
+  auto amax_numel = amax.numel();
+  size_t num_blocks = (amax_history_numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+  const int *current_step_id_ptr = nullptr;
+  if (fwd_update) current_step_id_ptr = current_step_id_tensor.data<int>();
+  auto parameterSetter = [current_step_id_ptr,
+                          fwd_update](phi::backends::gpu::CUDAKernelParams &params) {
+    if (fwd_update) {
+      int current_step_id = *current_step_id_ptr;
+      params.As<bool>(7) = (current_step_id == 0);
+    }
+  };
+
+  const float *amax_ptr = amax.data<float>();
+  const float *rolled_amax_history_ptr = rolled_amax_history.data<float>();
+  const bool *non_weight_mask_ptr = non_weight_mask.data<bool>();
+  float *amax_history_ptr = amax_history.data<float>();
+  float *scale_ptr = scale.data<float>();
+  float *scale_inv_ptr = scale_inv.data<float>();
+
+  phi::backends::gpu::CUDAGraphNodeLauncher::cudaKernelCallback_t cudaKernelCallback =
+      [=](unsigned int id) {
+        void *functionPtr = reinterpret_cast<void *>(&UpdateFP8MetaKernel);
+        cudaFunction_t cudaFunc;
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaGetFuncBySymbol(&cudaFunc, functionPtr));
+        UpdateFP8MetaKernel<<<num_blocks, BLOCK_SIZE, 0, amax_history.stream()>>>(
+            id, amax_ptr, rolled_amax_history_ptr, non_weight_mask_ptr, amax_history_ptr, scale_ptr,
+            scale_inv_ptr, update_weight_scale_inv, margin, fp8_max, amax_history_numel,
+            amax_numel);
+        NVTE_CHECK_CUDA(cudaGetLastError());
+        return cudaFunc;
+      };
+  phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
+                                                                         cudaKernelCallback);
 }
 
 void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
@@ -1616,6 +1742,16 @@ PD_BUILD_OP(te_scaled_upper_triang_masked_softmax_backward)
     .SetInplaceMap({{"out_grad_", "out_grad"}})
     .SetKernelFn(
         PD_KERNEL(transformer_engine::paddle_ext::te_scaled_upper_triang_masked_softmax_backward));
+
+PD_BUILD_OP(amax_and_scale_update_inplace_legacy)
+    .Inputs({"_amax_history", "_scale", "_scale_inv", "non_weight_mask", "current_step_id_tensor"})
+    .Outputs({"amax_history", "scale", "scale_inv"})
+    .SetInplaceMap({{"_amax_history", "amax_history"},
+                    {"_scale", "scale"},
+                    {"_scale_inv", "scale_inv"}})
+    .Attrs({"update_weight_scale_inv: bool", "fwd_update: bool", "fp8_max: float", "margin: float",
+            "amax_compute: std::string"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace_legacy));
 
 PD_BUILD_OP(amax_and_scale_update_inplace)
     .Inputs({"_amax_history", "_scale", "_scale_inv", "non_weight_mask"})

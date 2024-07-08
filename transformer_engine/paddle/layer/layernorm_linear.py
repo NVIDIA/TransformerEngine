@@ -562,7 +562,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         set_weight_tensor_dist_attr(
             self.weight, self.tensor_parallel, self.parallel_mode, self.backend
         )
-        self.fp8_weight_shapes.append(self.weight.shape)
+        self.fp8_weights.append(self.weight)
 
         # Initialize Linear bias parameter
         self.has_bias = self._bias_attr is not False
@@ -616,7 +616,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             inp = cast_if_needed(inp, self.activation_dtype)
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
-            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad_and_cast(is_first_microbatch)
 
             out = _LayerNormLinear.apply(
                 inp,

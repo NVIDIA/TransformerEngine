@@ -62,6 +62,7 @@ class FP8State:
         self._fp8_autocast_counter = 0
         self._fp8_autocast_depth = 0
         self._fp8_recompute_enabled = False
+        self._use_cudagraph = False
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
         self._fp8_recompute_buffer = FP8RecomputeBuffer()
@@ -115,6 +116,18 @@ class FP8State:
     def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
         """Returns global fp8 recompute buffer."""
         return self._fp8_recompute_buffer
+
+    def is_cudagraph_enabled(self) -> bool:
+        """Is CUDAGraph enabled"""
+        return self._use_cudagraph
+
+    def enable_cudagraph(self):
+        """Enable CUDA Graphs. Once CUDA Graphs are enabled, they cannot be disabled within the same execution context at current implementation."""
+        self._use_cudagraph = True
+        self._fp8_fwd_buffer.enable_cudagraph()
+        self._fp8_bwd_buffer.enable_cudagraph()
+        if self._fp8_recompute_enabled:
+            raise RuntimeError("Currently, We do not allow recompute with cudagraph")
 
     def enter(
         self,
@@ -235,25 +248,45 @@ def amax_and_scale_update(
     fp8_meta: Dict[str, Any],
     fwd_update: bool,
     update_weight_scale_inv: bool = True,
+    current_step_id_tensor: Optional[paddle.Tensor] = None,
+    use_cudagraph: bool = False,
 ) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
     sf_compute = fp8_meta["recipe"].scaling_factor_compute_algo
     fp8_meta_tensor_key = "scaling_fwd" if fwd_update else "scaling_bwd"
+    fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
 
     if not callable(amax_compute) and sf_compute is None:
         non_weight_mask = fp8_meta[fp8_meta_tensor_key].non_weight_mask
-        if update_weight_scale_inv:
-            non_weight_mask = paddle.empty([0])
-        tex.amax_and_scale_update_inplace(
-            _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
-            _scale=fp8_meta[fp8_meta_tensor_key].scale,
-            _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
-            non_weight_mask=non_weight_mask,
-            fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
-            margin=float(fp8_meta["recipe"].margin),
-            amax_compute=amax_compute,
-        )
+
+        if use_cudagraph:
+            tex.amax_and_scale_update_inplace_legacy(
+                _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
+                _scale=fp8_meta[fp8_meta_tensor_key].scale,
+                _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
+                non_weight_mask=non_weight_mask,
+                current_step_id_tensor=current_step_id_tensor,
+                update_weight_scale_inv=update_weight_scale_inv,
+                fwd_update=fwd_update,
+                fp8_max=fp8_meta[fp8_max_key],
+                margin=float(fp8_meta["recipe"].margin),
+                amax_compute=amax_compute,
+            )
+        else:
+            if update_weight_scale_inv:
+                # we pass nullptr into kernel when we need to update_weight_scale_inv
+                non_weight_mask = paddle.empty([0])
+            tex.amax_and_scale_update_inplace(
+                _amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
+                _scale=fp8_meta[fp8_meta_tensor_key].scale,
+                _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
+                non_weight_mask=non_weight_mask,
+                fp8_dtype=int(get_fp8_te_dtype(fp8_meta["recipe"], fwd_update)),
+                margin=float(fp8_meta["recipe"].margin),
+                amax_compute=amax_compute,
+            )
+
     else:
         raise ValueError(
             "We only support the fp8 recipe with 'max' or 'most_recent' "
