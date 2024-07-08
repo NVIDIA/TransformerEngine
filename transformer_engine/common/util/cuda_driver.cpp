@@ -93,7 +93,14 @@ Library &cuda_driver_lib() {
 
 namespace cuda_driver {
 
-void *get_symbol(const char *symbol) { return cuda_driver_lib().get_symbol(symbol); }
+void *get_symbol(const char *symbol) {
+  void *entry_point;
+  cudaDriverEntryPointQueryResult driver_result;
+  NVTE_CHECK_CUDA(cudaGetDriverEntryPoint(symbol, &entry_point, cudaEnableDefault, &driver_result));
+  NVTE_CHECK(driver_result == cudaDriverEntryPointSuccess,
+             "Could not find CUDA driver entry point for ", symbol);
+  return entry_point;
+}
 
 }  // namespace cuda_driver
 

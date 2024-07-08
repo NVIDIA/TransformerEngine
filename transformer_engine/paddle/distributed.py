@@ -14,6 +14,16 @@ import paddle.distributed.fleet.base.topology as tp
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 from paddle.distributed.fleet.layers.mpu import mp_ops
 
+try:
+    # This feature is not supported as of Paddle 2.6.
+    from paddle.distributed.fleet.meta_parallel import (
+        PipelineParallelMicroStepLocations,
+        register_global_pipeline_parallel_hook,
+    )
+except ImportError:
+    print("Cannot find register_global_pipeline_parallel_hook !")
+    register_global_pipeline_parallel_hook = None
+
 from .constants import dist_group_type
 
 _weight_split_axis = {
@@ -52,6 +62,22 @@ def get_tp_group_and_world_size(
         )
 
     return model_parallel_group, world_size
+
+
+def is_pp_enabled() -> bool:
+    """Check if pipeline parallel is enabled"""
+    if not paddle.distributed.is_initialized():
+        return False
+
+    return tp._HYBRID_PARALLEL_GROUP.get_pipe_parallel_world_size() > 1
+
+
+def register_pp_fwd_begin_hook(forward_begin_hook):
+    """Register the pp hook if register_global_pipeline_parallel_hook exist"""
+    if register_global_pipeline_parallel_hook is not None:
+        register_global_pipeline_parallel_hook(
+            PipelineParallelMicroStepLocations.FORWARD_BEGIN, forward_begin_hook
+        )
 
 
 @contextmanager
@@ -120,6 +146,7 @@ def allgather(
     input_: paddle.Tensor,
     tp_group: Optional[dist_group_type] = None,
     sync_op: bool = True,
+    axis: int = 0,
 ) -> Tuple[paddle.Tensor, Any]:
     """All-gather the input tensor across model parallel group."""
 
@@ -129,7 +156,7 @@ def allgather(
 
     parallelism = tp_group.nranks
     output_shape = input_.shape
-    output_shape[0] = output_shape[0] * parallelism
+    output_shape[axis] = output_shape[axis] * parallelism
     output = paddle.empty(shape=output_shape, dtype=input_.dtype)
     wait_handle = tp_group.process_group.all_gather_into_tensor(output, input_, sync_op)
     if sync_op:
