@@ -6,7 +6,7 @@ import jax
 import pytest
 
 
-@pytest.fixture(autouse=True, scope='function')
+@pytest.fixture(autouse=True, scope="function")
 def clear_live_arrays():
     """
     Clear all live arrays to keep the resource clean

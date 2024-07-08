@@ -8,7 +8,8 @@ import unittest
 import paddle
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer import (
-    DygraphShardingOptimizer,)
+    DygraphShardingOptimizer,
+)
 
 from utils import assert_allclose, set_random_seed
 import transformer_engine.paddle as te
@@ -25,7 +26,7 @@ class TestGroupSharding(unittest.TestCase):
     def set_attr(self):
         """Set test configs"""
         self.sharding_degree = 2
-        self.global_dtype = 'float32'
+        self.global_dtype = "float32"
         self.rtol = 1e-5
         self.atol = 1e-5
         self.batch_size = 16
@@ -57,11 +58,12 @@ class TestGroupSharding(unittest.TestCase):
             optimizer = paddle.optimizer.AdamW(learning_rate=0.01, parameters=model.parameters())
             group = fleet.get_hybrid_communicate_group().get_sharding_parallel_group()
 
-            class ShardingLevel:    # pylint: disable=too-few-public-methods,
+            class ShardingLevel:  # pylint: disable=too-few-public-methods,
                 """Paddle sharding options"""
-                kStage1 = 'os'
-                kStage2 = 'os_g'
-                kStage3 = 'p_g_os'
+
+                kStage1 = "os"
+                kStage2 = "os_g"
+                kStage3 = "p_g_os"
 
             level = ShardingLevel.kStage3 if stage == 3 else ShardingLevel.kStage2
             model, optimizer, _ = paddle.distributed.sharding.group_sharded_parallel(
@@ -104,8 +106,9 @@ class TestGroupSharding(unittest.TestCase):
             loss_pd = train_one_step(model_pd, inp, optimizer_pd)
             assert_allclose(loss_te, loss_pd, rtol=self.rtol, atol=self.atol)
 
-        assert len(optimizer_te.state_dict()) == 4, \
-            "Expect each rank to hold 4 optimizer state entries."
+        assert (
+            len(optimizer_te.state_dict()) == 4
+        ), "Expect each rank to hold 4 optimizer state entries."
 
     def test_group_sharding_stage2(self):
         """Tests group sharding training"""
@@ -141,8 +144,9 @@ class TestGroupSharding(unittest.TestCase):
             loss_pd = train_one_step(model_pd, inp, optimizer_pd)
             assert_allclose(loss_te, loss_pd, rtol=self.rtol, atol=self.atol)
 
-        assert len(optimizer_te.state_dict()) == 4, \
-            "Expect each rank to hold 4 optimizer state entries."
+        assert (
+            len(optimizer_te.state_dict()) == 4
+        ), "Expect each rank to hold 4 optimizer state entries."
 
     def test_group_sharding_stage3(self):
         """Tests group sharding training"""
@@ -174,11 +178,11 @@ class TestGroupSharding(unittest.TestCase):
             assert_allclose(loss_te, loss_pd, rtol=self.rtol, atol=self.atol)
 
         for name, value in optimizer_te.state_dict().items():
-            if name.endswith('w_0_moment1_0'):
-                assert value.numel() == \
-                    self.in_channels * self.out_channels // self.sharding_degree, \
-                    "Expect optimizer state to be sharded across trainers."
+            if name.endswith("w_0_moment1_0"):
+                assert (
+                    value.numel() == self.in_channels * self.out_channels // self.sharding_degree
+                ), "Expect optimizer state to be sharded across trainers."
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

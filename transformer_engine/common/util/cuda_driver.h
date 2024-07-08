@@ -7,9 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
 
-#include <string>
-
 #include <cuda.h>
+
+#include <string>
 
 #include "../common.h"
 #include "../util/string.h"
@@ -35,7 +35,7 @@ void *get_symbol(const char *symbol);
 template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
-  FuncT *func = reinterpret_cast<FuncT*>(get_symbol(symbol));
+  FuncT *func = reinterpret_cast<FuncT *>(get_symbol(symbol));
   return (*func)(args...);
 }
 
@@ -43,23 +43,20 @@ inline CUresult call(const char *symbol, ArgTs... args) {
 
 }  // namespace transformer_engine
 
-#define NVTE_CHECK_CUDA_DRIVER(expr)                                    \
-  do {                                                                  \
-    const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);              \
-    if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                \
-      const char *desc_NVTE_CHECK_CUDA_DRIVER;                          \
-      ::transformer_engine::cuda_driver::call(                          \
-        "cuGetErrorString",                                             \
-        status_NVTE_CHECK_CUDA_DRIVER,                                  \
-        &desc_NVTE_CHECK_CUDA_DRIVER);                                  \
-      NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);          \
-    }                                                                   \
+#define NVTE_CHECK_CUDA_DRIVER(expr)                                                             \
+  do {                                                                                           \
+    const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                                       \
+    if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                                         \
+      const char *desc_NVTE_CHECK_CUDA_DRIVER;                                                   \
+      ::transformer_engine::cuda_driver::call("cuGetErrorString", status_NVTE_CHECK_CUDA_DRIVER, \
+                                              &desc_NVTE_CHECK_CUDA_DRIVER);                     \
+      NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                                   \
+    }                                                                                            \
   } while (false)
 
-#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                        \
-  do {                                                                  \
-    NVTE_CHECK_CUDA_DRIVER(                                             \
-      ::transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__));   \
+#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                           \
+  do {                                                                                     \
+    NVTE_CHECK_CUDA_DRIVER(::transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__)); \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_

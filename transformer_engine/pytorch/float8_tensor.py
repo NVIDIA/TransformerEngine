@@ -34,17 +34,22 @@ def _make_fp8_attr_property_funcs(name: str) -> Any:
           Key in dictionary of FP8 attributes
 
     """
+
     def get_func(self) -> Any:
         return self._fp8_attrs[name]
+
     def set_func(self, value: Any) -> None:
         self._fp8_attrs[name] = value
+
     def del_func(self) -> None:
         del self._fp8_attrs[name]
+
     return dict(fget=get_func, fset=set_func, fdel=del_func)
 
 
 class _FromFloat8Func(torch.autograd.Function):
     """Cast from FP8 to other dtype"""
+
     @staticmethod
     def forward(
         _ctx: torch.autograd.function.FunctionCtx,  # unused
@@ -53,7 +58,7 @@ class _FromFloat8Func(torch.autograd.Function):
     ) -> torch.Tensor:
         if dtype is None:
             dtype = tensor.dtype
-        data = tensor._data.contiguous().view(1,-1).detach()
+        data = tensor._data.contiguous().view(1, -1).detach()
         out = tex.cast_from_fp8(
             data,
             tensor._scale_inv,
@@ -92,13 +97,13 @@ def post_optimizer_step_fwd_amax_reduction(param: Float8Tensor) -> None:
     current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
     # All FP8 trainable parameters have been updated.
     if updated_fp8_params[autocast_key] == current_fp8_params_set:
-        FP8GlobalStateManager.reduce_and_update_fp8_tensors(
-                                            forward=True, fp8_weights=True)
+        FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True, fp8_weights=True)
         del updated_fp8_params[autocast_key]
 
 
 class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
+
     @staticmethod
     def forward(
         _ctx: torch.autograd.function.FunctionCtx,  # unused
@@ -153,9 +158,7 @@ class _ToFloat8Func(torch.autograd.Function):
                 device=tensor.device,
             )
         if scale.numel() != 1:
-            raise ValueError(
-                "Attempted to initialize Float8Tensor with invalid scale tensor"
-            )
+            raise ValueError("Attempted to initialize Float8Tensor with invalid scale tensor")
         scale = scale.to(device=tensor.device, dtype=torch.float32)
 
         # Check scale-inverse
@@ -167,13 +170,11 @@ class _ToFloat8Func(torch.autograd.Function):
         if amax is None:
             amax = torch.empty_like(scale)
         if not (amax.numel() == 1 and amax.is_cuda and amax.dtype == torch.float32):
-            raise ValueError(
-                "Attempted to initialize Float8Tensor with invalid amax tensor"
-            )
+            raise ValueError("Attempted to initialize Float8Tensor with invalid amax tensor")
 
         # Cast data to FP8
         data = tex.cast_to_fp8(
-            tensor.view(1,-1),
+            tensor.view(1, -1),
             scale,
             amax,
             scale_inv,
@@ -240,6 +241,7 @@ class _IdentityFunc(torch.autograd.Function):
     def backward(ctx, grad):
         return grad.to(ctx.input_dtype), None
 
+
 class _ViewFunc(torch.autograd.Function):
     """View function
 
@@ -268,7 +270,8 @@ class _ViewFunc(torch.autograd.Function):
         return tensor.view(*shape)
 
     @staticmethod
-    def backward(ctx,
+    def backward(
+        ctx,
         grad: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
 
@@ -309,7 +312,8 @@ class _ReshapeFunc(torch.autograd.Function):
         return tensor.reshape(*shape)
 
     @staticmethod
-    def backward(ctx,
+    def backward(
+        ctx,
         grad: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
 
@@ -375,13 +379,10 @@ class Float8Tensor(torch.Tensor):
         # Check that data buffer is valid
         if data.element_size() != 1:
             raise ValueError(
-                "Float8Tensor requires data buffer with 8-bit dtype "
-                f"(got dtype={data.dtype})"
+                f"Float8Tensor requires data buffer with 8-bit dtype (got dtype={data.dtype})"
             )
         if data.requires_grad:
-            raise ValueError(
-                "Float8Tensor requires non-differentiable data buffer"
-            )
+            raise ValueError("Float8Tensor requires non-differentiable data buffer")
         if not data.is_cuda:
             data = data.cuda()
 
@@ -418,8 +419,9 @@ class Float8Tensor(torch.Tensor):
         self._fp8_meta_index: Optional[int] = fp8_meta_index
 
         # FP8 dtype
-        assert (
-            fp8_dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
+        assert fp8_dtype in (
+            tex.DType.kFloat8E4M3,
+            tex.DType.kFloat8E5M2,
         ), f"Unsupported fp8_dtype {fp8_dtype}."
         self._fp8_dtype: tex.DType = fp8_dtype
 
@@ -451,10 +453,7 @@ class Float8Tensor(torch.Tensor):
             )
         if fp8_scale_inv.dim() != 1:
             fp8_scale_inv = fp8_scale_inv.reshape(1)
-        if (
-            fp8_scale_inv.device != self._data.device
-            or fp8_scale_inv.dtype != torch.float32
-        ):
+        if fp8_scale_inv.device != self._data.device or fp8_scale_inv.dtype != torch.float32:
             fp8_scale_inv = fp8_scale_inv.to(
                 device=self._data.device,
                 dtype=torch.float32,
@@ -674,7 +673,6 @@ class Float8Tensor(torch.Tensor):
             tensor.device != data.device
             or tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16)
             or not tensor.is_contiguous()
-
         ):
             dtype = tensor.dtype
             if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -691,13 +689,11 @@ class Float8Tensor(torch.Tensor):
             )
         if not data.is_contiguous():
             raise ValueError(
-                "FP8 cast-transpose is only supported for "
-                "`Float8Tensor`s with contiguous data"
+                "FP8 cast-transpose is only supported for `Float8Tensor`s with contiguous data"
             )
         if self._fp8_meta is None:
             raise ValueError(
-                "FP8 cast-transpose is only supported for "
-                "`Float8Tensor`s with FP8 metadata "
+                "FP8 cast-transpose is only supported for `Float8Tensor`s with FP8 metadata "
             )
 
         # Construct transpose cache if needed
@@ -726,7 +722,7 @@ class Float8Tensor(torch.Tensor):
             transpose_out=transpose,
             noop_flag=noop_flag,
         )
-        scale = fp8_meta.scale[fp8_meta_index:fp8_meta_index+1]
+        scale = fp8_meta.scale[fp8_meta_index : fp8_meta_index + 1]
         scale_inv = self._scale_inv
         if noop_flag is None:
             torch.reciprocal(scale, out=scale_inv)
@@ -784,13 +780,9 @@ class Float8Tensor(torch.Tensor):
             dst = args[0]
             src = args[1]
             if not isinstance(dst, torch.Tensor):
-                raise RuntimeError(
-                    "Attempted to copy into something that isn't a PyTorch tensor"
-                )
+                raise RuntimeError("Attempted to copy into something that isn't a PyTorch tensor")
             if not isinstance(src, torch.Tensor):
-                raise RuntimeError(
-                    "Attempted to copy from something that isn't a PyTorch tensor"
-                )
+                raise RuntimeError("Attempted to copy from something that isn't a PyTorch tensor")
 
             # Special handling based on which tensors are FP8
             dst_is_fp8 = isinstance(dst, Float8Tensor)
@@ -850,9 +842,9 @@ class Float8Tensor(torch.Tensor):
                 if not dst._data.is_contiguous():
                     raise RuntimeError("Transformer Engine cast kernels require contiguous data")
                 tex.cast_to_fp8_noalloc(
-                    src.view(1,-1),
+                    src.view(1, -1),
                     scale,
-                    dst._data.view(1,-1),
+                    dst._data.view(1, -1),
                     amax,
                     dst._scale_inv,
                     dst._fp8_dtype,
@@ -904,12 +896,12 @@ class Float8Tensor(torch.Tensor):
             Keep the same FP8 scaling factors.
 
             """
-            if(
-                isinstance(arg, Float8Tensor) and
-                isinstance(new_arg, torch.Tensor) and
-                hasattr(schema_arg, 'alias_info') and
-                hasattr(schema_arg.alias_info, 'is_write') and
-                schema_arg.alias_info.is_write
+            if (
+                isinstance(arg, Float8Tensor)
+                and isinstance(new_arg, torch.Tensor)
+                and hasattr(schema_arg, "alias_info")
+                and hasattr(schema_arg.alias_info, "is_write")
+                and schema_arg.alias_info.is_write
             ):
                 arg.copy_(new_arg)
                 arg._reset_caches()

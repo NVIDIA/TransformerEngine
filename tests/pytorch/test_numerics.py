@@ -20,11 +20,21 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
-    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
-    MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
+    DotProductAttention,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
+    GroupedLinear,
+    MultiheadAttention,
+    RMSNorm,
+    TransformerLayer,
+    LayerNorm,
+    InferenceParams,
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-
+from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
+from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
+import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -106,10 +116,11 @@ def assert_allclose(
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
-            msg = (f"Outputs not close enough in tensor at idx={i}. "
-                   f"Location of the maximum difference: {m.item()} "
-                   f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
-                   f"(diff {diff[m].item()})."
+            msg = (
+                f"Outputs not close enough in tensor at idx={i}. "
+                f"Location of the maximum difference: {m.item()} "
+                f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
+                f"(diff {diff[m].item()})."
             )
             raise AssertionError(msg)
 
@@ -175,9 +186,7 @@ class TorchDotProductAttention(torch.nn.Module):
         )
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query_layer = query_layer.reshape(
-            output_size[2], output_size[0] * output_size[1], -1
-        )
+        query_layer = query_layer.reshape(output_size[2], output_size[0] * output_size[1], -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
@@ -216,14 +225,10 @@ class TorchDotProductAttention(torch.nn.Module):
         )
 
         # change view [sk, b * np, hn]
-        value_layer = value_layer.reshape(
-            value_layer.size(0), output_size[0] * output_size[1], -1
-        )
+        value_layer = value_layer.reshape(value_layer.size(0), output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(
-            output_size[0] * output_size[1], output_size[2], -1
-        )
+        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
@@ -241,9 +246,7 @@ class TorchDotProductAttention(torch.nn.Module):
 
 
 class TorchLayerNorm(nn.Module):
-    def __init__(self, in_features: int,
-                 eps: float,
-                 zero_centered_gamma: bool):
+    def __init__(self, in_features: int, eps: float, zero_centered_gamma: bool):
         super().__init__()
         self.eps = eps
         self.in_features = in_features
@@ -260,9 +263,11 @@ class TorchLayerNorm(nn.Module):
         w = w.to(torch.float32)
         b = self.bias.to(torch.float32)
         inp = x.to(torch.float32)
-        out = torch.nn.functional.layer_norm(inp, (self.in_features,), weight=w,
-                                             bias=b, eps=self.eps)
+        out = torch.nn.functional.layer_norm(
+            inp, (self.in_features,), weight=w, bias=b, eps=self.eps
+        )
         return out.to(x.dtype)
+
 
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
@@ -278,11 +283,11 @@ class TorchRMSNorm(nn.Module):
         self.register_parameter("weight", self.weight)
 
     def forward(self, x):
-        norm_x2 = torch.sum(x.float()**2, dim=-1, keepdim=True)
+        norm_x2 = torch.sum(x.float() ** 2, dim=-1, keepdim=True)
         d_x = self.in_features
 
         rms_x2 = norm_x2 / d_x + self.eps
-        r_rms_x = rms_x2 ** (-1. / 2)
+        r_rms_x = rms_x2 ** (-1.0 / 2)
         x_normed = x * r_rms_x
 
         w = self.weight.float()
@@ -292,17 +297,24 @@ class TorchRMSNorm(nn.Module):
 
 
 class TorchLayerNormLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int,
-                 eps: float, bias: bool = True,
-                 normalization: str = "LayerNorm",
-                 zero_centered_gamma: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        eps: float,
+        bias: bool = True,
+        normalization: str = "LayerNorm",
+        zero_centered_gamma: bool = False,
+    ):
         super().__init__()
         if normalization == "LayerNorm":
-            self.layernorm = TorchLayerNorm(in_features, eps=eps,
-                                            zero_centered_gamma=zero_centered_gamma)
+            self.layernorm = TorchLayerNorm(
+                in_features, eps=eps, zero_centered_gamma=zero_centered_gamma
+            )
         elif normalization == "RMSNorm":
-            self.layernorm = TorchRMSNorm(in_features, eps=eps,
-                                          zero_centered_gamma=zero_centered_gamma)
+            self.layernorm = TorchRMSNorm(
+                in_features, eps=eps, zero_centered_gamma=zero_centered_gamma
+            )
         else:
             raise RuntimeError("Unsupported normalization")
 
@@ -329,21 +341,26 @@ class TorchMHA(nn.Module):
             output = output[0]
         return output
 
+
 class TorchQuickGELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return input * torch.sigmoid(1.702 * input)
+
 
 class TorchSquaredRELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return (input > 0) * input * input
 
-_supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
-                  'gelu'  : nn.GELU(approximate="tanh"),
-                  'reglu'  : nn.ReLU(),
-                  'relu'  : nn.ReLU(),
-                  'swiglu' : nn.SiLU(),
-                  'qgelu'  : TorchQuickGELU(),
-                  'srelu'  : TorchSquaredRELU()}
+
+_supported_act = {
+    "geglu": nn.GELU(approximate="tanh"),
+    "gelu": nn.GELU(approximate="tanh"),
+    "reglu": nn.ReLU(),
+    "relu": nn.ReLU(),
+    "swiglu": nn.SiLU(),
+    "qgelu": TorchQuickGELU(),
+    "srelu": TorchSquaredRELU(),
+}
 
 
 class TorchGLU(nn.Module):
@@ -353,26 +370,29 @@ class TorchGLU(nn.Module):
 
     def forward(self, x):
         shape = x.size(-1)
-        a = x[..., :shape // 2]
-        b = x[..., (shape // 2):]
+        a = x[..., : shape // 2]
+        b = x[..., (shape // 2) :]
         a = self.act(a)
         return a * b
 
 
 class TorchLayerNormMLP(nn.Module):
-    def __init__(self, hidden_size: int, ffn_hidden_size: int,
-                 eps: float = 1e-5, activation = 'gelu',
-                 normalization: str = "LayerNorm"):
+    def __init__(
+        self,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        eps: float = 1e-5,
+        activation="gelu",
+        normalization: str = "LayerNorm",
+    ):
         super().__init__()
         if normalization == "LayerNorm":
-            self.ln = TorchLayerNorm(hidden_size, eps=eps,
-                                     zero_centered_gamma=False)
+            self.ln = TorchLayerNorm(hidden_size, eps=eps, zero_centered_gamma=False)
         elif normalization == "RMSNorm":
-            self.ln = TorchRMSNorm(hidden_size, eps=eps,
-                                   zero_centered_gamma=False)
+            self.ln = TorchRMSNorm(hidden_size, eps=eps, zero_centered_gamma=False)
         else:
             raise RuntimeError("Unsupported normalization")
-        if 'glu' in activation:
+        if "glu" in activation:
             fc1_output_features = 2 * ffn_hidden_size
             self.gelu = TorchGLU(activation)
         else:
@@ -387,7 +407,9 @@ class TorchLayerNormMLP(nn.Module):
 
 
 class TorchGPT(nn.Module):
-    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool):
+    def __init__(
+        self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool
+    ):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
@@ -411,7 +433,6 @@ class TorchGPT(nn.Module):
         return x
 
 
-
 def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -421,23 +442,21 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
     with fp8_model_init(enabled=fp8 and fp8_model_params):
-        block = (
-            TransformerLayer(
-                config.hidden_size,
-                4 * config.hidden_size,
-                config.num_attention_heads,
-                layernorm_epsilon=config.eps,
-                init_method=init_method,
-                output_layer_init_method=output_layer_init_method,
-                hidden_dropout=0.1,
-                attention_dropout=0.1,
-                kv_channels=config.embed,
-                apply_residual_connection_post_layernorm=False,
-                output_layernorm=False,
-                params_dtype=dtype,
-                fuse_qkv_params=True,
-                device="cuda",
-            )
+        block = TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            params_dtype=dtype,
+            fuse_qkv_params=True,
+            device="cuda",
         )
 
     te_inp_hidden_states = torch.randn(
@@ -477,8 +496,12 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
     config = model_configs[model]
 
-    outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
-    outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
+    outputs = _test_e2e_selective_recompute(
+        bs, dtype, config, fp8, fp8_model_params, recompute=False
+    )
+    outputs_recompute = _test_e2e_selective_recompute(
+        bs, dtype, config, fp8, fp8_model_params, recompute=True
+    )
 
     # Check that results match
     tols = dtype_tols(dtype)
@@ -496,10 +519,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
 
 def _test_e2e_full_recompute(
-    bs, dtype, config, fp8,
-    fp8_model_params=False,
-    recompute=False,
-    use_reentrant=True
+    bs, dtype, config, fp8, fp8_model_params=False, recompute=False, use_reentrant=True
 ):
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -586,10 +606,12 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
         os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
 
-    outputs, names = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
-                                              recompute=False, use_reentrant=use_reentrant)
-    outputs_recompute, _ = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
-                                                    recompute=True, use_reentrant=use_reentrant)
+    outputs, names = _test_e2e_full_recompute(
+        bs, dtype, config, fp8, fp8_model_params, recompute=False, use_reentrant=use_reentrant
+    )
+    outputs_recompute, _ = _test_e2e_full_recompute(
+        bs, dtype, config, fp8, fp8_model_params, recompute=True, use_reentrant=use_reentrant
+    )
 
     if not use_reentrant:
         # Reset bias+GELU fusion flag to avoid contaminating other tests
@@ -753,22 +775,19 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
 
-    te_gpt = (
-        TransformerLayer(
-            hidden_size=config.hidden_size,
-            ffn_hidden_size=4 * config.hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            attention_dropout=0.1,
-            hidden_dropout=0.1,
-            params_dtype=dtype,
-            fuse_qkv_params=True,
-            qkv_weight_interleaved=False,
-            parallel_attention_mlp=parallel_attention_mlp,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_gpt = TransformerLayer(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        attention_dropout=0.1,
+        hidden_dropout=0.1,
+        params_dtype=dtype,
+        fuse_qkv_params=True,
+        qkv_weight_interleaved=False,
+        parallel_attention_mlp=parallel_attention_mlp,
+        device="cuda",
+    ).eval()
 
     torch_gpt = (
         TorchGPT(
@@ -853,18 +872,15 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
 
-    te_mha = (
-        MultiheadAttention(
-            config.hidden_size,
-            config.num_attention_heads,
-            fuse_qkv_params=True,
-            params_dtype=dtype,
-            qkv_weight_interleaved=False,
-            input_layernorm=False,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_mha = MultiheadAttention(
+        config.hidden_size,
+        config.num_attention_heads,
+        fuse_qkv_params=True,
+        params_dtype=dtype,
+        qkv_weight_interleaved=False,
+        input_layernorm=False,
+        device="cuda",
+    ).eval()
 
     torch_mha = (
         TorchMHA(
@@ -919,7 +935,9 @@ def _test_granular_accuracy(block, bs, dtype, config):
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
-    mask = torch.triu(torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1)
+    mask = torch.triu(
+        torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1
+    )
     query, key, value = [
         torch.randn(
             (config.seq_len, bs, config.num_attention_heads, config.embed),
@@ -953,7 +971,7 @@ def test_dpa_accuracy(dtype, bs, model):
         DotProductAttention(
             config.num_attention_heads,
             config.embed,
-            attention_dropout=0.0, # disable dropout, FU uses rng differently
+            attention_dropout=0.0,  # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
         .cuda()
@@ -962,7 +980,7 @@ def test_dpa_accuracy(dtype, bs, model):
     torch_dpa = (
         TorchDotProductAttention(
             config.embed,
-            0.0, # dropout
+            0.0,  # dropout
         )
         .to(dtype=dtype)
         .cuda()
@@ -984,27 +1002,21 @@ def test_dpa_accuracy(dtype, bs, model):
 def test_linear_accuracy(dtype, bs, model):
     config = model_configs[model]
 
-    te_linear = (
-        Linear(
-            config.hidden_size,
-            4 * config.hidden_size,
-            bias=True,
-            params_dtype=dtype,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_linear = Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=True,
+        params_dtype=dtype,
+        device="cuda",
+    ).eval()
 
-    torch_linear = (
-        torch.nn.Linear(
-            config.hidden_size,
-            4 * config.hidden_size,
-            bias=True,
-            device="cuda",
-            dtype=dtype,
-        )
-        .eval()
-    )
+    torch_linear = torch.nn.Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=True,
+        device="cuda",
+        dtype=dtype,
+    ).eval()
 
     # Share params
     with torch.no_grad():
@@ -1029,23 +1041,16 @@ def test_linear_accuracy(dtype, bs, model):
 def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     config = model_configs[model]
 
-    te_rmsnorm = (
-        RMSNorm(
-            config.hidden_size,
-            eps=eps,
-            params_dtype=dtype,
-            zero_centered_gamma=zero_centered_gamma,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_rmsnorm = RMSNorm(
+        config.hidden_size,
+        eps=eps,
+        params_dtype=dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        device="cuda",
+    ).eval()
 
     torch_rmsnorm = (
-        TorchRMSNorm(
-            config.hidden_size,
-            eps=eps,
-            zero_centered_gamma=zero_centered_gamma
-        )
+        TorchRMSNorm(config.hidden_size, eps=eps, zero_centered_gamma=zero_centered_gamma)
         .to(dtype=dtype)
         .cuda()
         .eval()
@@ -1059,11 +1064,13 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     torch_outputs = _test_granular_accuracy(torch_rmsnorm, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 1e-7,
-            torch.half    : 2e-3,
-            torch.bfloat16: 2e-2,
+    atol = {
+        torch.float32: 1e-7,
+        torch.half: 2e-3,
+        torch.bfloat16: 2e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1073,23 +1080,16 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     config = model_configs[model]
 
-    te_layernorm = (
-        LayerNorm(
-            config.hidden_size,
-            eps=eps,
-            params_dtype=dtype,
-            zero_centered_gamma=zero_centered_gamma,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_layernorm = LayerNorm(
+        config.hidden_size,
+        eps=eps,
+        params_dtype=dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        device="cuda",
+    ).eval()
 
     torch_layernorm = (
-        TorchLayerNorm(
-            config.hidden_size,
-            eps=eps,
-            zero_centered_gamma=zero_centered_gamma
-        )
+        TorchLayerNorm(config.hidden_size, eps=eps, zero_centered_gamma=zero_centered_gamma)
         .to(dtype=dtype)
         .cuda()
         .eval()
@@ -1104,9 +1104,10 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 1e-7,
-            torch.half    : 2e-3,
-            torch.bfloat16: 2e-2,
+    atol = {
+        torch.float32: 1e-7,
+        torch.half: 2e-3,
+        torch.bfloat16: 2e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
@@ -1119,19 +1120,16 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
     config = model_configs[model]
 
-    te_ln_linear = (
-        LayerNormLinear(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.eps,
-            bias=True,
-            normalization=normalization,
-            params_dtype=dtype,
-            zero_centered_gamma=zero_centered_gamma,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_ln_linear = LayerNormLinear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.eps,
+        bias=True,
+        normalization=normalization,
+        params_dtype=dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        device="cuda",
+    ).eval()
 
     torch_ln_linear = (
         TorchLayerNormLinear(
@@ -1159,9 +1157,10 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 2.5e-4,
-            torch.half    : 2e-3,
-            torch.bfloat16: 2e-2,
+    atol = {
+        torch.float32: 2.5e-4,
+        torch.half: 2e-3,
+        torch.bfloat16: 2e-2,
     }
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
@@ -1174,17 +1173,14 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     config = model_configs[model]
 
-    te_ln_mlp = (
-        LayerNormMLP(
-            config.hidden_size,
-            4 * config.hidden_size,
-            activation=activation,
-            normalization=normalization,
-            params_dtype=dtype,
-            device="cuda",
-        )
-        .eval()
-    )
+    te_ln_mlp = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+    ).eval()
 
     torch_ln_mlp = (
         TorchLayerNormMLP(
@@ -1218,6 +1214,99 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
+def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    m = config.seq_len // 16
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    m_splits = m_splits * 16
+    assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+
+    with fp8_autocast(enabled=fp8):
+        if isinstance(block, GroupedLinear):
+            m_splits = m_splits * bs
+            out = block(inp_hidden_states, m_splits.tolist())
+        else:
+            out = torch.cat(
+                [
+                    block[i](inp)
+                    for i, inp in enumerate(torch.split(inp_hidden_states, m_splits.tolist()))
+                ]
+            )
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=True,
+                    params_dtype=dtype,
+                    device="cuda",
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+
+    outputs = _test_grouped_linear_accuracy(grouped_linear, num_gemms, bs, dtype, config, fp8)
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear, num_gemms, bs, dtype, config, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     reset_rng_states()
 
@@ -1226,8 +1315,10 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     optimizer = torch.optim.SGD(block.parameters(), lr=0.1)
 
     # Placeholders used for graph capture.
-    static_input = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype, requires_grad=True)
-    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype)
+    static_input = torch.randn(
+        config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
+    )
+    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype)
 
     real_input = torch.rand_like(static_input)
     real_target = torch.rand_like(static_target)
@@ -1286,22 +1377,20 @@ def test_gpt_cuda_graph(dtype, bs, model):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            params_dtype=dtype,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            device="cuda",
-        )
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
     )
     graphed_block = copy.deepcopy(block)
 
@@ -1388,7 +1477,6 @@ def test_gpt_fp8_parameters(dtype, bs, model):
         )
 
 
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -1451,7 +1539,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         requires_grad=True,
     )
 
-    x_bshd = x_sbhd.transpose(0,1).contiguous()
+    x_bshd = x_sbhd.transpose(0, 1).contiguous()
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -1466,7 +1554,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # Check that results match
     torch.testing.assert_close(
         y_bshd,
-        y_sbhd.transpose(0,1).contiguous(),
+        y_sbhd.transpose(0, 1).contiguous(),
     )
 
 
@@ -1500,19 +1588,18 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     S_max = S + 2
 
     if module == "TransformerLayer":
-        model = (
-            TransformerLayer(
-                hidden_size=D,
-                ffn_hidden_size= 4 * D,
-                num_attention_heads=H,
-                attn_input_format=input_format,
-                layer_number=layer_number,
-                attention_dropout = 0.0,
-                params_dtype=dtype,
-                device="cuda",
-            )
-            .eval()
-        )
+        model = TransformerLayer(
+            hidden_size=D,
+            ffn_hidden_size=4 * D,
+            num_attention_heads=H,
+            attn_input_format=input_format,
+            self_attn_mask_type="causal_bottom_right",
+            enc_dec_attn_mask_type="causal_bottom_right",
+            layer_number=layer_number,
+            attention_dropout=0.0,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
     else:
         model = (
             MultiheadAttention(
@@ -1520,7 +1607,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
                 num_attention_heads=H,
                 qkv_format=input_format,
                 layer_number=layer_number,
-                attention_dropout = 0.0,
+                attention_dropout=0.0,
+                attn_mask_type="causal_bottom_right",
                 params_dtype=dtype,
             )
             .cuda()
@@ -1537,41 +1625,194 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     incremental_output = torch.zeros_like(input)
 
     # Generate output for the entire sequence
-    full_output = model(
-        hidden_states=input,
-        rotary_pos_emb=rotary_freqs if use_RoPE else None)
+    full_output = model(hidden_states=input, rotary_pos_emb=rotary_freqs if use_RoPE else None)
 
     # Incrementaly generate outputs using KV-cache
     for i in range(S):
         if input_format == "sbhd":
-            incremental_input = input[i].view(1,B,D)
+            incremental_input = input[i].view(1, B, D)
         else:
-            incremental_input = input[:, i, :].view(B,1,D)
+            incremental_input = input[:, i, :].view(B, 1, D)
 
         line_output = model(
             hidden_states=incremental_input,
             inference_params=inference_params,
-            rotary_pos_emb=rotary_freqs if use_RoPE else None)
+            rotary_pos_emb=rotary_freqs if use_RoPE else None,
+        )
 
         inference_params.sequence_len_offset += 1
 
         if input_format == "sbhd":
-            incremental_output[i] = line_output.view(B,D)
+            incremental_output[i] = line_output.view(B, D)
         else:
-            incremental_output[:, i, :] = line_output.view(B,D)
+            incremental_output[:, i, :] = line_output.view(B, D)
 
     if module == "TransformerLayer":
         atol = {
-            torch.float32 : 5e-3,
-            torch.half    : 5e-3,
+            torch.float32: 5e-3,
+            torch.half: 5e-3,
             torch.bfloat16: 5e-2,
         }
     else:
         atol = {
-            torch.float32 : 1e-3,
-            torch.half    : 1e-3,
+            torch.float32: 1e-3,
+            torch.half: 1e-3,
             torch.bfloat16: 1e-2,
         }
 
     # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 127, 128, 512),
+        (8, 15, 128, 512),
+        (8, 1027, 128, 512),
+        (16, 10027, 128, 512),
+    ],
+)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_grouped_gemm(shape, dtype, layout, accumulate):
+    torch.manual_seed(0)
+    z, m, k, n = shape
+
+    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    assert m_splits.sum() == m and len(m_splits) == z
+    m_splits = m_splits.tolist()
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+        out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+        grad = False
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        out = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # dgrad
+        grad = True
+    else:  # layout == "NT"
+        A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+
+    out_ref = [o.clone() for o in out]
+    for i in range(z):
+        gemm(
+            A[i],
+            B[i],
+            dtype,
+            get_workspace(),
+            grad=grad,
+            accumulate=accumulate,
+            layout=layout,
+            out=out_ref[i],
+        )
+
+    grouped_gemm(
+        A,
+        B,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        grad=grad,
+        accumulate=accumulate,
+        layout=layout,
+    )
+
+    # should be bit-wise match
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 128, 128, 512),
+        (8, 1024, 128, 512),
+        (16, 4096, 128, 512),
+    ],
+)
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    z, m, k, n = shape
+    m_splits = m // z
+
+    dtype = torch.bfloat16
+    A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+    B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
+    out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+    out_ref = [o.clone() for o in out]
+
+    # fp8 should be robust enough to this fake scale
+    scale = 1 + torch.rand(z * 3, dtype=torch.float32, device="cuda")
+    scale_inv = 1 / scale
+    amax = torch.zeros(1024, z * 3, dtype=torch.float32, device="cuda")
+
+    A_fp8 = [
+        torch.ops.tex_ts.cast_to_fp8_ts(
+            A[i],
+            scale,
+            amax,
+            scale_inv,
+            i,  # fp8 meta tensor index
+            tex.DType.kFloat8E4M3,
+        )
+        for i in range(z)
+    ]
+    B_fp8 = [
+        torch.ops.tex_ts.cast_to_fp8_ts(
+            B[i],
+            scale,
+            amax,
+            scale_inv,
+            z + i,  # fp8 meta tensor index
+            fp8_dtype,
+        )
+        for i in range(z)
+    ]
+
+    fp8_grouped_gemm(
+        A_fp8,
+        scale_inv,
+        0,  # A_offset
+        tex.DType.kFloat8E4M3,
+        B_fp8,
+        scale_inv,
+        z,  # B_offset
+        fp8_dtype,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        accumulate=accumulate,
+    )
+
+    # baseline
+    for i in range(z):
+        fp8_gemm(
+            A_fp8[i],
+            scale_inv,
+            i,
+            tex.DType.kFloat8E4M3,
+            B_fp8[i],
+            scale_inv,
+            z + i,
+            fp8_dtype,
+            dtype,
+            get_workspace(),
+            out=out_ref[i],
+            accumulate=accumulate,
+        )
+
+    # should be bit-wise match
+    for o, o_ref in zip(out, out_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
