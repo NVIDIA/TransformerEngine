@@ -24,7 +24,7 @@ namespace {
 // Parameters to tune
 constexpr size_t load_size = 8;
 constexpr size_t store_size = 8;
-constexpr size_t warps_per_tile = 4;
+constexpr size_t warps_per_tile = 16;
 constexpr size_t block_size = THREADS_PER_WARP * warps_per_tile;
 constexpr size_t max_tensors_per_kernel = 64;  // Args must be <4 KB
 
@@ -36,6 +36,8 @@ namespace multi_cast_transpose_impl {
 // Note: Multi-cast-transpose kernel can handle a variable number of
 // tensors.
 struct KernelArgs {
+  // Number of tensors being processed by kernel
+  uint32_t num_tensors;
   // (input) Data buffers for input tensors
   void* input_list[max_tensors_per_kernel];
   // (output) Data buffers for cast output tensors
@@ -47,14 +49,12 @@ struct KernelArgs {
   // (output) AMAX's of input tensors
   void* amax_list[max_tensors_per_kernel];
   // Input matrix heights
-  size_t num_rows_list[max_tensors_per_kernel];
+  uint32_t num_rows_list[max_tensors_per_kernel];
   // Input matrix widths
-  size_t row_length_list[max_tensors_per_kernel];
+  uint32_t row_length_list[max_tensors_per_kernel];
   // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
-  size_t block_range[max_tensors_per_kernel + 1];
-  // Number of tensors being processed by kernel
-  size_t num_tensors;
+  uint32_t block_range[max_tensors_per_kernel + 1];
 };
 
 }  // namespace multi_cast_transpose_impl
