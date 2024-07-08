@@ -18,7 +18,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cmake cudnn9-cuda-12
+          apt-get install -y git python3.9 pip cmake ninja-build cudnn9-cuda-12
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -27,7 +27,6 @@ jobs:
         run: pip install . -v
         env:
           NVTE_FRAMEWORK: none
-          NVTE_MAX_BUILD_JOBS: 4
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -46,7 +45,6 @@ jobs:
         run: pip install . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
-          MAX_JOBS: 1
       - name: 'Sanity check'
         run: python tests/pytorch/test_sanity_import.py
   jax:
