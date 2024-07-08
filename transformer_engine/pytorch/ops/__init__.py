@@ -2,7 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operations."""
+"""Fusible operations.
+
+This operation-based API is experimental and subject to change.
+
+"""
 
 from transformer_engine.pytorch.ops.basic import (
     AllGather,
