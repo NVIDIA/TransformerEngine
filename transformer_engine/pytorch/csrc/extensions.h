@@ -444,22 +444,17 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 /***************************************************************************************************
  * Support memory efficient cross entropy for Megatron-LM
  **************************************************************************************************/
- 
+
 at::Tensor cross_entropy_forward_sum_exp(const at::Tensor &vocab_parallel_logits_ptr,
-                                    const at::Tensor &logits_max_ptr
-);
+                                         const at::Tensor &logits_max_ptr);
 
 at::Tensor cross_entropy_fwd_mean_log(const at::Tensor &vocab_parallel_logits_ptr,
-    const at::Tensor &logits_max_ptr,
-    const at::Tensor &sum_exp_logits_ptr
-);
+                                      const at::Tensor &logits_max_ptr,
+                                      const at::Tensor &sum_exp_logits_ptr);
 
 at::Tensor cross_entropy_bwd(const at::Tensor &grad_output_ptr,
-    const at::Tensor &input_ptr, //vocab_parallel_logits_ptr
-    const at::Tensor &target_mask_ptr,
-    const at::Tensor &masked_target_1d_ptr,
-    const at::Tensor &logits_max_ptr,
-    const at::Tensor &sum_exp_logits_ptr,
-    float label_smoothing,
-    size_t vocab_size
-);
+                             const at::Tensor &input_ptr,  //vocab_parallel_logits_ptr
+                             const at::Tensor &target_mask_ptr,
+                             const at::Tensor &masked_target_1d_ptr,
+                             const at::Tensor &logits_max_ptr, const at::Tensor &sum_exp_logits_ptr,
+                             float label_smoothing, size_t vocab_size);

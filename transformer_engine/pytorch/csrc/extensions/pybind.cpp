@@ -11,8 +11,10 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Efficeint memory softmax cross entropy
-  m.def("cross_entropy_fwd_sum_exp_cuda", &cross_entropy_forward_sum_exp, "Softmax Cross_entropy Forward Sum & Exp");
-  m.def("cross_entropy_fwd_mean_log_cuda", &cross_entropy_fwd_mean_log, "Softmax Cross_entropy Forward Mean & Log");
+  m.def("cross_entropy_fwd_sum_exp_cuda", &cross_entropy_forward_sum_exp,
+        "Softmax Cross_entropy Forward Sum & Exp");
+  m.def("cross_entropy_fwd_mean_log_cuda", &cross_entropy_fwd_mean_log,
+        "Softmax Cross_entropy Forward Mean & Log");
   m.def("cross_entropy_bwd_cuda", &cross_entropy_bwd, "Softmax Cross_entropy Backward");
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
