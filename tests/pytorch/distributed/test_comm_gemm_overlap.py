@@ -33,8 +33,7 @@ if not tex.comm_overlap_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Comm+GEMM overlap requires at least 2 GPUs.")
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Comm+GEMM overlap requires at least 2 GPUs.")
 @pytest.mark.parametrize(
     "fp8,p2p,comm_type,aggregate,atomic,bulk",
     [
@@ -67,14 +66,11 @@ if not tex.comm_overlap_supports_multicast():
         "   GEMM + BULK RS | BF16 | PIPELINE "
     ],
 )
-def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic, bulk):
+def test_gemm_with_overlap(fp8, p2p, comm_type, aggregate, atomic, bulk):
     """
     Test comm+GEMM overlap algorithms with direct calls to
     te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm
     """
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = TORCHRUN_CMD + [ str(test_path) ] + [
         f"-s {SEQ_LENGTH}",
@@ -93,6 +89,8 @@ def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic, bulk):
         test_cmd.append("--bulk-overlap")
     else:
         if fp8:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
             test_cmd.append("--fp8")
         if p2p:
             test_cmd.append("--p2p")
@@ -104,12 +102,9 @@ def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic, bulk):
     assert not bool(subprocess.call(test_cmd, env=os.environ))
 
 
-@pytest.mark.parametrize("fp8", (False, True), ids=["BF16", "FP8"])
-def test_transformer_layer_with_overlap(fp8):
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Comm+GEMM overlap requires at least 2 GPUs.")
+def test_transformer_layer_with_overlap():
     """Test TransformerLayer with comm+GEMM overlap enabled in all layers."""
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     test_path = TEST_ROOT / "run_transformer_layer_with_overlap.py"
     test_cmd = TORCHRUN_CMD + [ str(test_path) ] + [
         f"-s {SEQ_LENGTH}",
