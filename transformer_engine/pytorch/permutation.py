@@ -118,7 +118,7 @@ class _Unpermute(torch.autograd.Function):
                     "The recommended type is torch.float32."
                 )
                 probs = probs.to(torch.float32)
-            
+
             num_tokens = probs.size(0)
             topK = probs.size(1)
         else:

@@ -29,13 +29,13 @@ def pytorch_permute(tokens, indices, num_out_tokens: int = None):
         indices: torch.Tensor
             The token to expert indices tensor, should have a shape of [num_tokens] or [num_tokens, topk].
         num_out_tokens: int, optional
-            The effective output token count, when enabling the capacity factor, should equal the number of tokens not dropped. 
+            The effective output token count, when enabling the capacity factor, should equal the number of tokens not dropped.
             By default, set to None, meaning no tokens are dropped.
 
     Returns:
-        torch.Tensor: 
+        torch.Tensor:
             The permuted tensor.
-        torch.Tensor: 
+        torch.Tensor:
             The sorted_indices corresponding permuted tensor.
     """
     if indices.dim() == 1:
@@ -87,7 +87,7 @@ def pytorch_unpermute(
         device=permuted_tokens.device,
     )
 
-    unpermuted_tokens.index_copy_(0, sorted_indices[:permuted_tokens.size(0)], permuted_tokens)
+    unpermuted_tokens.index_copy_(0, sorted_indices[: permuted_tokens.size(0)], permuted_tokens)
     unpermuted_tokens = unpermuted_tokens.reshape(-1, topk, permuted_tokens.size(-1))
     if probs is not None:
         unpermuted_tokens = unpermuted_tokens * probs.unsqueeze(-1)
@@ -118,6 +118,7 @@ if is_bf16_compatible():
 if fp8_available:
     param_dtypes.extend([torch.float8_e5m2, torch.float8_e4m3fn])
 
+
 @pytest.mark.parametrize("dtype", param_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [8, 16])
@@ -146,9 +147,7 @@ def test_permutation(
     if num_out_tokens == None:
         num_out_tokens = num_tokens * topK
 
-    print(
-        f"token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {dtype}"
-    )
+    print(f"token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {dtype}")
 
     permute_input = torch.rand((num_tokens, hidden_size), dtype=torch.float32).cuda().to(dtype)
     if fp8_available and dtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
@@ -210,30 +209,30 @@ def test_permutation(
     tols = dtype_tols(dtype)
 
     torch.testing.assert_close(
-        permute_output.float(),
-        te_permute_output.float(),
-        msg=f"Mismatch in te_permute fwd")
+        permute_output.float(), te_permute_output.float(), msg=f"Mismatch in te_permute fwd"
+    )
     torch.testing.assert_close(
         permute_input.grad.float(),
         te_permute_input.grad.float(),
         msg=f"Mismatch in te_permute bwd",
-        **tols)
+        **tols,
+    )
     torch.testing.assert_close(
         unpermute_output.float(),
         te_unpermute_output.float(),
         msg=f"Mismatch in te_unpermute fwd",
-        **tols)
+        **tols,
+    )
     torch.testing.assert_close(
         unpermute_input.grad.float(),
         te_unpermute_input.grad.float(),
         msg=f"Mismatch in te_unpermute bwd",
-        **tols)
+        **tols,
+    )
     if with_probs:
         torch.testing.assert_close(
-            probs.grad.float(),
-            te_probs.grad.float(),
-            msg=f"Mismatch in te_unpermute bwd",
-            **tols)
+            probs.grad.float(), te_probs.grad.float(), msg=f"Mismatch in te_unpermute bwd", **tols
+        )
 
     if not permute_input.numel():
         print("Empty permute_input activation test passed.")
@@ -278,10 +277,10 @@ def test_permutation(
         )
         print(f"permute\t\tbwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
-        t1 = perf_test_cuda_kernel(lambda: pytorch_unpermute(unpermute_input, sorted_indices, probs=probs))
-        t2 = perf_test_cuda_kernel(
-            lambda: te_unpermute(te_unpermute_input, row_id_map, te_probs)
+        t1 = perf_test_cuda_kernel(
+            lambda: pytorch_unpermute(unpermute_input, sorted_indices, probs=probs)
         )
+        t2 = perf_test_cuda_kernel(lambda: te_unpermute(te_unpermute_input, row_id_map, te_probs))
         print(f"unpermute\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
         t1 = perf_test_cuda_kernel(
@@ -297,7 +296,9 @@ def test_permutation(
             lambda: backward_wrapper(
                 te_unpermute_output,
                 te_unpermute_bwd_input,
-                forward_input=[te_unpermute_input, te_probs] if with_probs else [te_unpermute_input],
+                forward_input=(
+                    [te_unpermute_input, te_probs] if with_probs else [te_unpermute_input]
+                ),
                 retain_graph=True,
                 accumulate_grad=False,
             )

@@ -200,10 +200,10 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 }
 
 template <typename T, bool FWD>
-void moe_permutation_launcher(const void *input_, void *output_, const int *sorted_row_id,
-                              int *row_id_map, const float *prob, const int num_rows,
-                              const int num_topK, const int num_cols, const int num_out_tokens,
-                              cudaStream_t stream, float *prob_grad, const void *input_fwd_) {
+void nvte_permutation(const void *input_, void *output_, const int *sorted_row_id, int *row_id_map,
+                      const float *prob, const int num_rows, const int num_topK, const int num_cols,
+                      const int num_out_tokens, float *prob_grad, const void *input_fwd_,
+                      cudaStream_t stream) {
   using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
                                               std::is_same<T, __nv_fp8_e4m3>::value),
                                              half, T>::type;
@@ -279,10 +279,10 @@ void moe_permutation_launcher(const void *input_, void *output_, const int *sort
 }
 
 #define FUNCTION_INSTANTIATION(T, FWD)                                               \
-  template void moe_permutation_launcher<T, FWD>(                                    \
+  template void nvte_permutation<T, FWD>(                                            \
       const void *input, void *output, const int *sorted_row_id, int *row_id_map,    \
       const float *prob, const int num_rows, const int num_topK, const int num_cols, \
-      const int num_out_tokens, cudaStream_t stream, float *prob_grad, const void *input_fwd);
+      const int num_out_tokens, float *prob_grad, const void *input_fwd, cudaStream_t stream);
 
 FUNCTION_INSTANTIATION(float, true)
 FUNCTION_INSTANTIATION(float, false)
