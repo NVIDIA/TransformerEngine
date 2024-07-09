@@ -10,7 +10,7 @@ from jax.interpreters import mlir
 
 from transformer_engine import transformer_engine_jax
 
-from .misc import is_ffi_available
+from .misc import is_ffi_enabled
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -25,7 +25,7 @@ class CustomCallAPIVersion(IntEnum):
 
 for _name, _value in transformer_engine_jax.registrations().items():
     if "_ffi" in _name:
-        if is_ffi_available():
+        if is_ffi_enabled():
             # TODO: add prep, init, exec
             # traits = 1 (i.e. COMMAND_BUFFER_COMPATIBLE) enabled cudaGraph
             xla_client.register_custom_call_target(

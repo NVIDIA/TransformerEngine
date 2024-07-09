@@ -23,7 +23,7 @@ from .misc import (
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
     get_padded_spec,
-    is_ffi_available,
+    is_ffi_enabled,
 )
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
@@ -111,7 +111,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         (x_aval,) = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        if is_ffi_available():
+        if is_ffi_enabled():
             name = "te_act_lu_ffi"
             out = ffi.ffi_lowering(name)(ctx, x, act_enum=act_enum)
         else:
@@ -237,7 +237,7 @@ class DActLuPrimitive(BasePrimitive):
         in_aval, gi_aval = ctx.avals_in
         assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert gi_aval.dtype == in_aval.dtype
-        if is_ffi_available():
+        if is_ffi_enabled():
             name = "te_dact_lu_ffi"
             out = ffi.ffi_lowering(name)(ctx, dz, x, act_enum=act_enum)
         else:

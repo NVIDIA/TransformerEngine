@@ -6,6 +6,7 @@
 from importlib.metadata import version as get_pkg_version
 from packaging.version import Version as PkgVersion
 import numpy as np
+import os
 
 import jax.numpy as jnp
 from jax import dtypes
@@ -142,8 +143,11 @@ def jax_version_meet_requirement(version: str):
     return jax_version >= jax_version_required
 
 
-def is_ffi_available():
+def is_ffi_enabled():
     """
-    Helper function checking if XLA Custom Call with FFI is available
+    Helper function checking if XLA Custom Call with FFI is enabled
     """
-    return jax_version_meet_requirement("0.4.29")
+    is_supported = jax_version_meet_requirement("0.4.29")
+    is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "0"))
+    assert is_enabled in (0,1), "Invalid NVTE_JAX_WITH_FFI value"
+    return (is_supported and is_enabled)
