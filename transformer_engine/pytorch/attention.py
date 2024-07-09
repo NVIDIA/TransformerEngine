@@ -438,9 +438,7 @@ def get_attention_backend(
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
         if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if (fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)) and (
-                window_size[0] != -1 or window_size[1] not in [-1, 0]
-            ):
+            if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention"
                     " for FP8"
@@ -763,7 +761,9 @@ def get_swa_mask(
         Sliding window size for local attention, where query at position i attends to keys
         in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
         + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-        window and causal mask specifically.
+        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+        `attn_mask_type`.
     max_seqlen_q: int
         Maximum sequence length for queries.
     max_seqlen_kv: int
@@ -5036,7 +5036,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
@@ -5902,7 +5904,9 @@ class MultiheadAttention(torch.nn.Module):
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.

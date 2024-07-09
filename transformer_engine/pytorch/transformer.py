@@ -142,8 +142,10 @@ class TransformerLayer(torch.nn.Module):
                 sliding window size for local attention in encoder, where query at position i
                 attends to keys in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k
                 - seqlen_q + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean
-                no sliding window and "`causal`" mask specifically. Similar to
-                :attr:`self_attn_mask_type`, it can be overridden by :attr:`window_size`
+                no sliding window and causal mask specifically. Both `causal` and
+                `causal_bottom_right` masks map to `window_size = (-1, 0)` and Transformer Engine
+                distinguishes them based on `attn_mask_type`. Similar to
+                :attr:`self_attn_mask_type`, `window_size` can be overridden by :attr:`window_size`
                 in `forward` as well.
     enc_dec_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                            default = `no_mask`
