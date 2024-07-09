@@ -108,7 +108,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute(Tensor input, Tensor
       break;
     }
     default:
-      throw std::runtime_error("Wrong activation tensor type.");
+      NVTE_ERROR("Wrong activation tensor type.");
   }
 
   return std::make_tuple(permuted_output, row_id_map, workspace);
@@ -169,7 +169,7 @@ Tensor moe_unpermute_fwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t n
       break;
     }
     default:
-      throw std::runtime_error("Wrong activation tensor type.");
+      NVTE_ERROR("Wrong activation tensor type.");
   }
 
   return unpermuted_output;
@@ -238,7 +238,7 @@ std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd,
       break;
     }
     default:
-      throw std::runtime_error("Wrong activation tensor type.");
+      NVTE_ERROR("Wrong activation tensor type.");
   }
 
   return std::make_tuple(act_grad, prob_grad);

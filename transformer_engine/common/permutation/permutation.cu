@@ -257,7 +257,7 @@ void nvte_permutation(const void *input_, void *output_, const int *sorted_row_i
         moe_permute_kernel<T, TCompute, 128, true><<<blocks, threads, smem_bytes, stream>>>(
             input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
       } else {
-        throw std::runtime_error("num_topK cannot exceed 128.");
+        NVTE_ERROR("num_topK cannot exceed 128.");
       }
     }
   } else {

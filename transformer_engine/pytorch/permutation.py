@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Linear API"""
-import os
 import torch
 import warnings
 from typing import Tuple
