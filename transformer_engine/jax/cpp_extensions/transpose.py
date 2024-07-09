@@ -103,7 +103,7 @@ class TransposePrimitive(BasePrimitive):
 
         out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(x, static_axis_boundary, transpose_axis_boundary):
