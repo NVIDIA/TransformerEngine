@@ -49,7 +49,7 @@ struct KernelConfig {
   size_t elements_per_store_t = 0;
 
   KernelConfig(size_t row_length, size_t num_rows, size_t itype_size, size_t otype_size,
-               size_t load_size_, size_t store_size_)
+               size_t load_size_, size_t store_size_, size_t sm_count)
       : load_size{load_size_}, store_size{store_size_} {
     // Check that tiles are correctly aligned
     constexpr size_t cache_line_size = 128;
@@ -69,8 +69,7 @@ struct KernelConfig {
 
     // Parameters for performance model
     constexpr size_t warps_per_sm = 16;  // Rough estimate for saturated SMs
-    active_sm_count = std::min(DIVUP(num_blocks * warps_per_tile, warps_per_sm),
-                               static_cast<size_t>(cuda::sm_count()));
+    active_sm_count = std::min(DIVUP(num_blocks * warps_per_tile, warps_per_sm), sm_count);
     elements_per_load = (std::min(cache_line_size, row_tile_elements * itype_size) / itype_size);
     elements_per_store_c = (std::min(cache_line_size, row_tile_elements * otype_size) / otype_size);
     elements_per_store_t = (std::min(cache_line_size, col_tile_elements * otype_size) / otype_size);
@@ -273,9 +272,10 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
             // Pick kernel config
             std::vector<KernelConfig> kernel_configs;
             kernel_configs.reserve(16);
+            const size_t sm_count = static_cast<size_t>(cuda::sm_count());
             auto add_config = [&](size_t load_size, size_t store_size) {
               kernel_configs.emplace_back(row_length, num_rows, itype_size, otype_size, load_size,
-                                          store_size);
+                                          store_size, sm_count);
             };
             add_config(8, 8);
             add_config(4, 8);
