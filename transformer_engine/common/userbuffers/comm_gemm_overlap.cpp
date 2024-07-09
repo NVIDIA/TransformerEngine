@@ -831,16 +831,15 @@ void CommGemmOverlapP2P::split_gemm_overlap_rs(
     // GEMM chunk
     int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
     char *input_b_chunk_ptr = input_b_ptr + (input_b_chunk_id * input_b_chunk_bytes);
-    TensorWrapper input_b_chunk =
-        TensorWrapper(reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk, k}, B.dtype(),
-                      B.amax(), B.scale(), B.scale_inv());
-    // Store the last GEMM chunk output to the recieve buffer.
-    TensorWrapper workspace_chunk =
-        TensorWrapper(reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) *
-                                                                    workspace_size_chunk),
-                      {workspace_size_chunk}, workspace.dtype());
-    cudaStream_t gemm_stream =
-        (i == _tp_size - 1) ? stream_main : _stream_compute[i % _stream_compute.size()];
+    TensorWrapper input_b_chunk = TensorWrapper(
+      reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk, k}, B.dtype(), nullptr, nullptr,
+      B.scale_inv());
+    TensorWrapper workspace_chunk = TensorWrapper(
+      reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk),
+      {workspace_size_chunk}, workspace.dtype());
+
+    cudaStream_t gemm_stream = (i == _tp_size - 1) ? stream_main
+                                                   : _stream_compute[i % _stream_compute.size()];
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), ubufs[i].data(), bias.data(),
                       pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
                       accumulate, use_split_accumulator, _math_sms, gemm_stream);
@@ -851,8 +850,8 @@ void CommGemmOverlapP2P::split_gemm_overlap_rs(
       int recv_offset = comm_bytes * (i - 1 + _tp_size);
       int send_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
       int recv_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
-      NVTE_CHECK_CUDA(
-          cudaEventRecord(_start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
+      NVTE_CHECK_CUDA(cudaEventRecord(
+          _start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _start_comm, 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_comm, 0));
       userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,

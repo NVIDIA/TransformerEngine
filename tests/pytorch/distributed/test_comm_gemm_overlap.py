@@ -59,7 +59,7 @@ if not tex.comm_overlap_supports_multicast():
         (False, True, "AG", False, False, False),
         (False, True, "AG", True, False, False),
         (True, True, "AG", False, False, False),
-        (True, True, "AG", True, False), False,
+        (True, True, "AG", True, False, False),
         (False, False, "RS", False, False, False),
         (False, True, "RS", False, False, False),
         (True, False, "RS", False, False, False),
@@ -70,18 +70,18 @@ if not tex.comm_overlap_supports_multicast():
         (False, False, "RS", False, False, True)
     ],
     ids=[
-        " AG + SPLIT GEMM | BF16 | RING-EXCHANGE",
-        " AG + SPLIT GEMM | BF16 | 2X AGGREGATED RING-EXCHANGE",
-        " AG + SPLIT GEMM | FP8  | RING-EXCHANGE",
-        " AG + SPLIT GEMM | FP8  | 2X AGGREGATED RING-EXCHANGE",
-        " SPLIT GEMM + RS | BF16 | PIPELINE",
-        " SPLIT GEMM + RS | BF16 | RING-EXCHANGE",
-        " SPLIT GEMM + RS | FP8  | PIPELINE",
-        " SPLIT GEMM + RS | FP8  | RING-EXCHANGE",
-        # "ATOMIC GEMM + RS | FP8  | PIPELINE",
-        "ATOMIC GEMM + RS | FP8  | RING-EXCHANGE",
-        "  BULK AG + GEMM | BF16 | PIPELINE",
-        "  GEMM + BULK RS | BF16 | PIPELINE"
+        "  AG + SPLIT GEMM | BF16 | RING-EXCHANGE ",
+        "  AG + SPLIT GEMM | BF16 | 2X AGGREGATED RING-EXCHANGE ",
+        "  AG + SPLIT GEMM | FP8  | RING-EXCHANGE ",
+        "  AG + SPLIT GEMM | FP8  | 2X AGGREGATED RING-EXCHANGE ",
+        "  SPLIT GEMM + RS | BF16 | PIPELINE ",
+        "  SPLIT GEMM + RS | BF16 | RING-EXCHANGE ",
+        "  SPLIT GEMM + RS | FP8  | PIPELINE ",
+        "  SPLIT GEMM + RS | FP8  | RING-EXCHANGE ",
+        # " ATOMIC GEMM + RS | FP8  | PIPELINE ",
+        " ATOMIC GEMM + RS | FP8  | RING-EXCHANGE ",
+        "   BULK AG + GEMM | BF16 | PIPELINE ",
+        "   GEMM + BULK RS | BF16 | PIPELINE "
     ],
 )
 def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic, bulk):

@@ -114,14 +114,23 @@ def initialize_ub(
         local_rank = torch.distributed.get_rank(intra_node_group)
         local_size = torch.distributed.get_world_size(intra_node_group)
 
-    # Construct an inter-node communicator
+    # Determine node ID as the row index of the world rank in a 2D device mesh that we construct
+    # from all-gathered intra-node (local) ranks -- this avoids any assumptions about world rank
+    # ordering within the node.
     num_nodes = world_size // local_size
     if num_nodes > 1:
-        inter_node_start = local_rank - ((local_rank // local_size) * local_size)
-        inter_node_end = inter_node_start + ((world_size // local_size) * local_size)
-        inter_node_ranks = list(range(inter_node_start, inter_node_end, local_size))
-        inter_node_group = torch.distributed.new_group(backend="nccl", ranks=inter_node_ranks)
-        node_id = torch.distributed.get_rank(inter_node_group)
+        intra_node_ranks = torch.tensor(intra_node_ranks, dtype=torch.int64, device="cuda")
+        all_intra_node_ranks = torch.zeros(world_size, local_size, dtype=torch.int64, device="cuda")
+        torch.distributed.all_gather_into_tensor(all_intra_node_ranks, intra_node_ranks)
+        device_mesh = []
+        for rank in range(world_size):
+            node = all_intra_node_ranks[rank, :].tolist()
+            if node not in device_mesh:
+                device_mesh.append(node)
+        assert len(device_mesh) == num_nodes, "Internal TE error: Could not infer device mesh."
+        device_mesh = torch.tensor(device_mesh, dtype=int, device="cpu")
+        rank_idx = (device_mesh == world_rank).nonzero()
+        node_id = rank_idx[0, 0].item()
     else:
         node_id = 0
 

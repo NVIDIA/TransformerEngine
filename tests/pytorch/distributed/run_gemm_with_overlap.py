@@ -305,8 +305,10 @@ def main(opts):
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
     ffn_hidden_size = 4 * hidden_size
     if opts.bulk_overlap:
+        # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)
         local_inp_shape = (outer_size, hidden_size)
+        # Bulk overlap comm tensor is distributed for AG overlap only
         if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
             bulk_inp_shape = (outer_size // local_size, hidden_size)
         else:
