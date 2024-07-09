@@ -159,7 +159,7 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
 
   const auto &desc = *UnpackOpaque<CustomCallCommonDescriptor>(opaque, opaque_len);
   auto m = desc.shape.dims[0];
-  auto n = desc.shape.dims[2];
+  auto n = desc.shape.dims[1];
   auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
 
   auto act_len = get_activation_len(act_enum);

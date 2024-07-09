@@ -26,7 +26,7 @@ from .misc import (
     get_padded_spec,
     multidim_transpose,
     normalize_axis_boundary,
-    jax_version_meet_requirement,
+    is_ffi_available,
 )
 from .activation import ActivationEnum
 from .activation import _jax_act_lu
@@ -264,7 +264,7 @@ class CastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        if jax_version_meet_requirement():
+        if is_ffi_available():
             name = "te_cast_transpose_ffi"
             out = ffi.ffi_lowering(name, operand_output_aliases={1: 2})(
                 ctx, x, amax, scale, scale_inv, transpose_axis=transpose_axis_boundary

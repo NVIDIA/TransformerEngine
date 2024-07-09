@@ -133,10 +133,17 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
     )
 
 
-def jax_version_meet_requirement(version: str = "0.4.29"):
+def jax_version_meet_requirement(version: str):
     """
     Helper function checking if required JAX version is available
     """
     jax_version = PkgVersion(get_pkg_version("jax"))
     jax_version_required = PkgVersion(version)
     return jax_version >= jax_version_required
+
+
+def is_ffi_available():
+    """
+    Helper function checking if XLA Custom Call with FFI is available
+    """
+    return jax_version_meet_requirement("0.4.29")

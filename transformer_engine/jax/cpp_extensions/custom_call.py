@@ -3,13 +3,14 @@
 # See LICENSE for license information.
 """JAX/TE custom call"""
 from dataclasses import dataclass
+from enum import IntEnum
 
 from jax.lib import xla_client
 from jax.interpreters import mlir
 
 from transformer_engine import transformer_engine_jax
 
-from .misc import jax_version_meet_requirement
+from .misc import is_ffi_available
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -18,16 +19,21 @@ except ImportError:
     # version, so we still need this import.
     pass
 
+class CustomCallAPIVersion(IntEnum):
+    OPAQUE = 0
+    FFI = 1
+
 for _name, _value in transformer_engine_jax.registrations().items():
     if "_ffi" in _name:
-        if jax_version_meet_requirement():
+        if is_ffi_available():
             # TODO: add prep, init, exec
             # traits = 1 (i.e. COMMAND_BUFFER_COMPATIBLE) enabled cudaGraph
             xla_client.register_custom_call_target(
-                _name, _value, platform="CUDA", api_version=1, traits=1
+                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value, traits=1
             )
     else:
-        xla_client.register_custom_call_target(_name, _value, platform="CUDA", api_version=0)
+        xla_client.register_custom_call_target(_name, _value, platform="CUDA",
+                                               api_version=CustomCallAPIVersion.OPAQUE.value)
 
 
 @dataclass
@@ -49,9 +55,9 @@ class CustomCallArgsWrapper:
         self.operand_layouts = CustomCallArgsWrapper.generate_layouts(
             operand_shapes, operand_specific_layouts
         )
-        self.output_shapes = [x.shape for x in output_types]
+        output_shapes = [x.shape for x in output_types]
         self.output_layouts = CustomCallArgsWrapper.generate_layouts(
-            self.output_shapes, output_specific_layouts
+            output_shapes, output_specific_layouts
         )
 
     @staticmethod
@@ -105,37 +111,3 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
             **kwargs,
         )
     return out
-
-
-#   Reference for custom_call from JAX
-#   (https://github.com/google/jax/blob/956226c929a34741c1f0a396b96e721c61ae5794/
-#   jax/_src/interpreters/mlir.py#L2589)
-#    def custom_call(
-#        call_target_name: str,
-#        *,
-#        result_types: Sequence[ir.Type],
-#        operands: Sequence[ir.Value],
-#        backend_config: str | bytes | dict[str, ir.Attribute] = "",
-#        has_side_effect: bool = False,
-#        result_shapes: Sequence[ir.Value] | None = None,
-#        called_computations: Sequence[str] = (),
-#        api_version: int = 2,
-#        operand_output_aliases: dict[int, int] | None = None,
-#        operand_layouts: Sequence[Sequence[int]] | None = None,
-#        result_layouts: Sequence[Sequence[int]] | None = None,
-#        extra_attributes: dict[str, ir.Attribute] | None = None,
-#        ) -> ir.Operation:
-
-
-def custom_caller_with_ffi(name, args, backend_config, **kwargs):
-    """
-    New XLA custom call warpper
-    """
-    return mlir.custom_call(
-        call_target_name=name,
-        result_types=args.output_types,
-        operands=args.operands,
-        backend_config=backend_config,
-        api_version=4,
-        **kwargs,
-    ).results
