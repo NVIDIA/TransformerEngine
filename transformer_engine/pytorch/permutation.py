@@ -50,9 +50,9 @@ class _Permute(torch.autograd.Function):
             )
             indices = indices.to(torch.int32)
 
-        num_topK = indices.size(1)
+        topK = indices.size(1)
 
-        input_max_expanded_token_num = max(max_token_num, inp.size(0)) * num_topK
+        input_max_expanded_token_num = max(max_token_num, inp.size(0)) * topK
         if _Permute.max_expanded_token_num < input_max_expanded_token_num:
             _Permute.max_expanded_token_num = input_max_expanded_token_num
             _Permute.workspace = []
@@ -67,7 +67,7 @@ class _Permute(torch.autograd.Function):
 
         ctx.row_id_map = row_id_map
         ctx.num_tokens = indices.size(0)
-        ctx.num_topK = indices.size(1)
+        ctx.topK = indices.size(1)
         return permuted_act, row_id_map
 
     @staticmethod
@@ -85,10 +85,10 @@ class _Permute(torch.autograd.Function):
 
         row_id_map = ctx.row_id_map
         num_tokens = ctx.num_tokens
-        num_topK = ctx.num_topK
+        topK = ctx.topK
 
         unpermuted_act_grad = tex.moe_unpermute_fwd(
-            permuted_act_grad, row_id_map, torch.empty(0), num_tokens, num_topK
+            permuted_act_grad, row_id_map, torch.empty(0), num_tokens, topK
         )
         return unpermuted_act_grad, None, None, None
 
@@ -101,7 +101,7 @@ class _Unpermute(torch.autograd.Function):
         ctx,
         inp: torch.Tensor,
         row_id_map: torch.Tensor,
-        probs: torch.Tensor = torch.empty(0),
+        probs: torch.Tensor,
     ) -> torch.Tensor:
         # Empty input check
         if not inp.numel():
@@ -109,7 +109,7 @@ class _Unpermute(torch.autograd.Function):
             return inp
 
         # None probs check
-        if probs.numel():
+        if probs is not None:
             assert probs.is_cuda, "TransformerEngine needs CUDA."
 
             if probs.dtype != torch.float32:
@@ -118,6 +118,13 @@ class _Unpermute(torch.autograd.Function):
                     "The recommended type is torch.float32."
                 )
                 probs = probs.to(torch.float32)
+            
+            num_tokens = probs.size(0)
+            topK = probs.size(1)
+        else:
+            num_tokens = row_id_map.size(0)
+            topK = 1
+            probs = torch.empty(0)
 
         # Device check
         assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -131,10 +138,7 @@ class _Unpermute(torch.autograd.Function):
             )
             row_id_map = row_id_map.to(torch.int32)
 
-        num_topK = probs.size(1) if probs.numel() else 1
-        num_tokens = probs.size(0) if probs.numel() else row_id_map.size(0)
-
-        unpermuted_output = tex.moe_unpermute_fwd(inp, row_id_map, probs, num_tokens, num_topK)
+        unpermuted_output = tex.moe_unpermute_fwd(inp, row_id_map, probs, num_tokens, topK)
 
         ctx.save_for_backward(inp, row_id_map, probs)
         return unpermuted_output
@@ -191,7 +195,7 @@ def Permute(
 def Unpermute(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
-    probs: torch.Tensor = torch.empty(0),
+    probs: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their

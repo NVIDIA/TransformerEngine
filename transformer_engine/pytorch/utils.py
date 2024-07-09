@@ -242,6 +242,8 @@ def is_bf16_compatible() -> None:
     """
     return torch.cuda.get_device_capability()[0] >= 8
 
+def is_fp8_compatible() -> None:
+    return float(torch.__version__[0:3]) > 2.2
 
 @functools.cache
 def get_cudnn_version() -> Tuple[int, int, int]:
