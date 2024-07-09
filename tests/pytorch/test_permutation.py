@@ -7,10 +7,15 @@ import pytest
 from typing import Dict
 
 from transformer_engine.pytorch import Permute as te_permute, Unpermute as te_unpermute
-from transformer_engine.pytorch.utils import (
-    is_bf16_compatible,
-    is_fp8_compatible,
-)
+from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+# Only run FP8 tests on H100.
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
 
 
 def pytorch_permute(tokens, indices, num_out_tokens: int = None):
@@ -110,7 +115,7 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 param_dtypes = [torch.float32, torch.float16]
 if is_bf16_compatible():
     param_dtypes.append(torch.bfloat16)
-if is_fp8_compatible():
+if fp8_available:
     param_dtypes.extend([torch.float8_e5m2, torch.float8_e4m3fn])
 
 @pytest.mark.parametrize("dtype", param_dtypes)
@@ -146,7 +151,7 @@ def test_permutation(
     )
 
     permute_input = torch.rand((num_tokens, hidden_size), dtype=torch.float32).cuda().to(dtype)
-    if dtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
+    if fp8_available and dtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
         permute_input = permute_input.half()
     permute_input.requires_grad_(True)
 
