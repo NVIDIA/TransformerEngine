@@ -45,7 +45,7 @@ jobs:
         run: pip install . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
-          MAX_JOBS: 4
+          MAX_JOBS: 1
       - name: 'Sanity check'
         run: python tests/pytorch/test_sanity_import.py
   jax:
