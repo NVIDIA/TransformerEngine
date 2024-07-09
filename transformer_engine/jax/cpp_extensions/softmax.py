@@ -135,7 +135,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         out = custom_caller(name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def forward_impl(primitive, logits, scale_factor):
@@ -247,7 +247,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         out = custom_caller(name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def backward_impl(primitive, dz, softmax_out, scale_factor):
@@ -577,7 +577,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(logits, mask, scale_factor):
