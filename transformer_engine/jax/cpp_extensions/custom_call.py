@@ -21,6 +21,7 @@ except ImportError:
 
 
 class CustomCallAPIVersion(IntEnum):
+    """ Enum for selecting between old and new custom call registration API """
     OPAQUE = 0
     FFI = 1
 
