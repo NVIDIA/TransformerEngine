@@ -157,7 +157,7 @@ def fused_attn_fwd_qkvpacked(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -359,7 +359,7 @@ def fused_attn_bwd_qkvpacked(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
@@ -526,7 +526,7 @@ def fused_attn_fwd_kvpacked(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -747,7 +747,7 @@ def fused_attn_bwd_kvpacked(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
@@ -927,7 +927,7 @@ def fused_attn_fwd(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -1155,7 +1155,7 @@ def fused_attn_bwd(
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and "`causal`" mask specifically.
+                window and causal mask specifically.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
