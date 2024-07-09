@@ -14,6 +14,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Format, DelayedScaling
@@ -158,7 +159,7 @@ def parse_args(argv=None, namespace=None):
     )
     return parser.parse_args(argv, namespace)
 
-
+@record
 def train(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
@@ -200,7 +201,7 @@ def train(opts):
     if not opts.no_overlap:
         te.initialize_ub(
             [batched_size, hidden_size],
-            tp_group,
+            tp_size,
             use_fp8=opts.fp8,
             dtype=opts.dtype,
         )
@@ -373,7 +374,7 @@ def train(opts):
     dist.barrier()
     with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=tp_group):
         y = te_gpt(x, attention_mask=causal_mask)
-        loss = y.sum()
+        loss = y.flatten().sum()
     loss.backward()
     dist_print(f"Distributed output: {y.size()}")
     yg = te.distributed.gather_along_first_dim(y, tp_group)[0]

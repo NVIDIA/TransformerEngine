@@ -5,6 +5,7 @@
 """Base modules and utilities for TransformerEngine PyTorch API"""
 import io
 import os
+import socket
 import pickle
 import warnings
 from abc import ABC, abstractmethod
@@ -80,7 +81,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
 
 def initialize_ub(
     shape: list,
-    tp_group: dist_group_type,
+    tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
@@ -89,17 +90,57 @@ def initialize_ub(
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
-    rank_id = torch.distributed.get_rank()
-    world_size = torch.distributed.get_world_size()
-    tp_id = torch.distributed.get_rank(tp_group)
-    tp_size = torch.distributed.get_world_size(tp_group)
+    world_group = torch.distributed.new_group(backend="nccl")
+    world_rank = torch.distributed.get_rank(world_group)
+    world_size = torch.distributed.get_world_size(world_group)
+
+    # Construct an intra-node communicator -- this should include ALL ranks in the node
+    # NOTE: This may be different than the tensor-parallel group (e.g. two TP groups in a node),
+    #       in which case the local_size we get below will not be equal to the tp_size given
+    #       by the user. Userbuffers internally accounts for this.
+    hostnames = [None for _ in range(world_size)]
+    hostname = socket.gethostname()
+    torch.distributed.all_gather_object(hostnames, hostname)
+    intra_node_ranks = []
+    for i, host in enumerate(hostnames):
+        if host == hostname:
+            intra_node_ranks.append(i)
+    if len(intra_node_ranks) == world_size:
+        intra_node_group = world_group
+        local_rank = world_rank
+        local_size = world_size
+    else:
+        intra_node_group = torch.distributed.new_group(backend="nccl", ranks=intra_node_ranks)
+        local_rank = torch.distributed.get_rank(intra_node_group)
+        local_size = torch.distributed.get_world_size(intra_node_group)
+
+    # Construct an inter-node communicator
+    num_nodes = world_size // local_size
+    if num_nodes > 1:
+        inter_node_start = local_rank - ((local_rank // local_size) * local_size)
+        inter_node_end = inter_node_start + ((world_size // local_size) * local_size)
+        inter_node_ranks = list(range(inter_node_start, inter_node_end, local_size))
+        inter_node_group = torch.distributed.new_group(backend="nccl", ranks=inter_node_ranks)
+        node_id = torch.distributed.get_rank(inter_node_group)
+    else:
+        node_id = 0
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
     _cublas_workspace = get_workspace().repeat(tex.NVTE_COMM_OVERLAP_MAX_STREAMS)
 
+    # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
+    layers_all_gather_overlap = [
+        "qkv_fprop",
+        "qkv_dgrad",
+        "proj_dgrad",
+        "fc1_fprop",
+        "fc1_dgrad",
+        "fc2_dgrad",
+    ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+
     # Default overlap methods for layers
     methods = {
         "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
@@ -121,17 +162,18 @@ def initialize_ub(
 
     def get_default_config(name):
         method = get_method(name)
+        is_reduce_scatter = name in layers_reduce_scatter_overlap
         default_cfg = {
-            'method': method,
-            'num_splits': tp_size if method == "ring_exchange" else 4,
-            'cga_size': 1 if method == "ring_exchange" else 2,
-            'num_sm': 1 if method == "ring_exchange" else 16,
-            'set_sm_margin': name in layers_reduce_scatter_overlap,
-            'use_ce': method == "ring_exchange",
-            'atomic_gemm': False,
-            'aggregate': False,
-            'is_reduce_scatter': name in layers_reduce_scatter_overlap,
-            'fp8_buf': "wgrad" not in name,
+            "method": method,
+            "is_reduce_scatter": is_reduce_scatter,
+            "num_sm": 1 if method == "ring_exchange" else 16,
+            "cga_size": 1 if method == "ring_exchange" else 2,
+            "set_sm_margin": is_reduce_scatter,
+            "num_splits": 4 if method == "pipeline" else tp_size,
+            "aggregate": False,
+            "atomic_gemm": False,
+            "use_ce": True,
+            "fp8_buf": name in layers_all_gather_overlap,
         }
         return default_cfg
 
@@ -188,10 +230,13 @@ def initialize_ub(
         if method == "ring_exchange":
             ub_obj = tex.UbufP2PCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
-                world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                world_rank,  # Global rank
+                world_size,  # Number of global ranks
+                local_rank,  # Local rank in physical node
+                local_size,  # Number of local ranks in physical node
+                node_id,  # Physical node ID
+                num_nodes,  # Number of physical nodes
+                tp_size,  # Tensor-parallel group size (may be smaller than local_size)
                 tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
                 cga_size,  # CGA cluster size
                 num_sm,  # Number of communication SMs
@@ -204,10 +249,13 @@ def initialize_ub(
         else:
             ub_obj = tex.UbufCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
-                world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                world_rank,  # Global rank
+                world_size,  # Number of global ranks
+                local_rank,  # Local rank in physical node
+                local_size,  # Number of local ranks in physical node
+                node_id,  # Physical node ID
+                num_nodes,  # Number of physical nodes
+                tp_size,  # Tensor-parallel group size (may be smaller than local_size)
                 num_splits,  # Number of communication splits
                 tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max. number of compute streams (default: 3)
                 cga_size,  # CGA cluster size
@@ -218,27 +266,43 @@ def initialize_ub(
             )
         _ub_communicators[name] = ub_obj
 
-    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
-        pg = None if group == "world" else tp_group
-        use_nccl = torch.distributed.get_backend(pg) == "nccl"
-        global_data = torch.zeros(
-            local_data.numel() * torch.distributed.get_world_size(pg),
-            dtype=local_data.dtype,
-            device="cuda" if use_nccl else "cpu",
+    ub_pgs = {
+        "world": world_group,
+        "intra": intra_node_group,
+    }
+
+    def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
+        # Make sure the global tensor is sized correctly
+        pg_size = torch.distributed.get_world_size(ub_pgs[group])
+        assert global_data.numel() == pg_size * local_data.numel(), (
+            "Internal TE error: Incorrect global tensor size, "
+            f"expected {pg_size * local_data.numel()} but got {global_data.numel()}."
         )
-        torch.distributed.all_gather_into_tensor(
-            global_data, local_data.cuda() if use_nccl else local_data, group=pg
-        )
-        return global_data.cpu() if use_nccl else global_data
 
-    def barrier_callback(group: str) -> None:
-        pg = None if group == "world" else tp_group
-        torch.distributed.barrier(group=pg)
+        # Move tensors to device if using NCCL backend
+        pg_backend = torch.distributed.get_backend(ub_pgs[group])
+        assert (
+            global_data.device == local_data.device == torch.device("cpu")
+        ), "Internal TE error: Bootstrap callbacks need to be called with host (CPU) tensors."
+        if pg_backend == torch.distributed.Backend.NCCL:
+            global_tmp = global_data.cuda()
+            local_tmp = local_data.cuda()
+        else:
+            global_tmp = global_data
+            local_tmp = local_data
 
-    def free_callback(data: torch.Tensor) -> None:
-        data.data = torch.Tensor()
+        torch.distributed.all_gather_into_tensor(global_tmp, local_tmp, group=ub_pgs[group])
 
-    tex.set_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
+        # Copy global tensor from CUDA back to original CPU tensor
+        if pg_backend == torch.distributed.Backend.NCCL:
+            global_data.copy_(global_tmp.cpu())
+            global_tmp.data = torch.Tensor()
+            local_tmp.data = torch.Tensor()
+
+    def barrier_callback(group: str):
+        torch.distributed.barrier(group=ub_pgs[group])
+
+    tex.set_bootstrap_callbacks(allgather_callback, barrier_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -252,7 +316,11 @@ def initialize_ub(
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
+            fp8_buf = (name in layers_all_gather_overlap) or (
+                ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
+            )
             ub_cfg.update(ub_cfgs[name])  # replaces default options with user configuration
+            ub_cfg["fp8_buf"] = fp8_buf
         add_ub(name, **ub_cfg)
 
 

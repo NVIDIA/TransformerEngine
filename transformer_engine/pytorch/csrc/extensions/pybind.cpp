@@ -10,11 +10,10 @@
 #include <torch/script.h>
 #include <torch/torch.h>
 
+#include <common/util/pybind_helper.h>
 #include "../comm_gemm_overlap.h"
 #include "../common.h"
 #include "../extensions.h"
-#include "common/userbuffers/comm_gemm_overlap.h"
-#include "common/util/pybind_helper.h"
 
 namespace te = transformer_engine;
 namespace te_cgo = te::comm_gemm_overlap;
@@ -246,7 +245,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<te_cgo::UbufCommOverlap>(m, "UbufCommOverlap", py::module_local())
       .def(py::init</* sample_tensor */ torch::Tensor &, /* world_rank */ int, /* world_size */ int,
-                    /* tp_rank */ int, /* tp_size */ int, /* num_splits */ int,
+                    /* local_rank */ int, /* local_size */ int, /* node_id */ int,
+                    /* num_nodes */ int, /* tp_size */ int, /* num_splits */ int,
                     /* num_max_streams */ int, /* cga_size */ int, /* num_comm_sm */ int,
                     /* set_sm_margin */ bool, /* use_ce */ bool, /* atomic_gemm */ bool>())
       .def("bulk_overlap", &te_cgo::UbufCommOverlap::bulk_overlap,
@@ -270,7 +270,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<te_cgo::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap", py::module_local())
       .def(py::init</* sample_tensor */ torch::Tensor &, /* world_rank */ int, /* world_size */ int,
-                    /* tp_rank */ int, /* tp_size */ int, /* num_max_streams */ int,
+                    /* local_rank */ int, /* local_size */ int, /* node_id */int,
+                    /* num_nodes */ int, /* tp_size */ int, /* num_max_streams */ int,
                     /* cga_size */ int, /* num_comm_sm */ int, /* set_sm_margin */ bool,
                     /* use_ce */ bool, /* atomic_gemm */ bool, /* aggregate */ bool,
                     /* is_reduce_scatter */ bool>())

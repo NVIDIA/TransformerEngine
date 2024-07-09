@@ -14,6 +14,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 project(transformer_engine LANGUAGES CUDA CXX)
 
+find_package(Python COMPONENTS Interpreter Development)
+
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
@@ -73,7 +75,8 @@ list(APPEND transformer_engine_SOURCES
      recipe/delayed_scaling.cu
      userbuffers/ipcsocket.cc
      userbuffers/userbuffers.cu
-     userbuffers/userbuffers-host.cpp)
+     userbuffers/userbuffers-host.cpp
+     userbuffers/comm_gemm_overlap.cpp)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -89,7 +92,8 @@ list(APPEND transformer_engine_LIBS
      CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-                           ${CUDNN_FRONTEND_INCLUDE_DIR})
+                           ${CUDNN_FRONTEND_INCLUDE_DIR}
+                           ${Python_INCLUDE_DIRS})
 
 # Check for MPI (optional)
 option(UB_MPI_BOOTSTRAP "Bootstrap userbuffers with MPI." OFF)

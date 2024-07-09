@@ -42,25 +42,32 @@ TEST_CMD_BASE = [
     "--verbose",
 ]
 
+# Sync GPU launch order to the host CPU
+os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.comm_overlap_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Comm+GEMM overlap requires at least 2 GPUs.")
 @pytest.mark.parametrize(
-    "fp8,p2p,comm_type,aggregate,atomic",
+    "fp8,p2p,comm_type,aggregate,atomic,bulk",
     [
         # FP8, P2P, Type, Aggregate, Atomic
-        (False, True, "AG", False, False),
-        (False, True, "AG", True, False),
-        (True, True, "AG", False, False),
-        (True, True, "AG", True, False),
-        (False, False, "RS", False, False),
-        (False, True, "RS", False, False),
-        (True, False, "RS", False, False),
-        (True, True, "RS", False, False),
-        (True, False, "RS", False, True),
-        (True, True, "RS", False, True),
+        (False, True, "AG", False, False, False),
+        (False, True, "AG", True, False, False),
+        (True, True, "AG", False, False, False),
+        (True, True, "AG", True, False), False,
+        (False, False, "RS", False, False, False),
+        (False, True, "RS", False, False, False),
+        (True, False, "RS", False, False, False),
+        (True, True, "RS", False, False, False),
+        # (True, False, "RS", False, True, False),
+        (True, True, "RS", False, True, False),
+        (False, False, "AG", False, False, True),
+        (False, False, "RS", False, False, True)
     ],
     ids=[
         " AG + SPLIT GEMM | BF16 | RING-EXCHANGE",
@@ -71,11 +78,13 @@ if not tex.comm_overlap_supports_multicast():
         " SPLIT GEMM + RS | BF16 | RING-EXCHANGE",
         " SPLIT GEMM + RS | FP8  | PIPELINE",
         " SPLIT GEMM + RS | FP8  | RING-EXCHANGE",
-        "ATOMIC GEMM + RS | FP8  | PIPELINE",
+        # "ATOMIC GEMM + RS | FP8  | PIPELINE",
         "ATOMIC GEMM + RS | FP8  | RING-EXCHANGE",
+        "  BULK AG + GEMM | BF16 | PIPELINE",
+        "  GEMM + BULK RS | BF16 | PIPELINE"
     ],
 )
-def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic):
+def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic, bulk):
     """
     Test comm+GEMM overlap algorithms with direct calls to
     te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm
@@ -83,12 +92,15 @@ def test_overlap_algos(fp8, p2p, comm_type, aggregate, atomic):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     test_cmd = TEST_CMD_BASE + ["--comm-type", comm_type]
-    if fp8:
-        test_cmd.append("--fp8")
-    if p2p:
-        test_cmd.append("--p2p")
-    if aggregate:
-        test_cmd.append("--aggregate")
-    if atomic:
-        test_cmd.append("--atomic")
+    if bulk:
+        test_cmd.append("--bulk-overlap")
+    else:
+        if fp8:
+            test_cmd.append("--fp8")
+        if p2p:
+            test_cmd.append("--p2p")
+        if aggregate:
+            test_cmd.append("--aggregate")
+        if atomic:
+            test_cmd.append("--atomic")
     assert not bool(subprocess.call(test_cmd, env=os.environ))

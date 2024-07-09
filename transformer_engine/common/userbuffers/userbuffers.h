@@ -142,9 +142,8 @@ typedef struct communicator {
   volatile int tail;
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
-  std::function<void(void **, void *, size_t, ExtComm)> _alloc_copy_allgather;
+  std::function<void(void *, size_t, void *, size_t, ExtComm)> _allgather;
   std::function<void(ExtComm)> _barrier;
-  std::function<void(void *)> _free;
 
   ExtComm comm_world,
       comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
@@ -161,9 +160,9 @@ typedef struct communicator {
 /*  Creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes);
+    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
+    int tensornodes);
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes);

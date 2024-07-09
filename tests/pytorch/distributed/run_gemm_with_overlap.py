@@ -14,9 +14,12 @@ from functools import partial, reduce
 
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
+from transformer_engine.common.recipe import Format
+from transformer_engine.pytorch.fp8 import _default_sf_compute
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -72,6 +75,12 @@ def parse_args(argv=None, namespace=None):
         help="Comm type to overlap.",
     )
     parser.add_argument(
+        "--bulk-overlap",
+        action="store_true",
+        default=False,
+        help="Enable bulk AG or RS overlap for a tensor that is not involved in the GEMM compute."
+    )
+    parser.add_argument(
         "--check-numerics",
         action="store_true",
         default=False,
@@ -100,18 +109,31 @@ def parse_args(argv=None, namespace=None):
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
+
+    if opts.bulk_overlap:
+        if opts.p2p:
+            warnings.warn("Point-2-point comms are not supported with bulk overlap.")
+            opts.p2p = False
+        if opts.atomic:
+            warnings.warn("Atomic GEMM is not supported with bulk overlap.")
+            opts.atomic = False
+        if opts.fp8:
+            warnings.warn("Bulk overlap is supported in FP8 but only tested in BF16.")
+            opts.fp8 = False
+    elif opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG and not opts.p2p:
+        warnings.warn("All-gather overlap is only supported with point-2-point comms.")
+        opts.p2p = True
+
     if opts.atomic:
         if not te.fp8.check_fp8_support():
             assert not opts.fp8, "Atomic GEMM is only supported in FP8."
         elif not opts.fp8:
-            warnings.warn("Switching to FP8 for Atomic GEMM.")
+            warnings.warn("Atomic GEMM is only supported in FP8.")
             opts.fp8 = True
-    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG and not opts.p2p:
-        warnings.warn("Switching to point-2-point comms for all-gather overlap.")
-        opts.p2p = True
+
     return opts
 
-
+@record
 def main(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
@@ -166,24 +188,22 @@ def main(opts):
                 print(msg + "\n", end="", flush=True)
 
     # torch.distributed callback wrappers for bootstrapping userbuffers
-    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str):
+    def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
         pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * dist.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        dist.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
+        global_tmp = global_data.cuda()
+        dist.all_gather_into_tensor(global_tmp, local_data.cuda(), group=pg)
+        global_data.copy_(global_tmp.cpu())
 
     def barrier_callback(group: str):
         pg = None if group == "world" else tp_group
         dist.barrier(group=pg)
 
-    def free_callback(data: torch.Tensor):
-        del data
-
-    tex.set_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
+    tex.set_bootstrap_callbacks(allgather_callback, barrier_callback)
 
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
-        if opts.p2p:
+        if opts.bulk_overlap:
+            ub_algo = tex.NVTE_Comm_Overlap_Algo.BULK_OVERLAP_RS
+        elif opts.p2p:
             ub_algo = (
                 tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P
                 if opts.atomic
@@ -195,12 +215,17 @@ def main(opts):
                 if opts.atomic
                 else tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_RS
             )
+    elif opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+        if opts.bulk_overlap:
+            ub_algo = tex.NVTE_Comm_Overlap_Algo.BULK_OVERLAP_AG
+        else:
+            ub_algo = (
+                tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P
+                if opts.atomic
+                else tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P
+            )
     else:
-        ub_algo = (
-            tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_AG_P2P
-            if opts.atomic
-            else tex.NVTE_Comm_Overlap_Algo.SPLIT_PIPELINED_AG_P2P
-        )
+        raise TypeError("Invalid comm+GEMM overlap type!")
 
     # Initialize userbuffers with (M, N) buffer
     # M = sequence * batch
@@ -218,6 +243,9 @@ def main(opts):
             world_size,
             local_rank,
             local_size,
+            0,
+            1,
+            local_size,
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             1,  # cga_size
             1,  # num_comm_sms
@@ -233,6 +261,9 @@ def main(opts):
             world_rank,
             world_size,
             local_rank,
+            local_size,
+            0,
+            1,
             local_size,
             4,  # num_splits
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
@@ -253,6 +284,9 @@ def main(opts):
             world_size,
             local_rank,
             local_size,
+            0,
+            1,
+            local_size,
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             1,  # num_comm_sms
             1,  # cga_size
@@ -270,16 +304,24 @@ def main(opts):
     # P = number of devices for sequence/tensor parallelism
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
     ffn_hidden_size = 4 * hidden_size
-    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-        # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
-        local_kernel_t_shape = (ffn_hidden_size // local_size, hidden_size)
-        local_inp_shape = (outer_size // local_size, hidden_size)
-        if ub_obj2 is not None:
-            local_kernel2_t_shape = (hidden_size, ffn_hidden_size // local_size)
+    if opts.bulk_overlap:
+        local_kernel_t_shape = (ffn_hidden_size, hidden_size)
+        local_inp_shape = (outer_size, hidden_size)
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            bulk_inp_shape = (outer_size // local_size, hidden_size)
+        else:
+            bulk_inp_shape = (outer_size, hidden_size)
     else:
-        # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
-        local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
-        local_inp_shape = (outer_size, ffn_hidden_size // local_size)
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
+            local_kernel_t_shape = (ffn_hidden_size // local_size, hidden_size)
+            local_inp_shape = (outer_size // local_size, hidden_size)
+            if ub_obj2 is not None:
+                local_kernel2_t_shape = (hidden_size, ffn_hidden_size // local_size)
+        else:
+            # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
+            local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
+            local_inp_shape = (outer_size, ffn_hidden_size // local_size)
 
     # Initialize distributed input tensor and GEMM kernels
     torch.manual_seed(opts.seed + WORLD_RANK)
@@ -294,33 +336,51 @@ def main(opts):
         )
 
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
-    if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-        # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
-        ker_g = torch.transpose(te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1)
-        # AG Input: (M/P, N) -> gather -> (M, N)
-        inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
-        if ub_obj2 is not None:
-            ker2_g = te.distributed.gather_along_first_dim(
-                torch.transpose(kernel2_t, 0, 1),
-                tp_group
-            )[0]
-    else:
-        # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
-        ker_g = te.distributed.gather_along_first_dim(torch.transpose(kernel_t, 0, 1), tp_group)[0]
-        # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-        inp_g = torch.transpose(
-            te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1
+    if opts.bulk_overlap:
+        ker_g = torch.transpose(kernel_t, 0, 1)
+        inp_g = inp
+        bulk_inp = torch.mul(
+            torch.rand(bulk_inp_shape, dtype=torch.bfloat16, device="cuda"), opts.scale
         )
+    else:
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
+            ker_g = torch.transpose(
+                te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1
+            )
+            # AG Input: (M/P, N) -> gather -> (M, N)
+            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
+            if ub_obj2 is not None:
+                ker2_g = te.distributed.gather_along_first_dim(
+                    torch.transpose(kernel2_t, 0, 1),
+                    tp_group
+                )[0]
+        else:
+            # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
+            ker_g = te.distributed.gather_along_first_dim(
+                torch.transpose(kernel_t, 0, 1), tp_group
+            )[0]
+            # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+            inp_g = torch.transpose(
+                te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1
+            )
 
-    ref_g = torch.matmul(inp_g, ker_g)
-    if ub_obj2 is not None:
-        inp2_g = torch.mul(ref_g, opts.scale)
-        ref2_g = torch.matmul(inp2_g, ker2_g)
+    if opts.bulk_overlap:
+        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+            ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
+        else:
+            # First all-gather all the bulk inputs into a list
+            bulk_inp_list = [ torch.zeros_like(bulk_inp) for _ in range(local_size) ]
+            dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
+            # Sum the list together for final global result
+            ref_g = torch.stack(bulk_inp_list).sum(dim=0)
+    else:
+        ref_g = torch.matmul(inp_g, ker_g)
+        if ub_obj2 is not None:
+            inp2_g = torch.mul(ref_g, opts.scale)
+            ref2_g = torch.matmul(inp2_g, ker2_g)
 
     if opts.fp8:
-        from transformer_engine.common.recipe import Format
-        from transformer_engine.pytorch.fp8 import _default_sf_compute
-
         fp8_formats = {
             tex.DType.kFloat8E4M3: Format.E4M3,
             tex.DType.kFloat8E5M2: Format.E5M2,
@@ -400,18 +460,26 @@ def main(opts):
     ubuf_out2 = None
     rs_out2 = None
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-        ub_obj.copy_input_to_ubuf(inp_fp8 if opts.fp8 else inp, True)
-        gemm_inp = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
+        if opts.bulk_overlap:
+            ub_obj.copy_input_to_ubuf(bulk_inp, True)
+            gemm_inp = inp
+        else:
+            ub_obj.copy_input_to_ubuf(inp_fp8 if opts.fp8 else inp, True)
+            gemm_inp = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         ubuf_out = None
-        rs_out = torch.empty_like(ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS))
+        rs_out = None
         if ub_obj2 is not None:
             ubuf_out2 = ub_obj2.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             rs_out2 = torch.empty(
                 (outer_size // local_size, hidden_size), dtype=torch.bfloat16, device="cuda"
             )
     else:
+        if opts.bulk_overlap:
+            ub_obj.copy_input_to_ubuf(bulk_inp, False)
+            ubuf_out = None
+        else:
+            ubuf_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         gemm_inp = inp_fp8 if opts.fp8 else inp
-        ubuf_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         rs_out = torch.empty(
             (outer_size // local_size, hidden_size), dtype=torch.bfloat16, device="cuda"
         )
@@ -509,71 +577,82 @@ def main(opts):
     if opts.check_numerics:
         torch.cuda.synchronize()
         dist.barrier()
-        if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-            if ub_obj2 is not None:
-                # AG+RS Output: (M/P, N) -> gather -> (M, N)
-                output = rs_out2
-                test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
+        if opts.bulk_overlap:
+            if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+                # Bulk overlap AG output is already gathered
+                test_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             else:
-                # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-                output = all_outputs[0]
-                test_out = torch.transpose(
-                    te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1),
-                                                          tp_group)[0],
-                    0,
-                    1,
-                )
+                # Bulk overlap RS output needs to be gathered
+                ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
+                test_out = te.distributed.gather_along_first_dim(
+                    ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS), tp_group)[0]
+            ref_out = ref_g
         else:
-            # RS Output: (M/P, N) -> gather -> (M, N)
-            output = rs_out
-            test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
+            if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
+                if ub_obj2 is not None:
+                    # AG+RS Output: (M/P, N) -> gather -> (M, N)
+                    output = rs_out2
+                    test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
+                else:
+                    # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
+                    output = all_outputs[0]
+                    test_out = torch.transpose(
+                        te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1),
+                                                              tp_group)[0], 0, 1)
+            else:
+                # RS Output: (M/P, N) -> gather -> (M, N)
+                output = rs_out
+                test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
 
-        if opts.fp8:
-            dist_print("GEMM1 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
-            fp8_meta_info = (
-                f"amax_reference  = {fp8_meta.amax_history[1][:3].tolist()}\n"
-                + f"amax_history    = {fp8_meta.amax_history[0][:3].tolist()}\n"
-                + f"scale           = {fp8_meta.scale[:3].tolist()}\n"
-                + f"scale_inv       = {fp8_meta.scale_inv[:3].tolist()}"
-            )
-            dist_print(fp8_meta_info, src=0)
-            if ub_obj2 is not None:
-                dist_print("GEMM2 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
+            if opts.fp8:
+                dist_print("GEMM1 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
                 fp8_meta_info = (
-                    f"amax_reference  = {fp8_meta.amax_history[1][3:].tolist()}\n"
-                    + f"amax_history    = {fp8_meta.amax_history[0][3:].tolist()}\n"
-                    + f"scale           = {fp8_meta.scale[3:].tolist()}\n"
-                    + f"scale_inv       = {fp8_meta.scale_inv[3:].tolist()}"
+                    f"amax_reference  = {fp8_meta.amax_history[1][:3].tolist()}\n"
+                    + f"amax_history    = {fp8_meta.amax_history[0][:3].tolist()}\n"
+                    + f"scale           = {fp8_meta.scale[:3].tolist()}\n"
+                    + f"scale_inv       = {fp8_meta.scale_inv[:3].tolist()}"
                 )
                 dist_print(fp8_meta_info, src=0)
+                if ub_obj2 is not None:
+                    dist_print("GEMM2 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
+                    fp8_meta_info = (
+                        f"amax_reference  = {fp8_meta.amax_history[1][3:].tolist()}\n"
+                        + f"amax_history    = {fp8_meta.amax_history[0][3:].tolist()}\n"
+                        + f"scale           = {fp8_meta.scale[3:].tolist()}\n"
+                        + f"scale_inv       = {fp8_meta.scale_inv[3:].tolist()}"
+                    )
+                    dist_print(fp8_meta_info, src=0)
 
-        test_nonzeros = torch.count_nonzero(test_out)
-        dist.all_reduce(test_nonzeros, op=dist.ReduceOp.SUM, group=tp_group)
-        ref_out = ref2_g if ub_obj2 is not None else ref_g
-        ref_nonzeros = torch.count_nonzero(ref_out)
-        nonzero_info = f"output nonzeros = {test_nonzeros} " + f"| reference count = {ref_nonzeros}"
-        dist_print(nonzero_info, src=0, section=True)
+            test_nonzeros = torch.count_nonzero(test_out)
+            dist.all_reduce(test_nonzeros, op=dist.ReduceOp.SUM, group=tp_group)
+            ref_out = ref2_g if ub_obj2 is not None else ref_g
+            ref_nonzeros = torch.count_nonzero(ref_out)
+            nonzero_info = (
+                f"output nonzeros = {test_nonzeros} "
+                + f"| reference count = {ref_nonzeros}"
+            )
+            dist_print(nonzero_info, src=0, section=True)
 
-        sizing_info = (
-            f"input: {list(inp.shape)} "
-            + f"| GEMM1 weights: {list(kernel_t.shape)[::-1]} "
-        )
-        if ub_obj2 is not None:
-            sizing_info += f"| GEMM2 weights: {list(kernel2_t.shape)[::-1]} "
-        sizing_info += f"| output: {list(output.shape)}\n"
-        dist_print(sizing_info, section=True)
+            sizing_info = (
+                f"input: {list(inp.shape)} "
+                + f"| GEMM1 weights: {list(kernel_t.shape)[::-1]} "
+            )
+            if ub_obj2 is not None:
+                sizing_info += f"| GEMM2 weights: {list(kernel2_t.shape)[::-1]} "
+            sizing_info += f"| output: {list(output.shape)}\n"
+            dist_print(sizing_info, section=True)
 
-        sizing_info_g = (
-            f"input: {list(inp_g.shape)} "
-            + f"| GEMM1 weights: {list(ker_g.shape)} "
-        )
-        if ub_obj2 is not None:
-            sizing_info_g += f"| GEMM2 weights: {list(ker2_g.shape)} "
-        sizing_info_g += (
-            f"| output: {list(test_out.shape)} "
-            + f"| reference: {list(ref_out.shape)}\n"
-        )
-        dist_print(sizing_info_g, src=0)
+            sizing_info_g = (
+                f"input: {list(inp_g.shape)} "
+                + f"| GEMM1 weights: {list(ker_g.shape)} "
+            )
+            if ub_obj2 is not None:
+                sizing_info_g += f"| GEMM2 weights: {list(ker2_g.shape)} "
+            sizing_info_g += (
+                f"| output: {list(test_out.shape)} "
+                + f"| reference: {list(ref_out.shape)}\n"
+            )
+            dist_print(sizing_info_g, src=0)
 
         torch.cuda.synchronize()
         dist.barrier()
