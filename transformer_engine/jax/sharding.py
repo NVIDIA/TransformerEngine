@@ -132,10 +132,13 @@ def get_padded_spec(spec, ndim):
     return spec + (None,) * (ndim - len(spec))
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, kwargs: dict):
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, kwargs: dict = None):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
+    if kwargs is None:
+        kwargs = {}
+
     if mesh_resource is not None:
         _, resource = _get_mesh_info(mesh_resource)
         return ops(x, resource, kwargs)
