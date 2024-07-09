@@ -18,7 +18,10 @@ namespace transformer_engine {
 
 namespace cuda_driver {
 
-/*! \brief Get pointer corresponding to symbol in CUDA driver library */
+/*! \brief Get pointer corresponding to symbol in CUDA driver library
+ *
+ * Pointers are cached the first time they are accessed.
+ */
 void *get_symbol(const char *symbol);
 
 /*! \brief Call function in CUDA driver library
