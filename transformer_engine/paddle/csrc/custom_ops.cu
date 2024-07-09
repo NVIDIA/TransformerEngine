@@ -758,7 +758,7 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
                                 te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
                                 attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, -1, -1, false, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
@@ -769,7 +769,7 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
                                 te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
                                 attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, -1, -1, false, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -940,7 +940,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
       &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
-      -1, -1, false, workspace.data(), Q.stream());
+      -1, -1, true, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -952,7 +952,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
       &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
-      -1, -1, false, workspace.data(), Q.stream());
+      -1, -1, true, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1140,7 +1140,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, -1, -1, false, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -1152,7 +1152,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, -1, -1, false, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
