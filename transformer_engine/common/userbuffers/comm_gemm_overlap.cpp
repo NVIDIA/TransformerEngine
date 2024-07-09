@@ -40,10 +40,11 @@ namespace comm_gemm_overlap {
 CommGemmOverlapBase::CommGemmOverlapBase(
     int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
     int tp_size, int num_splits, int num_max_streams, int cga_size, int num_comm_sms,
-    bool set_sm_margin, bool use_ce, bool atomic_gemm,
+    bool set_sm_margin, bool use_ce, bool atomic_gemm, const char *name,
     std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
     std::function<void(char *)> barrier_handle) {
   // Initialize the UB communicator
+  snprintf(_name, 32, "%s", name);
   if (!_comm_created) {
 #ifdef UB_MPI_BOOTSTRAP
     create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
@@ -52,7 +53,7 @@ CommGemmOverlapBase::CommGemmOverlapBase(
                                   numnodes, allgather_handle, barrier_handle, 1, 1, tp_size, 1);
 #endif
     if (worldrank == 0) {
-      printf("[CommGemmOverlap] communicator initialized\n");
+      printf("[%s] Communicator initialized\n", _name);
     }
     _comm_created = true;
   }
@@ -74,10 +75,6 @@ CommGemmOverlapBase::CommGemmOverlapBase(
   NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
   _comm_sms = (set_sm_margin) ? num_comm_sms : 0;
   _math_sms = prop.multiProcessorCount - _comm_sms - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-  if (_first_init && worldrank == 0) {
-    printf("[CommGemmOverlap] comm SMs: %d | math SMs: %d\n", _comm_sms, _math_sms);
-  }
-  _first_init = false;
 
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
@@ -105,12 +102,12 @@ CommGemmOverlapBase::~CommGemmOverlapBase() {
 
 void CommGemmOverlapBase::register_gpu_buffer(void **gpuptr, size_t bytes, bool alloc) {
   NVTE_CHECK(_comm_created,
-              "[CommGemmOverlap] Communicator must be initialized before buffer registration.");
-  NVTE_CHECK(!_buffer_registered, "[CommGemmOverlap] GPU buffer is already registered.");
+              "[%s] Communicator must be initialized before buffer registration.", _name);
+  NVTE_CHECK(!_buffer_registered, "[%s] GPU buffer is already registered.", _name);
   _ub_reg = register_user_buffer_collective(gpuptr, bytes, _ub_comm, alloc);
   _buffer_registered = true;
   if (_tp_id == 0) {
-    printf("[CommGemmOverlap] registered buffer %d\n", _ub_reg);
+    printf("[%s] Registered buffer %d\n", _name, _ub_reg);
   }
 }
 
@@ -126,17 +123,18 @@ CommGemmOverlap::CommGemmOverlap(
     std::function<void(char *)> barrier_handle)
     : CommGemmOverlapBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes, tp_size,
                           num_splits, num_max_streams, num_comm_cga, num_comm_sms, set_sm_margin,
-                          use_ce, atomic_gemm, allgather_handle, barrier_handle) {
+                          use_ce, atomic_gemm, "UB", allgather_handle, barrier_handle) {
   if (_atomic_gemm) {
     _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 1);
     NVTE_CHECK(0 <= _rs_kernel_type && _rs_kernel_type < 3,
-                "Invalid choice for NVTE_RS_STRIDED_ATOMIC");
+                "[%s] Invalid choice for NVTE_RS_STRIDED_ATOMIC", _name);
     if (worldrank == 0 && _rs_kernel_type == 0) {
-      NVTE_ERROR("Non-atomic RS overlap (BF16) is incompatible with Atomic GEMM (FP8).");
+      NVTE_ERROR("[%s] Non-atomic RS overlap (BF16) is incompatible with Atomic GEMM (FP8).",
+                 _name);
     } else if (worldrank == 0 && _rs_kernel_type == 1) {
-      printf("[CommGemmOverlap] NVTE_RS_STRIDED_ATOMIC=1 (atomic GEMM + atomic RS)\n");
+      printf("[%s] NVTE_RS_STRIDED_ATOMIC=1 (atomic GEMM + atomic RS)\n", _name);
     } else if (worldrank == 0) {
-      printf("[CommGemmOverlap] NVTE_RS_STRIDED_ATOMIC=2 (atomic GEMM + multi-atomic RS)\n");
+      printf("[%s] NVTE_RS_STRIDED_ATOMIC=2 (atomic GEMM + multi-atomic RS)\n", _name);
     }
   }
 
@@ -189,7 +187,7 @@ void CommGemmOverlap::bulk_gemm_overlap(
       reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm);
     }
   } else {
-    NVTE_ERROR("Not supported communication type.");
+    NVTE_ERROR("[%s] Unsupported communication type.", _name);
   }
 
   assert(pre_gelu_out.numel() == 0);
@@ -257,7 +255,7 @@ void CommGemmOverlap::atomic_gemm_overlap_rs(
           counter_ptr, _ub_comm, _stream_comm);
       break;
     } else {
-      NVTE_ERROR("Unsupported reduce-scatter kernel type!");
+      NVTE_ERROR("[%s] Unsupported reduce-scatter kernel type!", _name);
     }
 
     rs_output_ptr += m_chunk * rs_output.element_size();
@@ -433,7 +431,7 @@ CommGemmOverlapP2P::CommGemmOverlapP2P(
     std::function<void(char *)> barrier_handle)
     : CommGemmOverlapBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes, tp_size,
                           tp_size, num_max_streams, cga_size, num_comm_sms, use_ce, set_sm_margin,
-                          atomic_gemm, allgather_handle, barrier_handle) {
+                          atomic_gemm, "UBP2P", allgather_handle, barrier_handle) {
   _is_p2p = true;
   _aggregate = aggregate;
   _is_reduce_scatter = is_reduce_scatter;
@@ -447,7 +445,7 @@ CommGemmOverlapP2P::CommGemmOverlapP2P(
     if (!_is_reduce_scatter) {
       _ag_sendrecv_multiatomic = getenv<bool>("NVTE_AG_P2P_MULTI_ATOMIC");
       if (worldrank == 0 && _ag_sendrecv_multiatomic) {
-        printf("[CommGemmOverlap] NVTE_AG_P2P_MULTI_ATOMIC=1 (multi-atomic AG + atomic GEMM)\n");
+        printf("[%s] NVTE_AG_P2P_MULTI_ATOMIC=1 (multi-atomic AG + atomic GEMM)\n", _name);
       }
     }
   }

@@ -51,7 +51,6 @@ namespace comm_gemm_overlap {
 struct PYBIND11_EXPORT CommGemmOverlapBase {
   static inline communicator *_ub_comm{nullptr};
   static inline bool _comm_created{false};
-  static inline bool _first_init{true};
 
   int _tp_id, _tp_size;
   int _comm_sms, _math_sms;
@@ -62,6 +61,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
   bool _atomic_gemm{false};
   bool _buffer_registered{false};
   bool _is_p2p{false};
+  char _name[32];
 
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _start_d2dcopy;
   std::vector<cudaStream_t> _stream_compute;
@@ -69,7 +69,7 @@ struct PYBIND11_EXPORT CommGemmOverlapBase {
   CommGemmOverlapBase(
       int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
       int tp_size, int num_splits, int num_max_streams, int cga_size, int num_comm_sms,
-      bool set_sm_margin, bool use_ce, bool atomic_gemm,
+      bool set_sm_margin, bool use_ce, bool atomic_gemm, const char *name,
       std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
       std::function<void(char *)> barrier_handle);
 
