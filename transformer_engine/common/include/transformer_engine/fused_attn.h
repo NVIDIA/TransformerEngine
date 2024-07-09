@@ -258,7 +258,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  *  \param[in]     attn_mask_type           Attention mask type.
  *  \param[in]     window_size_left         Sliding window size (the left half).
  *  \param[in]     window_size_right        Sliding window size (the right half).
- *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
+ *  \param[in]     deterministic            Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */

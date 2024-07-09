@@ -5145,7 +5145,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         )
         # To use the workspace optimization path for determinism, please
         # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
-        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 for cuDNN >=9.0.0.
+        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
         cudnn_version = get_cudnn_version()
         if (8, 9, 5) <= cudnn_version < (9, 0, 0):
             if self.deterministic:
