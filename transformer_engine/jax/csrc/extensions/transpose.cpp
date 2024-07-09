@@ -72,10 +72,8 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
                             Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
                             Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
                             Result_Type amax_out_buf, int64_t transpose_axis) {
-  auto in_dtype =
-      convert_ffi_datatype_to_te_dtype(input_buf.element_type());
-  auto out_dtype =
-      convert_ffi_datatype_to_te_dtype(input_cast_buf->element_type());
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(input_cast_buf->element_type());
 
   auto *input = input_buf.untyped_data();
   float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());

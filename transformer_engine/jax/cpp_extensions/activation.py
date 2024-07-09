@@ -33,16 +33,16 @@ __all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
 
 
 ActivationEnum = {
-    ("gelu",): int(NVTE_Activation_Type.GELU),
-    ("gelu", "linear"): int(NVTE_Activation_Type.GEGLU),
-    ("silu",): int(NVTE_Activation_Type.SILU),
-    ("silu", "linear"): int(NVTE_Activation_Type.SWIGLU),
-    ("relu",): int(NVTE_Activation_Type.RELU),
-    ("relu", "linear"): int(NVTE_Activation_Type.REGLU),
-    ("quick_gelu",): int(NVTE_Activation_Type.QGELU),
-    ("quick_gelu", "linear"): int(NVTE_Activation_Type.QGEGLU),
-    ("squared_relu",): int(NVTE_Activation_Type.SRELU),
-    ("squared_relu", "linear"): int(NVTE_Activation_Type.SREGLU),
+    ("gelu",): NVTE_Activation_Type.GELU,
+    ("gelu", "linear"): NVTE_Activation_Type.GEGLU,
+    ("silu",): NVTE_Activation_Type.SILU,
+    ("silu", "linear"): NVTE_Activation_Type.SWIGLU,
+    ("relu",): NVTE_Activation_Type.RELU,
+    ("relu", "linear"): NVTE_Activation_Type.REGLU,
+    ("quick_gelu",): NVTE_Activation_Type.QGELU,
+    ("quick_gelu", "linear"): NVTE_Activation_Type.QGEGLU,
+    ("squared_relu",): NVTE_Activation_Type.SRELU,
+    ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
 }
 
 
@@ -195,7 +195,7 @@ def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]])
     if not ActLuPrimitive.enabled():
         return _jax_act_lu(inputs, activation_type)
 
-    act_type_id = ActivationEnum[activation_type]
+    act_type_id = ActivationEnum[activation_type].value
     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
 
 
@@ -330,12 +330,11 @@ def dact_lu(
     dact_lu fusion wrapper
     Return dgated_act_lu(inputs)
     """
-
     if not DActLuPrimitive.enabled():
         _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
         return vjp_func(inputs)[0]
 
-    act_type_id = ActivationEnum[activation_type]
+    act_type_id = ActivationEnum[activation_type].value
     return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
 
 
@@ -497,7 +496,7 @@ def act_lu_fp8(
         casted_output, updated_amax = _jax_cast_fp8(act_lu_output, scale, amax, out_dtype)
         return casted_output, updated_amax
 
-    act_type_id = ActivationEnum[activation_type]
+    act_type_id = ActivationEnum[activation_type].value
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
     )

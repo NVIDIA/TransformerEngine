@@ -149,5 +149,5 @@ def is_ffi_enabled():
     """
     is_supported = jax_version_meet_requirement("0.4.29")
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "0"))
-    assert is_enabled in (0,1), "Invalid NVTE_JAX_WITH_FFI value"
-    return (is_supported and is_enabled)
+    assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
+    return is_supported and is_enabled
