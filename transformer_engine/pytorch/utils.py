@@ -32,10 +32,9 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
         if t is not None:
             if isinstance(t, Float8Tensor):
                 t._data.data = torch.Tensor()
-                del t
             else:
                 t.data = torch.Tensor()
-                del t
+            del t
 
 
 def get_device_compute_capability() -> Tuple[int, int]:
