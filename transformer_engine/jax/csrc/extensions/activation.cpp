@@ -103,13 +103,13 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 
 Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf,
                     int64_t act_enum) {
-  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.dtype);
-  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->dtype);
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
-  auto *input = input_buf.data;
-  auto *output = output_buf->data;
+  auto *input = input_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
 
-  auto &input_dims = input_buf.dimensions;
+  auto input_dims = input_buf.dimensions();
   auto m = std::accumulate(input_dims.begin(), input_dims.end() - 2, 1, std::multiplies<>());
   auto n = input_dims.back();
   auto act_len = input_dims.end()[-2];
@@ -210,14 +210,14 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
 
 Error_Type DActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type act_input_buf,
                      Result_Type output_buf, int64_t act_enum) {
-  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.dtype);
-  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->dtype);
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
-  auto *input = input_buf.data;
-  auto *act_input = act_input_buf.data;
-  auto *output = output_buf->data;
+  auto *input = input_buf.untyped_data();
+  auto *act_input = act_input_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
 
-  auto act_input_dims = act_input_buf.dimensions;
+  auto act_input_dims = act_input_buf.dimensions();
   auto m =
       std::accumulate(act_input_dims.begin(), act_input_dims.end() - 2, 1, std::multiplies<>());
   auto n = act_input_dims.back();

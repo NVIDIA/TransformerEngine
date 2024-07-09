@@ -73,18 +73,18 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
                             Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
                             Result_Type amax_out_buf, int64_t transpose_axis) {
   auto in_dtype =
-      convert_ffi_datatype_to_te_dtype(static_cast<xla::ffi::DataType>(input_buf.dtype));
+      convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype =
-      convert_ffi_datatype_to_te_dtype(static_cast<xla::ffi::DataType>(input_cast_buf->dtype));
+      convert_ffi_datatype_to_te_dtype(input_cast_buf->element_type());
 
-  auto *input = input_buf.data;
-  float *amax = reinterpret_cast<float *>(amax_buf.data);
-  float *scale = reinterpret_cast<float *>(scale_buf.data);
-  float *scale_inv = reinterpret_cast<float *>(scale_inv_buf.data);
+  auto *input = input_buf.untyped_data();
+  float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+  float *scale_inv = reinterpret_cast<float *>(scale_inv_buf.untyped_data());
 
-  auto *input_cast = input_cast_buf->data;
-  auto *input_cast_trans = input_cast_trans_buf->data;
-  float *amax_out = reinterpret_cast<float *>(amax_out_buf->data);
+  auto *input_cast = input_cast_buf->untyped_data();
+  auto *input_cast_trans = input_cast_trans_buf->untyped_data();
+  float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
   assert(amax == amax_out);
 
   if (!use_fp8(out_dtype)) {
@@ -93,7 +93,7 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     amax_out = nullptr;
   }
 
-  auto &input_dims = input_buf.dimensions;
+  auto input_dims = input_buf.dimensions();
   if (transpose_axis < 0) transpose_axis += input_dims.size();
   auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
                            std::multiplies<>());
