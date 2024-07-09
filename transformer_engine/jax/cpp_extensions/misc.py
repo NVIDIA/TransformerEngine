@@ -3,10 +3,10 @@
 # See LICENSE for license information.
 """JAX/TE miscellaneous for custom ops"""
 
+import os
 from importlib.metadata import version as get_pkg_version
 from packaging.version import Version as PkgVersion
 import numpy as np
-import os
 
 import jax.numpy as jnp
 from jax import dtypes

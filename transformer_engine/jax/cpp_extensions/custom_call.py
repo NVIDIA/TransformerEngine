@@ -28,7 +28,6 @@ class CustomCallAPIVersion(IntEnum):
 for _name, _value in transformer_engine_jax.registrations().items():
     if "_ffi" in _name:
         if is_ffi_enabled():
-            # TODO: add prep, init, exec
             # traits = 1 (i.e. COMMAND_BUFFER_COMPATIBLE) enabled cudaGraph
             xla_client.register_custom_call_target(
                 _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value, traits=1
