@@ -1008,7 +1008,10 @@ class AttnFuncWithCP(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
-        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+        if qkv_format in ["bshd", "sbhd"]:
+            qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
+        else:
+            qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
         if causal:
             if qkv_format == "bshd":
@@ -1057,7 +1060,10 @@ class AttnFuncWithCP(torch.autograd.Function):
         fwd_results_correction_done = torch.cuda.Event()
 
         p2p_comm_buffers = [None for _ in range(cp_size)]
-        p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+        if use_fused_attention and qkv_format in ["bshd", "sbhd"]:
+            p2p_comm_buffers[0] = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
+        else:
+            p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         send_recv_reqs = [[], []]
 
         for i in range(cp_size + 1):
@@ -1086,15 +1092,17 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if qkv_format == "bshd":
                                     # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                                     q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
-                                    # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                        2, k.shape[0], -1, *k.shape[-2:]
+                                        k.shape[0], -1, 2, *k.shape[-2:]
                                     )
                                 elif qkv_format == "sbhd":
                                     # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                                     q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
-                                    # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-3:])
+                                    # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
                                 elif qkv_format == "thd":
                                     q_inputs[i % 2] = q
                                 if attn_bias is not None:
@@ -1114,8 +1122,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q,
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0],
-                                        kv_inputs[i % 2][1],
+                                        (
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1163,13 +1179,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if qkv_format == "bshd":
                                     # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                                     q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
-                                    # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2][:, :, 0, ...].contiguous()
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk//2, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2][:, 0, ...].contiguous()
                                 elif qkv_format == "sbhd":
                                     # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                                     q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
-                                    # [2, 2, sk//2, b, np, hn] -> [2, sk//2, b, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2][:, 0, ...].contiguous()
+                                    # [2, sk//2, b, 2, np, hn] -> [sk//2, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2][0].contiguous()
                                 elif qkv_format == "thd":
                                     q_inputs[i % 2] = q
                                     # [2, t, np, hn] -> [2, t/2, np, hn]
@@ -1187,8 +1203,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q,
                                         cu_seqlens_k // 2,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0],
-                                        kv_inputs[i % 2][1],
+                                        (
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1250,15 +1274,17 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if qkv_format == "bshd":
                                     # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                                     q_inputs[i % 2] = q[:, 1, ...].contiguous()
-                                    # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                        2, k.shape[0], -1, *k.shape[-2:]
+                                        k.shape[0], -1, 2, *k.shape[-2:]
                                     )
                                 elif qkv_format == "sbhd":
                                     # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                                     q_inputs[i % 2] = q[1].contiguous()
-                                    # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-3:])
+                                    # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
                                 elif qkv_format == "thd":
                                     # [t, np, hn] -> [t/2, np, hn]
                                     q_inputs[i % 2] = tex.thd_read_half_tensor(q, cu_seqlens_q, 1)
@@ -1279,8 +1305,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         cu_seqlens_q // 2,
                                         cu_seqlens_k,
                                         q_inputs[i % 2],
-                                        kv_inputs[i % 2][0],
-                                        kv_inputs[i % 2][1],
+                                        (
+                                            kv_inputs[i % 2][..., 0, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][0]
+                                        ),
+                                        (
+                                            kv_inputs[i % 2][..., 1, :, :]
+                                            if qkv_format in ["bshd", "sbhd"]
+                                            else kv_inputs[i % 2][1]
+                                        ),
                                         TE_DType[q.dtype],
                                         tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                         attn_scale=softmax_scale,
@@ -1354,8 +1388,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     cu_seqlens_q,
                                     cu_seqlens_k,
                                     q,
-                                    kv_inputs[i % 2][0],
-                                    kv_inputs[i % 2][1],
+                                    (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    ),
+                                    (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    ),
                                     TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale,
@@ -1410,7 +1452,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
+                        out = torch.zeros_like(q)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
@@ -1538,7 +1580,10 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         causal = "causal" in ctx.attn_mask_type
         padding = "padding" in ctx.attn_mask_type
-        qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
+        if ctx.qkv_format in ["bshd", "sbhd"]:
+            qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format[:-2] + "2" + ctx.qkv_format[-2:]
+        else:
+            qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         if attn_biases[0] is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)]
@@ -1612,16 +1657,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                         if ctx.qkv_format == "bshd":
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             q_ = q.view(q.shape[0], -1, *q.shape[-2:])
-                            # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                            kv_ = kv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                            # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
+                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             out_ = out.view(out.shape[0], -1, *out.shape[-2:])
                             dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
                         elif ctx.qkv_format == "sbhd":
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             q_ = q.view(-1, *q.shape[-3:])
-                            # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
+                            # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                            kv_ = kv.view(-1, *kv.shape[-4:])
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
@@ -1636,8 +1681,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q,
                             cu_seqlens_k,
                             q_,
-                            kv_[0],
-                            kv_[1],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1689,16 +1734,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                         if ctx.qkv_format == "bshd":
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             q_ = q.view(q.shape[0], -1, *q.shape[-2:])
-                            # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                            kv_ = kv[:, :, 0, ...].contiguous()
+                            # [b, 2, sk//2, 2, np, hn] -> [b, sk//2, 2, np, hn]
+                            kv_ = kv[:, 0, ...].contiguous()
                             # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                             out_ = out.view(out.shape[0], -1, *out.shape[-2:])
                             dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
                         elif ctx.qkv_format == "sbhd":
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             q_ = q.view(-1, *q.shape[-3:])
-                            # [2, 2, sk//2, b, np, hn] -> [2, sk//2, b, np, hn]
-                            kv_ = kv[:, 0, ...].contiguous()
+                            # [2, sk//2, b, 2, np, hn] -> [sk//2, b, 2, np, hn]
+                            kv_ = kv[0].contiguous()
                             # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
                             out_ = out.view(-1, *out.shape[-3:])
                             dout_ = dout.view(-1, *dout.shape[-3:])
@@ -1715,8 +1760,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q,
                             cu_seqlens_k // 2,
                             q_,
-                            kv_[0],
-                            kv_[1],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1774,16 +1819,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                         if ctx.qkv_format == "bshd":
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             q_ = q[:, 1, ...].contiguous()
-                            # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                            kv_ = kv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                            # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
+                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                             out_ = out[:, 1, ...].contiguous()
                             dout_ = dout[:, 1, ...].contiguous()
                         elif ctx.qkv_format == "sbhd":
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             q_ = q[1].contiguous()
-                            # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                            kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
+                            # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                            kv_ = kv.view(-1, *kv.shape[-4:])
                             # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                             out_ = out[1].contiguous()
                             dout_ = dout[1].contiguous()
@@ -1802,8 +1847,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q // 2,
                             cu_seqlens_k,
                             q_,
-                            kv_[0],
-                            kv_[1],
+                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
+                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             dout_,
                             TE_DType[q.dtype],
@@ -1871,8 +1916,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                         cu_seqlens_q,
                         cu_seqlens_k,
                         q,
-                        kv[0],
-                        kv[1],
+                        kv[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[0],
+                        kv[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[1],
                         out,
                         dout,
                         TE_DType[q.dtype],
@@ -1989,6 +2034,10 @@ class AttnFuncWithCP(torch.autograd.Function):
             dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
+                if ctx.qkv_format in ["bshd", "sbhd"]:
+                    # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
+                    # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
+                    dkv = dkv.view(2, *dkv.shape[0:-3], *dkv.shape[-2:])
             if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
                 if ctx.qkv_format == "bshd":
                     # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
@@ -2042,14 +2091,14 @@ class AttnFuncWithCP(torch.autograd.Function):
         if causal:
             if ctx.qkv_format == "bshd":
                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
-                dq = dq.view(q.shape[0], -1, *q.shape[-2:])
+                dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-                dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                dkv = dkv.view(*dkv.shape[0:2], -1, *dkv.shape[-2:])
             elif ctx.qkv_format == "sbhd":
                 # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
-                dq = dq.view(-1, *q.shape[-3:])
+                dq = dq.view(-1, *dq.shape[-3:])
                 # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
-                dkv = dkv.view(kv.shape[0], -1, *kv.shape[-3:])
+                dkv = dkv.view(dkv.shape[0], -1, *dkv.shape[-3:])
 
         if attn_dbias is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
