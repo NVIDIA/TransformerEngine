@@ -6,7 +6,6 @@ import os
 import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
-import logging
 
 from jax import core
 from jax.interpreters import xla, mlir
@@ -24,10 +23,15 @@ class BasePrimitive(metaclass=ABCMeta):
 
     @classmethod
     def enabled(cls):
+        """
+        A custom call is marked as disabled if the `cls.name` does not fully match the
+        `NVTE_CUSTOM_CALLS_RE` pattern.
+        By default, `NVTE_CUSTOM_CALLS_RE` is set to `.*`, which matches and enables all names.
+        For example, to disable only `te_act_lu`, set `NVTE_CUSTOM_CALLS_RE='^(?!te_act_lu$).+$'`.
+        """
         pattern = os.getenv("NVTE_CUSTOM_CALLS_RE", r".*")
         pattern = re.compile(pattern)
         is_enabled = pattern.fullmatch(cls.name) is not None
-        print(f"{pattern=} {cls.name=} {is_enabled=}")
         return is_enabled
 
     @staticmethod
