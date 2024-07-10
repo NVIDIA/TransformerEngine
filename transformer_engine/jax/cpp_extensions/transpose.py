@@ -28,7 +28,7 @@ from .misc import (
 )
 from .activation import ActivationEnum
 from .activation import _act_lu
-from .quantization import _quantize
+from .quantization import _cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -53,8 +53,7 @@ def _cast_transpose(inputs, scale, amax, out_dtype, static_axis_boundary, transp
     """
     JAX native cast_transpose implementation
     """
-    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(inputs)).astype(amax.dtype))
-    casted_output = _quantize(inputs, scale, q_dtype=out_dtype)
+    casted_output, updated_amax = _cast_fp8(inputs, scale, amax, out_dtype=out_dtype)
     casted_transposed_output = _transpose(
         casted_output, static_axis_boundary, transpose_axis_boundary
     )

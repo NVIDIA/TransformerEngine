@@ -26,7 +26,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     te_dtype_to_jax_dtype,
 )
-from .quantization import _quantize
+from .quantization import _cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -278,8 +278,7 @@ def _layernorm_fp8(x, gamma, beta, scale, amax, out_dtype, zero_centered_gamma, 
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma + beta
-    casted_output = _quantize(output, scale, q_dtype=out_dtype)
-    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(output)).astype(amax.dtype))
+    casted_output, updated_amax = _cast_fp8(output, scale, amax, out_dtype=out_dtype)
     return casted_output, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1), updated_amax
 
 
@@ -294,8 +293,7 @@ def _rmsnorm_fp8(x, gamma, scale, amax, out_dtype, zero_centered_gamma, eps):
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma
-    casted_output = _quantize(output, scale, q_dtype=out_dtype)
-    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(output)).astype(amax.dtype))
+    casted_output, updated_amax = _cast_fp8(output, scale, amax, out_dtype=out_dtype)
     return casted_output, jnp.squeeze(rsigma, axis=-1), updated_amax
 
 
