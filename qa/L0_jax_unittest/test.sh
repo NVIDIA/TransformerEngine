@@ -9,6 +9,9 @@ pip install pytest==8.2.1
 
 pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax -k 'not distributed'
 
+# Test without custom calls
+NVTE_CUSTOM_CALLS_RE="" pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax/test_custom_call_compute.py
+
 pip install -r $TE_PATH/examples/jax/mnist/requirements.txt
 pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
 
