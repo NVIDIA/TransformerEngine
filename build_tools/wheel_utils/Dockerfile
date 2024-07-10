@@ -1,0 +1,31 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+FROM quay.io/pypa/manylinux_2_28_x86_64
+
+ARG VER="12-3"
+ARG ARCH="x86_64"
+RUN dnf -y install vim
+
+# Cuda toolkit, cudnn, driver.
+RUN dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+RUN dnf -y install epel-release
+RUN dnf -y install cuda-compiler-${VER}.${ARCH} \
+                   cuda-libraries-${VER}.${ARCH} \
+                   cuda-libraries-devel-${VER}.${ARCH}
+RUN dnf -y install --allowerasing cudnn9-cuda-12
+#RUN dnf -y module install nvidia-driver:latest-dkms
+RUN dnf clean all
+RUN rm -rf /var/cache/dnf/*
+RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/999_nvidia_cuda.conf
+RUN dnf -y install cuda-toolkit
+
+ENV PATH="/usr/local/cuda/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+ENV CUDA_HOME=/usr/local/cuda
+ENV CUDA_ROOT=/usr/local/cuda
+ENV CUDA_PATH=/usr/local/cuda
+ENV CUDADIR=/usr/local/cuda
+
+CMD ["/bin/bash"]
