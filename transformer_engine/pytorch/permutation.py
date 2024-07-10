@@ -60,7 +60,7 @@ class _Permute(torch.autograd.Function):
             _Permute.dtype = inp.dtype
             _Permute.workspace = []
 
-        permuted_act, row_id_map, _Permute.workspace = tex.moe_permute(
+        permuted_act, row_id_map, _Permute.workspace = tex.moe_permute_fwd(
             inp, indices, num_out_tokens, _Permute.workspace, _Permute.max_expanded_token_num
         )
 
@@ -86,7 +86,7 @@ class _Permute(torch.autograd.Function):
         num_tokens = ctx.num_tokens
         topK = ctx.topK
 
-        unpermuted_act_grad = tex.moe_unpermute_fwd(
+        unpermuted_act_grad = tex.moe_permute_bwd(
             permuted_act_grad, row_id_map, torch.empty(0), num_tokens, topK
         )
         return unpermuted_act_grad, None, None, None

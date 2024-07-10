@@ -14,9 +14,12 @@
  * permute
  **************************************************************************************************/
 
-std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute(
+std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     at::Tensor input, at::Tensor indices, int64_t num_out_tokens, std::vector<at::Tensor> workspace,
     int64_t max_expanded_token_num);
+
+at::Tensor moe_permute_bwd(at::Tensor input, at::Tensor row_id_map, at::Tensor prob,
+                           int64_t num_tokens, int64_t num_topK);
 
 at::Tensor moe_unpermute_fwd(at::Tensor input, at::Tensor row_id_map, at::Tensor prob,
                              int64_t num_tokens, int64_t num_topK);

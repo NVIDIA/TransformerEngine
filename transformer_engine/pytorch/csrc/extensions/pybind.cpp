@@ -11,7 +11,8 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Permutation functions
-  m.def("moe_permute", moe_permute);
+  m.def("moe_permute_fwd", moe_permute_fwd);
+  m.def("moe_permute_bwd", moe_permute_bwd);
   m.def("moe_unpermute_fwd", moe_unpermute_fwd);
   m.def("moe_unpermute_bwd", moe_unpermute_bwd);
 

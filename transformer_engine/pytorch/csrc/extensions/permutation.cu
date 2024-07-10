@@ -10,10 +10,10 @@
 
 using torch::Tensor;
 
-std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute(Tensor input, Tensor indices,
-                                                            int64_t num_out_tokens,
-                                                            std::vector<Tensor> workspace,
-                                                            int64_t max_expanded_token_num) {
+std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(Tensor input, Tensor indices,
+                                                                int64_t num_out_tokens,
+                                                                std::vector<Tensor> workspace,
+                                                                int64_t max_expanded_token_num) {
   const int num_tokens = input.size(0);
   const int num_cols = input.size(1);
   const int num_topK = indices.size(1);
@@ -112,6 +112,11 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute(Tensor input, Tensor
   }
 
   return std::make_tuple(permuted_output, row_id_map, workspace);
+}
+
+Tensor moe_permute_bwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t num_tokens,
+                       int64_t num_topK) {
+  return moe_unpermute_fwd(input, row_id_map, prob, num_tokens, num_topK);
 }
 
 Tensor moe_unpermute_fwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t num_tokens,
