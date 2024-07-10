@@ -133,6 +133,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+        python_requires='>=3.8, <3.13',
         setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),
