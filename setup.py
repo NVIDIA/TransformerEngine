@@ -61,7 +61,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     setup_reqs: List[str] = []
     install_reqs: List[str] = [
         "pydantic",
-        "importlib-metadata>=1.0; python_version<'3.8'",
+        "importlib-metadata>=1.0",
         "packaging",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
@@ -134,6 +134,13 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         python_requires='>=3.8, <3.13',
+        classifiers=[
+            'Programming Language :: Python :: 3.8',
+            'Programming Language :: Python :: 3.9',
+            'Programming Language :: Python :: 3.10',
+            'Programming Language :: Python :: 3.11',
+            'Programming Language :: Python :: 3.12',
+        ],
         setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),
