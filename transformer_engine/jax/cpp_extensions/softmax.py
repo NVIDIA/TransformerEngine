@@ -32,6 +32,30 @@ __all__ = [
 ]
 
 
+def _scaled_softmax(logits: jnp.ndarray, scale_factor: float):
+    return jax.nn.softmax(scale_factor * logits)
+
+
+def _scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float):
+    if mask is not None:
+        logits += jax.lax.select(
+            mask > 0,
+            jnp.full(mask.shape, -1e10).astype(logits.dtype),
+            jnp.full(mask.shape, 0.0).astype(logits.dtype),
+        )
+    return jax.nn.softmax(logits * scale_factor)
+
+
+def _scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float):
+    mask = 1 - jnp.tril(jnp.ones_like(logits))
+    logits += jax.lax.select(
+        mask > 0,
+        jnp.full(mask.shape, -1e10).astype(logits.dtype),
+        jnp.full(mask.shape, 0.0).astype(logits.dtype),
+    )
+    return jax.nn.softmax(logits * scale_factor)
+
+
 def is_softmax_kernel_available(
     softmax_type: SoftmaxType,
     batch: int,
@@ -397,7 +421,7 @@ def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
     Return FP16/BF16 tensor
     """
     if not ScaledSoftmaxFwdPrimitive.enabled():
-        return jax.nn.softmax(scale_factor * logits)
+        return _scaled_softmax(logits, scale_factor)
     return ScaledSoftmaxFwdPrimitive.outer_primitive.bind(logits, scale_factor=scale_factor)
 
 
@@ -479,11 +503,7 @@ def scaled_softmax_bwd(
     Return FP16/BF16 tensor
     """
     if not ScaledSoftmaxBwdPrimitive.enabled():
-
-        def scaled_softmax(logits):
-            return jax.nn.softmax(scale_factor * logits)
-
-        _, vjp_func = jax.vjp(scaled_softmax, logits)
+        _, vjp_func = jax.vjp(partial(_scaled_softmax, scale_factor=scale_factor), logits)
         return vjp_func(dz)[0]
 
     return ScaledSoftmaxBwdPrimitive.outer_primitive.bind(
@@ -637,13 +657,7 @@ def scaled_masked_softmax_fwd(
     Return FP16/BF16 tensor
     """
     if not ScaledMaskedSoftmaxFwdPrimitive.enabled():
-        if mask is not None:
-            logits += jax.lax.select(
-                mask > 0,
-                jnp.full(mask.shape, -1e10).astype(logits.dtype),
-                jnp.full(mask.shape, 0.0).astype(logits.dtype),
-            )
-        return jax.nn.softmax(logits * scale_factor)
+        return _scaled_masked_softmax(logits, mask, scale_factor)
     return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
         logits, mask, scale_factor=scale_factor
     )
@@ -734,17 +748,9 @@ def scaled_masked_softmax_bwd(
     Return FP16/BF16 tensor
     """
     if not ScaledMaskedSoftmaxBwdPrimitive.enabled():
-
-        def scaled_masked_softmax(logits):
-            if mask is not None:
-                logits += jax.lax.select(
-                    mask > 0,
-                    jnp.full(mask.shape, -1e10).astype(logits.dtype),
-                    jnp.full(mask.shape, 0.0).astype(logits.dtype),
-                )
-            return jax.nn.softmax(logits * scale_factor)
-
-        _, vjp_func = jax.vjp(scaled_masked_softmax, logits)
+        _, vjp_func = jax.vjp(
+            partial(_scaled_masked_softmax, scale_factor=scale_factor), logits, mask
+        )
         return vjp_func(dz)[0]
     return ScaledMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
         dz, softmax_out, scale_factor=scale_factor
@@ -843,13 +849,7 @@ def scaled_upper_triang_masked_softmax_fwd(logits: jnp.ndarray, scale_factor: fl
     Return FP16/BF16 tensor
     """
     if not ScaledUpperTriangMaskedSoftmaxFwdPrimitive.enabled():
-        mask = 1 - jnp.tril(jnp.ones_like(logits))
-        logits += jax.lax.select(
-            mask > 0,
-            jnp.full(mask.shape, -1e10).astype(logits.dtype),
-            jnp.full(mask.shape, 0.0).astype(logits.dtype),
-        )
-        return jax.nn.softmax(logits * scale_factor)
+        return _scaled_upper_triang_masked_softmax(logits, scale_factor)
     return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
         logits, scale_factor=scale_factor
     )
@@ -944,17 +944,9 @@ def scaled_upper_triang_masked_softmax_bwd(
     Return FP16/BF16 tensor
     """
     if not ScaledUpperTriangMaskedSoftmaxBwdPrimitive.enabled():
-        # TODO(rewang): nan
-        def scaled_upper_triang_masked_softmax(logits):
-            mask = 1 - jnp.tril(jnp.ones_like(logits))
-            logits += jax.lax.select(
-                mask > 0,
-                jnp.full(mask.shape, -1e10).astype(logits.dtype),
-                jnp.full(mask.shape, 0.0).astype(logits.dtype),
-            )
-            return jax.nn.softmax(logits * scale_factor)
-
-        _, vjp_func = jax.vjp(scaled_upper_triang_masked_softmax, logits)
+        _, vjp_func = jax.vjp(
+            partial(_scaled_upper_triang_masked_softmax, scale_factor=scale_factor), logits
+        )
         return vjp_func(dz)[0]
     return ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
         dz, softmax_out, scale_factor=scale_factor

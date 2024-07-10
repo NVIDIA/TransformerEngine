@@ -123,14 +123,12 @@ class SoftmaxRunner:
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
-            value_and_grad(
-                lambda logits, *args: grad_func(softmax, self.logits, *args, **kwargs), (0,)
-            )
+            value_and_grad(lambda logits, *args: grad_func(softmax, logits, *args, **kwargs), (0,))
         )
         jitted_reference = jit(
             value_and_grad(
                 lambda logits, *args: grad_func(
-                    __class__.reference_softmax, self.logits, *args, **kwargs
+                    __class__.reference_softmax, logits, *args, **kwargs
                 ),
                 (0,),
             )
