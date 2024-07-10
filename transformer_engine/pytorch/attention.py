@@ -949,6 +949,21 @@ def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     softmax_lse.copy_(new_scale)
 
 
+@jit_fuser
+def get_cu_seqlens_on_cp_rank(cu_seqlens, cu_seqlens_padded, cp_size, rank):
+    """Compute cu_seqlens of a context parallelism rank"""
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    seqlens_padded = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // (2 * cp_size)
+    cu_seqlens_out = torch.zeros_like(cu_seqlens)
+    cu_seqlens_out_1 = (seqlens - rank * seqlens_padded)
+    cu_seqlens_out_1 = cu_seqlens_out_1.clamp(cu_seqlens_out[1:], seqlens_padded)
+    cu_seqlens_out_2 = (seqlens - (2 * cp_size - rank - 1) * seqlens_padded)
+    cu_seqlens_out_2 = cu_seqlens_out_2.clamp(cu_seqlens_out[1:], seqlens_padded)
+    cu_seqlens_out[1:].add_(cu_seqlens_out_1 + cu_seqlens_out_2)
+    cu_seqlens_out.cumsum_(dim=0)
+    return cu_seqlens_out
+
+
 class AttnFuncWithCP(torch.autograd.Function):
     """
     Attention implementation with context parallelism.
