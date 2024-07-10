@@ -134,7 +134,7 @@ inline NVTE_Fused_Attn_Backend get_fused_attn_backend(
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
                                   qkv_layout, bias_type, attn_mask_type, p_dropout, num_attn_heads,
-                                  num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim);
+                                  num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, -1, -1);
   return fused_attention_backend;
 }
 

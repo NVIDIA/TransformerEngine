@@ -22,6 +22,9 @@ from transformer_engine.pytorch.attention import (
     get_attention_backend,
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
+    check_set_window_size,
+    AttentionParams,
+    _attention_backends,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -84,6 +87,7 @@ class ModelConfig:
         alibi_type: str = "none",
         num_layers: int = 1,
         bias_shape: str = "1hss",
+        window_size: Tuple[int, int] = (-1, -1),
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -100,6 +104,7 @@ class ModelConfig:
         self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
         self.bias_shape = bias_shape
+        self.window_size = window_size
 
 
 def _get_attention_backends(
@@ -118,6 +123,8 @@ def _get_attention_backends(
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -136,33 +143,10 @@ def _get_attention_backends(
 
     fused_attn_backends = []
     available_backends = None
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    _, _, _, available_backends, fused_attention_backend = get_attention_backend(
-        qkv_dtype=qkv_dtype,
-        qkv_layout=qkv_layout,
-        batch_size=config.batch_size,
-        num_heads=config.num_heads,
-        num_gqa_groups=config.num_gqa_groups,
-        max_seqlen_q=config.max_seqlen_q,
-        max_seqlen_kv=config.max_seqlen_kv,
-        head_dim=config.head_dim,
-        attn_mask_type=config.attn_mask_type,
-        window_size=window_size,
-        alibi_slopes_shape=alibi_slopes_shape,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias_shape=core_attention_bias_shape,
-        core_attention_bias_requires_grad=core_attention_bias_requires_grad,
-        pad_between_seqs=pad_between_seqs,
-        attention_dropout=config.dropout_p,
-        context_parallel=context_parallel,
-        deterministic=deterministic,
-        fp8=fp8,
-        fp8_meta=fp8_meta,
-    )
-    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        fused_attn_backends.append(fused_attention_backend)
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-        _, _, _, available_backends, fused_attention_backend = get_attention_backend(
+    fused_attention_backend = None
+
+    def test():
+        attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
             qkv_layout=qkv_layout,
             batch_size=config.batch_size,
@@ -184,13 +168,18 @@ def _get_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
-        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
+            attention_params
+        )
+        return available_backends, fused_attention_backend
+
+    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    for i in range(3):
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
+        available_backends, fused_attention_backend = test()
+        if fused_attention_backend == FusedAttnBackend[backends[i]]:
             fused_attn_backends.append(fused_attention_backend)
-    elif (
-        fused_attention_backend != FusedAttnBackend["No_Backend"]
-        and fused_attention_backend is not None
-    ):
-        fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
 
@@ -209,18 +198,6 @@ param_types = [torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
-
-
-def get_swa(seq_q, seq_kv, w=None):
-    """Generate a random sliding window size (left, right) if w is None,
-    and create its equivalent attention mask in [seq_q, seq_kv] shape"""
-    if w is None:
-        w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
-    m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
-    mu = torch.triu(m, diagonal=seq_kv - seq_q - w[0])
-    ml = torch.tril(mu, diagonal=seq_kv - seq_q + w[1])
-    ml = ~ml
-    return w, ml
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -251,15 +228,22 @@ def test_dot_product_attention(
         pytest.skip("No need to test this layout for cross attention")
 
     # Test backend availability
-    window_size = (2, 2) if swa else (-1, -1)
+    window_size = (-1, -1)
+    if swa:
+        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+    config.window_size = check_set_window_size(config.attn_mask_type, window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=window_size,
+        window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
+    # mannually pads and unpads the input and output of FlashAttention for testing purposes
+    if pad_between_seqs:
+        flash_attn_supported = True
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -268,9 +252,6 @@ def test_dot_product_attention(
     is_training = config.head_dim <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        if swa:
-            attn_mask_type = config.attn_mask_type
-            config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
@@ -278,12 +259,9 @@ def test_dot_product_attention(
             ckpt_attn,
             qkv_layout,
             workspace_opt,
-            swa,
             pad_between_seqs,
             is_training,
         )
-        if swa:
-            config.attn_mask_type = attn_mask_type
 
     # FusedAttention backend
     if fused_attn_supported:
@@ -295,7 +273,6 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -308,7 +285,6 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -320,7 +296,6 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -334,7 +309,6 @@ def test_dot_product_attention(
             ckpt_attn,
             qkv_layout,
             workspace_opt,
-            swa,
             pad_between_seqs,
             is_training,
         )
@@ -499,11 +473,19 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 
 model_configs_swa = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
     "swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
     "swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
     "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    "swa_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
+    "swa_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
+    "swa_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    "swa_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
 }
 
 
@@ -622,7 +604,6 @@ def _run_dot_product_attention(
     ckpt_attn: bool,
     qkv_layout: str,
     workspace_opt: bool,
-    swa: bool,
     pad_between_seqs: bool,
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -637,6 +618,8 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
@@ -733,11 +716,6 @@ def _run_dot_product_attention(
                 attention_mask_q.to(device="cuda"),
                 attention_mask_kv.to(device="cuda"),
             )
-    window_size = None
-    if swa:
-        window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
-    elif "causal" in config.attn_mask_type:
-        window_size, attention_mask = (-1, 0), None
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -902,7 +880,7 @@ def _run_dot_product_attention(
         q,
         k,
         v,
-        window_size=window_size,
+        window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
         max_seqlen_q=config.max_seqlen_q,
@@ -1121,6 +1099,8 @@ def _run_transformer_layer(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
     inp = torch.randn(
@@ -1279,6 +1259,9 @@ def _rmse(a, b):
 def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
     config = model_configs_fp8_vs_f16[model]
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
@@ -1457,6 +1440,9 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout)
@@ -1741,6 +1727,8 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
         -100,
@@ -1794,6 +1782,8 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
     inp.requires_grad = True
