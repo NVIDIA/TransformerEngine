@@ -61,8 +61,8 @@ CommGemmOverlapBase::CommGemmOverlapBase(
   }
 
   _atomic_gemm = atomic_gemm;
-  _tp_size = localsize;
-  _tp_id = worldrank % localsize;
+  _tp_size = tp_size;
+  _tp_id = worldrank % _tp_size;
   _num_splits = num_splits;
   _cga_size = cga_size;
   _use_ce = static_cast<int>(use_ce);
@@ -453,6 +453,7 @@ CommGemmOverlapP2P::CommGemmOverlapP2P(
     int tp_size, int num_max_streams, int cga_size, int num_comm_sms, bool set_sm_margin,
     bool use_ce, bool atomic_gemm, bool aggregate, bool is_reduce_scatter,
     std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
+    std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle)
     : CommGemmOverlapBase(worldrank, worldsize, localrank, localsize, nodeid, numnodes, tp_size,
                           tp_size, num_max_streams, cga_size, num_comm_sms, set_sm_margin, use_ce,

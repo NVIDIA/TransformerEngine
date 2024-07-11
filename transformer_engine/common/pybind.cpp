@@ -22,8 +22,7 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)
       .value("kBFloat16", transformer_engine::DType::kBFloat16)
       .value("kFloat16", transformer_engine::DType::kFloat16)
-      .value("kFloat32", transformer_engine::DType::kFloat32)
-      .export_values();
+      .value("kFloat32", transformer_engine::DType::kFloat32);
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type")
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
@@ -34,20 +33,17 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("QGELU", NVTE_Activation_Type::QGELU)
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
-      .value("SREGLU", NVTE_Activation_Type::SREGLU)
-      .export_values();
+      .value("SREGLU", NVTE_Activation_Type::SREGLU);
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
       .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
-      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI)
-      .export_values();
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
   pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
       .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
-      .export_values();
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
@@ -63,18 +59,15 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
       .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)
-      .export_values();
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-      .export_values();
+      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
   pybind11::enum_<NVTE_Comm_Overlap_Type>(m, "NVTE_Comm_Overlap_Type")
       .value("AG", NVTE_Comm_Overlap_Type::ALL_GATHER)
-      .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
-      .export_values();
+      .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER);
   pybind11::enum_<NVTE_Comm_Overlap_Algo>(m, "NVTE_Comm_Overlap_Algo")
       .value("BULK_OVERLAP_RS", NVTE_Comm_Overlap_Algo::BULK_OVERLAP_RS)
       .value("BULK_OVERLAP_AG", NVTE_Comm_Overlap_Algo::BULK_OVERLAP_AG)
@@ -83,8 +76,7 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("SPLIT_PIPELINED_AG_P2P", NVTE_Comm_Overlap_Algo::SPLIT_PIPELINED_AG_P2P)
       .value("ATOMIC_GEMM_RS", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS)
       .value("ATOMIC_GEMM_RS_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_RS_P2P)
-      .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P)
-      .export_values();
+      .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P);
   m.attr("NVTE_COMM_OVERLAP_MAX_STREAMS") = pybind11::int_(NVTE_COMM_OVERLAP_MAX_STREAMS);
   m.def("device_supports_multicast", &transformer_engine::device_supports_multicast,
         pybind11::call_guard<pybind11::gil_scoped_release>());

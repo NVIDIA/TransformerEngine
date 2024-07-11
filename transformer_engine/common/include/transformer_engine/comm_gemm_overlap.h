@@ -41,8 +41,6 @@ enum NVTE_Comm_Overlap_Algo {
   ATOMIC_GEMM_RS_P2P = 7       // atomic GEMM              | point-2-point reduce-scatter
 };
 
-bool nvte_comm_overlap_supports_multicast();
-
 #ifdef __cplusplus
 }  // extern "C"
 
