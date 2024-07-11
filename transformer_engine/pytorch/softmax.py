@@ -21,18 +21,18 @@ THREADS_PER_BLOCK = 128
 _default_causal_mask = {}
 
 
-def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
+def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
     if sq == 1:
         return torch.zeros((1, sk), dtype=torch.bool, device="cuda")
 
-    matrix_shape = (sq, sk)
-    if matrix_shape not in _default_causal_mask:
-        diagonal_offset = sk - sq + 1
-        _default_causal_mask[matrix_shape] = torch.triu(
+    matrix_identifiers = (mask_type, sq, sk)
+    if matrix_identifiers not in _default_causal_mask:
+        diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1
+        _default_causal_mask[matrix_identifiers] = torch.triu(
             torch.ones(sq, sk, dtype=torch.bool, device="cuda"), diagonal=diagonal_offset
         )
-    return _default_causal_mask[matrix_shape]
+    return _default_causal_mask[matrix_identifiers]
 
 
 def _get_onnx_export_causal_mask(
@@ -332,10 +332,8 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.attn_mask_type == "arbitrary":
             return False  # Custom masks not supported
 
-        if self.attn_mask_type == "causal_bottom_right" or (
-            self.attn_mask_type == "causal" and sq == sk
-        ):  # fused causal softmax kernel
-            return True
+        if self.attn_mask_type == "causal" and sq != sk:
+            return False  # Fused causal kernel only support causal_bottom_right
 
         if (
             sq % 4 == 0  # sq must be divisor of 4
@@ -387,7 +385,7 @@ class FusedScaleMaskSoftmax(nn.Module):
                 assert self.kvcache_max_seq >= seq_len_k
                 mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
             else:
-                mask = _get_default_causal_mask(seq_len_q, seq_len_k)
+                mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
 
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":
