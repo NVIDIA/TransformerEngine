@@ -1017,14 +1017,14 @@ class AttnFuncWithCP(torch.autograd.Function):
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
-        max_seqlen_q = max_seqlen_q // cp_size
-        max_seqlen_kv = max_seqlen_kv // cp_size
         pad_between_seqs_q = not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
         pad_between_seqs_kv = not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
-        cu_seqlens_q_per_step = [None for _ in range(cp_size)]
-        cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
+        max_seqlen_q = max_seqlen_q // cp_size
+        max_seqlen_kv = max_seqlen_kv // cp_size
         cu_seqlens_q_padded = cu_seqlens_q_padded // cp_size
         cu_seqlens_kv_padded = cu_seqlens_kv_padded // cp_size
+        cu_seqlens_q_per_step = [None for _ in range(cp_size)]
+        cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
         if causal:
             if qkv_format == "bshd":
