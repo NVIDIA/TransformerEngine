@@ -1101,11 +1101,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                     kv_inputs[i % 2] = p2p_comm_buffers[i]
                     if causal:
                         if i == 0:
-                            if pad_between_seq_q:
+                            if pad_between_seqs_q:
                                 cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True)
                             else:
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
-                            if pad_between_seq_kv:
+                            if pad_between_seqs_kv:
                                 cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True)
                             else:
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
