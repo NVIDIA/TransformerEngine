@@ -10,16 +10,22 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,
                                       const bool zero_centered_gamma) {
-  auto dx = at::empty_like(x);
-  auto dgamma = at::empty_like(gamma);
-  auto dbeta = at::empty_like(gamma);
+  const auto &dz_ = dz.contiguous();
+  const auto &x_ = x.contiguous();
+  const auto &mu_ = mu.contiguous();
+  const auto &rsigma_ = rsigma.contiguous();
+  const auto &gamma_ = gamma.contiguous();
+
+  auto dx = at::empty_like(x_);
+  auto dgamma = at::empty_like(gamma_);
+  auto dbeta = at::empty_like(gamma_);
   transformer_engine::TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
 
-  auto dz_cu = makeTransformerEngineTensor(dz);
-  auto x_cu = makeTransformerEngineTensor(x);
-  auto mu_cu = makeTransformerEngineTensor(mu);
-  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
-  auto gamma_cu = makeTransformerEngineTensor(gamma);
+  auto dz_cu = makeTransformerEngineTensor(dz_);
+  auto x_cu = makeTransformerEngineTensor(x_);
+  auto mu_cu = makeTransformerEngineTensor(mu_);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma_);
+  auto gamma_cu = makeTransformerEngineTensor(gamma_);
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
   auto dbeta_cu = makeTransformerEngineTensor(dbeta);
@@ -76,6 +82,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
     const int scale_offset, const int amax_offset, const int scale_inv_offset) {
   using namespace transformer_engine;
 
+  const auto &input_ = input.contiguous();
+  const auto &weight_ = weight.contiguous();
+  const auto &bias_ = bias.contiguous();
+
   // Choose kernel implementation
   const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
 
@@ -92,9 +102,9 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
   DType itype = GetTransformerEngineDType(input.scalar_type());
   auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
   auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-  auto input_cu = makeTransformerEngineTensor(input);
-  auto gamma_cu = makeTransformerEngineTensor(weight);
-  auto beta_cu = makeTransformerEngineTensor(bias);
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto gamma_cu = makeTransformerEngineTensor(weight_);
+  auto beta_cu = makeTransformerEngineTensor(bias_);
   auto z_cu = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype, amax_dptr, scale_dptr,
                                           scale_inv_dptr);
   auto mu_cu = makeTransformerEngineTensor(mu);
@@ -174,14 +184,19 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight,
 std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
                                     const int sm_margin, const bool zero_centered_gamma) {
-  auto dx = at::empty_like(x);
-  auto dgamma = at::empty_like(gamma);
+  const auto &dz_ = dz.contiguous();
+  const auto &x_ = x.contiguous();
+  const auto &rsigma_ = rsigma.contiguous();
+  const auto &gamma_ = gamma.contiguous();
+
+  auto dx = at::empty_like(x_);
+  auto dgamma = at::empty_like(gamma_);
   transformer_engine::TensorWrapper workspace, barrier, dgamma_part;
 
-  auto dz_cu = makeTransformerEngineTensor(dz);
-  auto x_cu = makeTransformerEngineTensor(x);
-  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
-  auto gamma_cu = makeTransformerEngineTensor(gamma);
+  auto dz_cu = makeTransformerEngineTensor(dz_);
+  auto x_cu = makeTransformerEngineTensor(x_);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma_);
+  auto gamma_cu = makeTransformerEngineTensor(gamma_);
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
@@ -234,6 +249,9 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
                                                 const int scale_inv_offset) {
   using namespace transformer_engine;
 
+  const auto &input_ = input.contiguous();
+  const auto &weight_ = weight.contiguous();
+
   // Choose kernel implementation
   const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
 
@@ -249,8 +267,8 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
   // Construct Transformer Engine tensors
   DType itype = GetTransformerEngineDType(input.scalar_type());
   auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-  auto input_cu = makeTransformerEngineTensor(input);
-  auto gamma_cu = makeTransformerEngineTensor(weight);
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto gamma_cu = makeTransformerEngineTensor(weight_);
   auto z_cu = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype, amax_dptr, scale_dptr,
                                           scale_inv_dptr);
   auto rsigma_cu = makeTransformerEngineTensor(rsigma);
