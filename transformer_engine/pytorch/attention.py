@@ -3177,10 +3177,10 @@ class FlashAttention(torch.nn.Module):
 
         if qkv_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
-            output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
+            output = output.view(batch_size, max_seqlen_q//cp_size, -1).transpose(0, 1).contiguous()
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
-            output = output.view(batch_size, max_seqlen_q, -1).contiguous()
+            output = output.view(batch_size, max_seqlen_q//cp_size, -1).contiguous()
         elif qkv_format == "thd":
             # thd -> t(hd)
             output = output.view(output.shape[0], -1).contiguous()
