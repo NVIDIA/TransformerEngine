@@ -25,6 +25,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
@@ -46,7 +47,7 @@
 
 #include "common/util/logging.h"
 
-namespace transformer_engine {
+namespace transformer_engine_torch {
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
@@ -81,7 +82,7 @@ enum FP8BwdTensors {
   GRAD_INPUT3 = 5
 };
 
-}  // namespace transformer_engine
+}  // namespace transformer_engine_torch
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);

@@ -54,7 +54,7 @@ def parse_args(argv=None, namespace=None):
     )
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
     parser.add_argument(
-        "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+        "--fp8", action="store_true", default=False, help="Enable FP8 GEMM."
     )
     parser.add_argument(
         "--p2p", action="store_true", default=False, help="Test overlap with P2P comms."
@@ -193,12 +193,20 @@ def main(opts):
         global_tmp = global_data.cuda()
         dist.all_gather_into_tensor(global_tmp, local_data.cuda(), group=pg)
         global_data.copy_(global_tmp.cpu())
+        global_tmp = torch.Tensor()
+
+    def bcast_callback(data: torch.Tensor, src: int, group: str):
+        pg = None if group == "world" else tp_group
+        data_tmp = data.cuda()
+        dist.broadcast(data_tmp, src, pg)
+        data.copy_(data_tmp.cpu())
+        data_tmp = torch.Tensor()
 
     def barrier_callback(group: str):
         pg = None if group == "world" else tp_group
         dist.barrier(group=pg)
 
-    tex.set_bootstrap_callbacks(allgather_callback, barrier_callback)
+    tex.set_comm_overlap_callbacks(allgather_callback, bcast_callback, barrier_callback)
 
     if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS:
         if opts.bulk_overlap:
@@ -233,11 +241,14 @@ def main(opts):
     hidden_size = opts.num_heads * opts.head_dim
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
-    sample_buffer = torch.empty(
-        (outer_size, hidden_size), dtype=torch.uint8 if opts.fp8 else torch.bfloat16, device="cuda"
+    ubuf_dtype = (
+        torch.uint8
+        if opts.fp8 and opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG
+        else torch.bfloat16
     )
+    sample_buffer = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
     ub_obj = ub_obj = (
-        tex.UbufP2PCommOverlap(
+        tex.CommGemmOverlapP2P(
             sample_buffer,
             world_rank,
             world_size,
@@ -256,7 +267,7 @@ def main(opts):
             opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS,  # is_reduce_scatter
         )
         if opts.p2p
-        else tex.UbufCommOverlap(
+        else tex.CommGemmOverlap(
             sample_buffer,
             world_rank,
             world_size,
@@ -278,8 +289,9 @@ def main(opts):
     # Numerical check on AG + atomic GEMM requires testing an AG+RS pair
     ub_obj2 = None
     if opts.atomic and opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG and opts.check_numerics:
+        sample_buffer2 = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
         ub_obj2 = tex.UbufP2PCommOverlap(
-            sample_buffer,
+            sample_buffer2,
             world_rank,
             world_size,
             local_rank,
@@ -493,7 +505,6 @@ def main(opts):
     torch.cuda.synchronize()
 
     if opts.fp8:
-        fp8_output = opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS
         for i in range(total_iters):
             start_events[i].record()
             all_outputs = tex.fp8_gemm(
@@ -505,7 +516,7 @@ def main(opts):
                 fp8_meta.scale_inv,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype,
-                torch.uint8 if fp8_output else torch.bfloat16,
+                torch.bfloat16,
                 te.module.base.get_workspace(),
                 bias=None,
                 use_bias=False,
@@ -514,9 +525,6 @@ def main(opts):
                 ub_algo=ub_algo,
                 ub=ub_obj,
                 extra_output_tensor=rs_out,
-                D_dtype=fp8_dtype if fp8_output else None,
-                fp8_meta_tensor=fp8_meta if fp8_output else None,
-                out_index=tex.FP8FwdTensors.GEMM1_OUTPUT if fp8_output else None,
                 out=ubuf_out,
             )
             end_events[i].record()
@@ -536,7 +544,7 @@ def main(opts):
                     fp8_meta.scale_inv,
                     tex.FP8FwdTensors.GEMM2_INPUT,
                     fp8_dtype,
-                    torch.uint8,
+                    torch.bfloat16,
                     te.module.base.get_workspace(),
                     bias=None,
                     use_bias=None,
@@ -545,9 +553,6 @@ def main(opts):
                     ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P,
                     ub=ub_obj2,
                     extra_output_tensor=rs_out2,
-                    D_dtype=fp8_dtype,
-                    fp8_meta_tensor=fp8_meta,
-                    out_index=tex.FP8FwdTensors.GEMM2_OUTPUT,
                     out=ubuf_out2
                 )
     else:

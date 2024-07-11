@@ -72,8 +72,8 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
       .export_values();
   pybind11::enum_<NVTE_Comm_Overlap_Type>(m, "NVTE_Comm_Overlap_Type")
-      .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
       .value("AG", NVTE_Comm_Overlap_Type::ALL_GATHER)
+      .value("RS", NVTE_Comm_Overlap_Type::REDUCE_SCATTER)
       .export_values();
   pybind11::enum_<NVTE_Comm_Overlap_Algo>(m, "NVTE_Comm_Overlap_Algo")
       .value("BULK_OVERLAP_RS", NVTE_Comm_Overlap_Algo::BULK_OVERLAP_RS)
@@ -86,7 +86,7 @@ PYBIND11_MODULE(transformer_engine_common, m) {
       .value("ATOMIC_GEMM_AG_P2P", NVTE_Comm_Overlap_Algo::ATOMIC_GEMM_AG_P2P)
       .export_values();
   m.attr("NVTE_COMM_OVERLAP_MAX_STREAMS") = pybind11::int_(NVTE_COMM_OVERLAP_MAX_STREAMS);
-  m.def("comm_overlap_supports_multicast", &nvte_comm_overlap_supports_multicast,
+  m.def("device_supports_multicast", &transformer_engine::device_supports_multicast,
         pybind11::call_guard<pybind11::gil_scoped_release>());
 }  // PYBIND11_MODULE
 

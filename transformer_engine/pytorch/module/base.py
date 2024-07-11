@@ -89,6 +89,13 @@ def initialize_ub(
     """Initialize communicators for TP comm overlap using userbuffers."""
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
+    if not tex.device_supports_multicast():
+        assert (
+            bool(os.getenv("UB_SKIPMC", "0"))
+        ), (
+            "CUDA device, driver and/or toolkit version does not support CUDA Multicast for "
+            + "comm+GEMM overlap. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+        )
     _ub_communicators = {}
     world_group = torch.distributed.new_group(backend="nccl")
     world_rank = torch.distributed.get_rank(world_group)
@@ -122,17 +129,22 @@ def initialize_ub(
         intra_node_ranks = torch.tensor(intra_node_ranks, dtype=torch.int64, device="cuda")
         all_intra_node_ranks = torch.zeros(world_size, local_size, dtype=torch.int64, device="cuda")
         torch.distributed.all_gather_into_tensor(all_intra_node_ranks, intra_node_ranks)
+
         device_mesh = []
         for rank in range(world_size):
             node = all_intra_node_ranks[rank, :].tolist()
             if node not in device_mesh:
                 device_mesh.append(node)
-        assert len(device_mesh) == num_nodes, "Internal TE error: Could not infer device mesh."
+        assert len(device_mesh) == num_nodes, "Internal TE error: Could not infer inter-node ranks"
+
         device_mesh = torch.tensor(device_mesh, dtype=int, device="cpu")
         rank_idx = (device_mesh == world_rank).nonzero()
         node_id = rank_idx[0, 0].item()
+        inter_node_ranks = device_mesh[:, rank_idx[0, 1].item()].tolist()
+        inter_node_group = torch.distributed.new_group(backend="nccl", ranks=inter_node_ranks)
     else:
         node_id = 0
+        inter_node_group = None
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -237,7 +249,7 @@ def initialize_ub(
             shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
         )
         if method == "ring_exchange":
-            ub_obj = tex.UbufP2PCommOverlap(
+            ub_obj = tex.CommGemmOverlapP2P(
                 sample_buffer,  # Sample userbuffer
                 world_rank,  # Global rank
                 world_size,  # Number of global ranks
@@ -256,7 +268,7 @@ def initialize_ub(
                 is_reduce_scatter,  # Overlapped collective is reduce-scatter
             )
         else:
-            ub_obj = tex.UbufCommOverlap(
+            ub_obj = tex.CommGemmOverlap(
                 sample_buffer,  # Sample userbuffer
                 world_rank,  # Global rank
                 world_size,  # Number of global ranks
@@ -278,9 +290,13 @@ def initialize_ub(
     ub_pgs = {
         "world": world_group,
         "intra": intra_node_group,
+        "inter": inter_node_group,
     }
 
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
+        if group == "inter" and ub_pgs[group] is None:
+            return
+
         # Make sure the global tensor is sized correctly
         pg_size = torch.distributed.get_world_size(ub_pgs[group])
         assert global_data.numel() == pg_size * local_data.numel(), (
@@ -289,29 +305,42 @@ def initialize_ub(
         )
 
         # Move tensors to device if using NCCL backend
-        pg_backend = torch.distributed.get_backend(ub_pgs[group])
         assert (
             global_data.device == local_data.device == torch.device("cpu")
-        ), "Internal TE error: Bootstrap callbacks need to be called with host (CPU) tensors."
-        if pg_backend == torch.distributed.Backend.NCCL:
-            global_tmp = global_data.cuda()
-            local_tmp = local_data.cuda()
-        else:
-            global_tmp = global_data
-            local_tmp = local_data
+        ), "Internal TE error: Comm+GEMM overlap bootstrap callbacks need host (CPU) tensors."
+        global_tmp = global_data.cuda()
+        local_tmp = local_data.cuda()
 
         torch.distributed.all_gather_into_tensor(global_tmp, local_tmp, group=ub_pgs[group])
 
-        # Copy global tensor from CUDA back to original CPU tensor
-        if pg_backend == torch.distributed.Backend.NCCL:
-            global_data.copy_(global_tmp.cpu())
-            global_tmp.data = torch.Tensor()
-            local_tmp.data = torch.Tensor()
+        # Copy global tensor from CUDA back to original CPU tensor and clear temporary tensors
+        global_data.copy_(global_tmp.cpu())
+        global_tmp.data = torch.Tensor()
+        local_tmp.data = torch.Tensor()
+
+    def bcast_callback(data: torch.Tensor, src: int, group: str):
+        if group == "inter" and ub_pgs[group] is None:
+            return
+
+        # Move tensor to device if using NCCL backend
+        assert (
+            data.device == torch.device("cpu")
+        ), "Internal TE error: Comm+GEMM overlap bootstrap callbacks need host (CPU) tensors."
+        data_tmp = data.cuda()
+
+        torch.distributed.broadcast(data, src, ub_pgs[group])
+
+        # Copy global tensor from CUDA back to original CPU tensor and clear temporary tensor
+        data.copy_(data_tmp.cpu())
+        data_tmp.data = torch.Tensor()
 
     def barrier_callback(group: str):
+        if group == "inter" and ub_pgs[group] is None:
+            return
+
         torch.distributed.barrier(group=ub_pgs[group])
 
-    tex.set_bootstrap_callbacks(allgather_callback, barrier_callback)
+    tex.set_comm_overlap_callbacks(allgather_callback, bcast_callback, barrier_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:

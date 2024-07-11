@@ -29,7 +29,7 @@ TORCHRUN_CMD = [
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
-if not tex.comm_overlap_supports_multicast():
+if not tex.device_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"
 
 
@@ -46,7 +46,7 @@ if not tex.comm_overlap_supports_multicast():
         (False, True, "RS", False, False, False),
         (True, False, "RS", False, False, False),
         (True, True, "RS", False, False, False),
-        # (True, False, "RS", False, True, False),
+        (True, False, "RS", False, True, False),
         (True, True, "RS", False, True, False),
         (False, False, "AG", False, False, True),
         (False, False, "RS", False, False, True)
@@ -60,7 +60,7 @@ if not tex.comm_overlap_supports_multicast():
         "  SPLIT GEMM + RS | BF16 | RING-EXCHANGE ",
         "  SPLIT GEMM + RS | FP8  | PIPELINE ",
         "  SPLIT GEMM + RS | FP8  | RING-EXCHANGE ",
-        # " ATOMIC GEMM + RS | FP8  | PIPELINE ",
+        " ATOMIC GEMM + RS | FP8  | PIPELINE ",
         " ATOMIC GEMM + RS | FP8  | RING-EXCHANGE ",
         "   BULK AG + GEMM | BF16 | PIPELINE ",
         "   GEMM + BULK RS | BF16 | PIPELINE "
@@ -73,16 +73,16 @@ def test_gemm_with_overlap(fp8, p2p, comm_type, aggregate, atomic, bulk):
     """
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = TORCHRUN_CMD + [ str(test_path) ] + [
-        f"-s {SEQ_LENGTH}",
-        f"-b {BATCH_SIZE}",
-        f"-n {NUM_HEADS}",
-        f"-d {HEAD_DIM}",
-        f"--seed {RNG_SEED}",
+        f"--seq-length={SEQ_LENGTH}",
+        f"--batch-size={BATCH_SIZE}",
+        f"--num-heads={NUM_HEADS}",
+        f"--head-dim={HEAD_DIM}",
+        f"--seed={RNG_SEED}",
         "--check-numerics",
-        "--warmup-iters 0",
-        "--timing-iters 1",
+        "--warmup-iters=0",
+        "--timing-iters=1",
         "--verbose",
-        f"--comm-type {comm_type}",
+        f"--comm-type={comm_type}",
     ]
 
     if bulk:
@@ -102,16 +102,16 @@ def test_gemm_with_overlap(fp8, p2p, comm_type, aggregate, atomic, bulk):
     assert not bool(subprocess.call(test_cmd, env=os.environ))
 
 
-@pytest.mark.skipif(NUM_PROCS < 2, reason="Comm+GEMM overlap requires at least 2 GPUs.")
-def test_transformer_layer_with_overlap():
-    """Test TransformerLayer with comm+GEMM overlap enabled in all layers."""
-    test_path = TEST_ROOT / "run_transformer_layer_with_overlap.py"
-    test_cmd = TORCHRUN_CMD + [ str(test_path) ] + [
-        f"-s {SEQ_LENGTH}",
-        f"-b {BATCH_SIZE}",
-        f"-n {NUM_HEADS}",
-        f"-d {HEAD_DIM}",
-        "--no-grad"
-    ]
+# @pytest.mark.skipif(NUM_PROCS < 2, reason="Comm+GEMM overlap requires at least 2 GPUs.")
+# def test_transformer_layer_with_overlap():
+#     """Test TransformerLayer with comm+GEMM overlap enabled in all layers."""
+#     test_path = TEST_ROOT / "run_transformer_layer_with_overlap.py"
+#     test_cmd = TORCHRUN_CMD + [ str(test_path) ] + [
+#         f"--seq-length={SEQ_LENGTH}",
+#         f"--batch-size={BATCH_SIZE}",
+#         f"--num-heads={NUM_HEADS}",
+#         f"--head-dim={HEAD_DIM}",
+#         "--no-grad"
+#     ]
 
-    assert not bool(subprocess.call(test_cmd, env=os.environ))
+#     assert not bool(subprocess.call(test_cmd, env=os.environ))

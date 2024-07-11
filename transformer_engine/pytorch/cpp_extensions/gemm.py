@@ -34,7 +34,7 @@ def fp8_gemm(
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     ub_algo: tex.NVTE_Comm_Overlap_Algo = None,
-    ub: Union[tex.UbufCommOverlap, tex.UbufP2PCommOverlap] = None,
+    ub: Union[tex.CommGemmOverlap, tex.CommGemmOverlapP2P] = None,
     extra_output_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
@@ -187,7 +187,7 @@ def gemm(
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
     ub_algo: tex.NVTE_Comm_Overlap_Algo = None,
-    ub: tex.UbufCommOverlap = None,
+    ub: Union[tex.CommGemmOverlap, tex.CommGemmOverlapP2P] = None,
     extra_output_tensor: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
