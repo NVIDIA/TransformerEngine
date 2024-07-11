@@ -98,7 +98,7 @@ class ActLuPrimitive(BasePrimitive):
 
         out = custom_caller(ActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(x, act_enum):
@@ -226,7 +226,7 @@ class DActLuPrimitive(BasePrimitive):
 
         out = custom_caller(DActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(dz, x, act_enum):
