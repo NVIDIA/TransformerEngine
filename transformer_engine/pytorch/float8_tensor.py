@@ -563,6 +563,23 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
+    def contiguous(
+        self,
+        *,
+        memory_format: torch.memory_format = torch.contiguous_format,
+    ) -> Float8Tensor:
+        """Returns tensor with data in provided memory format
+
+        Returns `self` if data is already in correct memory format.
+
+        """
+        if self._data.is_contiguous(memory_format=memory_format):
+            return self
+        return _IdentityFunc.apply(
+            self,
+            {"data": self._data.detach().contiguous(memory_format=memory_format)},
+        )
+
     def transpose_2d(
         self,
         *,
@@ -883,6 +900,22 @@ class Float8Tensor(torch.Tensor):
                 args[0],
                 data=args[0]._data,
                 fp8_attrs=args[0]._fp8_attrs,
+            )
+
+        # View op
+        if func == aten.view.default:
+            tensor = args[0]
+            data = tensor._data
+            data_view = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(
+                tensor,
+                data=data_view,
+                fp8_attrs=tensor._fp8_attrs,
             )
 
         def maybe_unwrap(t):

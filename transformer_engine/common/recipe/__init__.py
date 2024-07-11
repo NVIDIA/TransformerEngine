@@ -162,5 +162,6 @@ class DelayedScaling:
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
             f"wgrad_override={self.override_linear_precision.wgrad}, "
-            f"reduce_amax={self.reduce_amax}"
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}"
         )
