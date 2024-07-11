@@ -162,17 +162,3 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Install core library
 install(TARGETS transformer_engine DESTINATION .)
-
-#######################################################################################
-# PyBind11 Extensions
-#######################################################################################
-find_package(pybind11 CONFIG REQUIRED)
-pybind11_add_module(transformer_engine_common pybind.cpp)
-target_include_directories(transformer_engine_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(transformer_engine_common PUBLIC transformer_engine)
-
-# Install
-set_source_files_properties(pybind.cpp
-                            PROPERTIES
-                            COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
-install(TARGETS transformer_engine_common DESTINATION .)
