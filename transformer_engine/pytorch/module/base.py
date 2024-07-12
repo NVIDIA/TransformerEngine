@@ -85,6 +85,7 @@ def initialize_ub(
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
+    bootstrap_backend: str = None,
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
     global _ub_communicators
@@ -97,9 +98,22 @@ def initialize_ub(
             + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
         )
     _ub_communicators = {}
-    world_group = torch.distributed.new_group(backend="nccl")
+
+    assert torch.distributed.is_initialized()
+    if bootstrap_backend is None:
+        bootstrap_backend = "nccl"
+        if torch.distributed.is_gloo_available():
+            bootstrap_backend = "gloo"
+        elif torch.distributed.is_mpi_available():
+            bootstrap_backend = "mpi"
+
+    world_group = torch.distributed.new_group(backend=bootstrap_backend)
     world_rank = torch.distributed.get_rank(world_group)
     world_size = torch.distributed.get_world_size(world_group)
+
+    if world_rank == 0:
+        print(f"Bootstrapping Userbuffers with backend=\"{bootstrap_backend}\"\n", end='',
+              flush=True)
 
     # Construct an intra-node communicator -- this should include ALL ranks in the node
     # NOTE: This may be different than the tensor-parallel group (e.g. two TP groups in a node),
@@ -116,35 +130,22 @@ def initialize_ub(
         intra_node_group = world_group
         local_rank = world_rank
         local_size = world_size
+        intra_node_group = list(range(world_size))
     else:
-        intra_node_group = torch.distributed.new_group(backend="nccl", ranks=intra_node_ranks)
+        intra_node_group = torch.distributed.new_group(backend=bootstrap_backend,
+                                                       ranks=intra_node_ranks)
         local_rank = torch.distributed.get_rank(intra_node_group)
         local_size = torch.distributed.get_world_size(intra_node_group)
 
-    # Determine node ID as the row index of the world rank in a 2D device mesh that we construct
-    # from all-gathered intra-node (local) ranks -- this avoids any assumptions about world rank
-    # ordering within the node.
+    node_id = world_rank // local_size
     num_nodes = world_size // local_size
-    if num_nodes > 1:
-        intra_node_ranks = torch.tensor(intra_node_ranks, dtype=torch.int64, device="cuda")
-        all_intra_node_ranks = torch.zeros(world_size, local_size, dtype=torch.int64, device="cuda")
-        torch.distributed.all_gather_into_tensor(all_intra_node_ranks, intra_node_ranks)
-
-        device_mesh = []
-        for rank in range(world_size):
-            node = all_intra_node_ranks[rank, :].tolist()
-            if node not in device_mesh:
-                device_mesh.append(node)
-        assert len(device_mesh) == num_nodes, "Internal TE error: Could not infer inter-node ranks"
-
-        device_mesh = torch.tensor(device_mesh, dtype=int, device="cpu")
-        rank_idx = (device_mesh == world_rank).nonzero()
-        node_id = rank_idx[0, 0].item()
-        inter_node_ranks = device_mesh[:, rank_idx[0, 1].item()].tolist()
-        inter_node_group = torch.distributed.new_group(backend="nccl", ranks=inter_node_ranks)
-    else:
-        node_id = 0
-        inter_node_group = None
+    if local_rank == 0:
+        print(
+            f"Found {num_nodes} physical node{'s' if num_nodes > 1 else ''}\n"
+            + f"Global ranks on node {node_id}: {intra_node_ranks}\n",
+            end='',
+            flush=True
+        )
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -290,54 +291,27 @@ def initialize_ub(
     ub_pgs = {
         "world": world_group,
         "intra": intra_node_group,
-        "inter": inter_node_group,
     }
 
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
-        if group == "inter" and ub_pgs[group] is None:
-            return
-
-        # Make sure the global tensor is sized correctly
-        pg_size = torch.distributed.get_world_size(ub_pgs[group])
-        assert global_data.numel() == pg_size * local_data.numel(), (
-            "Internal TE error: Incorrect global tensor size, "
-            f"expected {pg_size * local_data.numel()} but got {global_data.numel()}."
-        )
-
-        # Move tensors to device if using NCCL backend
-        assert (
-            global_data.device == local_data.device == torch.device("cpu")
-        ), "Internal TE error: Comm+GEMM overlap bootstrap callbacks need host (CPU) tensors."
-        global_tmp = global_data.cuda()
-        local_tmp = local_data.cuda()
-
+        global_tmp = global_data.cuda() if bootstrap_backend == "nccl" else global_data
+        local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else global_data
         torch.distributed.all_gather_into_tensor(global_tmp, local_tmp, group=ub_pgs[group])
 
-        # Copy global tensor from CUDA back to original CPU tensor and clear temporary tensors
-        global_data.copy_(global_tmp.cpu())
-        global_tmp.data = torch.Tensor()
-        local_tmp.data = torch.Tensor()
+        if bootstrap_backend == "nccl":
+            global_data.copy_(global_tmp.cpu())
+            global_tmp.data = torch.Tensor()
+            local_tmp.data = torch.Tensor()
 
     def bcast_callback(data: torch.Tensor, src: int, group: str):
-        if group == "inter" and ub_pgs[group] is None:
-            return
+        data_tmp = data.cuda() if bootstrap_backend == "nccl" else data
+        torch.distributed.broadcast(data_tmp, src, ub_pgs[group])
 
-        # Move tensor to device if using NCCL backend
-        assert (
-            data.device == torch.device("cpu")
-        ), "Internal TE error: Comm+GEMM overlap bootstrap callbacks need host (CPU) tensors."
-        data_tmp = data.cuda()
-
-        torch.distributed.broadcast(data, src, ub_pgs[group])
-
-        # Copy global tensor from CUDA back to original CPU tensor and clear temporary tensor
-        data.copy_(data_tmp.cpu())
-        data_tmp.data = torch.Tensor()
+        if bootstrap_backend == "nccl":
+            data.copy_(data_tmp.cpu())
+            data_tmp.data = torch.Tensor()
 
     def barrier_callback(group: str):
-        if group == "inter" and ub_pgs[group] is None:
-            return
-
         torch.distributed.barrier(group=ub_pgs[group])
 
     tex.set_comm_overlap_callbacks(allgather_callback, bcast_callback, barrier_callback)
