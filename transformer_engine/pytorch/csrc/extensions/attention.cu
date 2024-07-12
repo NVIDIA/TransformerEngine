@@ -102,6 +102,9 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   // create output tensor O
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty(o_shape, options);
+  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    O.fill_(0);
+  }
 
   // construct NVTE tensors
   TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens, te_cu_seqlens_padded;
@@ -253,6 +256,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   // create output tensor dQKV
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
   at::Tensor dQKV = torch::empty_like(QKV, options);
+  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    dQKV.fill_(0);
+  }
 
   // construct NVTE tensors
   TensorWrapper te_QKV, te_O, te_dO, te_S, te_dP, te_dQKV;
@@ -328,6 +334,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
     }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
+    }
   }
 
   // create cu_seqlens tensorwrappers
@@ -399,6 +408,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   // create output tensor O
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty(o_shape, options);
+  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    O.fill_(0);
+  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_KV, te_S, te_O, te_Bias, te_cu_seqlens_q, te_cu_seqlens_kv;
@@ -573,6 +585,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
   at::Tensor dQ = torch::empty_like(Q, options);
   at::Tensor dKV = torch::empty_like(KV, options);
+  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    dQ.fill_(0);
+    dKV.fill_(0);
+  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_KV, te_O, te_dO, te_S, te_dP, te_dQ, te_dKV;
@@ -684,6 +700,9 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
     }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
+    }
   }
 
   // create workspace
@@ -743,6 +762,9 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // create output tensor O
   auto O = torch::empty_like(Q);
+  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    O.fill_(0);
+  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias;
@@ -927,6 +949,9 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
+      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+        dQKV.fill_(0);
+      }
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1)})
@@ -944,6 +969,9 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
+      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+        dQKV.fill_(0);
+      }
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1)})
                .squeeze(tmp_shape.size() - 2);
@@ -959,6 +987,10 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
+      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+        dQ.fill_(0);
+        dKV.fill_(0);
+      }
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1)})
@@ -973,6 +1005,10 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
+      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+        dQ.fill_(0);
+        dKV.fill_(0);
+      }
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1)})
                .squeeze(tmp_shape.size() - 2);
@@ -984,6 +1020,11 @@ std::vector<at::Tensor> fused_attn_bwd(
       dQ = torch::empty_like(Q, options);
       dK = torch::empty_like(K, options);
       dV = torch::empty_like(V, options);
+      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+        dQ.fill_(0);
+        dK.fill_(0);
+        dV.fill_(0);
+      }
       break;
     default:
       NVTE_ERROR("QKV layout not supported!");
@@ -1108,6 +1149,9 @@ std::vector<at::Tensor> fused_attn_bwd(
                             static_cast<int64_t>(max_seqlen_kv)},
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
     }
   }
 
