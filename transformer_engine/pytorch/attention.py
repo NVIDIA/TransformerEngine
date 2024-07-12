@@ -1894,12 +1894,16 @@ class AttnFuncWithCP(torch.autograd.Function):
         dout = dout.view(*q.shape)
         # Flash Attn outputs
         dq = torch.empty_like(q)
+        if ctx.qkv_format == "thd" and causal:
+            dq[cu_seqlens_q_padded[-1]:].fill_(0)
 
         p2p_comm_buffers = [
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
         ]
         p2p_comm_buffers[0][0].copy_(kv)
+        if ctx.qkv_format == "thd" and causal:
+            p2p_comm_buffers[0][1][cu_seqlens_kv_padded[-1]:].fill_(0)
         send_recv_reqs = []
 
         fa_optional_backward_kwargs = {}
