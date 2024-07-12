@@ -594,7 +594,7 @@ def fused_attn_fwd_qkvpacked(
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen, h, d], fill_value=0, dtype=qkv.dtype)
@@ -680,7 +680,7 @@ def fused_attn_bwd_qkvpacked(
     ), "Fused attention does not support this input combination."
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
@@ -688,7 +688,7 @@ def fused_attn_bwd_qkvpacked(
         dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
 
     if bias_type != "no_bias":
-        if qkv_format == 'thd':
+        if qkv_format == "thd":
             dbias = paddle.zero(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
         else:
             dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
@@ -782,7 +782,7 @@ def fused_attn_fwd_kvpacked(
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
@@ -880,7 +880,7 @@ def fused_attn_bwd_kvpacked(
     ), "Fused attention does not support this input combination."
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
@@ -889,7 +889,7 @@ def fused_attn_bwd_kvpacked(
         dq = paddle.empty(shape=q.shape, dtype=q.dtype)
         dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
     if bias_type != "no_bias":
-        if qkv_format == 'thd':
+        if qkv_format == "thd":
             dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
         else:
             dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
@@ -989,7 +989,7 @@ def fused_attn_fwd(
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
@@ -1087,7 +1087,7 @@ def fused_attn_bwd(
     ), "Fused attention does not support this input combination."
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == 'thd':
+    if qkv_format == "thd":
         set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
@@ -1098,7 +1098,7 @@ def fused_attn_bwd(
         dk = paddle.empty(shape=k.shape, dtype=k.dtype)
         dv = paddle.empty(shape=v.shape, dtype=v.dtype)
     if bias_type != "no_bias":
-        if qkv_format == 'thd':
+        if qkv_format == "thd":
             dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
         else:
             dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
