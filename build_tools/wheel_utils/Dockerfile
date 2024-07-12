@@ -4,6 +4,9 @@
 
 FROM quay.io/pypa/manylinux_2_28_x86_64
 
+WORKDIR /TransformerEngine/
+COPY ../.. /TransformerEngine/
+
 ARG VER="12-3"
 ARG ARCH="x86_64"
 RUN dnf -y install vim
@@ -28,4 +31,5 @@ ENV CUDA_ROOT=/usr/local/cuda
 ENV CUDA_PATH=/usr/local/cuda
 ENV CUDADIR=/usr/local/cuda
 
-CMD ["/bin/bash"]
+CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh"]
+
