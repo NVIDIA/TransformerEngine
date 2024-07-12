@@ -1432,7 +1432,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             else:
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
                             if pad_between_seqs_kv:
-                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, False)
+                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, (rank - i) % cp_size, True, False)
                             else:
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // (cp_size * 2)
                             if use_fused_attention:
@@ -1535,7 +1535,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             else:
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // (cp_size * 2)
                             if pad_between_seqs_kv:
-                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True)
+                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, (rank - i) % cp_size, True, True)
                             else:
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
                             if use_fused_attention:
@@ -1643,7 +1643,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         else:
                             cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
                         if pad_between_seqs_kv:
-                            cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True)
+                            cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, (rank - i) % cp_size, True, True)
                         else:
                             cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
                         if use_fused_attention:
