@@ -1742,7 +1742,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     else:
                         if qkv_format == "thd":
                             tex.thd_second_half_lse_correction(
-                                softmax_lse, softmax_lse_per_step[i - 1], cu_seqlens_q_padded, q.size(0)
+                                softmax_lse, softmax_lse_per_step[i - 1], cu_seqlens_q_padded, max_seqlen_q
                             )
                         else:
                             flash_attn_fwd_softmax_lse_correction(
@@ -1876,7 +1876,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         if causal:
             if ctx.qkv_format == "thd":
-                softmax_lse_ = tex.thd_read_second_half_lse(softmax_lse, cu_seqlens_q_padded, q.size(0))
+                softmax_lse_ = tex.thd_read_second_half_lse(softmax_lse, cu_seqlens_q_padded, ctx.max_seqlen_q)
             else:
                 # [b, np, sq] -> [b, np, 2, sq//2]
                 softmax_lse_ = softmax_lse.view(
