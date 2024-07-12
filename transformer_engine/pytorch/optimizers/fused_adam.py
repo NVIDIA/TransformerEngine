@@ -221,8 +221,8 @@ class FusedAdam(torch.optim.Optimizer):
             v_main_of_f16 = []
             p_extra_fp16_out = []
             p_extra_fp8_out = []
-            fp8_scale = []
-            fp8_amax = []
+            scales = []
+            amaxes = []
 
             # Only used when extra params include fp8 tensors. Otherwise, it doesn't matter what the out_dtype is.
             out_dtype = tex.DType.kFloat32
@@ -251,11 +251,10 @@ class FusedAdam(torch.optim.Optimizer):
                         "All extra parameters are the same as the original parameters, "
                         "no extra parameter will be updated. Set fuse_dtype_casting to False."
                     )
-                # else: extra params are different from the main params, so we need to update them.
+                # else: extra params are different from the main params, need to update them.
 
             if self.fuse_dtype_casting:
                 for p, p_extra in zip(group["params"], extra_group):
-                    # if p.data is the same as p_extra.data, then we don't need to update p_extra
                     if p.grad is None:
                         continue
                     if p.grad.data.is_sparse:
@@ -273,9 +272,9 @@ class FusedAdam(torch.optim.Optimizer):
                         out_dtype = p_extra._fp8_dtype
                         p_extra_fp8_out.append(p_extra._data.data)
                         scale, amax, scale_inv = get_fp8_meta(p_extra)
-                        scale_inv.copy_(scale.detach().reciprocal())
-                        fp8_scale.append(scale.data)
-                        fp8_amax.append(amax.data)
+                        # Don't forget to update scale_inv outside of this function
+                        scales.append(scale.data)
+                        amaxes.append(amax.data)
 
                         p_main_of_fp8.append(p.data)
                         g_main_of_fp8.append(p.grad.data)
@@ -358,8 +357,8 @@ class FusedAdam(torch.optim.Optimizer):
                             m_main_of_fp8,
                             v_main_of_fp8,
                             p_extra_fp8_out,
-                            fp8_scale,
-                            fp8_amax,
+                            scales,
+                            amaxes,
                         ],
                         group["lr"],
                         beta1,
