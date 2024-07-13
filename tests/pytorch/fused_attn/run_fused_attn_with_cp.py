@@ -107,7 +107,7 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
         q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim)
-        kv_input_shape = q_input_shape
+        kv_input_shape = (config.batch_size * config.max_seqlen_q, config.num_gqa_groups, config.head_dim)
         attn_output_shape = (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim)
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
