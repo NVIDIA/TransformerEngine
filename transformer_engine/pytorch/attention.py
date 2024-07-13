@@ -1264,6 +1264,9 @@ class AttnFuncWithCP(torch.autograd.Function):
             elif qkv_format == "sbhd":
                 # [s, b, np, hn] -> [2, s//2, b, np, hn]
                 q, k, v = [x.view(2, x.shape[0] // 2, *x.shape[1:]) for x in [q, k, v]]
+        total_tokens_kv = None if qkv_format != "thd" else k.shape[0]
+        # remove padded tokens at the end
+        k, v = [x if qkv_format != "thd" else x[:cu_seqlens_kv_padded[-1]] for x in [k, v]]
         if attn_bias is not None:
             assert len(attn_bias.shape) == 4, (
                 "Only support bias shape of [b, h, sq, sk] for forward, "
@@ -1830,6 +1833,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
+        ctx.total_tokens_kv = total_tokens_kv
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
         ctx.softmax_scale = softmax_scale
@@ -1902,8 +1906,6 @@ class AttnFuncWithCP(torch.autograd.Function):
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
         ]
         p2p_comm_buffers[0][0].copy_(kv)
-        if ctx.qkv_format == "thd" and causal:
-            p2p_comm_buffers[0][1][cu_seqlens_kv_padded[-1]:].fill_(0)
         send_recv_reqs = []
 
         fa_optional_backward_kwargs = {}
@@ -2380,6 +2382,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                 dq = dq.view(-1, *dq.shape[-3:])
                 # [2, 2, sk//2, b, np, hn] -> [2, sk, b, np, hn]
                 dkv = dkv.view(dkv.shape[0], -1, *dkv.shape[-3:])
+
+        if ctx.qkv_format == "thd":
+            dkv_ = torch.empty(2, ctx.total_tokens_kv, *dkv.shape[-2:], dtype=dkv.dtype, device=dkv.device)
+            dkv_[:, :cu_seqlens_kv_padded[-1]].copy_(dkv)
+            dkv_[:, cu_seqlens_kv_padded[-1]:].fill_(0)
+            dkv = dkv_
 
         if attn_dbias is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
