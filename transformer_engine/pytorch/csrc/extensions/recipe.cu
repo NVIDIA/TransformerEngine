@@ -51,3 +51,30 @@ void fused_amax_and_scale_update_after_reduction(
       te_scale_invs, amax_compute_algo.c_str(), static_cast<NVTEDType>(fp8_dtype), margin,
       at::cuda::getCurrentCUDAStream());
 }
+
+namespace {
+
+__global__ void __launch_bounds__(1) scalar_reciprocal_kernel(const float* __restrict__ src,
+                                                              float* __restrict__ dst,
+                                                              const float* __restrict__ noop) {
+  if (noop != nullptr && *noop == 1.f) {
+    return;
+  }
+  *dst = __frcp_rn(*src);
+}
+
+}  // namespace
+
+void scalar_reciprocal(const at::Tensor &src,
+                       at::Tensor dst,
+                       int64_t src_offset,
+                       int64_t dst_offset,
+                       const std::optional<at::Tensor> &noop_flag) {
+  const float* src_ptr = reinterpret_cast<const float*>(getDataPtr(src, src_offset));
+  float* dst_ptr = reinterpret_cast<float*>(getDataPtr(dst, dst_offset));
+  const float* noop_ptr = nullptr;
+  if (noop_flag) {
+    noop_ptr = reinterpret_cast<const float*>(getDataPtr(noop_flag.value()));
+  }
+  scalar_reciprocal_kernel<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(src_ptr, dst_ptr, noop_ptr);
+}

@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <optional>
+
 #include <pybind11/functional.h>
 
 #include "../comm_gemm_overlap.h"
@@ -137,6 +139,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
+  m.def("scalar_reciprocal", &scalar_reciprocal,
+        "Reciprocal of a single float",
+        py::call_guard<py::gil_scoped_release>(),
+        py::arg("src"), py::arg("dst"),
+        py::arg("src_offset") = 0, py::arg("dst_offset") = 0,
+        py::arg("noop_flag") = std::nullopt);
 
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",

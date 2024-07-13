@@ -739,17 +739,12 @@ class Float8Tensor(torch.Tensor):
             transpose_out=transpose,
             noop_flag=noop_flag,
         )
-        scale = fp8_meta.scale[fp8_meta_index : fp8_meta_index + 1]
-        scale_inv = self._scale_inv
-        if noop_flag is None:
-            torch.reciprocal(scale, out=scale_inv)
-        else:
-            torch.where(
-                noop_flag.bool(),
-                scale_inv,
-                scale.reciprocal(),
-                out=scale_inv,
-            )
+        tex.scalar_reciprocal(
+            fp8_meta.scale,
+            self._scale_inv,
+            src_offset=fp8_meta_index,
+            noop_flag=noop_flag,
+        )
         self._transpose_invalid = False
 
     @torch.no_grad()
@@ -853,7 +848,7 @@ class Float8Tensor(torch.Tensor):
                     fp8_meta_index = dst._fp8_meta_index
                     scale = dst._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
                     amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-                    dst._scale_inv.copy_(scale.detach().reciprocal())
+                    tex.scalar_reciprocal(scale, dst._scale_inv)
 
                 # Cast to FP8
                 if not dst._data.is_contiguous():

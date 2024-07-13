@@ -7,6 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <cstdint>
+#include <optional>
+#include <vector>
+
 #include "common.h"
 #include "common/common.h"
 
@@ -351,6 +355,12 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  std::vector<at::Tensor> scale_invs,
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype, float margin);
+
+void scalar_reciprocal(const at::Tensor &src,
+                       at::Tensor dst,
+                       int64_t src_offset = 0,
+                       int64_t dst_offset = 0,
+                       const std::optional<at::Tensor> &noop_flag = std::nullopt);
 
 /***************************************************************************************************
  * Rotary positional embedding
