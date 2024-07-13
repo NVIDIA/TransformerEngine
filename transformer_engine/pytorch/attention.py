@@ -1986,7 +1986,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dq_ = torch.zeros_like(q_)
                         # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                         kv_ = kv.view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.zeros_like(kv_)
+                        dkv_ = torch.empty_like(kv_)
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
@@ -2071,7 +2071,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         else:
                             # [2, b, 2, sk//2, np, hn]->[2, b, sk//2, np, hn]->[2, b*sk//2, np, hn]
                             kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.zeros_like(kv_)
+                        dkv_ = torch.empty_like(kv_)
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
@@ -2158,7 +2158,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dq_ = torch.zeros_like(q_)
                         # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                         kv_ = kv.view(2, -1, *kv.shape[-2:])
-                        dkv_ = torch.zeros_like(kv_)
+                        dkv_ = torch.empty_like(kv_)
                         if ctx.qkv_format == "thd":
                             out_ = tex.thd_read_half_tensor(out, cu_seqlens_q_padded, 1)
                             dout_ = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, 1)
@@ -2221,7 +2221,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dq_ = torch.zeros_like(q_)
                     # [2, b, sk, np, hn] -> [2, b*sk, np, hn]
                     kv_ = kv.view(2, -1, *kv.shape[-2:])
-                    dkv_ = torch.zeros_like(kv_)
+                    dkv_ = torch.empty_like(kv_)
                     # [b, sq, np, hn] -> [b*sq, np, hn]
                     out_ = out.view(-1, *out.shape[-2:])
                     dout_ = dout.view(-1, *dout.shape[-2:])
