@@ -657,7 +657,6 @@ def get_attention_backend(
         use_flash_attention
         and use_fused_attention
         and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-        and int(os.getenv("NVTE_FUSED_ATTN", "1"))!=0
     ):
         if device_compute_capability == (9, 0):
             logger.debug(
