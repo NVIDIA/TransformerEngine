@@ -102,9 +102,6 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   // create output tensor O
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty(o_shape, options);
-  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-    O.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens, te_cu_seqlens_padded;
@@ -130,6 +127,9 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_QKV =
         makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -256,9 +256,6 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   // create output tensor dQKV
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
   at::Tensor dQKV = torch::empty_like(QKV, options);
-  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-    dQKV.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_QKV, te_O, te_dO, te_S, te_dP, te_dQKV;
@@ -294,6 +291,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                                           amax_dQKV.value().data_ptr(),
                                           scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQKV.fill_(0);
+    }
     // BF16 or FP16
     te_QKV =
         makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -408,9 +408,6 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   // create output tensor O
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty(o_shape, options);
-  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-    O.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_KV, te_S, te_O, te_Bias, te_cu_seqlens_q, te_cu_seqlens_kv;
@@ -439,6 +436,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_KV =
@@ -585,10 +585,6 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
   at::Tensor dQ = torch::empty_like(Q, options);
   at::Tensor dKV = torch::empty_like(KV, options);
-  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-    dQ.fill_(0);
-    dKV.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_KV, te_O, te_dO, te_S, te_dP, te_dQ, te_dKV;
@@ -630,6 +626,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                                          amax_dQKV.value().data_ptr(),
                                          scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQ.fill_(0);
+      dKV.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_KV =
@@ -762,9 +762,6 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // create output tensor O
   auto O = torch::empty_like(Q);
-  if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-    O.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias;
@@ -796,6 +793,9 @@ std::vector<at::Tensor> fused_attn_fwd(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
