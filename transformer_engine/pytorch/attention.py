@@ -657,6 +657,7 @@ def get_attention_backend(
         use_flash_attention
         and use_fused_attention
         and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+        and int(os.getenv("NVTE_FUSED_ATTN", "1"))!=0
     ):
         if device_compute_capability == (9, 0):
             logger.debug(
@@ -3090,6 +3091,7 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        softcap: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -3106,6 +3108,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.softcap = softcap
 
     def forward(
         self,
@@ -3286,6 +3289,7 @@ class FlashAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=self.softmax_scale,
                     causal="causal" in attn_mask_type,
+                    softcap=self.softcap,
                     **fa_optional_forward_kwargs,
                 )
 
@@ -5097,6 +5101,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
         softmax_scale: Optional[float] = None,
+        softcap: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -5180,6 +5185,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_type=attention_type,
             layer_number=layer_number,
             deterministic=self.deterministic,
+            softcap=softcap,
             **attn_kwargs,
         )
 
