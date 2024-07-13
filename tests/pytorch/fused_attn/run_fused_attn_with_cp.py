@@ -108,21 +108,29 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
         q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim)
-        kv_input_shape = (config.batch_size * config.max_seqlen_q, config.num_gqa_groups, config.head_dim)
-        attn_output_shape = (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim)
+        kv_input_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_gqa_groups,
+            config.head_dim,
+        )
+        attn_output_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_heads * config.head_dim,
+        )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
         cu_seqlens_q_padded = torch.cat(
-            [torch.zeros([1], dtype=torch.int32), \
-             seqlens_q_padded.cumsum(0, dtype=torch.int32), \
-             torch.tensor([q_input_shape[0]], dtype=torch.int32)]
+            [
+                torch.zeros([1], dtype=torch.int32),
+                seqlens_q_padded.cumsum(0, dtype=torch.int32),
+                torch.tensor([q_input_shape[0]], dtype=torch.int32),
+            ]
         ).cuda()
         if kernel_backend == "FlashAttention":
             cu_seqlens_q = cu_seqlens_q_padded[:-1]
         else:
             cu_seqlens_q = torch.cat(
-                [torch.zeros([1], dtype=torch.int32), \
-                 seqlens_q.cumsum(0, dtype=torch.int32)]
+                [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
             ).cuda()
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
@@ -186,8 +194,12 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(cu_seqlens_q_padded, q_.shape[0], world_size, rank)
-        seq_idx_kv = tex.thd_get_partitioned_indices(cu_seqlens_kv_padded, k_.shape[0], world_size, rank)
+        seq_idx_q = tex.thd_get_partitioned_indices(
+            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        )
+        seq_idx_kv = tex.thd_get_partitioned_indices(
+            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
     else:
@@ -245,21 +257,41 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
         dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
         cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
-        cu_seqlens_q = get_cu_seqlens_on_cp_rank(cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True)
+        cu_seqlens_q = get_cu_seqlens_on_cp_rank(
+            cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+        )
         cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
         num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
         for x in [dq, out, dq_, out_]:
-            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1]:]).item() == 0
+            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
             for b in range(config.batch_size):
-                assert num_pads_q[b] == 0 or torch.count_nonzero(x[(cu_seqlens_q_padded[b+1]-num_pads_q[b]):cu_seqlens_q_padded[b+1]]).item() == 0
+                assert (
+                    num_pads_q[b] == 0
+                    or torch.count_nonzero(
+                        x[(cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]]
+                    ).item()
+                    == 0
+                )
         cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
-        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True)
+        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
+            cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+        )
         cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
         num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
         for x in [dk, dv, dk_, dv_]:
-            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1]:]).item() == 0
+            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
             for b in range(config.batch_size):
-                assert num_pads_kv[b] == 0 or torch.count_nonzero(x[(cu_seqlens_kv_padded[b+1]-num_pads_kv[b]):cu_seqlens_kv_padded[b+1]]).item() == 0
+                assert (
+                    num_pads_kv[b] == 0
+                    or torch.count_nonzero(
+                        x[
+                            (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
+                                b + 1
+                            ]
+                        ]
+                    ).item()
+                    == 0
+                )
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
