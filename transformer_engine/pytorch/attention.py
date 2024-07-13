@@ -5769,11 +5769,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
-            deterministic = (
-                not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-                or torch.are_deterministic_algorithms_enabled()
-            )
-
             core_attention_bias_shape = None
             if core_attention_bias is not None:
                 if (
