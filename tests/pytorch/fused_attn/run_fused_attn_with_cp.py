@@ -6,6 +6,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 
@@ -243,12 +244,22 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
         dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
+        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q = get_cu_seqlens_on_cp_rank(cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True)
+        cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+        num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
         for x in [dq, out, dq_, out_]:
-            assert torch.all(torch.logical_not(x[cu_seqlens_q_padded[-2]:])).item()
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
+            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1]:]).item() == 0
+            for b in range(config.batch_size):
+                assert num_pads_q[b] == 0 or torch.count_nonzero(x[(cu_seqlens_q_padded[b+1]-num_pads_q[b]):cu_seqlens_q_padded[b+1]]).item() == 0
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True)
+        cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
+        num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
         for x in [dk, dv, dk_, dv_]:
-            assert torch.all(torch.logical_not(x[cu_seqlens_kv_padded[-2]:])).item()
+            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1]:]).item() == 0
+            for b in range(config.batch_size):
+                assert num_pads_kv[b] == 0 or torch.count_nonzero(x[(cu_seqlens_kv_padded[b+1]-num_pads_kv[b]):cu_seqlens_kv_padded[b+1]]).item() == 0
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
