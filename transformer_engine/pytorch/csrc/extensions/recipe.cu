@@ -65,16 +65,26 @@ __global__ void __launch_bounds__(1) scalar_reciprocal_kernel(const float* __res
 
 }  // namespace
 
-void scalar_reciprocal(const at::Tensor &src,
-                       at::Tensor dst,
-                       int64_t src_offset,
-                       int64_t dst_offset,
-                       const std::optional<at::Tensor> &noop_flag) {
+at::Tensor scalar_reciprocal(const at::Tensor &src,
+                             std::optional<at::Tensor> dst,
+                             int64_t src_offset,
+                             int64_t dst_offset,
+                             const std::optional<at::Tensor> &noop_flag) {
+  // Allocate output tensor if needed
+  NVTE_CHECK(dst || dst_offset == 0,
+             "Provided offset in output tensor without providing output tensor");
+  at::Tensor dst_val = dst ? dst.value() : allocateTorchTensor(1, DType::kFloat32);
+
+  // Get pointers
   const float* src_ptr = reinterpret_cast<const float*>(getDataPtr(src, src_offset));
-  float* dst_ptr = reinterpret_cast<float*>(getDataPtr(dst, dst_offset));
+  float* dst_ptr = reinterpret_cast<float*>(getDataPtr(dst_val, dst_offset));
   const float* noop_ptr = nullptr;
   if (noop_flag) {
     noop_ptr = reinterpret_cast<const float*>(getDataPtr(noop_flag.value()));
   }
+
+  // Launch kernel
   scalar_reciprocal_kernel<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(src_ptr, dst_ptr, noop_ptr);
+
+  return dst_val;
 }

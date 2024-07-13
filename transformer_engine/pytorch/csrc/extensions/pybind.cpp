@@ -142,7 +142,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scalar_reciprocal", &scalar_reciprocal,
         "Reciprocal of a single float",
         py::call_guard<py::gil_scoped_release>(),
-        py::arg("src"), py::arg("dst"),
+        py::arg("src"), py::arg("dst") = std::nullopt,
         py::arg("src_offset") = 0, py::arg("dst_offset") = 0,
         py::arg("noop_flag") = std::nullopt);
 

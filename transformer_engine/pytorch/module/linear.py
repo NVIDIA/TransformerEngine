@@ -117,10 +117,12 @@ class _Linear(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_t = None
         inputmat_no_fp8 = inputmat
+        inputmat_fp8_scale_inv = None
 
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if isinstance(inputmat, Float8Tensor):
+                inputmat_fp8_scale_inv = inputmat._scale_inv
                 if (
                     not fp8_meta["recipe"].override_linear_precision.wgrad
                     and is_grad_enabled
@@ -151,6 +153,12 @@ class _Linear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                     )
+
+                # FP8 scale-inverse
+                inputmat_fp8_scale_inv = tex.scalar_reciprocal(
+                    fp8_meta["scaling_fwd"].scale,
+                    src_offset=tex.FP8FwdTensors.GEMM1_INPUT,
+                )
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
@@ -222,8 +230,8 @@ class _Linear(torch.autograd.Function):
                     if isinstance(inputmat_total, Float8Tensor)
                     else inputmat_total
                 ),
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
+                inputmat_fp8_scale_inv,
+                0,
                 fp8_dtype_forward,
                 proj_out_pttype,
                 get_workspace(),
@@ -335,7 +343,7 @@ class _Linear(torch.autograd.Function):
                 weight,
                 weight_fp8,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                inputmat_fp8_scale_inv,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -388,7 +396,7 @@ class _Linear(torch.autograd.Function):
                 weight,
                 weight_fp8,
                 main_grad,
-                fwd_scale_inverses,
+                inputmat_fp8_scale_inv,
             ) = ctx.saved_tensors
 
             # Gather intermediate/activation tensors if needed
@@ -545,8 +553,8 @@ class _Linear(torch.autograd.Function):
                                 if isinstance(inputmat_t_total, Float8Tensor)
                                 else inputmat_t_total
                             ),
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            inputmat_fp8_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,

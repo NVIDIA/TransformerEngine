@@ -357,7 +357,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  transformer_engine::DType fp8_dtype, float margin);
 
 void scalar_reciprocal(const at::Tensor &src,
-                       at::Tensor dst,
+                       std::optional<at::Tensor> dst = std::nullopt,
                        int64_t src_offset = 0,
                        int64_t dst_offset = 0,
                        const std::optional<at::Tensor> &noop_flag = std::nullopt);
