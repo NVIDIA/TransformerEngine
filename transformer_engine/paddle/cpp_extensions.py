@@ -656,6 +656,7 @@ def fused_attn_bwd_qkvpacked(
     qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed QKV input"""
 
@@ -706,6 +707,7 @@ def fused_attn_bwd_qkvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
 
     return dqkv, dbias
@@ -843,6 +845,7 @@ def fused_attn_bwd_kvpacked(
     qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
@@ -903,6 +906,7 @@ def fused_attn_bwd_kvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dkv, dbias
 
@@ -1040,6 +1044,7 @@ def fused_attn_bwd(
     qkv_layout: str = "bshd_bshd_bshd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
@@ -1103,6 +1108,7 @@ def fused_attn_bwd(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dk, dv, dbias
 
