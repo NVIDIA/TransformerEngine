@@ -216,7 +216,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # FP8 scale-inverse for GEMM input
             ln_out_fp8_scale_inv = tex.scalar_reciprocal(
                 fp8_meta["scaling_fwd"].scale,
-                src_offset=tex.FP8FwdTensors.GEMM1_INPUT,
+                src_offset=int(tex.FP8FwdTensors.GEMM1_INPUT),
             )
 
             if fp8_meta["recipe"].fp8_mha:

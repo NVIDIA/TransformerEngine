@@ -157,7 +157,7 @@ class _Linear(torch.autograd.Function):
                 # FP8 scale-inverse
                 inputmat_fp8_scale_inv = tex.scalar_reciprocal(
                     fp8_meta["scaling_fwd"].scale,
-                    src_offset=tex.FP8FwdTensors.GEMM1_INPUT,
+                    src_offset=int(tex.FP8FwdTensors.GEMM1_INPUT),
                 )
 
         # Column Parallel Linear
