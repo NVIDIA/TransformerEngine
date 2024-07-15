@@ -70,6 +70,8 @@ at::Tensor scalar_reciprocal(const at::Tensor &src,
                              int64_t src_offset,
                              int64_t dst_offset,
                              const std::optional<at::Tensor> &noop_flag) {
+  using namespace transformer_engine;
+
   // Allocate output tensor if needed
   NVTE_CHECK(dst || dst_offset == 0,
              "Provided offset in output tensor without providing output tensor");

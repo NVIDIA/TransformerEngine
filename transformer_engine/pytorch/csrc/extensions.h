@@ -356,11 +356,20 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype, float margin);
 
-void scalar_reciprocal(const at::Tensor &src,
-                       std::optional<at::Tensor> dst = std::nullopt,
-                       int64_t src_offset = 0,
-                       int64_t dst_offset = 0,
-                       const std::optional<at::Tensor> &noop_flag = std::nullopt);
+/* Reciprocal of a single float32
+ *
+ * /param[in]  Input tensor.
+ * /param[out] Output tensor.
+ * /param[in]  Offset within input tensor.
+ * /param[in]  Offset within output tensor.
+ * /param[in]  float32 flag indicating whether to avoid updating
+ *             output.
+ */
+at::Tensor scalar_reciprocal(const at::Tensor &src,
+                             std::optional<at::Tensor> dst = std::nullopt,
+                             int64_t src_offset = 0,
+                             int64_t dst_offset = 0,
+                             const std::optional<at::Tensor> &noop_flag = std::nullopt);
 
 /***************************************************************************************************
  * Rotary positional embedding
