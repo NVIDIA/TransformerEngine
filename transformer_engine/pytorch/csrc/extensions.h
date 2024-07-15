@@ -365,10 +365,8 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  * /param[in]  float32 flag indicating whether to avoid updating
  *             output.
  */
-at::Tensor scalar_reciprocal(const at::Tensor &src,
-                             std::optional<at::Tensor> dst = std::nullopt,
-                             int64_t src_offset = 0,
-                             int64_t dst_offset = 0,
+at::Tensor scalar_reciprocal(const at::Tensor &src, std::optional<at::Tensor> dst = std::nullopt,
+                             int64_t src_offset = 0, int64_t dst_offset = 0,
                              const std::optional<at::Tensor> &noop_flag = std::nullopt);
 
 /***************************************************************************************************

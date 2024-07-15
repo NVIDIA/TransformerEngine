@@ -12,9 +12,9 @@
 #include "extensions.h"
 
 void fused_amax_and_scale_update_after_reduction(
-    const at::Tensor &amax_reduction_buffer, std::vector<at::Tensor> amax_histories,
+    const at::Tensor& amax_reduction_buffer, std::vector<at::Tensor> amax_histories,
     std::vector<at::Tensor> scales, std::vector<at::Tensor> scale_invs,
-    const std::string &amax_compute_algo, transformer_engine::DType fp8_dtype, float margin) {
+    const std::string& amax_compute_algo, transformer_engine::DType fp8_dtype, float margin) {
   using namespace transformer_engine;
   size_t num_tensors = amax_histories.size();
   std::vector<Tensor> t_amax_histories(num_tensors);
@@ -54,9 +54,9 @@ void fused_amax_and_scale_update_after_reduction(
 
 namespace {
 
-__global__ void __launch_bounds__(1) scalar_reciprocal_kernel(const float* __restrict__ src,
-                                                              float* __restrict__ dst,
-                                                              const float* __restrict__ noop) {
+__global__ void __launch_bounds__(1)
+    scalar_reciprocal_kernel(const float* __restrict__ src, float* __restrict__ dst,
+                             const float* __restrict__ noop) {
   if (noop != nullptr && *noop == 1.f) {
     return;
   }
@@ -65,11 +65,9 @@ __global__ void __launch_bounds__(1) scalar_reciprocal_kernel(const float* __res
 
 }  // namespace
 
-at::Tensor scalar_reciprocal(const at::Tensor &src,
-                             std::optional<at::Tensor> dst,
-                             int64_t src_offset,
-                             int64_t dst_offset,
-                             const std::optional<at::Tensor> &noop_flag) {
+at::Tensor scalar_reciprocal(const at::Tensor& src, std::optional<at::Tensor> dst,
+                             int64_t src_offset, int64_t dst_offset,
+                             const std::optional<at::Tensor>& noop_flag) {
   using namespace transformer_engine;
 
   // Allocate output tensor if needed
@@ -86,7 +84,8 @@ at::Tensor scalar_reciprocal(const at::Tensor &src,
   }
 
   // Launch kernel
-  scalar_reciprocal_kernel<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(src_ptr, dst_ptr, noop_ptr);
+  scalar_reciprocal_kernel<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(src_ptr, dst_ptr,
+                                                                          noop_ptr);
 
   return dst_val;
 }
