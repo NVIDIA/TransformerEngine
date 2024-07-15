@@ -46,7 +46,7 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size, const at::Tensor
                         const std::vector<std::vector<at::Tensor>> &tensor_lists, T callable,
                         ArgTypes... args) {
   bool use_fp8 = false;
-  if (tensor_lists.size() == 7 and depth == 5) {
+  if (tensor_lists.size() == 7 && depth == 5) {
     // assume the order of the tensor lists is [g, p, m, v, fp8_raw_data, scale, amax]
     use_fp8 = true;
   } else {

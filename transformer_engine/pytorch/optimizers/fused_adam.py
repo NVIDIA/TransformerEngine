@@ -13,6 +13,7 @@ from .multi_tensor_apply import multi_tensor_applier
 
 
 def get_fp8_meta(fp8_tensor):
+    """FP8 metadata getter."""
     if fp8_tensor._fp8_meta is None:
         raise RuntimeError("FP8 meta data is not initialized.")
 
@@ -241,7 +242,7 @@ class FusedAdam(torch.optim.Optimizer):
                     cnt += 1
                     if p.data is p_extra.data:
                         cnt += 1
-                assert same_cnt == cnt or same_cnt == 0, (
+                assert same_cnt in (cnt, 0), (
                     "Either all extra params are identical to the main params, or they are all"
                     " different."
                 )
@@ -271,7 +272,7 @@ class FusedAdam(torch.optim.Optimizer):
                     if isinstance(p_extra, Float8Tensor):
                         out_dtype = p_extra._fp8_dtype
                         p_extra_fp8_out.append(p_extra._data.data)
-                        scale, amax, scale_inv = get_fp8_meta(p_extra)
+                        scale, amax, _ = get_fp8_meta(p_extra)
                         # Don't forget to update scale_inv outside of this function
                         scales.append(scale.data)
                         amaxes.append(amax.data)
@@ -280,7 +281,7 @@ class FusedAdam(torch.optim.Optimizer):
                         g_main_of_fp8.append(p.grad.data)
                         m_main_of_fp8.append(state["exp_avg"])
                         v_main_of_fp8.append(state["exp_avg_sq"])
-                    elif p_extra.dtype == torch.float16 or p_extra.dtype == torch.bfloat16:
+                    elif p_extra.dtype in (torch.float16, torch.bfloat16):
                         p_extra_fp16_out.append(p_extra.data)
                         p_main_of_f16.append(p.data)
                         g_main_of_f16.append(p.grad.data)
