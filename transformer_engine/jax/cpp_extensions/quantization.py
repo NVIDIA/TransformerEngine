@@ -31,9 +31,10 @@ def _jax_quantize(x, scale, q_dtype):
     """
     Quantize with scale
     """
-    dtype_max = (jnp.finfo(q_dtype).max).astype(x.dtype)
-    scale = scale.astype(x.dtype)
-    clipped_scaled_x = jnp.clip((x * scale), -dtype_max, dtype_max)
+    compute_dtype = scale.dtype
+    dtype_max = (jnp.finfo(q_dtype).max).astype(compute_dtype)
+    scaled_x = x.astype(compute_dtype) * scale
+    clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max)
     return clipped_scaled_x.astype(q_dtype)
 
 
