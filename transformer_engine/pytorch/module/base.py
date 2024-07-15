@@ -85,7 +85,7 @@ def initialize_ub(
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
-    bootstrap_backend: str = None,
+    bootstrap_backend: torch.distributed.Backend = None,
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
     global _ub_communicators
@@ -130,7 +130,6 @@ def initialize_ub(
         intra_node_group = world_group
         local_rank = world_rank
         local_size = world_size
-        intra_node_group = list(range(world_size))
     else:
         intra_node_group = torch.distributed.new_group(backend=bootstrap_backend,
                                                        ranks=intra_node_ranks)
@@ -188,7 +187,7 @@ def initialize_ub(
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
-            "num_sm": 1 if method == "ring_exchange" else 16,
+            "num_sm": 4,
             "cga_size": 1 if method == "ring_exchange" else 2,
             "set_sm_margin": is_reduce_scatter,
             "num_splits": 4 if method == "pipeline" else tp_size,
@@ -197,6 +196,13 @@ def initialize_ub(
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
         }
+
+        # Adjust SMs reserved for communication in MultiheadAttention
+        if name in ["qkv_fprop", "qkv_wgrad"]:
+            default_cfg["num_sm"] = 8
+        elif "proj" in name:
+            default_cfg["num_sm"] = 24
+
         return default_cfg
 
     def add_ub(
@@ -204,7 +210,7 @@ def initialize_ub(
         method: str,
         num_splits: int = 4,
         cga_size: int = 2,
-        num_sm: int = 16,
+        num_sm: int = 4,
         set_sm_margin: bool = False,
         use_ce: bool = True,
         atomic_gemm: bool = False,
@@ -222,8 +228,8 @@ def initialize_ub(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
-                atomic_gemm = 0
-        if not is_reduce_scatter and method == "pipeline":
+                atomic_gemm = False
+        if method == "pipeline" and not is_reduce_scatter:
             raise ValueError(
                 f"At {name}, `pipeline` overlap method is not supported for AllGather."
             )
@@ -234,17 +240,17 @@ def initialize_ub(
             layers_atomic_ring_exchange += [name, ag_rs_pairs[name]]
         if name in rs_ag_pairs:
             assert_message = (
-                f"At {name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM chunk "
-                "outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
-                "GEMM-RS overlaps forming a TP block (e.g., qkv_fprop and proj_fprop) uses "
-                "`atomic gemm` and `ring_exhcnage`, its pair must use the same overlap config "
-                "for functionality."
+                "AG + atomic GEMM overlaps shuffle the GEMM output, which are later un-shuffled by "
+                "their atomic GEMM + RS overlap pairs in the same TP block. The AG + GEMM overlap "
+                f"in `{rs_ag_pairs[name]}` and the GEMM + RS overlap in `{name}` form one such TP "
+                "block. When one of these overlaps is configured with the `atomic_gemm = True` and "
+                "`method = \"ring_exchange\"` options, the other must also use the same overlap "
+                "configuration for the atomic shuffle/un-shuffle to work correctly."
             )
             if name in layers_atomic_ring_exchange:
                 assert atomic_gemm and method == "ring_exchange", assert_message
-            else:
-                if atomic_gemm and method == "ring_exchange":
-                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+            elif atomic_gemm and method == "ring_exchange":
+                assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
         sample_buffer = torch.empty(
             shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
@@ -295,8 +301,12 @@ def initialize_ub(
 
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
         global_tmp = global_data.cuda() if bootstrap_backend == "nccl" else global_data
-        local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else global_data
-        torch.distributed.all_gather_into_tensor(global_tmp, local_tmp, group=ub_pgs[group])
+        local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else local_data
+
+        group_size = torch.distributed.get_world_size(ub_pgs[group])
+        torch.distributed.all_gather(
+            list(global_tmp.chunk(group_size)), local_tmp, group=ub_pgs[group]
+        )
 
         if bootstrap_backend == "nccl":
             global_data.copy_(global_tmp.cpu())
@@ -328,7 +338,7 @@ def initialize_ub(
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
-            fp8_buf = (name in layers_all_gather_overlap) or (
+            fp8_buf = ub_cfg["fp8_buf"] or (
                 ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
             )
             ub_cfg.update(ub_cfgs[name])  # replaces default options with user configuration

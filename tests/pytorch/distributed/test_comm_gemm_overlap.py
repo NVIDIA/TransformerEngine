@@ -97,6 +97,8 @@ def test_gemm_with_overlap(fp8, p2p, comm_type, aggregate, atomic, bulk):
         if aggregate:
             test_cmd.append("--aggregate")
         if atomic:
+            if torch.cuda.get_device_properties(0).major < 9:
+                pytest.skip("Atomic GEMM requires device compute capability 9.0 or higher.")
             test_cmd.append("--atomic")
 
     assert not bool(subprocess.call(test_cmd, env=os.environ))

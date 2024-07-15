@@ -256,11 +256,21 @@ class TransformerLayer(torch.nn.Module):
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
-        ub_bulk_wgrad: bool = True,
-        ub_bulk_dgrad: bool = True,
         ub_overlap_ag: bool = True,
+        ub_overlap_mha_ag: bool = True,  # QKV Fprop, Proj Dgrad
+        ub_overlap_mlp_ag: bool = True,  # FC1 Fprop, FC2 Dgrad
         ub_overlap_rs: bool = True,
+        ub_overlap_mha_rs: bool = True,  # Proj Fprop
+        ub_overlap_mlp_rs: bool = True,  # FC2 Fprop
+        ub_bulk_wgrad: bool = True,
+        ub_bulk_mha_wgrad: bool = True,  # QKV Wgrad
+        ub_bulk_mlp_wgrad: bool = True,  # FC1 Wgrad
+        ub_bulk_dgrad: bool = True,
+        ub_bulk_mha_dgrad: bool = True,  # QKV Dgrad
+        ub_bulk_mlp_dgrad: bool = True,  # FC1 Dgrad
         ub_overlap_rs_dgrad: bool = False,
+        ub_overlap_mha_rs_dgrad: bool = True,  # QKV Dgrad
+        ub_overlap_mlp_rs_dgrad: bool = True,  # FC1 Dgrad
         bias: bool = True,
         activation: str = "gelu",
         normalization: str = "LayerNorm",
@@ -273,11 +283,31 @@ class TransformerLayer(torch.nn.Module):
         self.window_size = window_size
         self.window_size = check_set_window_size(self_attn_mask_type, self.window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
-        ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
-        ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
+
+        # All-Gather + Fprop/Dgrad GEMM overlaps
         ub_overlap_ag = ub_tp_comm_overlap and ub_overlap_ag
+        ub_overlap_mha_ag = ub_tp_comm_overlap and ub_overlap_mha_ag
+        ub_overlap_mlp_ag = ub_tp_comm_overlap and ub_overlap_mlp_ag
+
+        # Fprop GEMM + Reduce-Scatter overlaps
         ub_overlap_rs = ub_tp_comm_overlap and ub_overlap_rs
+        ub_overlap_mha_rs = ub_tp_comm_overlap and ub_overlap_mha_rs
+        ub_overlap_mlp_rs = ub_tp_comm_overlap and ub_overlap_mlp_rs
+
+        # DGrad GEMM + Reduce-Scatter overlaps
         ub_overlap_rs_dgrad = ub_tp_comm_overlap and ub_overlap_rs_dgrad
+        ub_overlap_mha_rs_dgrad = ub_overlap_rs_dgrad and ub_overlap_mha_rs_dgrad
+        ub_overlap_mlp_rs_dgrad = ub_overlap_rs_dgrad and ub_overlap_mlp_rs_dgrad
+
+        # GEMM + Wgrad Reduce-Scatter overlaps (GEMM and RS are independent)
+        ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
+        ub_bulk_mha_wgrad = ub_bulk_wgrad and ub_bulk_mha_wgrad and not ub_overlap_mha_rs_dgrad
+        ub_bulk_mlp_wgrad = ub_bulk_wgrad and ub_bulk_mlp_wgrad and not ub_overlap_mlp_rs_dgrad
+
+        # GEMM + Dgrad All-Gather overlaps (GEMM and AG are independent)
+        ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
+        ub_bulk_mha_dgrad = ub_bulk_dgrad and ub_bulk_mha_dgrad and not ub_overlap_mha_rs_dgrad
+        ub_bulk_mlp_dgrad = ub_bulk_dgrad and ub_bulk_mlp_dgrad and not ub_overlap_mlp_rs_dgrad
 
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
@@ -345,11 +375,11 @@ class TransformerLayer(torch.nn.Module):
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
             "qkv_weight_interleaved": qkv_weight_interleaved,
-            "ub_bulk_wgrad": ub_bulk_wgrad,
-            "ub_bulk_dgrad": ub_bulk_dgrad,
-            "ub_overlap_ag": ub_overlap_ag,
-            "ub_overlap_rs": ub_overlap_rs,
-            "ub_overlap_rs_dgrad": ub_overlap_rs_dgrad,
+            "ub_bulk_wgrad": ub_bulk_mha_wgrad,
+            "ub_bulk_dgrad": ub_bulk_mha_dgrad,
+            "ub_overlap_ag": ub_overlap_mha_ag,
+            "ub_overlap_rs": ub_overlap_mha_rs,
+            "ub_overlap_rs_dgrad": ub_overlap_mha_rs_dgrad,
             "qkv_format": self.attn_input_format,
         }
 
@@ -401,11 +431,11 @@ class TransformerLayer(torch.nn.Module):
             micro_batch_size=micro_batch_size,
             set_parallel_mode=set_parallel_mode,
             zero_centered_gamma=zero_centered_gamma,
-            ub_bulk_wgrad=ub_bulk_wgrad,
-            ub_bulk_dgrad=ub_bulk_dgrad,
-            ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
-            ub_overlap_rs=ub_overlap_rs,
-            ub_overlap_ag=ub_overlap_ag,
+            ub_bulk_wgrad=ub_bulk_mlp_wgrad,
+            ub_bulk_dgrad=ub_bulk_mlp_dgrad,
+            ub_overlap_rs_dgrad=ub_overlap_mlp_rs_dgrad,
+            ub_overlap_rs=ub_overlap_mlp_rs,
+            ub_overlap_ag=ub_overlap_mlp_ag,
             activation=activation,
             normalization=normalization,
             device=device,

@@ -6,6 +6,7 @@
 
 import os
 import sys
+import socket
 import warnings
 import subprocess
 import argparse
@@ -107,6 +108,27 @@ def parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--scale", type=float, default=1e-2, help="Set scaling factor for input and weight tensors."
     )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=torch.cuda.device_count(),
+        help="Tensor-parallel size for the GEMM operation (can be smaller than node size)."
+    )
+    parser.add_argument(
+        "--tcp-init",
+        action="store_true",
+        default=False,
+        help="Initialize torch.distributed with TcpStore."
+    )
+    parser.add_argument(
+        "--init-method", type=str, default=None, help="Set the torch.distributed init method."
+    )
+    parser.add_argument(
+        "--bind-to-device",
+        action="store_true",
+        default=False,
+        help="Initialize torch.distributed with 'device_id' argument to bind each rank to 1 device."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
 
@@ -137,19 +159,22 @@ def parse_args(argv=None, namespace=None):
 def main(opts):
     WORLD_RANK = int(os.getenv("RANK"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
+    LOCAL_RANK = int(os.getenv("LOCAL_RANK"))
+    LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE"))
+    NUM_NODES = WORLD_SIZE // LOCAL_SIZE
+    assert NUM_NODES == 1
 
     # Fix clock speed
-    torch.cuda.set_device(WORLD_RANK)
     if opts.clock_speed > 0:
         subprocess.run(
-            ["nvidia-smi", "-pm", "ENABLED", "-i", str(WORLD_RANK)],
+            ["nvidia-smi", "-pm", "ENABLED", "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         result = subprocess.run(
-            ["nvidia-smi", "-lgc", str(opts.clock_speed), "-i", str(WORLD_RANK)],
+            ["nvidia-smi", "-lgc", str(opts.clock_speed), "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.PIPE,
@@ -159,28 +184,46 @@ def main(opts):
         print(f"[rank:{WORLD_RANK}] {msg}\n", end="", flush=True)
 
     # Initialize torch.distributed global process group and get TP group
-    dist.init_process_group(
-        backend="nccl",
-        rank=WORLD_RANK,
-        world_size=WORLD_SIZE,
-        device_id=torch.device(f"cuda:{WORLD_RANK}"),
-    )
-    tp_group = dist.new_group(backend="nccl")
-    world_rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = dist.get_rank(tp_group)
-    local_size = dist.get_world_size(tp_group)
+    torch.cuda.set_device(LOCAL_RANK)
+    dist_init_kwargs = {
+        "backend": "nccl",
+        "rank": WORLD_RANK,
+        "world_size": WORLD_SIZE,
+    }
+    if opts.tcp_init:
+        if opts.init_method is not None:
+            assert opts.init_method.startswith("tcp://")
+            init_method = opts.init_method
+        else:
+            MASTER_ADDR = os.getenv("MASTER_ADDR", socket.gethostbyname(socket.gethostname()))
+            MASTER_PORT = os.getenv("MASTER_PORT", "1234")
+            init_method = f"tcp://{MASTER_ADDR}:{MASTER_PORT}"
+        dist_init_kwargs["init_method"] = init_method
+    elif opts.init_method is not None:
+        assert (
+            opts.init_method.startswith("env://")
+            or opts.init_method.startswith("file://")
+            or opts.init_method.startswith("tcp://")
+        )
+        dist_init_kwargs["init_method"] = opts.init_method
+    if opts.bind_to_device:
+        dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
+    dist.init_process_group(**dist_init_kwargs)
+
+    tp_ranks = list(range(opts.tp_size if opts.tp_size < WORLD_SIZE else WORLD_SIZE))
+    tp_group = dist.new_group(backend="nccl", ranks=tp_ranks)
+    tp_size = dist.get_world_size(tp_group)
 
     # Info printout
     def dist_print(msg, src=None, debug=False, section=False):
         if debug or opts.verbose:
             if section:
                 dist.barrier()
-                if world_rank == (0 if src is None else src):
+                if WORLD_RANK == (0 if src is None else src):
                     print("\n", end="", flush=True)
             dist.barrier()
-            if src is None or world_rank == src:
-                prefix = "[GLOBAL] " if src is not None else f"[rank:{world_rank}] "
+            if src is None or WORLD_RANK == src:
+                prefix = "[GLOBAL] " if src is not None else f"[rank:{WORLD_RANK}] "
                 lines = msg.splitlines()
                 msg = "\n".join(
                     [prefix + lines[0]] + [(" " * len(prefix)) + line for line in lines[1:]]
@@ -188,23 +231,37 @@ def main(opts):
                 print(msg + "\n", end="", flush=True)
 
     # torch.distributed callback wrappers for bootstrapping userbuffers
+    bootstrap_backend = "nccl"
+    if torch.distributed.is_gloo_available():
+        bootstrap_backend = "gloo"
+    elif torch.distributed.is_mpi_available():
+        bootstrap_backend = "mpi"
+    bootstrap_pg = dist.new_group(backend=bootstrap_backend)
+    dist_print(f"Bootstrapping comm+GEMM overlap with backend=\"{bootstrap_backend}\"", src=0,
+               debug=True, section=True)
+
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
-        pg = None if group == "world" else tp_group
-        global_tmp = global_data.cuda()
-        dist.all_gather_into_tensor(global_tmp, local_data.cuda(), group=pg)
-        global_data.copy_(global_tmp.cpu())
-        global_tmp = torch.Tensor()
+        global_tmp = global_data.cuda() if bootstrap_backend == "nccl" else global_data
+        local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else local_data
+
+        pg = None if group == "world" else bootstrap_pg
+        group_size = dist.get_world_size(pg)
+        torch.distributed.all_gather(list(global_tmp.chunk(group_size)), local_tmp, group=pg)
+
+        if bootstrap_backend == "nccl":
+            global_data.copy_(global_tmp.cpu())
+            global_tmp.data = torch.Tensor()
+            local_tmp.data = torch.Tensor()
 
     def bcast_callback(data: torch.Tensor, src: int, group: str):
-        pg = None if group == "world" else tp_group
-        data_tmp = data.cuda()
-        dist.broadcast(data_tmp, src, pg)
-        data.copy_(data_tmp.cpu())
-        data_tmp = torch.Tensor()
+        data_tmp = data.cuda() if bootstrap_backend == "nccl" else data
+        dist.broadcast(data_tmp, src, pg = None if group == "world" else bootstrap_pg)
+        if bootstrap_backend == "nccl":
+            data.copy_(data_tmp.cpu())
+            data_tmp = torch.Tensor()
 
     def barrier_callback(group: str):
-        pg = None if group == "world" else tp_group
-        dist.barrier(group=pg)
+        dist.barrier(None if group == "world" else bootstrap_pg)
 
     tex.set_comm_overlap_callbacks(allgather_callback, bcast_callback, barrier_callback)
 
@@ -250,13 +307,13 @@ def main(opts):
     ub_obj = ub_obj = (
         tex.CommGemmOverlapP2P(
             sample_buffer,
-            world_rank,
-            world_size,
-            local_rank,
-            local_size,
+            WORLD_RANK,
+            WORLD_SIZE,
+            LOCAL_RANK,
+            LOCAL_SIZE,
             0,
             1,
-            local_size,
+            tp_size,
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             1,  # cga_size
             1,  # num_comm_sms
@@ -269,13 +326,13 @@ def main(opts):
         if opts.p2p
         else tex.CommGemmOverlap(
             sample_buffer,
-            world_rank,
-            world_size,
-            local_rank,
-            local_size,
+            WORLD_RANK,
+            WORLD_SIZE,
+            LOCAL_RANK,
+            LOCAL_SIZE,
             0,
             1,
-            local_size,
+            tp_size,
             4,  # num_splits
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             2,  # cga_size
@@ -292,13 +349,13 @@ def main(opts):
         sample_buffer2 = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
         ub_obj2 = tex.UbufP2PCommOverlap(
             sample_buffer2,
-            world_rank,
-            world_size,
-            local_rank,
-            local_size,
+            WORLD_RANK,
+            WORLD_SIZE,
+            LOCAL_RANK,
+            LOCAL_SIZE,
             0,
             1,
-            local_size,
+            LOCAL_SIZE,
             tex.NVTE_COMM_OVERLAP_MAX_STREAMS,
             1,  # num_comm_sms
             1,  # cga_size
@@ -322,20 +379,20 @@ def main(opts):
         local_inp_shape = (outer_size, hidden_size)
         # Bulk overlap comm tensor is distributed for AG overlap only
         if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
-            bulk_inp_shape = (outer_size // local_size, hidden_size)
+            bulk_inp_shape = (outer_size // tp_size, hidden_size)
         else:
             bulk_inp_shape = (outer_size, hidden_size)
     else:
         if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
             # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
-            local_kernel_t_shape = (ffn_hidden_size // local_size, hidden_size)
-            local_inp_shape = (outer_size // local_size, hidden_size)
+            local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
+            local_inp_shape = (outer_size // tp_size, hidden_size)
             if ub_obj2 is not None:
-                local_kernel2_t_shape = (hidden_size, ffn_hidden_size // local_size)
+                local_kernel2_t_shape = (hidden_size, ffn_hidden_size // tp_size)
         else:
             # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
-            local_kernel_t_shape = (hidden_size, ffn_hidden_size // local_size)
-            local_inp_shape = (outer_size, ffn_hidden_size // local_size)
+            local_kernel_t_shape = (hidden_size, ffn_hidden_size // tp_size)
+            local_inp_shape = (outer_size, ffn_hidden_size // tp_size)
 
     # Initialize distributed input tensor and GEMM kernels
     torch.manual_seed(opts.seed + WORLD_RANK)
@@ -384,7 +441,7 @@ def main(opts):
             ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
         else:
             # First all-gather all the bulk inputs into a list
-            bulk_inp_list = [ torch.zeros_like(bulk_inp) for _ in range(local_size) ]
+            bulk_inp_list = [ torch.zeros_like(bulk_inp) for _ in range(LOCAL_SIZE) ]
             dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
@@ -485,7 +542,7 @@ def main(opts):
         if ub_obj2 is not None:
             ubuf_out2 = ub_obj2.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             rs_out2 = torch.empty(
-                (outer_size // local_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+                (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
             )
     else:
         if opts.bulk_overlap:
@@ -495,7 +552,7 @@ def main(opts):
             ubuf_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
         gemm_inp = inp_fp8 if opts.fp8 else inp
         rs_out = torch.empty(
-            (outer_size // local_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+            (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
         )
 
     # Trigger GEMM
@@ -547,7 +604,7 @@ def main(opts):
                     torch.bfloat16,
                     te.module.base.get_workspace(),
                     bias=None,
-                    use_bias=None,
+                    use_bias=False,
                     gelu=False,
                     use_split_accumulator=te.module.base._2X_ACC_FPROP,
                     ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P,
@@ -585,15 +642,26 @@ def main(opts):
         torch.cuda.synchronize()
         dist.barrier()
         if opts.bulk_overlap:
+            output_info = ""
             if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
                 # Bulk overlap AG output is already gathered
                 test_out = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.AG)
             else:
                 # Bulk overlap RS output needs to be gathered
-                ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
-                test_out = te.distributed.gather_along_first_dim(
-                    ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS), tp_group)[0]
+                out_local = ub_obj.get_ubuf_output(tex.NVTE_Comm_Overlap_Type.RS)
+                output_info += f"rs_output: {list(out_local.shape)} | "
+                test_out = te.distributed.gather_along_first_dim(out_local, tp_group)[0]
+
             ref_out = ref_g
+            output_info += f"output: {list(test_out.shape)} | reference: {list(ref_out.shape)}"
+            dist_print(output_info, src=0 if opts.comm_type == 0 else None, section=True)
+
+            test_nonzeros = torch.count_nonzero(test_out)
+            ref_nonzeros = torch.count_nonzero(ref_out)
+            nonzero_info = (
+                f"output nonzeros = {test_nonzeros} " + f"| reference count = {ref_nonzeros}"
+            )
+            dist_print(nonzero_info, src=0, section=True)
         else:
             if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG:
                 if ub_obj2 is not None:
@@ -668,13 +736,13 @@ def main(opts):
         error_below_tol = torch.allclose(
             test_out,
             ref_out,
-            rtol=0.125 if opts.fp8 else 1.6e-2,
-            atol=0.0675 if opts.fp8 else 1e-5,
+            rtol=0.125 if opts.fp8 else 0.01,
+            atol=0.0675 if opts.fp8 else 0.001,
         )
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)
         abs_err = diff[m].item()
-        rel_err = abs_err/test_out.flatten()[m].item()
+        rel_err = abs_err / (ref_out.flatten()[m].item() + 1e-5)
         if not error_below_tol:
             numerics_failed = True
             numerics_info = (
@@ -707,7 +775,7 @@ def main(opts):
     )
     dist_print(timing_info, section=True, debug=True)
     dist.barrier()
-    if world_rank == 0:
+    if WORLD_RANK == 0:
         print("\n", end="", flush=True)
 
     del ub_obj
@@ -734,17 +802,5 @@ def main(opts):
 
 
 if __name__ == "__main__":
-    try:
-        if "TORCHELASTIC_RUN_ID" in os.environ.keys():
-            args = parse_args()
-            os._exit(main(args))
-        else:
-            subprocess.run(
-                ["torchrun", f"--nproc-per-node={torch.cuda.device_count()}", *sys.argv],
-                env=os.environ,
-                check=True,
-            )
-            os._exit(0)
-    except Exception as err:  # pylint: disable=broad-exception-caught
-        print(err)
-        os._exit(1)
+    args = parse_args()
+    os._exit(main(args))
