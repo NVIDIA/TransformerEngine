@@ -19,7 +19,9 @@ from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quanti
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
+from transformer_engine.jax.cpp_extensions.activation import _convert_to_activation_function
 from transformer_engine.jax import cpp_extensions as tex
+
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -32,21 +34,6 @@ FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(512, 1024)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = is_fp8_available()
-
-
-def _convert_to_activation_function(fn_or_string):
-    """Convert a string to an activation function."""
-    if fn_or_string == "linear":
-        return lambda x: x
-    if fn_or_string == "quick_gelu":
-        return lambda x: nn.gelu(x, approximate=True)
-    if fn_or_string == "squared_relu":
-        return lambda x: functools.reduce(operator.mul, [nn.relu(x), nn.relu(x)])
-    if isinstance(fn_or_string, str):
-        return getattr(nn, fn_or_string)
-    if callable(fn_or_string):
-        return fn_or_string
-    raise ValueError(f"don't know how to convert {fn_or_string} to an activation function")
 
 
 class TestFP8Dot:

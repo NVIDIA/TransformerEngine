@@ -44,36 +44,32 @@ ActivationEnum = {
 }
 
 
+def _convert_to_activation_function(fn_or_string):
+    """Convert a string to an activation function."""
+    if fn_or_string == "linear":
+        return lambda x: x
+    if fn_or_string == "quick_gelu":
+        return lambda x: jax.nn.sigmoid(1.702 * x) * x
+    if fn_or_string == "squared_relu":
+        return lambda x: reduce(operator.mul, [jax.nn.relu(x), jax.nn.relu(x)])
+    if isinstance(fn_or_string, str):
+        return getattr(jax.nn, fn_or_string)
+    if callable(fn_or_string):
+        return fn_or_string
+    raise ValueError(f"Unsupported {fn_or_string} to an activation function")
+
+
 def _act_lu(inputs, activation_type):
     """
     JAX native activation implementation
     """
-    act_type_id = ActivationEnum[activation_type]
-    match act_type_id:
-        case NVTE_Activation_Type.GELU | NVTE_Activation_Type.SILU | NVTE_Activation_Type.RELU:
-            output = getattr(jax.nn, activation_type[0])(inputs)
-        case NVTE_Activation_Type.GEGLU | NVTE_Activation_Type.SWIGLU | NVTE_Activation_Type.REGLU:
-            activation, linear = activation_type
-            assert linear == "linear"
-            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
-            output = getattr(jax.nn, activation)(act_input) * linear_input
-        case NVTE_Activation_Type.QGELU:
-            output = jax.nn.sigmoid(1.702 * inputs) * inputs
-        case NVTE_Activation_Type.QGEGLU:
-            activation, linear = activation_type
-            assert linear == "linear"
-            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
-            output = jax.nn.sigmoid(1.702 * act_input) * act_input * linear_input
-        case NVTE_Activation_Type.SRELU:
-            output = jnp.where(inputs > 0, inputs * inputs, 0)
-        case NVTE_Activation_Type.SREGLU:
-            activation, linear = activation_type
-            assert linear == "linear"
-            act_input, linear_input = jnp.split(inputs, [1], axis=-2)
-            output = jnp.where(act_input > 0, act_input * act_input, 0) * linear_input
-        case _:
-            raise ValueError(f"Unregonized {activation_type=}")
-    return jnp.squeeze(output, axis=-2)
+    x = jnp.split(inputs, len(activation_type), axis=-2)
+    acts = []
+    for idx, act_fn in enumerate(activation_type):
+        x_i = _convert_to_activation_function(act_fn)(x[idx])
+        acts.append(x_i)
+    x = reduce(operator.mul, acts)
+    return x
 
 
 class ActLuPrimitive(BasePrimitive):
