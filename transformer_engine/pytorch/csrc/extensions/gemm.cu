@@ -24,7 +24,6 @@ void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType
 
   A = A.contiguous();
   B = B.contiguous();
-  D = D.contiguous();
 
   auto te_A = makeTransformerEngineTensor(
       A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,

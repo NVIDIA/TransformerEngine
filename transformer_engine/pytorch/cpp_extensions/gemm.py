@@ -54,6 +54,8 @@ def fp8_gemm(
             dtype=out_dtype,
             device="cuda",
         )
+    else:
+        out = out.contiguous()
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
@@ -202,6 +204,8 @@ def gemm(
             dtype=dtype,
             device="cuda",
         )
+    else:
+        out = out.contiguous()
 
     if gelu and not grad:
         gelu_input = torch.empty_like(out, dtype=dtype)

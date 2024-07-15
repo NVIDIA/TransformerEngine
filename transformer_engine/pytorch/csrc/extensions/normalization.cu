@@ -69,8 +69,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input, const at::Ten
                                           const int amax_offset, const int scale_inv_offset) {
   using namespace transformer_engine;
 
-  auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(otype)));
-  return layernorm_fwd_fp8_noalloc(input, weight, bias, eps, scale, ln_out, amax, scale_inv, otype,
+  const auto &input_ = input.contiguous();
+
+  auto ln_out = at::empty_like(input_, at::CUDA(GetATenDType(otype)));
+  return layernorm_fwd_fp8_noalloc(input_, weight, bias, eps, scale, ln_out, amax, scale_inv, otype,
                                    sm_margin, zero_centered_gamma, scale_offset, amax_offset,
                                    scale_inv_offset);
 }
@@ -155,9 +157,10 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input, const at::Tensor 
   using namespace transformer_engine;
 
   DType itype = GetTransformerEngineDType(input.scalar_type());
-  auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
+  const auto &input_ = input.contiguous();
+  auto ln_out = at::empty_like(input_, at::CUDA(GetATenDType(itype)));
 
-  return layernorm_fwd_noalloc(input, weight, bias, ln_out, eps, sm_margin, zero_centered_gamma);
+  return layernorm_fwd_noalloc(input_, weight, bias, ln_out, eps, sm_margin, zero_centered_gamma);
 }
 
 std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input, const at::Tensor &weight,
