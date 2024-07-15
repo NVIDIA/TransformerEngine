@@ -56,7 +56,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"],
+        install_requires=["torch", "flash-attn>=2.0.6,<=2.6.1,!=2.0.9,!=2.1.0"],
         tests_require=["numpy", "onnxruntime", "torchvision"],
         include_package_data=True,
         package_data={
