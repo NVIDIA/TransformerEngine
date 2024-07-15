@@ -27,8 +27,8 @@ from .misc import (
     normalize_axis_boundary,
 )
 from .activation import ActivationEnum
-from .activation import _act_lu
-from .quantization import _cast_fp8
+from .activation import _jax_act_lu
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -41,7 +41,7 @@ __all__ = [
 ]
 
 
-def _transpose(inputs, static_axis_boundary, transpose_axis_boundary):
+def _jax_transpose(inputs, static_axis_boundary, transpose_axis_boundary):
     """
     JAX native transpose implementation
     """
@@ -49,12 +49,14 @@ def _transpose(inputs, static_axis_boundary, transpose_axis_boundary):
     return jnp.transpose(inputs, axes=axes)
 
 
-def _cast_transpose(inputs, scale, amax, out_dtype, static_axis_boundary, transpose_axis_boundary):
+def _jax_cast_transpose(
+    inputs, scale, amax, out_dtype, static_axis_boundary, transpose_axis_boundary
+):
     """
     JAX native cast_transpose implementation
     """
-    casted_output, updated_amax = _cast_fp8(inputs, scale, amax, out_dtype=out_dtype)
-    casted_transposed_output = _transpose(
+    casted_output, updated_amax = _jax_cast_fp8(inputs, scale, amax, out_dtype=out_dtype)
+    casted_transposed_output = _jax_transpose(
         casted_output, static_axis_boundary, transpose_axis_boundary
     )
     return casted_output, casted_transposed_output, updated_amax
@@ -199,7 +201,7 @@ def transpose(
     transpose wrapper
     """
     if not TransposePrimitive.enabled():
-        return _transpose(x, static_axis_boundary, transpose_axis_boundary)
+        return _jax_transpose(x, static_axis_boundary, transpose_axis_boundary)
     return TransposePrimitive.outer_primitive.bind(
         x,
         static_axis_boundary=static_axis_boundary,
@@ -406,7 +408,7 @@ def cast_transpose(
     Return two tensors, FP8(inputs) and FP8(inputs.T), which are scaled by `scale`
     """
     if not CastTransposePrimitive.enabled():
-        return _cast_transpose(
+        return _jax_cast_transpose(
             x,
             scale,
             amax,
@@ -665,7 +667,7 @@ def dbias_cast_transpose(
         static_axis_boundary = -1  # means no static axes
 
     if not DBiasCastTransposePrimitive.enabled():
-        casted_dz, cast_transposed_dz, updated_amax = _cast_transpose(
+        casted_dz, cast_transposed_dz, updated_amax = _jax_cast_transpose(
             dz,
             scale,
             amax,
@@ -1003,9 +1005,9 @@ def dact_lu_dbias_cast_transpose(
         static_axis_boundary = -1  # means no static axes
 
     if not DActLuDBiasCastTransposePrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), x)
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), x)
         (dx,) = vjp_func(dz)
-        casted_dx, cast_transposed_dx, updated_amax = _cast_transpose(
+        casted_dx, cast_transposed_dx, updated_amax = _jax_cast_transpose(
             dx,
             scale,
             amax,
@@ -1242,9 +1244,9 @@ def dgated_act_lu_cast_transpose(
     """
     act_type_id = ActivationEnum[activation_type]
     if not DgatedActLuCastTransposePrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), x)
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), x)
         (dx,) = vjp_func(dz)
-        return _cast_transpose(
+        return _jax_cast_transpose(
             dx,
             scale,
             amax,

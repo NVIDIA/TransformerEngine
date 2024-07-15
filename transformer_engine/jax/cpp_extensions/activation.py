@@ -23,7 +23,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     get_padded_spec,
 )
-from .quantization import _cast_fp8
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
@@ -59,7 +59,7 @@ def _convert_to_activation_function(fn_or_string):
     raise ValueError(f"Unsupported {fn_or_string} to an activation function")
 
 
-def _act_lu(inputs, activation_type):
+def _jax_act_lu(inputs, activation_type):
     """
     JAX native activation implementation
     """
@@ -69,6 +69,7 @@ def _act_lu(inputs, activation_type):
         x_i = _convert_to_activation_function(act_fn)(x[idx])
         acts.append(x_i)
     x = reduce(operator.mul, acts)
+    x = jnp.squeeze(x, axis=-2)
     return x
 
 
@@ -186,7 +187,7 @@ def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]])
                  (N, 2, H) for gated activations
     """
     if not ActLuPrimitive.enabled():
-        return _act_lu(inputs, activation_type)
+        return _jax_act_lu(inputs, activation_type)
 
     act_type_id = ActivationEnum[activation_type]
     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
@@ -321,7 +322,7 @@ def dact_lu(
     """
 
     if not DActLuPrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_act_lu, activation_type=activation_type), act_lu_inputs)
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
         return vjp_func(inputs)[0]
 
     act_type_id = ActivationEnum[activation_type]
@@ -482,8 +483,8 @@ def act_lu_fp8(
                  (N, 2, H) for gated activations
     """
     if not ActLuFp8Primitive.enabled():
-        act_lu_output = _act_lu(x, activation_type)
-        casted_output, updated_amax = _cast_fp8(act_lu_output, scale, amax, out_dtype)
+        act_lu_output = _jax_act_lu(x, activation_type)
+        casted_output, updated_amax = _jax_cast_fp8(act_lu_output, scale, amax, out_dtype)
         return casted_output, updated_amax
 
     act_type_id = ActivationEnum[activation_type]

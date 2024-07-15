@@ -27,7 +27,7 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP
 __all__ = ["cast_fp8"]
 
 
-def _quantize(x, scale, q_dtype):
+def _jax_quantize(x, scale, q_dtype):
     """
     Quantize with scale
     """
@@ -37,11 +37,11 @@ def _quantize(x, scale, q_dtype):
     return clipped_scaled_x.astype(q_dtype)
 
 
-def _cast_fp8(inputs, scale, amax, out_dtype):
+def _jax_cast_fp8(inputs, scale, amax, out_dtype):
     """
     JAX native fp8 casting implementation
     """
-    casted_output = _quantize(inputs, scale, q_dtype=out_dtype)
+    casted_output = _jax_quantize(inputs, scale, q_dtype=out_dtype)
     updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(inputs)).astype(amax.dtype))
     return casted_output, updated_amax
 
@@ -178,5 +178,5 @@ def cast_fp8(
     Return FP8 tensor
     """
     if not CastFP8Primitive.enabled():
-        return _cast_fp8(x, scale, amax, out_dtype=out_dtype)
+        return _jax_cast_fp8(x, scale, amax, out_dtype=out_dtype)
     return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
