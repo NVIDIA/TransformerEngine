@@ -146,6 +146,7 @@ def allgather(
     input_: paddle.Tensor,
     tp_group: Optional[dist_group_type] = None,
     sync_op: bool = True,
+    axis: int = 0,
 ) -> Tuple[paddle.Tensor, Any]:
     """All-gather the input tensor across model parallel group."""
 
@@ -155,7 +156,7 @@ def allgather(
 
     parallelism = tp_group.nranks
     output_shape = input_.shape
-    output_shape[0] = output_shape[0] * parallelism
+    output_shape[axis] = output_shape[axis] * parallelism
     output = paddle.empty(shape=output_shape, dtype=input_.dtype)
     wait_handle = tp_group.process_group.all_gather_into_tensor(output, input_, sync_op)
     if sync_op:
