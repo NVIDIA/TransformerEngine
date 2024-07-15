@@ -949,9 +949,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
-      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-        dQKV.fill_(0);
-      }
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1)})
@@ -969,9 +966,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
-      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-        dQKV.fill_(0);
-      }
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
                        torch::indexing::Slice(0, torch::indexing::None, 1)})
                .squeeze(tmp_shape.size() - 2);
@@ -987,10 +981,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
-      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-        dQ.fill_(0);
-        dKV.fill_(0);
-      }
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1)})
@@ -1005,10 +995,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
-      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-        dQ.fill_(0);
-        dKV.fill_(0);
-      }
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
                       torch::indexing::Slice(0, torch::indexing::None, 1)})
                .squeeze(tmp_shape.size() - 2);
@@ -1020,11 +1006,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       dQ = torch::empty_like(Q, options);
       dK = torch::empty_like(K, options);
       dV = torch::empty_like(V, options);
-      if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-        dQ.fill_(0);
-        dK.fill_(0);
-        dV.fill_(0);
-      }
       break;
     default:
       NVTE_ERROR("QKV layout not supported!");
@@ -1078,6 +1059,11 @@ std::vector<at::Tensor> fused_attn_bwd(
         makeTransformerEngineTensor(dV.data_ptr(), v_shape, dqkv_type, amax_dQKV.value().data_ptr(),
                                     scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQ.fill_(0);
+      dK.fill_(0);
+      dV.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
