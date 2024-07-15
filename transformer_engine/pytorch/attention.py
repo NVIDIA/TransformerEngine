@@ -2296,6 +2296,67 @@ class AttnFuncWithCP(torch.autograd.Function):
         )
 
 
+class SWAFuncWithCP(torch.autograd.Function):
+    """
+    Sliding window attention implementation with context parallelism.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        is_training,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        dropout_p,
+        cp_group,
+        cp_global_ranks,
+        cp_stream,
+        softmax_scale,
+        qkv_format,
+        attn_mask_type,
+        attn_bias_type,
+        attn_bias,
+        deterministic,
+        use_fused_attention,
+        window_size,
+    ):
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        return (
+            None,
+            dq,
+            dkv[0],
+            dkv[1],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            attn_dbias,
+            None,
+            None,
+            None,
+        )
+
+
 def attn_forward_func_with_cp(
     is_training,
     q,
@@ -2318,6 +2379,7 @@ def attn_forward_func_with_cp(
     attn_bias=None,
     deterministic=False,
     use_fused_attention=False,
+    window_size=None,
 ) -> torch.Tensor:
     """Attention implementation with context parallelism"""
     assert qkv_format in [
@@ -2340,29 +2402,55 @@ def attn_forward_func_with_cp(
         """Attention bias is only supported with FusedAttention and "causal" """
         """or "no_mask" mask types!"""
     )
-    out = AttnFuncWithCP.apply(
-        is_training,
-        q,
-        k,
-        v,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
-        dropout_p,
-        cp_group,
-        cp_global_ranks,
-        cp_stream,
-        softmax_scale,
-        qkv_format,
-        attn_mask_type,
-        attn_bias_type,
-        attn_bias,
-        deterministic,
-        use_fused_attention,
-    )
+    if window_size is None:
+        out = AttnFuncWithCP.apply(
+            is_training,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            dropout_p,
+            cp_group,
+            cp_global_ranks,
+            cp_stream,
+            softmax_scale,
+            qkv_format,
+            attn_mask_type,
+            attn_bias_type,
+            attn_bias,
+            deterministic,
+            use_fused_attention,
+        )
+    else:
+        out = SWAFuncWithCP.apply(
+            is_training,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            dropout_p,
+            cp_group,
+            cp_global_ranks,
+            cp_stream,
+            softmax_scale,
+            qkv_format,
+            attn_mask_type,
+            attn_bias_type,
+            attn_bias,
+            deterministic,
+            use_fused_attention,
+            window_size,
+        )
     return out
 
 
