@@ -19,7 +19,7 @@ from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quanti
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
-from transformer_engine.jax.cpp_extensions.activation import _convert_to_activation_function
+from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
 from transformer_engine.jax import cpp_extensions as tex
 
 
@@ -280,14 +280,7 @@ class TestFP8Dot:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = jnp.split(linear_1_out, len(activation_type), axis=-2)
-            acts = []
-            for idx, act_fn in enumerate(activation_type):
-                x_i = _convert_to_activation_function(act_fn)(x[idx])
-                acts.append(x_i)
-            x = functools.reduce(operator.mul, acts)
-
-            x = jnp.asarray(jnp.squeeze(x, axis=-2), jnp.bfloat16)
+            x = _jax_act_lu(linear_1_out, activation_type)
 
             fp8_meta_pkg_2 = FP8MetaPackage(
                 amax_list_2[0],
@@ -430,12 +423,7 @@ class TestActivationLu:
     def ref_func(self, x, activation_type):
 
         def ref_act_lu(inputs):
-            x = jnp.split(inputs, len(activation_type), axis=-2)
-            acts = []
-            for idx, act_fn in enumerate(activation_type):
-                x_i = _convert_to_activation_function(act_fn)(x[idx])
-                acts.append(x_i)
-            x = functools.reduce(operator.mul, acts)
+            x = _jax_act_lu(inputs, activation_type)
             return jnp.mean(x)
 
         ref_act_func = jit(value_and_grad(ref_act_lu, (0,)))
