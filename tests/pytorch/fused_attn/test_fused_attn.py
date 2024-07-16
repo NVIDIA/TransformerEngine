@@ -227,9 +227,9 @@ def test_dot_product_attention(
     config = model_configs[model]
     if qkv_layout is None:
         if config.attn_type == "self":
-            qkv_layout = "bshd_bshd_bshd" #"sb3hd"
+            qkv_layout = "bshd_bshd_bshd"  # "sb3hd"
         else:
-            qkv_layout = "bshd_bshd_bshd" #"sbhd_sb2hd"
+            qkv_layout = "bshd_bshd_bshd"  # "sbhd_sb2hd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
@@ -255,7 +255,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = False #config.head_dim <= 128
+    is_training = False  # config.head_dim <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
