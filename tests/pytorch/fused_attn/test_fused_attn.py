@@ -185,13 +185,18 @@ def _get_attention_backends(
 
 model_configs_base = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
-    #"base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
-    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),  # self , 0
+    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
     "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),  # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),  # self , 1
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
     "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
     "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_11_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),  # self , 0
+    "base_11_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),  # cross, 0
+    "base_12_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # self , 1
+    "base_12_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),  # cross, 1
+    "base_13_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),  # inference
+    "base_13_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),  # inference
 }
 
 
@@ -250,7 +255,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim <= 128
+    is_training = False #config.head_dim <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -323,7 +328,6 @@ def test_dot_product_attention(
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
-            print('xxxxxxxxxxxxxxxx',i)
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
@@ -867,7 +871,6 @@ def _run_dot_product_attention(
         attention_type=config.attn_type,
     ).to(dtype=dtype, device="cuda")
 
-    print('bbb',[x.shape for x in [inp_orig[0], inp_orig[1], inp_orig[2]]])
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         q = inp_orig[0]
