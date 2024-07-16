@@ -1211,6 +1211,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        window_size,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2293,6 +2294,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias,
             None,
             None,
+            None,
         )
 
 
@@ -2313,8 +2315,6 @@ class SWAFuncWithCP(torch.autograd.Function):
         causal = ("causal" in attn_mask_type)
         padding = ("padding" in attn_mask_type)
         assert(not padding), f"{attn_mask_type} mask type is not supported!"
-
-        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
         seq_dim = qkv_format.index("s")
         window_size_left = window_size[0]
@@ -2526,50 +2526,51 @@ def attn_forward_func_with_cp(
     assert window_size is None or (not use_fused_attention and qkv_format != "thd"), (
         "Sliding window attention is only supported with FlashAttention!"
     )
-    if window_size is None:
-        out = AttnFuncWithCP.apply(
-            is_training,
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
-            dropout_p,
-            cp_group,
-            cp_global_ranks,
-            cp_stream,
-            softmax_scale,
-            qkv_format,
-            attn_mask_type,
-            attn_bias_type,
-            attn_bias,
-            deterministic,
-            use_fused_attention,
-        )
-    else:
-        out = SWAFuncWithCP.apply(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p,
-            cp_group,
-            cp_global_ranks,
-            cp_stream,
-            softmax_scale,
-            qkv_format,
-            attn_mask_type,
-            deterministic,
-            use_fused_attention,
-            window_size
-        )
+    #if window_size is None:
+    out = AttnFuncWithCP.apply(
+        is_training,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        dropout_p,
+        cp_group,
+        cp_global_ranks,
+        cp_stream,
+        softmax_scale,
+        qkv_format,
+        attn_mask_type,
+        attn_bias_type,
+        attn_bias,
+        deterministic,
+        use_fused_attention,
+        window_size,
+    )
+    #else:
+    #    out = SWAFuncWithCP.apply(
+    #        q,
+    #        k,
+    #        v,
+    #        cu_seqlens_q,
+    #        cu_seqlens_k,
+    #        max_seqlen_q,
+    #        max_seqlen_k,
+    #        dropout_p,
+    #        cp_group,
+    #        cp_global_ranks,
+    #        cp_stream,
+    #        softmax_scale,
+    #        qkv_format,
+    #        attn_mask_type,
+    #        deterministic,
+    #        use_fused_attention,
+    #        window_size
+    #    )
     return out
 
 
