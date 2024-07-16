@@ -3107,6 +3107,10 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        if softcap>0.0:
+            warnings.warn(
+                "Softcap will be used in flash attention."
+            )
         self.softcap = softcap
 
     def forward(
@@ -5708,15 +5712,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_unfused_attention,
                     _,
                 ) = get_attention_backend(attention_params)
-                if use_flash_attention:
-                    self.logger.info("Running with FlashAttention backend")
-                elif use_fused_attention:
-                    self.logger.info(
-                        "Running with FusedAttention backend (sub-backend %s)",
-                        int(fused_attention_backend),
-                    )
-                elif use_unfused_attention:
-                    self.logger.info("Running with UnfusedDotProductAttention backend")
+                # if use_flash_attention:
+                #     self.logger.info("Running with FlashAttention backend")
+                # elif use_fused_attention:
+                #     self.logger.info(
+                #         "Running with FusedAttention backend (sub-backend %s)",
+                #         int(fused_attention_backend),
+                #     )
+                # elif use_unfused_attention:
+                #     self.logger.info("Running with UnfusedDotProductAttention backend")
             else:
                 use_flash_attention = _attention_backends["use_flash_attention"]
                 use_fused_attention = _attention_backends["use_fused_attention"]
