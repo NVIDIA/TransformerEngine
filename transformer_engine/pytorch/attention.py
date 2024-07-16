@@ -2300,7 +2300,7 @@ class AttnFuncWithCP(torch.autograd.Function):
 
 class SWAFuncWithCP(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_kv, dropout_p,
                 cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
                 deterministic, use_fused_attention, window_size):
         if softmax_scale is None:
@@ -2316,58 +2316,72 @@ class SWAFuncWithCP(torch.autograd.Function):
         padding = ("padding" in attn_mask_type)
         assert(not padding), f"{attn_mask_type} mask type is not supported!"
 
-        seq_dim = qkv_format.index("s")
-        window_size_left = window_size[0]
-        assert(window_size_left > 0 and q.shape[seq_dim] % window_size_left == 0)
-        seqlen_window_size_ratio_q = q.shape[seq_dim] // window_size_left
-        assert(window_size_left > 0 and k.shape[seq_dim] % window_size_left == 0)
-        seqlen_window_size_ratio_k = k.shape[seq_dim] // window_size_left
+        max_seqlen_q = max_seqlen_q // cp_size
+        max_seqlen_kv = max_seqlen_kv // cp_size 
+        assert(window_size_left > 0 and window_size_left % (max_seqlen_kv // 2) == 0)
+        num_cp_steps = window_size_left // max_seqlen_kv // 2 + 1
         if causal:
-            # [b, s, np, hn] -> [b, s//w, w, np, hn] or \
-            # [s, b, np, hn] -> [s//w, w, b, np, hn]
-            q, k, v = [x.view(*x.shape[:seq_dim],
-                              x.shape[seq_dim]//window_size_left,
-                              window_size_left,
-                              *x.shape[(seq_dim+1):]) for x in [q, k, v]]
+            if qkv_format == "bshd":
+                # [b, s, np, hn] -> [b, 2, s//2, np, hn]
+                q, k, v = [x.view(x.shape[0], 2, x.shape[1] // 2, *x.shape[2:]) for x in [q, k, v]]
+            elif qkv_format == "sbhd":
+                # [s, b, np, hn] -> [2, s//2, b, np, hn]
+                q, k, v = [x.view(2, x.shape[0] // 2, *x.shape[1:]) for x in [q, k, v]]
         else:
             assert False, "Only causal masking is supported now!"
 
-        kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
-        if qkv_format == "bshd":
-            p2p_comm_buffer_send = kv[:, :, -1].contiguous()
-        elif qkv_format == "sbhd":
-            p2p_comm_buffer_send = kv[:, -1].contiguous()
-        else:
-            assert False, f"{qkv_format} format is not supported!"
-        p2p_comm_buffer_recv = torch.empty_like(p2p_comm_buffer_send)
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-        send_recv_reqs = []
+        assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
+        fa_optional_forward_kwargs = {}
+        if _flash_attn_2_3_plus:
+            fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+        if _flash_attn_2_4_plus:
+            fa_optional_forward_kwargs["alibi_slopes"] = None
 
         # Flash Attn inputs
+        q_inputs = [None, None]
         kv_inputs = [kv, None]
         # Flash Attn outputs
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
 
-        fa_optional_forward_kwargs = {}
-        if _flash_attn_2_4_plus:
-            fa_optional_forward_kwargs["alibi_slopes"] = None
+        # create two streams to resolve wave quantization issue of Flash Attn in each step
+        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
+        # synchronize fwd results correction across steps
+        fwd_results_correction_done = torch.cuda.Event()
 
-        for i in range(3):
-            if i < 2:
+        p2p_comm_buffers = [None for _ in range(cp_size)]
+        # [2, 2, b, s//2, np, hn] or [2, 2, s//2, b, np, hn]
+        p2p_comm_buffers[0] = torch.empty((2, 2, *k[:, 0].shape), dtype=k.dtype, device=k.device)
+        if qkv_format == "bshd":
+            p2p_comm_buffers[0][0][0].copy_(k[:, 0])
+            p2p_comm_buffers[0][0][1].copy_(v[:, 0])
+            p2p_comm_buffers[0][1][0].copy_(k[:, 1])
+            p2p_comm_buffers[0][1][1].copy_(v[:, 1])
+        elif qkv_format == "sbhd":
+            p2p_comm_buffers[0][0][0].copy_(k[0])
+            p2p_comm_buffers[0][0][1].copy_(v[0])
+            p2p_comm_buffers[0][1][0].copy_(k[1])
+            p2p_comm_buffers[0][1][1].copy_(v[1])
+        send_recv_reqs = [[], []]
+
+        for i in range(num_cp_steps + 1):
+            if i < num_cp_steps:
                 with torch.cuda.stream(flash_attn_streams[i]):
                     for req in send_recv_reqs:
                         req.wait()
 
-                    send_recv_reqs = flash_attn_p2p_communicate(rank,
-                                                                p2p_comm_buffer_send,
-                                                                send_dst,
-                                                                p2p_comm_buffer_recv,
-                                                                recv_src,
-                                                                cp_group,
-                                                                batch_p2p_comm)
+                    if i < (num_cp_steps - 1):
+                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        send_recv_reqs = flash_attn_p2p_communicate(
+                            rank,
+                            p2p_comm_buffers[i][0],
+                            send_dst,
+                            p2p_comm_buffers[i + 1][0],
+                            recv_src,
+                            cp_group,
+                            batch_p2p_comm
+                        )
 
                     if i > 0:
                         kv_inputs[i%2] = p2p_comm_buffer_recv
@@ -2385,7 +2399,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                     q_, kv_inputs[i%2][0], kv_inputs[i%2][1],
                                     cu_seqlens_q, cu_seqlens_k,
-                                    max_seqlen_q, max_seqlen_k,
+                                    max_seqlen_q, max_seqlen_kv,
                                     dropout_p, softmax_scale,
                                     causal=True, return_softmax=False,
                                     window_size = window_size,
@@ -2463,7 +2477,7 @@ class SWAFuncWithCP(torch.autograd.Function):
         ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_k = max_seqlen_k
+        ctx.max_seqlen_kv = max_seqlen_kv
         ctx.softmax_scale = softmax_scale
         ctx.qkv_format = qkv_format
         ctx.attn_mask_type = attn_mask_type
