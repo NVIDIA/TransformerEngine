@@ -156,6 +156,7 @@ class FusedAdam(torch.optim.Optimizer):
         # Skip buffer
         self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
         self.multi_tensor_adam = tex.multi_tensor_adam
+        self.multi_tensor_adam_fp8 = tex.multi_tensor_adam_fp8
         self.multi_tensor_adam_capturable = tex.multi_tensor_adam_capturable
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
 
@@ -181,11 +182,11 @@ class FusedAdam(torch.optim.Optimizer):
             loss = closure()
 
         if self.fuse_dtype_casting:
-            extra_pram_groups = self._extra_param_groups
+            extra_param_groups = self._extra_param_groups
         else:
-            extra_pram_groups = itertools.repeat(None)
+            extra_param_groups = itertools.repeat(None)
         for group, group_master, extra_group in zip(
-            self.param_groups, self.param_groups_master, extra_pram_groups
+            self.param_groups, self.param_groups_master, extra_param_groups
         ):
             if len(group["params"]) == 0:
                 continue
@@ -224,6 +225,7 @@ class FusedAdam(torch.optim.Optimizer):
             p_extra_fp8_out = []
             scales = []
             amaxes = []
+            scale_invs = []
 
             # Only used when extra params include fp8 tensors. Otherwise, it doesn't matter what the out_dtype is.
             out_dtype = tex.DType.kFloat32
@@ -241,7 +243,7 @@ class FusedAdam(torch.optim.Optimizer):
                     ), "Extra parameter is None or has different shape."
                     cnt += 1
                     if p.data is p_extra.data:
-                        cnt += 1
+                        same_cnt += 1
                 assert same_cnt in (cnt, 0), (
                     "Either all extra params are identical to the main params, or they are all"
                     " different."
@@ -272,10 +274,11 @@ class FusedAdam(torch.optim.Optimizer):
                     if isinstance(p_extra, Float8Tensor):
                         out_dtype = p_extra._fp8_dtype
                         p_extra_fp8_out.append(p_extra._data.data)
-                        scale, amax, _ = get_fp8_meta(p_extra)
+                        scale, amax, scale_inv = get_fp8_meta(p_extra)
                         # Don't forget to update scale_inv outside of this function
                         scales.append(scale.data)
                         amaxes.append(amax.data)
+                        scale_invs.append(scale_inv.data)
 
                         p_main_of_fp8.append(p.data)
                         g_main_of_fp8.append(p.grad.data)
@@ -346,11 +349,10 @@ class FusedAdam(torch.optim.Optimizer):
                         self.adam_w_mode,
                         bias_correction,
                         group["weight_decay"],
-                        out_dtype,
                     )
                 if len(p_extra_fp8_out) > 0:
                     multi_tensor_applier(
-                        self.multi_tensor_adam,
+                        self.multi_tensor_adam_fp8,
                         self._dummy_overflow_buf,
                         [
                             g_main_of_fp8,
@@ -360,6 +362,7 @@ class FusedAdam(torch.optim.Optimizer):
                             p_extra_fp8_out,
                             scales,
                             amaxes,
+                            scale_invs,
                         ],
                         group["lr"],
                         beta1,
@@ -469,7 +472,6 @@ class FusedAdam(torch.optim.Optimizer):
                         self.adam_w_mode,
                         bias_correction,
                         group["weight_decay"],
-                        out_dtype,
                     )
 
                 if len(g_bf) > 0:
@@ -485,7 +487,6 @@ class FusedAdam(torch.optim.Optimizer):
                         self.adam_w_mode,
                         bias_correction,
                         group["weight_decay"],
-                        out_dtype,
                     )
 
                 if len(g_32) > 0:
@@ -501,7 +502,6 @@ class FusedAdam(torch.optim.Optimizer):
                         self.adam_w_mode,
                         bias_correction,
                         group["weight_decay"],
-                        out_dtype,
                     )
 
         return loss
