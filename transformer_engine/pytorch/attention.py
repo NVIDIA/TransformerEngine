@@ -3107,10 +3107,8 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
-        if softcap>0.0:
-            warnings.warn(
-                "Softcap will be used in flash attention."
-            )
+        if softcap > 0.0:
+            warnings.warn("Softcap will be used in flash attention.")
         self.softcap = softcap
 
     def forward(
