@@ -12,6 +12,11 @@ from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
+from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
 class TestFusedOptimizer(unittest.TestCase):
@@ -171,6 +176,7 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
+    @unittest.skipIf(not is_bf16_compatible(), "bf16 if not supported")
     def test_bf16_model_weight_cast(self):
         dtype = torch.bfloat16
         model = MultiheadAttention(
@@ -211,6 +217,7 @@ class TestFusedAdam(TestFusedOptimizer):
                 ref_params, model_params_to_fp32, rtol=1e-3, atol=1e-3, equal_nan=True
             )
 
+    @unittest.skipIf(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
         with fp8_model_init(enabled=True):
