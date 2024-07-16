@@ -1816,3 +1816,43 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
     # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+def test_noncontiguous():
+    def _create2modules(m, params):
+        mod1 = m(*params)
+        mod2 = m(*params)
+        for p1, p2 in zip(mod1.parameters(), mod2.parameters()):
+            p2.data = p1.data.clone()
+
+        return mod1, mod2
+
+    def _run_module(m, inp):
+        out = m(inp)
+        out.sum().backward()
+        ret = [out, inp.grad]
+        for p in m.parameters():
+            if p.requires_grad():
+                ret.append(p.grad)
+        return ret
+
+    a = torch.randn((128, 256),
+                    device="cuda",
+                    requires_grad=True)
+    a = a.T
+    assert not a.is_contiguous(), "The test is supposed to test noncontiguous input."
+
+    b = a.contiguous()
+
+    # LayerNorm
+    ln1, ln2 = _create2modules(LayerNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT)
+
+    # GEMM
+    g1, g2 = _create2modules(Linear, [128, 128])
+    outT = _run_module(g1, a)
+    out = _run_module(g2, b)
+
+    assert_allclose(out, outT)
