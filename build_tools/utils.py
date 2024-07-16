@@ -28,6 +28,28 @@ def debug_build_enabled() -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=None)
+def get_max_jobs_for_parallel_build() -> int:
+    """Number of parallel jobs for Nina build"""
+
+    # Default: maximum parallel jobs
+    num_jobs = 0
+
+    # Check environment variable
+    if os.getenv("NVTE_MAX_BUILD_JOBS"):
+        num_jobs = int(os.getenv("NVTE_MAX_BUILD_JOBS"))
+    elif os.getenv("MAX_JOBS"):
+        num_jobs = int(os.getenv("MAX_JOBS"))
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--parallel="):
+            num_jobs = int(arg.replace("--parallel=", ""))
+            sys.argv.remove(arg)
+
+    return num_jobs
+
+
 def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):

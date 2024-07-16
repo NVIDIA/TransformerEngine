@@ -8,6 +8,28 @@ on:
   pull_request:
   workflow_dispatch:
 jobs:
+  core:
+    name: 'Core'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/cuda:12.5.0-devel-ubuntu22.04
+      options: --user root
+    steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y git python3.9 pip cmake ninja-build cudnn9-cuda-12
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: 'Build'
+        run: pip install . -v
+        env:
+          NVTE_FRAMEWORK: none
+      - name: 'Sanity check'
+        run: python3 -c "import transformer_engine"
+        working-directory: /
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest

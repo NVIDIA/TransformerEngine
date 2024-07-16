@@ -22,7 +22,10 @@ except ImportError as e:
 current_file_path = Path(__file__).parent.resolve()
 build_tools_dir = current_file_path.parent.parent / "build_tools"
 if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_dir):
-    shutil.copytree(build_tools_dir, current_file_path / "build_tools", dirs_exist_ok=True)
+    build_tools_copy = current_file_path / "build_tools"
+    if build_tools_copy.exists():
+        shutil.rmtree(build_tools_copy)
+    shutil.copytree(build_tools_dir, build_tools_copy)
 
 
 from build_tools.build_ext import get_build_ext
