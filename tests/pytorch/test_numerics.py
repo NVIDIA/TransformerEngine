@@ -1829,9 +1829,12 @@ def test_noncontiguous():
     def _run_module(m, inp):
         out = m(inp)
         out.sum().backward()
-        ret = [out, inp.grad]
+        ret = [out]
+        if inp.grad is not None:
+            ret.append(inp.grad)
+
         for p in m.parameters():
-            if p.requires_grad():
+            if p.requires_grad:
                 ret.append(p.grad)
         return ret
 
@@ -1848,11 +1851,11 @@ def test_noncontiguous():
     outT = _run_module(ln1, a)
     out = _run_module(ln2, b)
 
-    assert_allclose(out, outT)
+    assert_allclose(out, outT, 1e-7)
 
     # GEMM
     g1, g2 = _create2modules(Linear, [128, 128])
     outT = _run_module(g1, a)
     out = _run_module(g2, b)
 
-    assert_allclose(out, outT)
+    assert_allclose(out, outT, 1e-7)
