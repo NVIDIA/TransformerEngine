@@ -1817,6 +1817,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+
 def test_noncontiguous():
     def _create2modules(m, params):
         mod1 = m(*params)
@@ -1838,9 +1839,7 @@ def test_noncontiguous():
                 ret.append(p.grad)
         return ret
 
-    a = torch.randn((128, 256),
-                    device="cuda",
-                    requires_grad=True)
+    a = torch.randn((128, 256), device="cuda", requires_grad=True)
     a = a.T
     assert not a.is_contiguous(), "The test is supposed to test noncontiguous input."
 
