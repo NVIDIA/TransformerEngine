@@ -71,16 +71,37 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
-_flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+_flash_attn_version = PkgVersion("3.0.0") #PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_max_version = PkgVersion("3.0.0") #2.5.8")
 _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
 _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+try:
+    _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
+    _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("3")
+except:
+    _flash_attn_3_plus = False
+    warnings.warn(
+        "To use flash-attn v3, please use the following command to install: "
+        """pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" """
+        "cd /workspace"
+        "git clone https://github.com/Dao-AILab/flash-attention.git"
+        "mkdir /usr/local/lib/python3.10/dist-packages/flashattn_hopper"
+        "cp /workspace/flash-attention/hopper/flash_attn_interface.py /usr/local/lib/python3.10/dist-packages/flashattn_hopper"
+    )
+else:
+    _flash_attn_3_plus = True
+    warnings.warn(
+        "flashattn-hopper is a beta release of flash-attn, not an official release."
+    )
+    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_forward_func
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward
+    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_backward
 
-if _flash_attn_version >= _flash_attn_version_required:
+if _flash_attn_version >= _flash_attn_version_required and not _flash_attn_3_plus:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
@@ -3166,12 +3187,12 @@ class FlashAttention(torch.nn.Module):
 
         if qkv_format in ["sbhd", "bshd"]:
             max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
-            if not context_parallel:
-                # [b * s, h, d]
-                query_layer, key_layer, value_layer = [
-                    x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-                    for x in [query_layer, key_layer, value_layer]
-                ]
+            #if not context_parallel:
+            #    # [b * s, h, d]
+            #    query_layer, key_layer, value_layer = [
+            #        x.view(x.shape[0] * x.shape[1], *x.shape[2:])
+            #        for x in [query_layer, key_layer, value_layer]
+            #    ]
 
             if "padding" in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
@@ -3275,18 +3296,19 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                 if _flash_attn_2_4_1_plus:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
-                output = flash_attn_forward_func(
+                print('cccc',[x.shape for x in [query_layer, key_layer, value_layer]])
+                output, _ = flash_attn_forward_func(
                     query_layer,
                     key_layer,
                     value_layer,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    self.attention_dropout if self.training else 0.0,
+                    #cu_seqlens_q,
+                    #cu_seqlens_kv,
+                    #max_seqlen_q,
+                    #max_seqlen_kv,
+                    #self.attention_dropout if self.training else 0.0,
                     softmax_scale=self.softmax_scale,
                     causal="causal" in attn_mask_type,
-                    **fa_optional_forward_kwargs,
+                    #**fa_optional_forward_kwargs,
                 )
 
         if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type:
@@ -3297,7 +3319,9 @@ class FlashAttention(torch.nn.Module):
             output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
+            print('oooo',output.shape)
             output = output.view(batch_size, max_seqlen_q, -1).contiguous()
+            pass
         elif qkv_format == "thd":
             # thd -> t(hd)
             output = output.view(output.shape[0], -1).contiguous()

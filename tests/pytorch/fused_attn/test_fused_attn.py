@@ -185,7 +185,8 @@ def _get_attention_backends(
 
 model_configs_base = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
-    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
+    #"base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
+    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),  # self , 0
     "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),  # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),  # self , 1
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
@@ -221,9 +222,9 @@ def test_dot_product_attention(
     config = model_configs[model]
     if qkv_layout is None:
         if config.attn_type == "self":
-            qkv_layout = "sb3hd"
+            qkv_layout = "bshd_bshd_bshd" #"sb3hd"
         else:
-            qkv_layout = "sbhd_sb2hd"
+            qkv_layout = "bshd_bshd_bshd" #"sbhd_sb2hd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
@@ -322,6 +323,7 @@ def test_dot_product_attention(
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
+            print('xxxxxxxxxxxxxxxx',i)
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
@@ -865,6 +867,7 @@ def _run_dot_product_attention(
         attention_type=config.attn_type,
     ).to(dtype=dtype, device="cuda")
 
+    print('bbb',[x.shape for x in [inp_orig[0], inp_orig[1], inp_orig[2]]])
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         q = inp_orig[0]
