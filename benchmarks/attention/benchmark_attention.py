@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import nvtx
 import transformer_engine
+
 sys.path.append("../../")
 from tests.pytorch.fused_attn.test_fused_attn import (
     ModelConfig,
@@ -77,7 +78,7 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 pad_between_seqs,
                 is_training,
             )
-        #if fused_attn_supported and flash_attn_supported:
+        # if fused_attn_supported and flash_attn_supported:
         #    torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         #    for i, _ in enumerate(flash_attn_bwd):
         #        torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
