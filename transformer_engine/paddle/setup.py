@@ -59,7 +59,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Paddle Paddle Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=["paddlepaddle-gpu"],
+        install_requires=["paddlepaddle-gpu==2.6.1"],
         tests_require=["numpy"],
         include_package_data=True,
         package_data={
