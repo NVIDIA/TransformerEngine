@@ -79,6 +79,7 @@ _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+_flash_attn_2_6_1_plus = _flash_attn_version >= PkgVersion("2.6.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
@@ -3100,6 +3101,10 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version <= _flash_attn_max_version
         ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
+        if softcap > 0.0:
+            assert (
+                _flash_attn_2_6_1_plus
+            ), f"FlashAttention minimum version {PkgVersion("2.6.1")} is required for softcap."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3107,8 +3112,6 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
-        if softcap > 0.0:
-            warnings.warn("Softcap will be used in flash attention.")
         self.softcap = softcap
 
     def forward(
