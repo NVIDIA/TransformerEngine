@@ -7,8 +7,3 @@ docker run --runtime=nvidia --gpus=all --ipc=host "x86_wheel"
 rm -rf x86_wheelhouse
 docker cp $(docker ps -aq | head -1):/wheelhouse x86_wheelhouse
 
-docker build -t "aarch_wheel" -f build_tools/wheel_utils/Dockerfile.aarch .
-docker run --runtime=nvidia --gpus=all --ipc=host "aarch_wheel"
-rm -rf aarch_wheelhouse
-docker cp $(docker ps -aq | head -1):/wheelhouse/ aarch_wheelhouse
-

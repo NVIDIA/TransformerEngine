@@ -23,9 +23,9 @@ RUN rm -rf /var/cache/dnf/*
 RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/999_nvidia_cuda.conf
 RUN dnf -y install cuda-toolkit
 RUN dnf clean all
-RUN dnf -y install libcudnn8-devel.x86_64
-RUN dnf -y install libcudnn8.x86_64
-RUN dnf -y install glog.x86_64 glog-devel.x86_64
+RUN dnf -y install libcudnn8.aarch64
+RUN dnf -y install libcudnn8-devel.aarch64
+RUN dnf -y install glog.aarch64 glog-devel.aarch64
 
 ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
