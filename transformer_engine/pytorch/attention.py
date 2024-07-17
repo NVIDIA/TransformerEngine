@@ -478,11 +478,10 @@ def get_attention_backend(
         if (
             use_flash_attention
             and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-            and (not _flash_attn_2_3_plus or context_parallel)
+            and not _flash_attn_2_3_plus
         ):
             logger.debug(
-                "Disabling FlashAttention as sliding window attention requires "
-                "flash-attn 2.3+ and no context parallelism"
+                "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
             )
             use_flash_attention = False
 
@@ -1290,7 +1289,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
         fa_optional_forward_kwargs = {}
         if _flash_attn_2_3_plus:
-            fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+            fa_optional_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
         if _flash_attn_2_4_plus:
             fa_optional_forward_kwargs["alibi_slopes"] = None
 
@@ -1524,7 +1523,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                                 kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
-                                    fa_optional_forward_kwargs["window_size"] = [-1, -1]
+                                    fa_optional_forward_kwargs["window_size"] = (-1, -1)
                                 (
                                     _,
                                     _,
@@ -1645,7 +1644,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                                 kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_3_plus:
-                                    fa_optional_forward_kwargs["window_size"] = [-1, -1]
+                                    fa_optional_forward_kwargs["window_size"] = (-1, -1)
                                 (
                                     _,
                                     _,
@@ -2034,7 +2033,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
-                            fa_optional_backward_kwargs["window_size"] = [-1, 0]
+                            fa_optional_backward_kwargs["window_size"] = (-1, 0)
                         _flash_attn_backward(
                             dout_,
                             q_,
@@ -2119,7 +2118,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
-                            fa_optional_backward_kwargs["window_size"] = [-1, -1]
+                            fa_optional_backward_kwargs["window_size"] = (-1, -1)
                         _flash_attn_backward(
                             dout_,
                             q_,
@@ -2210,7 +2209,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
                             dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
-                            fa_optional_backward_kwargs["window_size"] = [-1, -1]
+                            fa_optional_backward_kwargs["window_size"] = (-1, -1)
                         _flash_attn_backward(
                             dout_,
                             q_,
@@ -2269,7 +2268,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     out_ = out.view(-1, *out.shape[-2:])
                     dout_ = dout.view(-1, *dout.shape[-2:])
                     if _flash_attn_2_3_plus:
-                        fa_optional_backward_kwargs["window_size"] = [-1, -1]
+                        fa_optional_backward_kwargs["window_size"] = (-1, -1)
                     _flash_attn_backward(
                         dout_,
                         q_,
@@ -2543,15 +2542,15 @@ class SWAFuncWithCP(torch.autograd.Function):
         if _flash_attn_2_4_plus:
             fa_optional_forward_kwargs["alibi_slopes"] = None
 
-        k_ag = flash_attn_ag_communication(k, cp_group)
-        v_ag = flash_attn_ag_communication(v, cp_group)
+        k_ag = flash_attn_ag_communication(k, cp_group, qkv_format)
+        v_ag = flash_attn_ag_communication(v, cp_group, qkv_format)
         local_kv_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
         out = torch.empty_like(q)
 
-        for i range(len(local_kv_seq_chunk_ids)):
+        for i in range(len(local_kv_seq_chunk_ids)):
             if use_fused_attention:
                 # TODO: will add the code
                 assert False
@@ -2572,7 +2571,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                 _, _, _, _, out_per_step[i], \
                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                     q_, k_, v_,
-                    cu_seqlens_q, cu_seqlens_k * num_kv_chunks,
+                    cu_seqlens_q, cu_seqlens_kv * num_kv_chunks,
                     max_seqlen_q, max_seqlen_kv * num_kv_chunks,
                     dropout_p, softmax_scale,
                     causal=True, return_softmax=False,
@@ -2584,8 +2583,14 @@ class SWAFuncWithCP(torch.autograd.Function):
                 elif qkv_format == "sbhd":
                     out[i].copy_(out_per_step[i])
 
+        if use_fused_attention:
+            # TODO: will add the code
+            assert False
+        else:
+            out = out.view(-1, *out.shape[-2:])
+
         ctx.save_for_backward(
-            q, k, v, cu_seqlens_q, cu_seqlens_k, *out_per_step, *softmax_lse_per_step, *rng_states
+            q, k, v, cu_seqlens_q, cu_seqlens_kv, *out_per_step, *softmax_lse_per_step, *rng_states
         )
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -2677,7 +2682,7 @@ def attn_forward_func_with_cp(
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
 
-    swa_attn = window_size is not None and window_size != [-1, 0] and window_size != [-1, -1]
+    swa_attn = window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     assert (
         not swa_attn or qkv_format != "thd" or attn_bias_type == "no_bias"
     ), (
@@ -3579,10 +3584,6 @@ class FlashAttention(torch.nn.Module):
                 max_seqlen_kv = seqlens_kv.max().item()
 
         if context_parallel:
-            assert window_size in (
-                (-1, -1),
-                (-1, 0),
-            ), "Sliding window attention is not supported with context parallelism."
             assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
