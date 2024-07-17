@@ -1232,7 +1232,6 @@ class AttnFuncWithCP(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
-        window_size,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2460,7 +2459,6 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias,
             None,
             None,
-            None,
         )
 
 
@@ -2632,7 +2630,6 @@ def attn_forward_func_with_cp(
     assert window_size is None or (not use_fused_attention and qkv_format != "thd"), (
         "Sliding window attention is only supported with FlashAttention!"
     )
-    #if window_size is None:
     out = AttnFuncWithCP.apply(
         is_training,
         q,
@@ -2657,26 +2654,6 @@ def attn_forward_func_with_cp(
         use_fused_attention,
         window_size,
     )
-    #else:
-    #    out = SWAFuncWithCP.apply(
-    #        q,
-    #        k,
-    #        v,
-    #        cu_seqlens_q,
-    #        cu_seqlens_k,
-    #        max_seqlen_q,
-    #        max_seqlen_k,
-    #        dropout_p,
-    #        cp_group,
-    #        cp_global_ranks,
-    #        cp_stream,
-    #        softmax_scale,
-    #        qkv_format,
-    #        attn_mask_type,
-    #        deterministic,
-    #        use_fused_attention,
-    #        window_size
-    #    )
     return out
 
 
