@@ -69,14 +69,14 @@ def _layernorm_fwd_rule(
         mu = None
     else:
         raise ValueError(f"{layernorm_type=} is not supported.")
-    return output, (x, mu, rsigma, gamma)
+    return output, (x, mu, rsigma, gamma, beta)
 
 
 def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
-    x, mu, rsigma, gamma = ctx
+    x, mu, rsigma, gamma, beta = ctx
     if layernorm_type == "layernorm":
         dx, dgamma, dbeta = tex.layernorm_bwd(
-            dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            dz, x, mu, rsigma, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
         )
     elif layernorm_type == "rmsnorm":
         assert (
@@ -267,6 +267,7 @@ def _layernorm_fp8_dot_fwd_rule(
         rsigma,
         x,
         gamma,
+        beta,
         x_contracting_dims,
         k_contracting_dims,
         maybe_fp32_to_fm32,
@@ -300,6 +301,7 @@ def _layernorm_fp8_dot_bwd_rule(
         rsigma,
         x,
         gamma,
+        beta,
         x_contracting_dims,
         k_contracting_dims,
         maybe_fp32_to_fm32,
@@ -352,7 +354,14 @@ def _layernorm_fp8_dot_bwd_rule(
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
     if layernorm_type == "layernorm":
         dx, dgamma, dbeta = tex.layernorm_bwd(
-            dgrad, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            dgrad,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
         )
     else:
         assert (

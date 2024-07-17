@@ -233,7 +233,9 @@ def initialize_ub(
                 wgrad_name = name.replace("dgrad", "wgrad")
                 assert wgrad_name not in ub_cfgs
                 layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+                methods["pipeline"].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         if ub_cfgs is not None and name in ub_cfgs:
