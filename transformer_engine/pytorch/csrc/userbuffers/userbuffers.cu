@@ -1890,8 +1890,15 @@ template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
-
+template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e5m2>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements_out, const int strideelements_in,
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements_out, const int strideelements_in,
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
+template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e5m2>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
