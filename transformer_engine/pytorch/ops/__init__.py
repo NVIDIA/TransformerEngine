@@ -9,6 +9,7 @@ This operation-based API is experimental and subject to change.
 """
 
 from transformer_engine.pytorch.ops.basic import (
+    AddInPlace,
     AllGather,
     AllReduce,
     BasicLinear,

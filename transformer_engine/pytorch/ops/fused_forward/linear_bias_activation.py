@@ -60,10 +60,12 @@ class ForwardLinearBiasActivation(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
         # Get basic operations
         idx = self._op_idxs["linear"]
@@ -128,7 +130,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
         linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
 
-        return output
+        return output, [() for _ in range(len(self.basic_ops))]
 
 
 def fuse_forward_linear_bias_activation(

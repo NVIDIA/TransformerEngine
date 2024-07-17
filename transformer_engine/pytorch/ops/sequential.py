@@ -143,28 +143,44 @@ class Sequential(torch.nn.Module):
         modules: Iterable[torch.nn.Module],
     ) -> list[OperationFuser | torch.nn.Module]:
         """Make list of modules, with fusible operations grouped together"""
-        module_groups = []
-        fusible_ops = []
 
-        def maybe_add_fuser():
-            nonlocal fusible_ops
-            if fusible_ops:
-                module_groups.append(OperationFuser(fusible_ops, fuse_ops=True))
-                fusible_ops = []
-
+        # Group fusible operations together
+        groups = []
         for module in modules:
             if isinstance(module, FusibleOperation):
-                fusible_ops.append(module)
+                if not groups or not isinstance(groups[-1], list):
+                    groups.append([])
+                groups[-1].append(module)
             else:
-                maybe_add_fuser()
-                module_groups.append(module)
-        maybe_add_fuser()
-        return module_groups
+                groups.append(module)
+        for idx, group in enumerate(groups):
+            if isinstance(group, list):
+                groups[idx] = OperationFuser(group, fuse_ops=True)
+
+        # Check if operations expect extra input or output tensors
+        # Note: If any op has extra inputs or outputs, then the entire
+        # Sequential must be made up of TE ops.
+        if len(groups) > 1:
+            ops = []
+            for group in groups:
+                if isinstance(group, OperationFuser):
+                    ops.extend(group._basic_ops)
+            num_extra_inputs = sum(op.num_extra_inputs for op in ops)
+            num_extra_outputs = sum(op.num_extra_outputs for op in ops)
+            if num_extra_inputs > 0 or num_extra_outputs > 0:
+                raise RuntimeError(
+                    f"`Sequential` expects {num_extra_inputs} extra inputs "
+                    f"and {num_extra_outputs} extra outputs, "
+                    "but it contains non-fusible operations"
+                )
+
+        return groups
 
     def forward(
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
-    ) -> torch.Tensor:
+        *extra_inputs: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass"""
 
         # Create module groups if needed
@@ -174,5 +190,5 @@ class Sequential(torch.nn.Module):
         # Forward pass for each module group
         x = input
         for module_group in self._module_groups:
-            x = module_group(x)
+            x = module_group(x, *extra_inputs)
         return x

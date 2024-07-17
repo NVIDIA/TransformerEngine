@@ -737,6 +737,64 @@ class TestBasicOps:
             db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((1,),))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("device", ("cuda", "cpu"))
+    @pytest.mark.parametrize("fp8", (False, True))
+    def test_add_in_place(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device,
+        fp8: bool,
+    ) -> None:
+
+        # Skip invalid configurations
+        if fp8 and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8 and torch.device(device).type != "cuda":
+            pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Random data
+        x1_ref, x1_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=fp8,
+        )
+        x2_ref, x2_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = x2_ref.detach()
+        y_ref += x1_ref
+        dx1_ref = dy_ref
+        dx2_ref = dy_ref
+
+        # Implementation with fusible operation
+        op = te_ops.AddInPlace()
+        y_test = op(x1_test, x2_test)
+        y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
+        dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx1_test, dx1_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dx2_test, dx2_ref, rtol=0, atol=0)
+
 
 class TestFusedOps:
     """Tests for fused operations"""
