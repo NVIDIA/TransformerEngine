@@ -1232,6 +1232,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        window_size,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2459,6 +2460,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias,
             None,
             None,
+            None,
         )
 
 
@@ -2482,9 +2484,31 @@ def flash_attn_ag_communication(x, cp_group, qkv_format):
 
 class SWAFuncWithCP(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_kv, dropout_p,
-                cp_group, cp_global_ranks, cp_stream, softmax_scale, qkv_format, attn_mask_type,
-                deterministic, use_fused_attention, window_size):
+    def forward(
+        ctx,
+        is_training,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        dropout_p,
+        cp_group,
+        cp_global_ranks,
+        cp_stream,
+        softmax_scale,
+        qkv_format,
+        attn_mask_type,
+        attn_bias_type,
+        attn_bias,
+        deterministic,
+        use_fused_attention,
+        window_size,
+    ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -2518,11 +2542,12 @@ class SWAFuncWithCP(torch.autograd.Function):
         k_ag = flash_attn_ag_communication(k, cp_group)
         v_ag = flash_attn_ag_communication(v, cp_group)
         local_kv_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
+        out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
         out = torch.empty_like(q)
 
-        for i range(len(local_seq_chunk_ids)):
+        for i range(len(local_kv_seq_chunk_ids)):
             if use_fused_attention:
                 # TODO: will add the code
                 assert False
@@ -2533,14 +2558,15 @@ class SWAFuncWithCP(torch.autograd.Function):
                 elif qkv_format == "sbhd":
                     # [2, sq//2, b, np, hn] -> [b*sq//2, np, hn]
                     q_ = q[i].contiguous().view(-1, *q.shape[-2:])
-                kv_seq_end_idx = local_seq_chunk_ids[i] * max_seqlen_kv
+                kv_seq_end_idx = (local_kv_seq_chunk_ids[i] + 1) * max_seqlen_kv
                 kv_seq_start_idx = max(0, kv_seq_end_idx - max_seqlen_q - window_size[0])
                 kv_seqlen = kv_seq_end_idx - kv_seq_start_idx
                 num_kv_chunks = (kv_seqlen + max_seqlen_kv - 1) // max_seqlen_kv
                 seq_dim = qkv_format.index("s")
                 k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *k.shape[-2:])
                 v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *v.shape[-2:])
-                _, _, _, _, out_, softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                _, _, _, _, out_per_step[i], \
+                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                     q_, k_, v_,
                     cu_seqlens_q, cu_seqlens_k * num_kv_chunks,
                     max_seqlen_q, max_seqlen_kv * num_kv_chunks,
@@ -2550,12 +2576,12 @@ class SWAFuncWithCP(torch.autograd.Function):
                     **fa_optional_forward_kwargs
                 )
                 if qkv_format == "bshd":
-                    out[:, i].copy_(out_)
+                    out[:, i].copy_(out_per_step[i])
                 elif qkv_format == "sbhd":
-                    out[i].copy_(out_)
+                    out[i].copy_(out_per_step[i])
 
         ctx.save_for_backward(
-            q, k, v, out, cu_seqlens_q, cu_seqlens_k, *softmax_lse_per_step, *rng_states
+            q, k, v, cu_seqlens_q, cu_seqlens_k, *out_per_step, *softmax_lse_per_step, *rng_states
         )
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -2572,8 +2598,30 @@ class SWAFuncWithCP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout):
         dq, dk, dv = None, None, None
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, \
-                None, None, None
+        return (
+            None,
+            dq,
+            dk,
+            dv,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def attn_forward_func_with_cp(
@@ -2624,14 +2672,17 @@ def attn_forward_func_with_cp(
     assert (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
+
+    swa_attn = window_size is not None and window_size != [-1, 0] and window_size != [-1, -1]
     assert (
-        window_size is None or window_size == [-1, 0] or window_size == [-1, -1] or \
-        qkv_format != "thd" or attn_bias_type == "no_bias"
+        not swa_attn or qkv_format != "thd" or attn_bias_type == "no_bias"
     ), (
-        f"Context parallelism is not supported with window size {window_size} and "
+        f"Context parallelism is not supported for sliding window attention with "
         f"{qkv_format} format and attention bias!"
     )
-    out = AttnFuncWithCP.apply(
+
+    func_with_cp = SWAFuncWithCP if swa_attn else AttnFuncWithCP
+    out = func_with_cp.apply(
         is_training,
         q,
         k,
@@ -2653,6 +2704,7 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
+        window_size,
     )
     return out
 
