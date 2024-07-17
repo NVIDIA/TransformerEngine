@@ -2627,8 +2627,12 @@ def attn_forward_func_with_cp(
     assert (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
-    assert window_size is None or window_size == [-1, 0] or window_size == [-1, -1] or qkv_format != "thd", (
-        f"Window size {window_size} or QKV format {qkv_format} cannot work with context parallelism!"
+    assert (
+        window_size is None or window_size == [-1, 0] or window_size == [-1, -1] or \
+        qkv_format != "thd" or attn_bias_type == "no_bias"
+    ), (
+        f"Context parallelism is not supported with window size {window_size} and "
+        f"{qkv_format} format and attention bias!"
     )
     out = AttnFuncWithCP.apply(
         is_training,
