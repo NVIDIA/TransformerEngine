@@ -344,6 +344,7 @@ def _fused_layernorm_fp8_mlp_fwd_rule(
         mu,
         rsigma,
         gamma,
+        beta,
         dot_1_output,
         casted_activation_lu_out,
         casted_kernel_1,
@@ -390,6 +391,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
         mu,
         rsigma,
         gamma,
+        beta,
         dot_1_output,
         casted_activation_lu_out,
         casted_kernel_1,
@@ -568,7 +570,14 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
 
     if layernorm_type == "layernorm":
         dx, dgamma, dbeta = tex.layernorm_bwd(
-            dgrad_1, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
+            dgrad_1,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
         )
     else:
         assert (
