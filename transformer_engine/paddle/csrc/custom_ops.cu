@@ -595,10 +595,12 @@ void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_p
   // extract random number generator seed and offset
   const phi::DeviceContext *dev_ctx =
       paddle::experimental::DeviceContextPool::Instance().Get(place);
+
   phi::Generator *gen_cuda = dev_ctx->GetGenerator();
   auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  auto state_index = gen_cuda->GetStateIndex();
   int64_t *rng_state_p = static_cast<int64_t *>(rng_state.data());
+#if PADDLE_VERSION > 261
+  auto state_index = gen_cuda->GetStateIndex();
 
   auto parameterSetter = [gen_cuda, state_index,
                           rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
@@ -618,6 +620,9 @@ void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_p
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  set_rng_state<<<1, 1, 0, stream>>>(0, seed_offset, rng_state_p);
+#endif
 }
 
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
@@ -1005,9 +1010,10 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
   auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
   auto gen_cuda = dev_ctx->GetGenerator();
   auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  auto state_index = gen_cuda->GetStateIndex();
-  auto rng_state_p = static_cast<int64_t *>(rng_state.data());
   auto stream = Q.stream();
+  auto rng_state_p = static_cast<int64_t *>(rng_state.data());
+#if PADDLE_VERSION > 261
+  auto state_index = gen_cuda->GetStateIndex();
   auto parameterSetter = [gen_cuda, state_index,
                           rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
     // ensure the generator use correct state index
@@ -1026,6 +1032,9 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  set_rng_state<<<1, 1, 0, stream>>>(0, seed_offset, rng_state_p);
+#endif
 
   auto te_rng_state = MakeNvteTensor(rng_state);
 
@@ -1353,6 +1362,7 @@ void amax_and_scale_update_inplace_legacy(
     const paddle::Tensor &non_weight_mask,
     const paddle::optional<paddle::Tensor> &current_step_id_tensor, bool update_weight_scale_inv,
     bool fwd_update, float fp8_max, float margin, const std::string &amax_compute) {
+#if PADDLE_VERSION > 261
   NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
 
   paddle::Tensor amax;
@@ -1400,6 +1410,10 @@ void amax_and_scale_update_inplace_legacy(
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  NVTE_ERROR(
+      "amax_and_scale_update_inplace_legacy is not supported in old version of PaddlePaddle\n");
+#endif
 }
 
 void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
