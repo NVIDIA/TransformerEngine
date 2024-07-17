@@ -2517,7 +2517,7 @@ class SWAFuncWithCP(torch.autograd.Function):
 
         k_ag = flash_attn_ag_communication(k, cp_group)
         v_ag = flash_attn_ag_communication(v, cp_group)
-        local_kv_seq_chunk_ids = [rank + 1, 2 * cp_size - rank]
+        local_kv_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
         out = torch.empty_like(q)
@@ -2538,8 +2538,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                 kv_seqlen = kv_seq_end_idx - kv_seq_start_idx
                 num_kv_chunks = (kv_seqlen + max_seqlen_kv - 1) // max_seqlen_kv
                 seq_dim = qkv_format.index("s")
-                k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks : local_kv_seq_chunk_ids[i]], dim=seq_dim).view(-1, *k.shape[-2:])
-                v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks : local_kv_seq_chunk_ids[i]], dim=seq_dim).view(-1, *v.shape[-2:])
+                k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *k.shape[-2:])
+                v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *v.shape[-2:])
                 _, _, _, _, out_, softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                     q_, k_, v_,
                     cu_seqlens_q, cu_seqlens_k * num_kv_chunks,
