@@ -2627,8 +2627,8 @@ def attn_forward_func_with_cp(
     assert (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
-    assert window_size is None or (not use_fused_attention and qkv_format != "thd"), (
-        "Sliding window attention is only supported with FlashAttention!"
+    assert window_size is None or window_size == [-1, 0] or window_size == [-1, -1] or qkv_format != "thd", (
+        f"Window size {window_size} or QKV format {qkv_format} cannot work with context parallelism!"
     )
     out = AttnFuncWithCP.apply(
         is_training,
@@ -2652,7 +2652,6 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
-        window_size,
     )
     return out
 
@@ -5230,6 +5229,7 @@ class FusedAttention(torch.nn.Module):
                     attn_bias_type=core_attention_bias_type,
                     attn_bias=core_attention_bias,
                     use_fused_attention=True,
+                    window_size=window_size,
                 )
         else:
             with self.attention_dropout_ctx():
