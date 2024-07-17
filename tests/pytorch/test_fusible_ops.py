@@ -767,6 +767,7 @@ class TestBasicOps:
             in_shape,
             test_dtype=dtype,
             test_device=device,
+            test_is_fp8=fp8,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
@@ -788,12 +789,72 @@ class TestBasicOps:
 
         # Check results
         tols = dtype_tols(dtype)
+        if fp8:
+            tols = dtype_tols(x1_test._fp8_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
         dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx1_test, dx1_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx2_test, dx2_ref, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("in_shape", ((1,),))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("device", ("cuda", "cpu"))
+    @pytest.mark.parametrize("fp8", (False, True))
+    def test_make_extra_output(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device,
+        fp8: bool,
+    ) -> None:
+
+        # Skip invalid configurations
+        if fp8 and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8 and torch.device(device).type != "cuda":
+            pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=fp8,
+        )
+        dy1_ref, dy1_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        dy2_ref, dy2_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y1_ref = x_ref
+        y2_ref = x_ref
+        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+
+        # Implementation with fusible operation
+        op = te_ops.MakeExtraOutput()
+        y1_test, y2_test = op(x_test)
+        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y1_test = y1_test.to(dtype=torch.float64, device="cpu")
+        y2_test = y2_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y1_test, y1_ref, rtol=0, atol=0)
+        torch.testing.assert_close(y2_test, y2_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
 
 class TestFusedOps:

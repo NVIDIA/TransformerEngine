@@ -15,6 +15,7 @@ from transformer_engine.pytorch.ops.basic import (
     BasicLinear,
     Bias,
     Identity,
+    MakeExtraOutput,
     ReduceScatter,
     Reshape,
 )
