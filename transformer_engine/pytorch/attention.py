@@ -2483,6 +2483,10 @@ def flash_attn_ag_communication(x, cp_group, qkv_format):
 
 
 class SWAFuncWithCP(torch.autograd.Function):
+    """
+    Sliding window attention implementation with context parallelism.
+    """
+
     @staticmethod
     def forward(
         ctx,
