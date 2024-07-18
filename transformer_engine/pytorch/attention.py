@@ -65,6 +65,7 @@ from transformer_engine.pytorch.distributed import (
     set_all_rng_states,
     CudaRNGStatesTracker,
     graph_safe_rng_available,
+    reduce_scatter_along_first_dim,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
@@ -2555,19 +2556,14 @@ class SWAFuncWithCP(torch.autograd.Function):
                 # TODO: will add the code
                 assert False
             else:
-                if qkv_format == "bshd":
-                    # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
-                    q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
-                elif qkv_format == "sbhd":
-                    # [2, sq//2, b, np, hn] -> [b*sq//2, np, hn]
-                    q_ = q[i].contiguous().view(-1, *q.shape[-2:])
+                # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
+                q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
                 kv_seq_end_idx = (local_kv_seq_chunk_ids[i] + 1) * max_seqlen_kv
                 kv_seq_start_idx = max(0, kv_seq_end_idx - max_seqlen_q - window_size[0])
                 kv_seqlen = kv_seq_end_idx - kv_seq_start_idx
                 num_kv_chunks = (kv_seqlen + max_seqlen_kv - 1) // max_seqlen_kv
-                seq_dim = qkv_format.index("s")
-                k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *k.shape[-2:])
-                v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=seq_dim).view(-1, *v.shape[-2:])
+                k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=1).view(-1, *k.shape[-2:])
+                v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=1).view(-1, *v.shape[-2:])
                 _, _, _, _, out_per_step[i], \
                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                     q_, k_, v_,
@@ -2578,12 +2574,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                     window_size = window_size,
                     **fa_optional_forward_kwargs
                 )
-                if qkv_format == "bshd":
-                    out_per_step[i] = out_per_step[i].view(*out[:, i].shape)
-                    out[:, i].copy_(out_per_step[i])
-                elif qkv_format == "sbhd":
-                    out_per_step[i] = out_per_step[i].view(*out[i].shape)
-                    out[i].copy_(out_per_step[i])
+                out_per_step[i] = out_per_step[i].view(*out[:, i].shape)
+                out[:, i].copy_(out_per_step[i])
 
         if use_fused_attention:
             # TODO: will add the code
@@ -2595,7 +2587,6 @@ class SWAFuncWithCP(torch.autograd.Function):
             q, k, v, cu_seqlens_q, cu_seqlens_kv, *out_per_step, *softmax_lse_per_step, *rng_states
         )
         ctx.cp_group = cp_group
-        ctx.cp_global_ranks = cp_global_ranks
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -2608,7 +2599,37 @@ class SWAFuncWithCP(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        dq, dk, dv = None, None, None
+        cp_size = get_distributed_world_size(ctx.cp_group)
+        rank = get_distributed_rank(ctx.cp_group)
+
+        (q, k, v, cu_seqlens_q, cu_seqlens_kv) = ctx.saved_tensors[:5]
+        out_per_step = ctx.saved_tensors[5 : 7]
+        softmax_lse_per_step = ctx.saved_tensors[7 : 9]
+        rng_states = ctx.saved_tensors[9 : 11]
+
+        causal = ("causal" in ctx.attn_mask_type)
+        padding = ("padding" in ctx.attn_mask_type)
+
+        dq = torch.empty_like(q)
+        if ctx.qkv_format == "bshd":
+            dk = torch.zeros((2*cp_size, k.shape[-3], k.shape[0], *k.shape[-2:]), dtype=k.dtype, device=k.device)
+        elif ctx.qlv_format == "sbhd":
+            dk = torch.zeros((2*cp_size, *k.shape[1:]), dtype=k.dtype, device=k.device)
+        dv = torch.zeros_like(dk)
+
+        dk = dk.view(-1, *dk.shape[-3:])
+        dv = dv.view(-1, *dv.shape[-3:])
+
+        dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
+        dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
+
+        if ctx.qkv_format == "bshd":
+            dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
+            dk = dk.transpose(0, 1).contiguous()
+            dv = dv.transpose(0, 1).contiguous()
+        elif ctx.qkv_format == "sbhd":
+            dq = dq.view(-1, *dq.shape[-3:])
+
         return (
             None,
             dq,
