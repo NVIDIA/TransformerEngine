@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 PLATFORM=${1:-manylinux_2_28_x86_64}
-MAKE_FW_SDIST=${2:-true}
+BUILD_FW_EXT=${2:-true}
 
 export NVTE_RELEASE_BUILD=1
 export TARGET_BRANCH=${TARGET_BRANCH:-wheels}
@@ -20,7 +20,7 @@ IFS='-' read -ra whl_parts <<< "$whl_name"
 whl_name_target="${whl_parts[0]}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
 mv dist/"$whl_name" /wheelhouse/"$whl_name_target"
 
-if $MAKE_FW_SDIST ; then
+if $BUILD_FW_EXT ; then
 	# PyTorch sdist
 	cd /TransformerEngine/transformer_engine/pytorch
 	/opt/python/cp310-cp310/bin/pip install torch
@@ -32,15 +32,15 @@ if $MAKE_FW_SDIST ; then
 	/opt/python/cp310-cp310/bin/pip install jax jaxlib
 	/opt/python/cp310-cp310/bin/python setup.py sdist
 	cp dist/* /wheelhouse/
-fi
 
-# Wheels for paddle.
-cd /TransformerEngine/transformer_engine/paddle
-/opt/python/cp310-cp310/bin/pip install /wheelhouse/*.whl
-/opt/python/cp310-cp310/bin/pip install paddlepaddle-gpu==2.6.1
-/opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM
-whl_name=$(basename dist/*)
-IFS='-' read -ra whl_parts <<< "$whl_name"
-whl_name_target="${whl_parts[0]}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
-mv dist/"$whl_name" /wheelhouse/"$whl_name_target"
+	# Wheels for paddle.
+	cd /TransformerEngine/transformer_engine/paddle
+	/opt/python/cp310-cp310/bin/pip install /wheelhouse/*.whl
+	/opt/python/cp310-cp310/bin/pip install paddlepaddle-gpu==2.6.1
+	/opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM
+	whl_name=$(basename dist/*)
+	IFS='-' read -ra whl_parts <<< "$whl_name"
+	whl_name_target="${whl_parts[0]}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
+	mv dist/"$whl_name" /wheelhouse/"$whl_name_target"
+fi
 
