@@ -8,3 +8,7 @@ from .linear_bias_activation import (
     ForwardLinearBiasActivation,
     fuse_forward_linear_bias_activation,
 )
+from .linear_bias_add import (
+    ForwardLinearBiasAdd,
+    fuse_forward_linear_bias_add,
+)

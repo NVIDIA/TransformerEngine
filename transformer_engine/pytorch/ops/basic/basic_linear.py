@@ -12,7 +12,11 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.cpp_extensions import fp8_gemm, gemm
+from transformer_engine.pytorch.cpp_extensions import (
+    FP8TensorMeta,
+    fp8_gemm,
+    gemm,
+)
 from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -32,11 +36,11 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
+    devices_match,
     is_float8_tensor,
     reshape,
 )
 from ...utils import clear_tensor_data
-
 
 def _wait_async(handle: Optional[Any]) -> None:
     """Wait for asynchronous communication to finish, if needed"""
@@ -308,6 +312,8 @@ class BasicLinear(BasicOperation):
         bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        out: Optional[torch.Tensor] = None,
+        accumulate_out: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
@@ -369,6 +375,11 @@ class BasicLinear(BasicOperation):
         device = canonicalize_device(device)
         if device.type != "cuda":
             raise ValueError(f"Only CUDA devices are supported (got {device})")
+        if out is not None and not devices_match(out.device, device):
+            raise ValueError(
+                "Output tensor has invalid device "
+                f"(expected {device}, got {out.device})"
+            )
 
         # Check datatype
         if dtype is None:
@@ -376,8 +387,13 @@ class BasicLinear(BasicOperation):
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
+        if out is not None and out.dtype != dtype:
+            raise ValueError(
+                "Output tensor has invalid dtype "
+                f"(expected {dtype}, got {out.dtype})"
+            )
 
-        # Check tensor dims
+        # Check input tensor dims
         input_dims = tuple(input.size())
         weight_dims = tuple(weight.size())
         if len(weight_dims) != 2:
@@ -389,6 +405,34 @@ class BasicLinear(BasicOperation):
                 "are not compatible"
             )
 
+        # Check output tensor dims
+        output_dims: list[int]
+        if out is None:
+            output_dims = list(input_dims)
+            output_dims[0] = -1
+            output_dims[-1] = weight_dims[0]
+        else:
+            output_dims = list(out.size())
+            if len(output_dims) == 0 or weight_dims[0] != output_dims[-1]:
+                raise ValueError(
+                    f"Output tensor (shape={output_dims}) "
+                    f"and weight tensor (shape={weight_dims}) "
+                    "are not compatible"
+                )
+
+        # Check if accumulating into output tensor
+        if accumulate_out:
+            if out is None:
+                raise ValueError(
+                    "Attempted to accumulate into output tensor "
+                    "without providing output tensor"
+                )
+            if tensor_parallel_mode == "row":
+                raise ValueError(
+                    "Accumulating into output tensor "
+                    "is not supported with row tensor parallelism"
+                )
+
         # Check if FP8 is enabled
         if with_fp8_compute:
             if input_fp8_meta is None and not is_float8_tensor(input):
@@ -399,9 +443,19 @@ class BasicLinear(BasicOperation):
             input_fp8_meta = None
             weight_fp8_meta = None
             output_fp8_meta = None
-        with_fp8_output = (
-            with_fp8_compute and tensor_parallel_mode != "row" and output_fp8_meta is not None
-        )
+        with_fp8_output = with_fp8_compute and tensor_parallel_mode != "row"
+        if out is None:
+            with_fp8_output = with_fp8_output and output_fp8_meta is not None
+        else:
+            if is_float8_tensor(out):
+                if not with_fp8_output:
+                    raise ValueError(
+                        "Output tensor is a Float8Tensor, "
+                        "but FP8 output is not supported"
+                    )
+                out._reset_caches()
+            else:
+                with_fp8_output = False
 
         # Check input tensor
         x_local = reshape(
@@ -476,49 +530,64 @@ class BasicLinear(BasicOperation):
 
         # Construct output tensor
         y = None
-        if with_fp8_output:
-            fp8_dtype = get_fp8_te_dtype(
-                output_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            data = torch.empty(
-                (x.size(0), weight_dims[0]),
-                dtype=torch.uint8,
-                device=device,
-            )
-            y = Float8Tensor(
-                data=data,
-                fp8_meta=output_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                dtype=dtype,
-            )
+        if out is not None:
+            y = reshape(out, (-1, output_dims[-1]))
         else:
-            y = torch.empty(
-                (x.size(0), weight_dims[0]),
-                dtype=dtype,
-                device=device,
-            )
+            if with_fp8_output:
+                fp8_dtype = get_fp8_te_dtype(
+                    output_fp8_meta["recipe"],
+                    fprop_tensor=True,
+                )
+                data = torch.empty(
+                    (x.size(0), weight_dims[0]),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                y = Float8Tensor(
+                    data=data,
+                    fp8_meta=output_fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    dtype=dtype,
+                )
+            else:
+                y = torch.empty(
+                    (x.size(0), weight_dims[0]),
+                    dtype=dtype,
+                    device=device,
+                )
 
         # Perform GEMM
         _wait_async(x_async)
         x_async = None
         if with_fp8_compute:
             kwargs = dict(
+                accumulate=accumulate_out,
                 out=y,
                 bias=b,
                 use_bias=(b is not None),
             )
             if with_fp8_output:
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=y._fp8_meta_forward,
-                )
+                if y._fp8_meta is None:
+                    # Hackily create FP8TensorMeta if needed
+                    fp8_meta = FP8TensorMeta()
+                    fp8_meta.scale = y._scale_inv.reciprocal()
+                    fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=device)
+                    fp8_meta.scale_inv = y._scale_inv
+                    fp8_meta_index = 0
+                else:
+                    # Get FP8TensorMeta from Float8Tensor
+                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                        forward=y._fp8_meta_forward,
+                    )
+                    fp8_meta = y._fp8_meta[fp8_meta_key]
+                    fp8_meta_index = y._fp8_meta_index
                 kwargs.update(
                     dict(
                         out=y._data,
-                        out_index=y._fp8_meta_index,
-                        fp8_meta_tensor=y._fp8_meta[fp8_meta_key],
+                        out_index=fp8_meta_index,
+                        fp8_meta_tensor=fp8_meta,
                         D_dtype=y._fp8_dtype,
                     )
                 )
@@ -541,6 +610,7 @@ class BasicLinear(BasicOperation):
                 x,
                 y.dtype,
                 get_workspace(),
+                accumulate=accumulate_out,
                 out=y,
                 bias=b,
                 use_bias=(b is not None),
@@ -553,13 +623,11 @@ class BasicLinear(BasicOperation):
             else:
                 torch.distributed.all_reduce(y, group=tensor_parallel_group)
 
-        # Reshape output tensor
-        output_dims = list(input_dims)
-        output_dims[0] = -1
-        output_dims[-1] = weight_dims[0]
-        output = reshape(y, output_dims)
+        # Reshape output tensor if needed
+        if out is None:
+            out = reshape(y, output_dims)
 
-        return output, x_local, w
+        return out, x_local, w
 
     @staticmethod
     def _functional_backward(
