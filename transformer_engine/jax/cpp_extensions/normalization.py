@@ -7,6 +7,7 @@ import operator
 import os
 import warnings
 
+import jax
 import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters import mlir
@@ -25,6 +26,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     te_dtype_to_jax_dtype,
 )
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -239,12 +241,77 @@ class LayerNormFwdPrimitive(BasePrimitive):
 register_primitive(LayerNormFwdPrimitive)
 
 
+def _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps):
+    """
+    JAX native layernorm implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    mean = jnp.mean(x_, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.0
+    return jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
+
+
+def _jax_rmsnorm(x, gamma, zero_centered_gamma, eps):
+    """
+    JAX native rmsnorm implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    normed_input = x_ * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.0
+    return jnp.asarray(normed_input * gamma).astype(x.dtype)
+
+
+def _jax_layernorm_fp8(x, gamma, beta, scale, amax, out_dtype, zero_centered_gamma, eps):
+    """
+    JAX native layernorm fp8 implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    mean = jnp.mean(x_, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    rsigma = jax.lax.rsqrt(var + eps)
+    normed_input = (x_ - mean) * rsigma
+    if zero_centered_gamma:
+        gamma += 1.0
+    output = normed_input * gamma + beta
+    casted_output, updated_amax = _jax_cast_fp8(output, scale, amax, out_dtype=out_dtype)
+    return casted_output, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1), updated_amax
+
+
+def _jax_rmsnorm_fp8(x, gamma, scale, amax, out_dtype, zero_centered_gamma, eps):
+    """
+    JAX native rmsnorm fp8 implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    rsigma = jax.lax.rsqrt(var + eps)
+    normed_input = x_ * rsigma
+    if zero_centered_gamma:
+        gamma += 1.0
+    output = normed_input * gamma
+    casted_output, updated_amax = _jax_cast_fp8(output, scale, amax, out_dtype=out_dtype)
+    return casted_output, jnp.squeeze(rsigma, axis=-1), updated_amax
+
+
 def layernorm_fwd(
     x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool, epsilon: float
 ):
     """
     Wrapper for TE layernorm fwd
     """
+    if not LayerNormFwdPrimitive.enabled():
+        x_ = jnp.asarray(x, jnp.float32)
+        mu = jnp.mean(x_, axis=-1, keepdims=True)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_ - mu), axis=-1, keepdims=True) + epsilon)
+        return (
+            _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon),
+            jnp.squeeze(mu, axis=-1),
+            jnp.squeeze(rsigma, axis=-1),
+        )
     return LayerNormFwdPrimitive.outer_primitive.bind(
         x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
     )
@@ -468,12 +535,21 @@ def layernorm_bwd(
     mu: jnp.ndarray,
     rsigma: jnp.ndarray,
     gamma: jnp.ndarray,
+    beta: jnp.ndarray,
     zero_centered_gamma: bool,
     epsilon: float,
 ):
     """
     Wrapper for TE layernorm bwd
     """
+    if not LayerNormBwdPrimitive.enabled():
+        _, vjp_func = jax.vjp(
+            partial(_jax_layernorm, zero_centered_gamma=zero_centered_gamma, eps=epsilon),
+            x,
+            gamma,
+            beta,
+        )
+        return vjp_func(dz)
     return LayerNormBwdPrimitive.outer_primitive.bind(
         dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
     )
@@ -655,6 +731,12 @@ def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
     """
     Wrapper for TE rmsnorm fwd
     """
+    if not RmsNormFwdPrimitive.enabled():
+        x_ = jnp.asarray(x, jnp.float32)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_), axis=-1, keepdims=True) + epsilon)
+        return _jax_rmsnorm(x, gamma, zero_centered_gamma=False, eps=epsilon), jnp.squeeze(
+            rsigma, axis=-1
+        )
     return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon)
 
 
@@ -852,6 +934,11 @@ def rmsnorm_bwd(
     """
     Wrapper for TE layernorm bwd
     """
+    if not RmsNormBwdPrimitive.enabled():
+        _, vjp_func = jax.vjp(
+            partial(_jax_rmsnorm, zero_centered_gamma=False, eps=epsilon), x, gamma
+        )
+        return vjp_func(dz)
     return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
 
 
@@ -1148,6 +1235,17 @@ def layernorm_fwd_fp8(
     """
     Wrapper for TE layernorm fwd (fp8 out)
     """
+    if not LayerNormFwdFp8Primitive.enabled():
+        return _jax_layernorm_fp8(
+            x,
+            gamma,
+            beta,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            eps=epsilon,
+        )
     return LayerNormFwdFp8Primitive.outer_primitive.bind(
         x,
         gamma,
@@ -1387,6 +1485,10 @@ def rmsnorm_fwd_fp8(
     """
     Wrapper for TE rmsnorm fwd (fp8 out)
     """
+    if not RmsNormFwdFp8Primitive.enabled():
+        return _jax_rmsnorm_fp8(
+            x, gamma, scale, amax, out_dtype=out_dtype, zero_centered_gamma=False, eps=epsilon
+        )
     return RmsNormFwdFp8Primitive.outer_primitive.bind(
         x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
     )

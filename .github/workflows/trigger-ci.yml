@@ -15,9 +15,25 @@ jobs:
       args: ${{ env.args }}
 
     # This job only runs for pull request comments
-    if: |
-         contains( ',ptrendx,ksivaman,schetlur-nv,timmoon10,zlsh80826,mingxu1067,cyanguwa,nzmora-nvidia,galagam,nouiz,denera,sudhakarsingh27,Oleg-Goncharov,phu0ngng,nvcforster,', format(',{0},', github.actor)) &&
+    if: >
          startsWith(github.event.comment.body, '/te-ci')
+         && (
+           github.actor == 'ptrendx'
+           || github.actor == 'ksivaman'
+           || github.actor == 'schetlur-nv'
+           || github.actor == 'timmoon10'
+           || github.actor == 'zlsh80826'
+           || github.actor == 'mingxu1067'
+           || github.actor == 'cyanguwa'
+           || github.actor == 'nzmora-nvidia'
+           || github.actor == 'galagam'
+           || github.actor == 'nouiz'
+           || github.actor == 'denera'
+           || github.actor == 'sudhakarsingh27'
+           || github.actor == 'Oleg-Goncharov'
+           || github.actor == 'phu0ngng'
+           || github.actor == 'nvcforster'
+         )
     steps:
       - name: Check if comment is issued by authorized person
         run: blossom-ci

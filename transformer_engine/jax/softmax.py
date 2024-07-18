@@ -49,18 +49,18 @@ def _softmax_fwd_rule(logits, mask, scale_factor, softmax_type):
     else:
         output = tex.scaled_softmax_fwd(logits, scale_factor)
 
-    return output, (output,)
+    return output, (output, logits, mask)
 
 
 def _softmax_bwd_rule(scale_factor, softmax_type, ctx, dz):
-    (softmax_output,) = ctx
+    (softmax_output, logits, mask) = ctx
 
     if softmax_type is SoftmaxType.SCALED_MASKED:
-        dgrad = tex.scaled_masked_softmax_bwd(dz, softmax_output, scale_factor)
+        dgrad = tex.scaled_masked_softmax_bwd(dz, softmax_output, logits, mask, scale_factor)
     elif softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-        dgrad = tex.scaled_upper_triang_masked_softmax_bwd(dz, softmax_output, scale_factor)
+        dgrad = tex.scaled_upper_triang_masked_softmax_bwd(dz, softmax_output, logits, scale_factor)
     else:
-        dgrad = tex.scaled_softmax_bwd(dz, softmax_output, scale_factor)
+        dgrad = tex.scaled_softmax_bwd(dz, softmax_output, logits, scale_factor)
 
     return (dgrad, None)
 
