@@ -129,6 +129,9 @@ if __name__ == "__main__":
         ),
         extras_require={
             "test": test_requires,
+            "pytorch": [f"transformer_engine_torch=={__version__}"],
+            "jax": [f"transformer_engine_jax=={__version__}"],
+            "paddle": [f"transformer_engine_paddle=={__version__}"],
         },
         description="Transformer acceleration library",
         ext_modules=ext_modules,
