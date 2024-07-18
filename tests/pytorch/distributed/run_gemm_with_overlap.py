@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 
 import os
-import sys
 import socket
 import warnings
 import subprocess
@@ -37,13 +36,13 @@ nvte_comm_types = {
 }
 
 
-def mapped_argtype(opt, typemap={}):
+def _mapped_argtype(opt, typemap):
     if str(opt).lower() not in typemap.keys():
         raise TypeError(f"Unrecognized option! Please choose from: {typemap.keys()}")
     return typemap[str(opt).lower()]
 
 
-def parse_args(argv=None, namespace=None):
+def _parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(description="Test comm+GEMM overlap with Userbuffers.")
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
@@ -71,7 +70,7 @@ def parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--comm-type",
-        type=partial(mapped_argtype, typemap=nvte_comm_types),
+        type=partial(_mapped_argtype, typemap=nvte_comm_types),
         default=tex.NVTE_Comm_Overlap_Type.AG,
         help="Comm type to overlap.",
     )
@@ -109,12 +108,6 @@ def parse_args(argv=None, namespace=None):
         "--scale", type=float, default=1e-2, help="Set scaling factor for input and weight tensors."
     )
     parser.add_argument(
-        "--tp-size",
-        type=int,
-        default=torch.cuda.device_count(),
-        help="Tensor-parallel size for the GEMM operation (can be smaller than node size)."
-    )
-    parser.add_argument(
         "--tcp-init",
         action="store_true",
         default=False,
@@ -129,6 +122,17 @@ def parse_args(argv=None, namespace=None):
         default=False,
         help="Initialize torch.distributed with 'device_id' argument to bind each rank to 1 device."
     )
+    parser.add_argument(
+        "--bootstrap-backend",
+        type=str.lower,
+        default="nccl",
+        choices=["gloo", "mpi", "nccl"],
+        help=(
+            "PyTorch distributed backend for host tensor collectives during comm+GEMM overlap "
+            + "initialization."
+        ),
+    )
+    parser.add_argument("--use-cuda-graphs", action="store_true", default=False,)
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
 
@@ -156,13 +160,24 @@ def parse_args(argv=None, namespace=None):
     return opts
 
 @record
-def main(opts):
-    WORLD_RANK = int(os.getenv("RANK"))
-    WORLD_SIZE = int(os.getenv("WORLD_SIZE"))
-    LOCAL_RANK = int(os.getenv("LOCAL_RANK"))
-    LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE"))
-    NUM_NODES = WORLD_SIZE // LOCAL_SIZE
-    assert NUM_NODES == 1
+def _main(opts):
+    if "OMPI_COMM_WORLD_SIZE" in os.environ:
+        # Execution with `mpirun -np N`
+        WORLD_RANK = int(os.getenv("OMPI_COMM_WORLD_RANK", "0"))
+        WORLD_SIZE = int(os.getenv("OMPI_COMM_WORLD_SIZE", "1"))
+        LOCAL_RANK = int(os.getenv("OMPI_COMM_WORLD_LOCAL_RANK", "0"))
+        LOCAL_SIZE = int(os.getenv("OMPI_COMM_WORLD_LOCAL_SIZE", "1"))
+        opts.tcp_init = True
+        opts.bootstrap_backend = "mpi"
+    elif "TORCHELASTIC_RUN_ID" in os.environ:
+        WORLD_RANK = int(os.getenv("RANK", "0"))
+        WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
+        LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
+    else:
+        raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
+    assert WORLD_SIZE == LOCAL_SIZE  # this test supports only 1 node
+    assert LOCAL_SIZE <= torch.cuda.device_count()
 
     # Fix clock speed
     if opts.clock_speed > 0:
@@ -182,6 +197,24 @@ def main(opts):
         )
         msg = result.stdout.decode("utf-8").splitlines()[0]
         print(f"[rank:{WORLD_RANK}] {msg}\n", end="", flush=True)
+
+    # Info printout
+    def dist_print(msg, src=None, info=False, section=False, group=None):
+        group = dist.new_group() if group is None else group
+        rank = dist.get_rank(group)
+        if info or opts.verbose:
+            if section:
+                if rank == (0 if src is None else src):
+                    print("\n", end="", flush=True)
+                dist.barrier(group)
+            if src is None or rank == src:
+                prefix = "[GLOBAL] " if src is not None else f"[rank:{rank}] "
+                lines = msg.splitlines()
+                msg = "\n".join(
+                    [prefix + lines[0]] + [(" " * len(prefix)) + line for line in lines[1:]]
+                )
+                print(msg + "\n", end="", flush=True)
+            dist.barrier(group)
 
     # Initialize torch.distributed global process group and get TP group
     torch.cuda.set_device(LOCAL_RANK)
@@ -209,59 +242,47 @@ def main(opts):
     if opts.bind_to_device:
         dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
     dist.init_process_group(**dist_init_kwargs)
-
-    tp_ranks = list(range(opts.tp_size if opts.tp_size < WORLD_SIZE else WORLD_SIZE))
-    tp_group = dist.new_group(backend="nccl", ranks=tp_ranks)
+    tp_group = dist.new_group(backend="nccl")
     tp_size = dist.get_world_size(tp_group)
-
-    # Info printout
-    def dist_print(msg, src=None, debug=False, section=False):
-        if debug or opts.verbose:
-            if section:
-                dist.barrier()
-                if WORLD_RANK == (0 if src is None else src):
-                    print("\n", end="", flush=True)
-            dist.barrier()
-            if src is None or WORLD_RANK == src:
-                prefix = "[GLOBAL] " if src is not None else f"[rank:{WORLD_RANK}] "
-                lines = msg.splitlines()
-                msg = "\n".join(
-                    [prefix + lines[0]] + [(" " * len(prefix)) + line for line in lines[1:]]
-                )
-                print(msg + "\n", end="", flush=True)
+    dist_print(
+        f"Initialized default NCCL process group with {tp_size} GPUs",
+        src=0,
+        section=True,
+        info=True,
+        group=tp_group,
+    )
 
     # torch.distributed callback wrappers for bootstrapping userbuffers
-    bootstrap_backend = "nccl"
-    if torch.distributed.is_gloo_available():
-        bootstrap_backend = "gloo"
-    elif torch.distributed.is_mpi_available():
-        bootstrap_backend = "mpi"
-    bootstrap_pg = dist.new_group(backend=bootstrap_backend)
-    dist_print(f"Bootstrapping comm+GEMM overlap with backend=\"{bootstrap_backend}\"", src=0,
-               debug=True, section=True)
+    if opts.bootstrap_backend == "gloo":
+        assert dist.is_gloo_available()
+    elif opts.bootstrap_backend == "mpi":
+        assert dist.is_mpi_available()
+    bootstrap_pg = dist.new_group(backend=opts.bootstrap_backend)
+    dist_print(f"Bootstrapping comm+GEMM overlap with backend=\"{opts.bootstrap_backend}\"", src=0,
+               info=True, section=True)
 
+    # torch.distributed callback wrappers for bootstrapping userbuffers
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
-        global_tmp = global_data.cuda() if bootstrap_backend == "nccl" else global_data
-        local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else local_data
-
-        pg = None if group == "world" else bootstrap_pg
-        group_size = dist.get_world_size(pg)
-        torch.distributed.all_gather(list(global_tmp.chunk(group_size)), local_tmp, group=pg)
-
-        if bootstrap_backend == "nccl":
+        del group
+        global_tmp = global_data.cuda() if opts.bootstrap_backend == "nccl" else global_data
+        local_tmp = local_data.cuda() if opts.bootstrap_backend == "nccl" else local_data
+        dist.all_gather_into_tensor(global_tmp, local_tmp, group=bootstrap_pg)
+        if opts.bootstrap_backend == "nccl":
             global_data.copy_(global_tmp.cpu())
             global_tmp.data = torch.Tensor()
             local_tmp.data = torch.Tensor()
 
     def bcast_callback(data: torch.Tensor, src: int, group: str):
-        data_tmp = data.cuda() if bootstrap_backend == "nccl" else data
-        dist.broadcast(data_tmp, src, pg = None if group == "world" else bootstrap_pg)
-        if bootstrap_backend == "nccl":
+        del group
+        data_tmp = data.cuda() if opts.bootstrap_backend == "nccl" else data
+        dist.broadcast(data_tmp, src, pg=bootstrap_pg)
+        if opts.bootstrap_backend == "nccl":
             data.copy_(data_tmp.cpu())
             data_tmp = torch.Tensor()
 
     def barrier_callback(group: str):
-        dist.barrier(None if group == "world" else bootstrap_pg)
+        del group
+        dist.barrier(group=bootstrap_pg)
 
     tex.set_comm_overlap_callbacks(allgather_callback, bcast_callback, barrier_callback)
 
@@ -347,7 +368,7 @@ def main(opts):
     ub_obj2 = None
     if opts.atomic and opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG and opts.check_numerics:
         sample_buffer2 = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
-        ub_obj2 = tex.UbufP2PCommOverlap(
+        ub_obj2 = tex.CommGemmOverlapP2P(
             sample_buffer2,
             WORLD_RANK,
             WORLD_SIZE,
@@ -555,86 +576,136 @@ def main(opts):
             (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
         )
 
+    # Wrap GEMM ops in condensed functions to make CUDA Graphs easier to use
+    def _fp8_gemm():
+        return tex.fp8_gemm(
+            kernel_t_fp8,
+            fp8_meta.scale_inv,
+            tex.FP8FwdTensors.GEMM1_WEIGHT,
+            fp8_dtype,
+            gemm_inp,
+            fp8_meta.scale_inv,
+            tex.FP8FwdTensors.GEMM1_INPUT,
+            fp8_dtype,
+            torch.bfloat16,
+            te.module.base.get_workspace(),
+            bias=None,
+            use_bias=False,
+            gelu=False,
+            use_split_accumulator=te.module.base._2X_ACC_FPROP,
+            ub_algo=ub_algo,
+            ub=ub_obj,
+            extra_output_tensor=rs_out,
+            out=ubuf_out,
+        )
+
+    def _fp8_gemm2(gemm1_out):
+        gemm2_inp = tex.cast_to_fp8(
+            torch.mul(gemm1_out, opts.scale),
+            fp8_meta,
+            tex.FP8FwdTensors.GEMM2_INPUT,
+            fp8_dtype,
+        )
+        return tex.fp8_gemm(
+            kernel2_t_fp8,
+            fp8_meta.scale_inv,
+            tex.FP8FwdTensors.GEMM2_WEIGHT,
+            fp8_dtype,
+            gemm2_inp,
+            fp8_meta.scale_inv,
+            tex.FP8FwdTensors.GEMM2_INPUT,
+            fp8_dtype,
+            torch.bfloat16,
+            te.module.base.get_workspace(),
+            bias=None,
+            use_bias=False,
+            gelu=False,
+            use_split_accumulator=te.module.base._2X_ACC_FPROP,
+            ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P,
+            ub=ub_obj2,
+            extra_output_tensor=rs_out2,
+            out=ubuf_out2
+        )
+
+    def _gemm():
+        return tex.gemm(
+            kernel_t,
+            gemm_inp,
+            torch.bfloat16,
+            te.module.base.get_workspace(),
+            bias=None,
+            use_bias=False,
+            gelu=False,
+            ub_algo=ub_algo,
+            ub=ub_obj,
+            extra_output_tensor=rs_out,
+            out=ubuf_out,
+        )
+
     # Trigger GEMM
     total_iters = opts.warmup_iters + opts.timing_iters
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
     torch.cuda.synchronize()
 
-    if opts.fp8:
+    if opts.use_cuda_graphs:
+        # Trace the CUDA graph first
+        g = torch.cuda.CUDAGraph()
+        if opts.fp8:
+            if ub_obj is None:
+                with torch.cuda.graph(g):
+                    all_outputs = _fp8_gemm()
+            else:
+                with torch.cuda.graph(g):
+                    all_outputs = _fp8_gemm()
+                    _ = _fp8_gemm2(all_outputs[0])
+        else:
+            with torch.cuda.graph(g):
+                all_outputs = _gemm()
+
+        # Now replay the CUDA graph in a loop
         for i in range(total_iters):
             start_events[i].record()
-            all_outputs = tex.fp8_gemm(
-                kernel_t_fp8,
-                fp8_meta.scale_inv,
-                tex.FP8FwdTensors.GEMM1_WEIGHT,
-                fp8_dtype,
-                gemm_inp,
-                fp8_meta.scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype,
-                torch.bfloat16,
-                te.module.base.get_workspace(),
-                bias=None,
-                use_bias=False,
-                gelu=False,
-                use_split_accumulator=te.module.base._2X_ACC_FPROP,
-                ub_algo=ub_algo,
-                ub=ub_obj,
-                extra_output_tensor=rs_out,
-                out=ubuf_out,
-            )
+            g.replay()
             end_events[i].record()
-            if ub_obj2 is not None:
-                gemm2_inp = tex.cast_to_fp8(
-                    torch.mul(all_outputs[0], opts.scale),
-                    fp8_meta,
-                    tex.FP8FwdTensors.GEMM2_INPUT,
-                    fp8_dtype,
-                )
-                all_outputs = tex.fp8_gemm(
-                    kernel2_t_fp8,
-                    fp8_meta.scale_inv,
-                    tex.FP8FwdTensors.GEMM2_WEIGHT,
-                    fp8_dtype,
-                    gemm2_inp,
-                    fp8_meta.scale_inv,
-                    tex.FP8FwdTensors.GEMM2_INPUT,
-                    fp8_dtype,
-                    torch.bfloat16,
-                    te.module.base.get_workspace(),
-                    bias=None,
-                    use_bias=False,
-                    gelu=False,
-                    use_split_accumulator=te.module.base._2X_ACC_FPROP,
-                    ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P,
-                    ub=ub_obj2,
-                    extra_output_tensor=rs_out2,
-                    out=ubuf_out2
-                )
+
     else:
         for i in range(total_iters):
-            start_events[i].record()
-            all_outputs = tex.gemm(
-                kernel_t,
-                gemm_inp,
-                torch.bfloat16,
-                te.module.base.get_workspace(),
-                bias=None,
-                use_bias=False,
-                gelu=False,
-                ub_algo=ub_algo,
-                ub=ub_obj,
-                extra_output_tensor=rs_out,
-                out=ubuf_out,
-            )
-            end_events[i].record()
+            if opts.fp8:
+                start_events[i].record()
+                all_outputs = _fp8_gemm()
+                end_events[i].record()
+                if ub_obj2 is not None:
+                    _fp8_gemm2(all_outputs[0])
+            else:
+                start_events[i].record()
+                all_outputs = _gemm()
+                end_events[i].record()
 
     torch.cuda.synchronize()
     gpu_times = [
         s.elapsed_time(e)
         for s, e in zip(start_events[opts.warmup_iters :], end_events[opts.warmup_iters :])
     ]
+
+    avg_gpu_time = sum(gpu_times) / opts.timing_iters
+    gemm_name = "".join(
+        [
+            "p2p all-gather + " if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG else "",
+            "atomic " if opts.atomic else "",
+            "GEMM",
+            (
+                f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
+                if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS
+                else ""
+            ),
+        ]
+    )
+    timing_info = (
+        f"Avg. GPU time for {gemm_name}: {avg_gpu_time} ms "
+        + f"({opts.warmup_iters} warmup + {opts.timing_iters} timing runs)"
+    )
+    dist_print(timing_info, section=True, info=True)
 
     # Compare against standard GEMM
     numerics_failed = False
@@ -754,26 +825,8 @@ def main(opts):
         else:
             numerics_info = f"NUMERICAL CHECK PASSED: abs error = {abs_err} | rel error = {rel_err}"
 
-        dist_print(numerics_info, src=0, section=True, debug=True)
+        dist_print(numerics_info, src=0, section=True, info=True)
 
-    avg_gpu_time = sum(gpu_times) / opts.timing_iters
-    gemm_name = "".join(
-        [
-            "p2p all-gather + " if opts.comm_type == tex.NVTE_Comm_Overlap_Type.AG else "",
-            "atomic " if opts.atomic else "",
-            "GEMM",
-            (
-                f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
-                if opts.comm_type == tex.NVTE_Comm_Overlap_Type.RS
-                else ""
-            ),
-        ]
-    )
-    timing_info = (
-        f"Avg. GPU time for {gemm_name}: {avg_gpu_time} ms "
-        + f"({opts.warmup_iters} warmup + {opts.timing_iters} timing runs)"
-    )
-    dist_print(timing_info, section=True, debug=True)
     dist.barrier()
     if WORLD_RANK == 0:
         print("\n", end="", flush=True)
@@ -802,5 +855,4 @@ def main(opts):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    os._exit(main(args))
+    os._exit(_main(_parse_args()))

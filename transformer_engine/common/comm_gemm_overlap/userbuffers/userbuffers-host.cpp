@@ -575,7 +575,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
       NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
     }
-    assert(comm->nvsize <= 8);
+    NVTE_CHECK(comm->nvsize <= 8,
+               "CUDA IPC does not support more than 8 GPUs in an NVLink domain.");
 
     cudaIpcMemHandle_t memhndl;
     NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
