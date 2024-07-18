@@ -4,11 +4,15 @@
 
 """Compound tensor operation supported by the operation fuser."""
 
-from .linear_bias_activation import (
+from .backward_linear_add import (
+    BackwardLinearAdd,
+    fuse_backward_linear_add,
+)
+from .forward_linear_bias_activation import (
     ForwardLinearBiasActivation,
     fuse_forward_linear_bias_activation,
 )
-from .linear_bias_add import (
+from .forward_linear_bias_add import (
     ForwardLinearBiasAdd,
     fuse_forward_linear_bias_add,
 )

@@ -106,7 +106,7 @@ class ForwardLinearBiasAdd(FusedOperation):
             device=linear_op.device,
             dtype=linear_op.dtype,
             out=output,
-            accumulate_out=True,
+            accumulate_into_out=True,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
@@ -162,9 +162,6 @@ def fuse_forward_linear_bias_add(
         if op.tensor_parallel_mode == "row":
             # Row tensor-parallelism requires communication after the
             # GEMM
-            continue
-        if op.dtype not in (torch.float16, torch.bfloat16):
-            # cuBLAS only supports FP8 GEMM with FP8, FP16, or BF16 output.
             continue
         linear = op
         op, _ = ops[0]

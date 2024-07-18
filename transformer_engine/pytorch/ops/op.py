@@ -364,7 +364,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, list[tuple[()]]]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
                 f"{{self.__class__.__name__}} operation has "
@@ -389,8 +389,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
     ) -> tuple[
         torch.Tensor,
-        Iterable[Iterable[Optional[torch.Tensor]]],
-        Iterable[Iterable[Optional[torch.Tensor]]],
+        list[Iterable[Optional[torch.Tensor]]],
+        list[tuple[()]],
     ]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(

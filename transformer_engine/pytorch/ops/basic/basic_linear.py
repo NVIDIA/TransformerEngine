@@ -313,7 +313,7 @@ class BasicLinear(BasicOperation):
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         out: Optional[torch.Tensor] = None,
-        accumulate_out: bool = False,
+        accumulate_into_out: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
@@ -421,7 +421,7 @@ class BasicLinear(BasicOperation):
                 )
 
         # Check if accumulating into output tensor
-        if accumulate_out:
+        if accumulate_into_out:
             if out is None:
                 raise ValueError(
                     "Attempted to accumulate into output tensor "
@@ -532,38 +532,37 @@ class BasicLinear(BasicOperation):
         y = None
         if out is not None:
             y = reshape(out, (-1, output_dims[-1]))
+        elif with_fp8_output:
+            fp8_dtype = get_fp8_te_dtype(
+                output_fp8_meta["recipe"],
+                fprop_tensor=True,
+            )
+            data = torch.empty(
+                (x.size(0), weight_dims[0]),
+                dtype=torch.uint8,
+                device=device,
+            )
+            y = Float8Tensor(
+                data=data,
+                fp8_meta=output_fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+                dtype=dtype,
+            )
         else:
-            if with_fp8_output:
-                fp8_dtype = get_fp8_te_dtype(
-                    output_fp8_meta["recipe"],
-                    fprop_tensor=True,
-                )
-                data = torch.empty(
-                    (x.size(0), weight_dims[0]),
-                    dtype=torch.uint8,
-                    device=device,
-                )
-                y = Float8Tensor(
-                    data=data,
-                    fp8_meta=output_fp8_meta,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=0,
-                    fp8_dtype=fp8_dtype,
-                    dtype=dtype,
-                )
-            else:
-                y = torch.empty(
-                    (x.size(0), weight_dims[0]),
-                    dtype=dtype,
-                    device=device,
-                )
+            y = torch.empty(
+                (x.size(0), weight_dims[0]),
+                dtype=dtype,
+                device=device,
+            )
 
         # Perform GEMM
         _wait_async(x_async)
         x_async = None
         if with_fp8_compute:
             kwargs = dict(
-                accumulate=accumulate_out,
+                accumulate=accumulate_into_out,
                 out=y,
                 bias=b,
                 use_bias=(b is not None),
@@ -610,7 +609,7 @@ class BasicLinear(BasicOperation):
                 x,
                 y.dtype,
                 get_workspace(),
-                accumulate=accumulate_out,
+                accumulate=accumulate_into_out,
                 out=y,
                 bias=b,
                 use_bias=(b is not None),
@@ -641,6 +640,10 @@ class BasicLinear(BasicOperation):
         weight_requires_grad: bool = True,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        grad_weight: Optional[torch.Tensor] = None,
+        accumulate_into_grad_weight: bool = False,
+        grad_input: Optional[torch.Tensor] = None,
+        accumulate_into_grad_input: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
@@ -649,8 +652,6 @@ class BasicLinear(BasicOperation):
         weight_fp8_meta: Optional[dict[str, Any]] = None,
         grad_output_fp8_meta: Optional[dict[str, Any]] = None,
         grad_input_fp8_meta: Optional[dict[str, Any]] = None,
-        accumulate_into_grad_weight: bool = False,
-        grad_weight: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Functional API for backward pass
 
@@ -746,6 +747,36 @@ class BasicLinear(BasicOperation):
                 f"and weight tensor (shape={weight_dims}) "
                 "are not compatible"
             )
+        if grad_input is not None and tuple(grad_input.size()) != input_dims:
+            raise ValueError(
+                f"Grad input tensor (shape={tuple(grad_input.size())}) "
+                f"does not match expected shape ({input_dims})"
+            )
+
+        # Check grad input tensor
+        if not input_requires_grad:
+            grad_input = None
+        if grad_input is not None and not devices_match(grad_input.device, device):
+            raise ValueError(
+                "Grad input tensor has invalid device "
+                f"(expected {device}, got {grad_input.device})"
+            )
+        if grad_input is not None and grad_input.dtype != dtype:
+            raise ValueError(
+                "Grad input tensor has invalid dtype "
+                f"(expected {dtype}, got {out.dtype})"
+            )
+        if accumulate_into_grad_input:
+            if grad_input is None:
+                raise ValueError(
+                    "Attempted to accumulate into grad input tensor "
+                    "without providing grad input tensor"
+                )
+            if tensor_parallel_mode == "column":
+                raise ValueError(
+                    "Accumulating into grad input tensor "
+                    "is not supported with column tensor parallelism"
+                )
 
         # Check if FP8 is enabled
         if with_fp8_compute:
@@ -760,8 +791,19 @@ class BasicLinear(BasicOperation):
             with_fp8_compute
             and input_requires_grad
             and tensor_parallel_mode != "column"
-            and grad_input_fp8_meta is not None
         )
+        if grad_input is None:
+            with_fp8_grad_input = with_fp8_grad_input and grad_input_fp8_meta is not None
+        else:
+            if is_float8_tensor(grad_input):
+                if not with_fp8_grad_input:
+                    raise ValueError(
+                        "Grad input tensor is a Float8Tensor, "
+                        "but FP8 output is not supported"
+                    )
+                grad_input._reset_caches()
+            else:
+                with_fp8_grad_input = False
 
         # Check grad output tensor
         dy_async = None
@@ -874,7 +916,9 @@ class BasicLinear(BasicOperation):
                 w = w.from_float8()
 
             # Construct grad input tensor
-            if with_fp8_grad_input:
+            if grad_input is not None:
+                dx = reshape(grad_input, (-1, input_dims[-1]))
+            elif with_fp8_grad_input:
                 fp8_dtype = get_fp8_te_dtype(
                     grad_input_fp8_meta["recipe"],
                     fprop_tensor=False,
@@ -903,16 +947,30 @@ class BasicLinear(BasicOperation):
             _wait_async(dy_async)
             dy_async = None
             if with_fp8_compute:
-                kwargs = dict(out=dx)
+                kwargs = dict(
+                    accumulate=accumulate_into_grad_input,
+                    out=dx,
+                )
                 if with_fp8_grad_input:
-                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                        forward=dx._fp8_meta_forward,
-                    )
+                    if dx._fp8_meta is None:
+                        # Hackily create FP8TensorMeta if needed
+                        fp8_meta = FP8TensorMeta()
+                        fp8_meta.scale = dx._scale_inv.reciprocal()
+                        fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=device)
+                        fp8_meta.scale_inv = dx._scale_inv
+                        fp8_meta_index = 0
+                    else:
+                        # Get FP8TensorMeta from Float8Tensor
+                        fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                            forward=dx._fp8_meta_forward,
+                        )
+                        fp8_meta = dx._fp8_meta[fp8_meta_key]
+                        fp8_meta_index = dx._fp8_meta_index
                     kwargs.update(
                         dict(
                             out=dx._data,
-                            out_index=dx._fp8_meta_index,
-                            fp8_meta_tensor=dx._fp8_meta[fp8_meta_key],
+                            out_index=fp8_meta_index,
+                            fp8_meta_tensor=fp8_meta,
                             D_dtype=dx._fp8_dtype,
                         )
                     )
@@ -935,6 +993,7 @@ class BasicLinear(BasicOperation):
                     dy,
                     dx.dtype,
                     get_workspace(),
+                    accumulate=accumulate_into_grad_input,
                     layout="NN",
                     out=dx,
                 )
@@ -1004,8 +1063,7 @@ class BasicLinear(BasicOperation):
         _wait_async(dy_async)
         _wait_async(x_async)
         _wait_async(dx_async)
-        grad_input = None
-        if dx is not None:
+        if grad_input is None:
             grad_input = reshape(dx, input_dims)
         return grad_input, grad_weight
 
@@ -1095,6 +1153,8 @@ class BasicLinear(BasicOperation):
             weight_requires_grad=ctx.weight_requires_grad,
             device=self.device,
             dtype=self.dtype,
+            grad_weight=grad_weight,
+            accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
@@ -1102,8 +1162,6 @@ class BasicLinear(BasicOperation):
             weight_fp8_meta=ctx.weight_fp8_meta,
             grad_output_fp8_meta=ctx.grad_output_fp8_meta,
             grad_input_fp8_meta=ctx.grad_input_fp8_meta,
-            accumulate_into_grad_weight=accumulate_into_main_grad,
-            grad_weight=grad_weight,
         )
 
         # Clear input tensor if possible
