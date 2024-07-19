@@ -68,8 +68,18 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Basic operations
         basic_op_kwargs: list of dict
             Keyword arguments to BasicOperation
-        *params: torch.nn.Parameter
-            Parameters in operation pipeline
+        num_params: int
+            Number of parameter tensors to include in autograd graph.
+        *extra_inputs: torch.Tensor
+            Extra tensor inputs to include in autograd graph. Consists
+            of parameter tensors, followed by extra operation inputs.
+
+        Returns
+        -------
+        Output tensor(s). If none of the operations have any extra
+        tensor outputs, then the pipeline's output tensor is returned.
+        Otherwise, a tuple with the pipeline's output tensor and extra
+        tensor outputs is returned.
 
         """
 

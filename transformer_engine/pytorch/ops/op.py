@@ -84,24 +84,27 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         Parameters
         ----------
         basic_op_ctxs: list of OperationContext
-            Contexts for corresponding basic operations
+            Contexts for basic operations
         input_: torch.Tensor
             Input tensor
+        basic_op_extra_inputs: list of torch.Tensor
+            Extra tensor inputs to basic operations
         basic_op_prev_ops: list of BasicOperation
-            Basic operations that preceed each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            first)
+            Basic operations that preceed this operation's basic
+            operations
         basic_op_next_ops: list of BasicOperation
-            Basic operations that follow each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            last)
+            Basic operations that follow this operation's basic
+            operations
         basic_op_kwargs: list of dict
-            Keyword arguments to forward functions of corresponding
-            basic operations
+            Keyword arguments to forward functions of basic
+            operations.
 
         Returns
         -------
-        torch.Tensor: Output tensor.
+        torch.Tensor:
+            Output tensor.
+        Iterable of torch.Tensor:
+            Extra tensor outputs from basic operations.
 
         """
         raise NotImplementedError(
@@ -130,24 +133,21 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         Parameters
         ----------
         basic_op_ctxs: list of OperationContext
-            Contexts for corresponding basic operations.
+            Contexts for basic operations
         grad_output: torch.Tensor
-            Loss gradient w.r.t. operation output.
-        basic_op_prev_ops: list of BasicOperation
-            Basic operations that preceed each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            first)
-        basic_op_next_ops: list of BasicOperation
-            Basic operations that follow each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            last)
+            Loss gradient w.r.t. operation output
+        basic_op_grad_extra_outputs: list of tuple of torch.Tensor
+            Loss gradients w.r.t. extra tensor outputs from basic
+            operations.
 
         Returns
         -------
         torch.Tensor:
             Loss gradient w.r.t. operation input
         Iterable of iterable of torch.Tensor:
-            Loss gradients w.r.t. parameters for corresponding basic
+            Loss gradients w.r.t. parameters for basic operations
+        Iterable of iterable of torch.Tensor:
+            Loss gradients w.r.t. extra tensor inputs to basic
             operations
 
         """
@@ -179,9 +179,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
-    # pylint: disable=no-self-use
+
     def num_fp8_scales(
-        self,
+        self,  # pylint: disable=no-self-use
         mode: str,  # pylint: disable=unused-argument
     ) -> int:
         """Number of FP8 scaling factors
@@ -323,6 +323,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Context to coordinate between forward and backward passes
         input_: torch.Tensor
             Input tensor
+        prev_op: BasicOperation, optional
+            Basic operation that preceeds this operation
+        next_op: BasicOperation, optional
+            Basic operation that follows this operation
 
         Returns
         -------
@@ -408,7 +412,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *extra_inputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        ### TODO Handle branching
         """Apply operation"""
         from .fuser import OperationFuser
 
@@ -463,7 +466,6 @@ class FusedOperation(FusibleOperation):
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
-        ### TODO Handle branching
         """Apply operation"""
         if basic_op_kwargs is None:
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]

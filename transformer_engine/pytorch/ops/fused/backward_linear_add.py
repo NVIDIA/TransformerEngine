@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fused operation for dgrad GEMM, add in the backward pass."""
+"""Fused backward dgrad GEMM + add."""
 
 from __future__ import annotations
 from typing import Optional
@@ -19,7 +19,7 @@ from ...utils import clear_tensor_data
 
 
 class BackwardLinearAdd(FusedOperation):
-    """Fused dgrad GEMM, add in the backward pass
+    """Fused backward dgrad GEMM + add
 
     Column tensor parallelism is not supported since that requires
     communication immediately after the dgrad GEMM.
@@ -104,7 +104,7 @@ class BackwardLinearAdd(FusedOperation):
 def fuse_backward_linear_add(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fuse dgrad GEMM, add in the backward pass
+    """Fused backward dgrad GEMM + add
 
     Parameters
     ----------

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fused operation for GEMM, bias, add in the forward pass."""
+"""Fused operation for forward GEMM + bias + add."""
 
 from __future__ import annotations
 from typing import Any, Optional
@@ -20,7 +20,7 @@ from transformer_engine.pytorch.ops.op import (
 
 
 class ForwardLinearBiasAdd(FusedOperation):
-    """Fused GEMM, bias, add in the forward pass
+    """Fused forward GEMM + bias + add
 
     Bias is optional. Row tensor parallelism is not supported since
     that requires communication immediately after the GEMM.
@@ -133,7 +133,7 @@ class ForwardLinearBiasAdd(FusedOperation):
 def fuse_forward_linear_bias_add(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fuse GEMM, bias, add in the forward pass
+    """Fuse forward GEMM + bias + add
 
     Parameters
     ----------

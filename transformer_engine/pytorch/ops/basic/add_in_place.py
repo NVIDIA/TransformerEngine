@@ -16,6 +16,20 @@ from transformer_engine.pytorch.ops.op import (
 
 
 class AddInPlace(BasicOperation):
+    """Add in-place
+
+    This operation requires an extra tensor input to the operation
+    fuser. The main input is added in-place to the extra input, and a
+    view of the extra input is output.
+
+    This operation is considered an advanced feature and most users
+    are discouraged from using it. In-place operations break some
+    autograd assumptions and they can result in subtle, esoteric bugs.
+
+    Compare to `MakeExtraOutput`, which does a similar operation in
+    the backward pass.
+
+    """
 
     # Operation expects buffer for output tensor
     num_extra_inputs: int = 1

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operation for in-place add."""
+"""Make extra tensor output in operation fuser."""
 
 from __future__ import annotations
 from typing import Any, Optional
@@ -16,6 +16,21 @@ from transformer_engine.pytorch.ops.op import (
 
 
 class MakeExtraOutput(BasicOperation):
+    """Make extra output in operation fuser
+
+    If this operation is included in the operation fuser, then the
+    operation fuser will return the intermediate tensor as an extra
+    tensor output. In the backward pass, the gradient is directly
+    accumulated into the gradient w.r.t. the extra output.
+
+    This operation is considered an advanced feature and most users
+    are discouraged from using it. In-place operations break some
+    autograd assumptions and they can result in subtle, esoteric bugs.
+
+    Compare to `AddInPlace`, which does a similar operation in the
+    backward pass.
+
+    """
 
     # Operation expects buffer for output tensor
     num_extra_outputs: int = 1

@@ -336,6 +336,10 @@ class BasicLinear(BasicOperation):
             Tensor device
         dtype: torch.dtype, default = default dtype
             Tensor datatype
+        out: torch.Tensor, optional
+            Output tensor
+        accumulate_into_out: bool, default = `False`
+            Add result to output tensor instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
@@ -677,6 +681,14 @@ class BasicLinear(BasicOperation):
             Tensor device
         dtype: torch.dtype, default = default dtype
             Tensor datatype
+        grad_weight: torch.Tensor, optional
+            Loss gradient w.r.t. weight tensor
+        accumulate_into_grad_weight: bool, default = `False`
+            Add result to weight grad instead of overwriting
+        grad_input: torch.Tensor, optional
+            Loss gradient w.r.t. input tensor
+        accumulate_into_grad_input: bool, default = `False`
+            Add result to input grad instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
@@ -701,10 +713,6 @@ class BasicLinear(BasicOperation):
         grad_output_fp8_meta: dict, optional
             FP8 metadata for casting loss gradient w.r.t. input
             tensor to FP8
-        accumulate_into_grad_weight: bool, default = `False`
-            Accumulate into weight grad instead of overwriting
-        grad_weight: torch.Tensor, optional
-            Loss gradient w.r.t. weight tensor
 
         Returns
         -------
