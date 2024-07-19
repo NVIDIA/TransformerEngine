@@ -203,9 +203,8 @@ class TestFusedAdam(TestFusedOptimizer):
         }
         ref_optim = torch.optim.Adam(ref_params, **options)
         model_param_groups = [model_params]
-        tst_optim = te.optimizers.FusedAdam(
-            master_params, extra_param_groups=model_param_groups, fuse_dtype_casting=True, **options
-        )
+        tst_optim = te.optimizers.FusedAdam(master_params, fuse_dtype_casting=True, **options)
+        tst_optim._extra_param_groups = model_param_groups
 
         for i in range(self.iters):
             self.gen_grad(ref_params, master_params)
@@ -245,9 +244,8 @@ class TestFusedAdam(TestFusedOptimizer):
         }
         ref_optim = torch.optim.Adam(ref_params, **options)
         model_param_groups = [model_params]
-        tst_optim = te.optimizers.FusedAdam(
-            master_params, extra_param_groups=model_param_groups, fuse_dtype_casting=True, **options
-        )
+        tst_optim = te.optimizers.FusedAdam(master_params, fuse_dtype_casting=True, **options)
+        tst_optim._extra_param_groups = model_param_groups
 
         for i in range(self.iters):
             self.gen_grad(ref_params, master_params)
