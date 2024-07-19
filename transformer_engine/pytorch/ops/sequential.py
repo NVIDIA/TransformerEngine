@@ -39,7 +39,7 @@ class Sequential(torch.nn.Module):
         self._module_groups = None
 
         # Add modules
-        if len(args) == 1 and isinstance(args[0], OrderedDict):
+        if len(args) == 1 and isinstance(args[0], dict):
             for key, module in args[0].items():
                 self.add_module(key, module)
         else:
@@ -129,11 +129,12 @@ class Sequential(torch.nn.Module):
         del self[idx]
         return out
 
-    def __iadd__(self, other: Sequential) -> Sequential:
-        return self.extend(other)
+    def __iadd__(self, modules: Iterable[torch.nn.Modules]) -> Sequential:
+        return self.extend(modules)
 
     def __add__(self, modules: Iterable[torch.nn.Modules]) -> Sequential:
-        out = self.__class__(self._modules)
+        out = Sequential()
+        out.extend(self)
         out.extend(modules)
         return out
 
