@@ -51,7 +51,7 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size, const at::Tensor
                         ArgTypes... args) {
   if constexpr (USE_FP8) {
     TORCH_CHECK(tensor_lists.size() == depth + 3,
-                "tensor_lists.size() != depth + 3, tensor_lists should have 2 more tensors (scale, "
+                "tensor_lists.size() != depth + 3, tensor_lists should have 3 more tensors (scale, "
                 "amax, scale_inv) for fp8");
   } else {
     TORCH_CHECK(tensor_lists.size() == depth, "tensor_lists.size() != depth");
