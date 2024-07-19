@@ -179,7 +179,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
-
     def num_fp8_scales(
         self,  # pylint: disable=no-self-use
         mode: str,  # pylint: disable=unused-argument
@@ -371,7 +370,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
-                f"{{self.__class__.__name__}} operation has "
+                "{self.__class__.__name__} operation has "
                 f"{self.num_extra_inputs} extra tensor inputs "
                 f"and {self.num_extra_outputs} extra tensor outputs. "
                 "It should override `fuser_forward` instead of `op_forward`."
@@ -398,7 +397,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
-                f"{{self.__class__.__name__}} operation has "
+                "{self.__class__.__name__} operation has "
                 f"{self.num_extra_inputs} extra tensor inputs "
                 f"and {self.num_extra_outputs} extra tensor outputs. "
                 "It should override `fuser_backward` instead of `op_backward`."

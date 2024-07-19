@@ -42,6 +42,7 @@ from .._common import (
 )
 from ...utils import clear_tensor_data
 
+
 def _wait_async(handle: Optional[Any]) -> None:
     """Wait for asynchronous communication to finish, if needed"""
     if handle is not None:
@@ -381,8 +382,7 @@ class BasicLinear(BasicOperation):
             raise ValueError(f"Only CUDA devices are supported (got {device})")
         if out is not None and not devices_match(out.device, device):
             raise ValueError(
-                "Output tensor has invalid device "
-                f"(expected {device}, got {out.device})"
+                f"Output tensor has invalid device (expected {device}, got {out.device})"
             )
 
         # Check datatype
@@ -392,10 +392,7 @@ class BasicLinear(BasicOperation):
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
         if out is not None and out.dtype != dtype:
-            raise ValueError(
-                "Output tensor has invalid dtype "
-                f"(expected {dtype}, got {out.dtype})"
-            )
+            raise ValueError(f"Output tensor has invalid dtype (expected {dtype}, got {out.dtype})")
 
         # Check input tensor dims
         input_dims = tuple(input.size())
@@ -428,13 +425,11 @@ class BasicLinear(BasicOperation):
         if accumulate_into_out:
             if out is None:
                 raise ValueError(
-                    "Attempted to accumulate into output tensor "
-                    "without providing output tensor"
+                    "Attempted to accumulate into output tensor without providing output tensor"
                 )
             if tensor_parallel_mode == "row":
                 raise ValueError(
-                    "Accumulating into output tensor "
-                    "is not supported with row tensor parallelism"
+                    "Accumulating into output tensor is not supported with row tensor parallelism"
                 )
 
         # Check if FP8 is enabled
@@ -454,8 +449,7 @@ class BasicLinear(BasicOperation):
             if is_float8_tensor(out):
                 if not with_fp8_output:
                     raise ValueError(
-                        "Output tensor is a Float8Tensor, "
-                        "but FP8 output is not supported"
+                        "Output tensor is a Float8Tensor, but FP8 output is not supported"
                     )
                 out._reset_caches()
             else:
@@ -766,13 +760,11 @@ class BasicLinear(BasicOperation):
             grad_input = None
         if grad_input is not None and not devices_match(grad_input.device, device):
             raise ValueError(
-                "Grad input tensor has invalid device "
-                f"(expected {device}, got {grad_input.device})"
+                f"Grad input tensor has invalid device (expected {device}, got {grad_input.device})"
             )
         if grad_input is not None and grad_input.dtype != dtype:
             raise ValueError(
-                "Grad input tensor has invalid dtype "
-                f"(expected {dtype}, got {out.dtype})"
+                f"Grad input tensor has invalid dtype (expected {dtype}, got {out.dtype})"
             )
         if accumulate_into_grad_input:
             if grad_input is None:
@@ -796,9 +788,7 @@ class BasicLinear(BasicOperation):
             grad_output_fp8_meta = None
             grad_input_fp8_meta = None
         with_fp8_grad_input = (
-            with_fp8_compute
-            and input_requires_grad
-            and tensor_parallel_mode != "column"
+            with_fp8_compute and input_requires_grad and tensor_parallel_mode != "column"
         )
         if grad_input is None:
             with_fp8_grad_input = with_fp8_grad_input and grad_input_fp8_meta is not None
@@ -806,8 +796,7 @@ class BasicLinear(BasicOperation):
             if is_float8_tensor(grad_input):
                 if not with_fp8_grad_input:
                     raise ValueError(
-                        "Grad input tensor is a Float8Tensor, "
-                        "but FP8 output is not supported"
+                        "Grad input tensor is a Float8Tensor, but FP8 output is not supported"
                     )
                 grad_input._reset_caches()
             else:
@@ -964,7 +953,9 @@ class BasicLinear(BasicOperation):
                         # Hackily create FP8TensorMeta if needed
                         fp8_meta = FP8TensorMeta()
                         fp8_meta.scale = dx._scale_inv.reciprocal()
-                        fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=device)
+                        fp8_meta.amax_history = torch.empty(
+                            1, 1, dtype=torch.float32, device=device
+                        )
                         fp8_meta.scale_inv = dx._scale_inv
                         fp8_meta_index = 0
                     else:

@@ -37,7 +37,7 @@ class MakeExtraOutput(BasicOperation):
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            f"{{self.__class__.__name__}} operation has "
+            "{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_forward` instead of `op_forward`."
@@ -45,7 +45,7 @@ class MakeExtraOutput(BasicOperation):
 
     def op_backward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            f"{{self.__class__.__name__}} operation has "
+            "{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_backward` instead of `op_backward`."

@@ -1108,9 +1108,7 @@ class TestFusedOps:
         if fp8_output and not fp8_compute:
             pytest.skip("FP8 output requires FP8 compute")
         if fp8_compute and dtype not in (torch.float16, torch.bfloat16):
-            pytest.skip(
-                "FP8 GEMM is only supported with FP8, FP16, or BF16 output"
-            )
+            pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
 
         # Random data
         x1_ref, x1_test = make_reference_and_test_tensors(
@@ -1237,9 +1235,7 @@ class TestFusedOps:
         if fp8_output and not fp8_compute:
             pytest.skip("FP8 output requires FP8 compute")
         if fp8_compute and dtype not in (torch.float16, torch.bfloat16):
-            pytest.skip(
-                "FP8 GEMM is only supported with FP8, FP16, or BF16 output"
-            )
+            pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
