@@ -6,6 +6,7 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import os
 import importlib
 import sys
 import torch
@@ -20,9 +21,19 @@ def _load_library():
     try:
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
-    except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+    except StopIteration as e1:
+        try:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+        except StopIteration as e2:
+            if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+                raise RuntimeError(
+                    "Could not find TransformerEngine's PyTorch framework extension. "
+                    "If installed via pip using wheels (pip install transformer_engine), "
+                    "try 'pip install transformer_engine_cu12[pytorch] instead'. Else file "
+                    "an issue: https://github.com/NVIDIA/TransformerEngine/issues/new."
+                ) from e2
+        raise e1
 
     module_name = "transformer_engine_torch"
     spec = importlib.util.spec_from_file_location(module_name, so_path)
