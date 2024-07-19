@@ -65,6 +65,7 @@ from transformer_engine.pytorch.distributed import (
     set_all_rng_states,
     CudaRNGStatesTracker,
     graph_safe_rng_available,
+    gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
@@ -2464,22 +2465,24 @@ class AttnFuncWithCP(torch.autograd.Function):
         )
 
 
-def flash_attn_ag_communication(x, cp_group, qkv_format):
-    cp_size = get_distributed_world_size(cp_group)
-    xs = [torch.empty_like(x) for _ in range(cp_size)]
-    torch.distributed.all_gather(xs, x, cp_group)
-
-    x_ag = [None] * (2*cp_size)
-    if qkv_format == "bshd":
-        for idx, x in enumerate(xs):
-            x_ag[idx] = x[:, 0]
-            x_ag[2*cp_size-idx-1] = x[:, 1]
-    elif qkv_format == "sbhd":
-        for idx, x in enumerate(xs):
-            x_ag[idx] = x[0]
-            x_ag[2*cp_size-idx-1] = x[1]
-
-    return x_ag
+@jit_fuser
+def get_seq_chunk_ids_to_all_gathered_kv(local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size_left):
+    seq_end_idx = (local_chunk_id + 1) * max_seqlen_kv
+    seq_start_idx = max(0, seq_end_idx - max_seqlen_q - window_size_left)
+    seqlen = seq_end_idx - seq_start_idx
+    num_chunks = (seqlen + max_seqlen_kv - 1) // max_seqlen_kv
+    chunk_ids = torch.arange(
+        local_chunk_id - num_chunks + 1,
+        local_chunk_id + 1,
+        dtype=torch.int32,
+        device=torch.cuda.current_device()
+    )
+    chunk_ids_to_all_gathered_kv = torch.where(
+        chunk_ids < cp_size,
+        2 * chunk_ids,
+        2 * (2 * cp_size - chunk_ids) - 1
+    )
+    return chunk_ids_to_all_gathered_kv
 
 
 class SWAFuncWithCP(torch.autograd.Function):
@@ -2522,6 +2525,12 @@ class SWAFuncWithCP(torch.autograd.Function):
         causal = ("causal" in attn_mask_type)
         padding = ("padding" in attn_mask_type)
         assert(causal and not padding), f"{attn_mask_type} mask type is not supported!"
+        assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
+        assert (use_fused_attention or _flash_attn_2_3_plus), \
+            "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
+        fa_optional_forward_kwargs = {}
+        if _flash_attn_2_4_plus:
+            fa_optional_forward_kwargs["alibi_slopes"] = None
 
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
@@ -2531,39 +2540,42 @@ class SWAFuncWithCP(torch.autograd.Function):
         if causal:
             if qkv_format == "bshd":
                 # [b, s, np, hn] -> [b, 2, s//2, np, hn]
-                q, k, v = [x.view(x.shape[0], 2, x.shape[1] // 2, *x.shape[2:]) for x in [q, k, v]]
+                q = q.view(q.shape[0], 2, q.shape[1] // 2, *q.shape[2:])
+                # [b, s, np, hn] -> [s, b, np, hn]
+                k, v = [x.transpose(0, 1).contiguous() for x in [k, v]]
             elif qkv_format == "sbhd":
                 # [s, b, np, hn] -> [2, s//2, b, np, hn]
-                q, k, v = [x.view(2, x.shape[0] // 2, *x.shape[1:]) for x in [q, k, v]]
+                q = q.view(2, q.shape[0] // 2, *q.shape[1:])
 
-        assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
-        assert (use_fused_attention or _flash_attn_2_3_plus), \
-            "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
-        fa_optional_forward_kwargs = {}
-        if _flash_attn_2_4_plus:
-            fa_optional_forward_kwargs["alibi_slopes"] = None
+        k_ag, _ = gather_along_first_dim(k, cp_group)
+        v_ag, _ = gather_along_first_dim(v, cp_group)
+        k_ag = k_ag.view(2*cp_size, k.shape[0]//2, *k.shape[1:])
+        v_ag = v_ag.view(2*cp_size, v.shape[0]//2, *v.shape[1:])
 
-        k_ag = flash_attn_ag_communication(k, cp_group, qkv_format)
-        v_ag = flash_attn_ag_communication(v, cp_group, qkv_format)
-        local_kv_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
+        local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
         out = torch.empty_like(q)
 
-        for i in range(len(local_kv_seq_chunk_ids)):
+        for i in range(len(local_seq_chunk_ids)):
             if use_fused_attention:
                 # TODO: will add the code
                 assert False
             else:
                 # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
                 q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
-                kv_seq_end_idx = (local_kv_seq_chunk_ids[i] + 1) * max_seqlen_kv
-                kv_seq_start_idx = max(0, kv_seq_end_idx - max_seqlen_q - window_size[0])
-                kv_seqlen = kv_seq_end_idx - kv_seq_start_idx
-                num_kv_chunks = (kv_seqlen + max_seqlen_kv - 1) // max_seqlen_kv
-                k_ = torch.cat(k_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=1).view(-1, *k.shape[-2:])
-                v_ = torch.cat(v_ag[local_kv_seq_chunk_ids[i] - num_kv_chunks + 1: local_kv_seq_chunk_ids[i] + 1], dim=1).view(-1, *v.shape[-2:])
+                chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
+                    local_seq_chunk_ids[i],
+                    cp_size,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    window_size[0]
+                )
+                num_kv_chunks = chunk_ids_to_kv_ag.numel()
+                # [num_kv_chunks, sq//2, b, np, hn] -> [b*num_kv_chunks*sq//2, np, hn]
+                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *k.shape[-2:])
+                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *v.shape[-2:])
                 _, _, _, _, out_per_step[i], \
                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                     q_, k_, v_,
@@ -2571,7 +2583,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     max_seqlen_q, max_seqlen_kv * num_kv_chunks,
                     dropout_p, softmax_scale,
                     causal=True, return_softmax=False,
-                    window_size = window_size,
+                    window_size=window_size,
                     **fa_optional_forward_kwargs
                 )
                 out_per_step[i] = out_per_step[i].view(*out[:, i].shape)
@@ -2611,15 +2623,11 @@ class SWAFuncWithCP(torch.autograd.Function):
         padding = ("padding" in ctx.attn_mask_type)
 
         dq = torch.empty_like(q)
-        if ctx.qkv_format == "bshd":
-            dk = torch.zeros((2*cp_size, k.shape[-3], k.shape[0], *k.shape[-2:]), dtype=k.dtype, device=k.device)
-        elif ctx.qlv_format == "sbhd":
-            dk = torch.zeros((2*cp_size, *k.shape[1:]), dtype=k.dtype, device=k.device)
+        dk = torch.zeros((2*cp_size, k.shape[0]//2, *k.shape[1:]), dtype=k.dtype, device=k.device)
         dv = torch.zeros_like(dk)
 
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
-
         dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
         dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
 
