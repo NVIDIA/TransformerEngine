@@ -47,8 +47,8 @@ class BackwardLinearAdd(FusedOperation):
     ]:
 
         # Get basic operations
-        linear_op, backward_add_op = self.basic_ops
-        linear_op_ctx, backward_add_op_ctx = basic_op_ctxs
+        linear_op = self.basic_ops[0]
+        linear_op_ctx = basic_op_ctxs[0]
 
         # Saved tensors from forward pass
         (x_local,) = linear_op_ctx.saved_tensors

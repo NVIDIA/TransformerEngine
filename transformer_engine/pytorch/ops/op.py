@@ -179,8 +179,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
+    # pylint: disable=no-self-use
     def num_fp8_scales(
-        self,  # pylint: disable=no-self-use
+        self,
         mode: str,  # pylint: disable=unused-argument
     ) -> int:
         """Number of FP8 scaling factors

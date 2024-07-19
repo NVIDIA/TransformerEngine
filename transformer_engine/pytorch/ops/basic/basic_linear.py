@@ -764,7 +764,7 @@ class BasicLinear(BasicOperation):
             )
         if grad_input is not None and grad_input.dtype != dtype:
             raise ValueError(
-                f"Grad input tensor has invalid dtype (expected {dtype}, got {out.dtype})"
+                f"Grad input tensor has invalid dtype (expected {dtype}, got {grad_input.dtype})"
             )
         if accumulate_into_grad_input:
             if grad_input is None:

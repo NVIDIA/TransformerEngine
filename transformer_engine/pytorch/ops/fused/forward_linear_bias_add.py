@@ -5,6 +5,7 @@
 """Fused operation for forward GEMM + bias + add."""
 
 from __future__ import annotations
+from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
@@ -78,9 +79,6 @@ class ForwardLinearBiasAdd(FusedOperation):
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
-        idx = self._op_idxs["add"]
-        add_op = self.basic_ops[idx]
-        add_op_ctx = basic_op_ctxs[idx]
 
         # FP8 metadata
         with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()

@@ -94,7 +94,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 f"({num_params} parameters, {num_extra_inputs} extra inputs), "
                 f"but got {len(extra_inputs)}"
             )
-        params, extra_inputs = _split_tuple(extra_inputs, num_params)
+        _, extra_inputs = _split_tuple(extra_inputs, num_params)
         basic_op_extra_inputs = []
         for op in basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
@@ -167,8 +167,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
-        else:
-            return x
+        return x
 
     @staticmethod
     @torch.autograd.function.once_differentiable
@@ -194,7 +193,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Unflatten list of extra tensor output grads
         if len(grad_extra_outputs) != func_ctx.num_extra_outputs:
             raise ValueError(
-                f"Expected grads for {ctx.num_extra_outputs} extra tensor outputs, "
+                f"Expected grads for {func_ctx.num_extra_outputs} extra tensor outputs, "
                 f"but got {len(grad_extra_outputs)}"
             )
         basic_op_grad_extra_outputs = []
