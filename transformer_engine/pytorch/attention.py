@@ -2586,8 +2586,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     window_size=window_size,
                     **fa_optional_forward_kwargs
                 )
-                out_per_step[i] = out_per_step[i].view(*out[:, i].shape)
-                out[:, i].copy_(out_per_step[i])
+                out[:, i].copy_(out_per_step[i].view_as(out[:, i]))
 
         if use_fused_attention:
             # TODO: will add the code
@@ -2607,6 +2606,7 @@ class SWAFuncWithCP(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.window_size = window_size
         return out
 
     @staticmethod
@@ -2622,9 +2622,71 @@ class SWAFuncWithCP(torch.autograd.Function):
         causal = ("causal" in ctx.attn_mask_type)
         padding = ("padding" in ctx.attn_mask_type)
 
+        dout = dout.view_as(q)
         dq = torch.empty_like(q)
         dk = torch.zeros((2*cp_size, k.shape[0]//2, *k.shape[1:]), dtype=k.dtype, device=k.device)
         dv = torch.zeros_like(dk)
+
+        k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
+        v_ag, _ = gather_along_first_dim(v, ctx.cp_group)
+        k_ag = k_ag.view(2*cp_size, k.shape[0]//2, *k.shape[1:])
+        v_ag = v_ag.view(2*cp_size, v.shape[0]//2, *v.shape[1:])
+
+        local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
+
+        fa_optional_backward_kwargs = {}
+        if _flash_attn_2_4_plus:
+            fa_optional_backward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_4_1_plus:
+            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+
+        for i in range(len(local_seq_chunk_ids)):
+            if ctx.use_fused_attention:
+                # TODO: will add the code
+                assert False
+            else:
+                # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
+                q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
+                chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
+                    local_seq_chunk_ids[i],
+                    cp_size,
+                    ctx.max_seqlen_q,
+                    ctx.max_seqlen_kv,
+                    ctx.window_size[0]
+                )
+                num_kv_chunks = chunk_ids_to_kv_ag.numel()
+                # [num_kv_chunks, sq//2, b, np, hn] -> [b*num_kv_chunks*sq//2, np, hn]
+                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *k.shape[-2:])
+                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *v.shape[-2:])
+                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                out_ = out_per_step[i]
+                dout_ = dout[:, i].contiguous().view_as(out_)
+                _flash_attn_backward(
+                    dout_,
+                    q_,
+                    k_,
+                    v_,
+                    out_,
+                    softmax_lse_per_step[i],
+                    dq_,
+                    dk_,
+                    dv_,
+                    cu_seqlens_q,
+                    cu_seqlens_kv * num_kv_chunks,
+                    ctx.max_seqlen_q,
+                    ctx.max_seqlen_kv * num_kv_chunks,
+                    ctx.dropout_p,
+                    ctx.softmax_scale,
+                    True,
+                    window_size=ctx.window_size,
+                    rng_state=rng_states[i],
+                    **fa_optional_backward_kwargs,
+                )
+                dq[:, i].copy_(dq_.view_as(dq[:, i]))
+                dk_ = dk_.view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
+                dv_ = dv_.view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:]).movedim(0, 2).contiguous()
+                dk.index_add_(0, chunk_ids_to_kv_ag, dk_)
+                dv.index_add_(0, chunk_ids_to_kv_ag, dv_)
 
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
