@@ -173,7 +173,7 @@ struct AdamFunctorExtraOutDtype {
           transformer_engine::atomicMaxFloat(fp8_data.amax_ptr, fp8_data.max);
         }
         if (fp8_data.scale_inv_ptr != nullptr) {
-          transformer_engine::reciprocal(fp8_data.scale_inv_ptr, fp8_data.scale);
+          *fp8_data.scale_inv_ptr = __frcp_rn(fp8_data.scale);
         }
       }
     }
