@@ -3237,7 +3237,7 @@ def check_set_window_size(
             warnings.warn(
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
-        elif orig_window_size[0] < 0 or orig_window_size[0] < 0:
+        elif orig_window_size[0] < 0 or orig_window_size[1] < 0:
             assert False, (
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
