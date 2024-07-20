@@ -5,7 +5,6 @@
 """Sequential container for fusible operations."""
 
 from __future__ import annotations
-from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from typing import Optional
 
@@ -82,8 +81,9 @@ class Sequential(torch.nn.Module):
     ) -> Sequential | torch.nn.Module:
         keys = self._get_keys_by_idx(idx)
         if isinstance(idx, slice):
-            modules = OrderedDict((str(i), self._modules[key]) for i, key in enumerate(keys))
-            return self.__class__(modules)
+            out = Sequential()
+            out.extend(self._modules[key] for key in keys)
+            return out
         return self._modules[keys[0]]
 
     def __setitem__(self, idx: int, module: torch.nn.Module) -> None:
