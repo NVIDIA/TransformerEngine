@@ -17,14 +17,12 @@ RUN dnf -y install epel-release
 RUN dnf -y install cuda-compiler-${VER}.${ARCH} \
                    cuda-libraries-${VER}.${ARCH} \
                    cuda-libraries-devel-${VER}.${ARCH}
-#RUN dnf -y install --allowerasing cudnn9-cuda-12
+RUN dnf -y install --allowerasing cudnn9-cuda-12
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/999_nvidia_cuda.conf
 RUN dnf -y install cuda-toolkit
 RUN dnf clean all
-RUN dnf -y install libcudnn8-devel.x86_64
-RUN dnf -y install libcudnn8.x86_64
 RUN dnf -y install glog.x86_64 glog-devel.x86_64
 
 ENV PATH="/usr/local/cuda/bin:${PATH}"
@@ -33,6 +31,7 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV CUDA_ROOT=/usr/local/cuda
 ENV CUDA_PATH=/usr/local/cuda
 ENV CUDADIR=/usr/local/cuda
+ENV NVTE_RELEASE_BUILD=1
 
-CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh", "manylinux_2_28_x86_64", "true"]
+CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true"]
 

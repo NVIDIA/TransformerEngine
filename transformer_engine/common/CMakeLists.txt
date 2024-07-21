@@ -73,14 +73,15 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+target_compile_definitions(transformer_engine PRIVATE NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
                       CUDA::cudart
                       CUDA::nvrtc
-                      CUDA::nvToolsExt
-                      CUDNN::cudnn)
+                      CUDA::nvToolsExt)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
