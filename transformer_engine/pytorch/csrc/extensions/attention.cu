@@ -797,9 +797,6 @@ std::vector<at::Tensor> fused_attn_fwd(
       O.fill_(0);
     }
     // BF16 or FP16
-    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-      O.fill_(0);
-    }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
     te_V = makeTransformerEngineTensor(V.data_ptr(), v_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -1068,11 +1065,6 @@ std::vector<at::Tensor> fused_attn_bwd(
       dV.fill_(0);
     }
     // BF16 or FP16
-    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
-      dQ.fill_(0);
-      dK.fill_(0);
-      dV.fill_(0);
-    }
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
     te_V = makeTransformerEngineTensor(V.data_ptr(), v_shape, qkv_type, nullptr, nullptr, nullptr);
