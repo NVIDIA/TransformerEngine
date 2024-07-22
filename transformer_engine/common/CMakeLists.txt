@@ -31,7 +31,7 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
-find_package (Python 3.8 COMPONENTS Interpreter Development.Module REQUIRED)
+find_package (Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR}/..)
