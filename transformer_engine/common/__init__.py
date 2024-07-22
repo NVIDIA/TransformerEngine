@@ -4,6 +4,8 @@
 
 """FW agnostic user-end APIs"""
 
+import glob
+import sysconfig
 import ctypes
 import os
 import platform
@@ -31,6 +33,24 @@ def _get_sys_extension():
     return extension
 
 
+def _dlopen_cudnn():
+    # First look at python site packages
+    lib_path = glob.glob(
+        os.path.join(
+            sysconfig.get_path("purelib"), "nvidia/cudnn/lib/libcudnn.so.*[0-9]"
+        )
+    )
+
+    if lib_path:
+        assert (
+            len(lib_path) == 1
+        ), f"Found {len(lib_path)} libcudnn.so.x in nvidia-cudnn-cuXX."
+        lib = ctypes.CDLL(lib_path[0])
+    else:  # Fallback
+        lib = ctypes.CDLL("libcudnn.so")
+    return lib
+
+
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
 
@@ -43,4 +63,5 @@ def _load_library():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ:
+    _CUDNN_LIB_CTYPES = _dlopen_cudnn()
     _TE_LIB_CTYPES = _load_library()
