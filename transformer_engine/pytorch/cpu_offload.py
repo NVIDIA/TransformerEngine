@@ -362,7 +362,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             if previous_group >= 0:
                 for tensor_tag, _ in self.tensor_tag_to_buf.items():
                     if tensor_tag[0] == previous_group:
-                        self.tensor_tag_to_buf[tensor_tag] = None 
+                        self.tensor_tag_to_buf[tensor_tag] = None
 
         # the copying of this group should wait for the computation stream event
         if current_group < self.num_offload_group:
