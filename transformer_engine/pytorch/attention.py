@@ -2522,6 +2522,8 @@ class SWAFuncWithCP(torch.autograd.Function):
         cp_size = get_distributed_world_size(cp_group)
         rank = get_distributed_rank(cp_group)
 
+        if use_fused_attention:
+            attn_mask_type = attn_mask_type + "_bottom_right"
         causal = ("causal" in attn_mask_type)
         padding = ("padding" in attn_mask_type)
         assert(causal and not padding), f"{attn_mask_type} mask type is not supported!"
