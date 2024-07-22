@@ -29,21 +29,21 @@ class CastFloat8(BasicOperation):
 
     Parameters
     ----------
-    cast_forward: bool, default = `True`
+    forward: bool, default = `True`
         Perform FP8 cast in forward pass
-    cast_backward: bool, default = `True`
+    backward: bool, default = `True`
         Perform FP8 cast in backward pass
 
     """
 
     def __init__(
         self,
-        cast_forward: bool = True,
-        cast_backward: bool = True,
+        forward: bool = True,
+        backward: bool = True,
     ) -> None:
         super().__init__()
-        self._cast_forward = cast_forward
-        self._cast_backward = cast_backward
+        self._cast_forward = forward
+        self._cast_backward = backward
 
     def num_fp8_scales(self, mode: str) -> int:
         if mode == "input" and self._cast_forward:
