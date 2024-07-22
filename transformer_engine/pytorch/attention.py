@@ -2777,7 +2777,7 @@ def attn_forward_func_with_cp(
 
     swa_attn = window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     assert (
-        not swa_attn or qkv_format != "thd" or attn_bias_type == "no_bias"
+        not swa_attn or (qkv_format != "thd" and attn_bias_type == "no_bias")
     ), (
         f"Context parallelism is not supported for sliding window attention with "
         f"{qkv_format} format and attention bias!"
