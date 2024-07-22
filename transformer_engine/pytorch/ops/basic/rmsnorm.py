@@ -160,7 +160,7 @@ class RMSNorm(BasicOperation):
 
         # Check tensor dims
         input_dims = tuple(input_.size())
-        if len(input_dims) < len(self._shape) or input_dims[-len(self._shape):] != self._shape:
+        if len(input_dims) < len(self._shape) or input_dims[-len(self._shape) :] != self._shape:
             raise ValueError(
                 f"Input tensor (shape={input_dims}) "
                 f"and weight tensor (shape={self._shape}) are not compatible"

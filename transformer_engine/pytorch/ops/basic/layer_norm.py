@@ -176,7 +176,7 @@ class LayerNorm(BasicOperation):
 
         # Check tensor dims
         input_dims = tuple(input_.size())
-        if len(input_dims) < len(self._shape) or input_dims[-len(self._shape):] != self._shape:
+        if len(input_dims) < len(self._shape) or input_dims[-len(self._shape) :] != self._shape:
             raise ValueError(
                 f"Input tensor (shape={input_dims}) "
                 f"and weight tensor (shape={self._shape}) are not compatible"
@@ -197,11 +197,7 @@ class LayerNorm(BasicOperation):
             b = x.from_float8()
 
         # Check if backward pass is needed
-        requires_grad = (
-            input_.requires_grad
-            or self.weight.requires_grad
-            or self.bias.requires_grad
-        )
+        requires_grad = input_.requires_grad or self.weight.requires_grad or self.bias.requires_grad
 
         # Check if FP8 is enabled
         with_fp8_output = (
