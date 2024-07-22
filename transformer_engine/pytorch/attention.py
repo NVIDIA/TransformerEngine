@@ -2536,6 +2536,8 @@ class SWAFuncWithCP(torch.autograd.Function):
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
         cu_seqlens_kv = cu_seqlens_kv // (2 * cp_size)
+        cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded // (2 * cp_size)
 
         if causal:
             if qkv_format == "bshd":
@@ -2559,20 +2561,52 @@ class SWAFuncWithCP(torch.autograd.Function):
         out = torch.empty_like(q)
 
         for i in range(len(local_seq_chunk_ids)):
+            chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
+                local_seq_chunk_ids[i],
+                cp_size,
+                max_seqlen_q,
+                max_seqlen_kv,
+                window_size[0]
+            )
+            num_kv_chunks = chunk_ids_to_kv_ag.numel()
             if use_fused_attention:
-                # TODO: will add the code
-                assert False
+                if qkv_format == "bshd":
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                    q_ = q[:, i].contiguous()
+                    # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
+                    k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[0], -1, *k.shape[-2:])
+                    v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[0], -1, *v.shape[-2:])
+                elif qkv_format == "sbhd":
+                    # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q[i].contiguous()
+                    # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
+                    k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
+                    v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
+                out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = fused_attn_fwd(
+                    is_training,
+                    max_seqlen_q,
+                    max_seqlen_kv * num_kv_chunks,
+                    cu_seqlens_q,
+                    cu_seqlens_kv * num_kv_chunks,
+                    q_, k_, v_,
+                    TE_DType[q.dtype],
+                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                    attn_scale=softmax_scale,
+                    dropout=dropout_p,
+                    qkv_layout=qkv_layout,
+                    attn_mask_type=attn_mask_type,
+                    attn_bias_type=attn_bias_type,
+                    attn_bias=None,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
+                )
+                if qkv_format == "bshd":
+                    out[:, i].copy_(out_per_step[i])
+                elif: qkv_format == "sbhd":
+                    out[i].copy_(out_per_step[i])
             else:
                 # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
                 q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
-                chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
-                    local_seq_chunk_ids[i],
-                    cp_size,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    window_size[0]
-                )
-                num_kv_chunks = chunk_ids_to_kv_ag.numel()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [b*num_kv_chunks*sq//2, np, hn]
                 k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *k.shape[-2:])
                 v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *v.shape[-2:])
@@ -2589,13 +2623,18 @@ class SWAFuncWithCP(torch.autograd.Function):
                 out[:, i].copy_(out_per_step[i].view_as(out[:, i]))
 
         if use_fused_attention:
-            # TODO: will add the code
-            assert False
+            if qkv_format == "bshd":
+                out = out.view(out.shape[0], -1, *out.shape[-2:])
+            elif qkv_format == "sbhd":
+                out = out.view(-1, *out.shape[-3:])
         else:
             out = out.view(-1, *out.shape[-2:])
 
         ctx.save_for_backward(
-            q, k, v, cu_seqlens_q, cu_seqlens_kv, *out_per_step, *softmax_lse_per_step, *rng_states
+            q, k, v,
+            cu_seqlens_q, cu_seqlens_kv,
+            cu_seqlens_q_padded, cu_seqlens_kv_padded,
+            *out_per_step, *softmax_lse_per_step, *rng_states
         )
         ctx.cp_group = cp_group
         ctx.dropout_p = dropout_p
@@ -2614,13 +2653,10 @@ class SWAFuncWithCP(torch.autograd.Function):
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
 
-        (q, k, v, cu_seqlens_q, cu_seqlens_kv) = ctx.saved_tensors[:5]
-        out_per_step = ctx.saved_tensors[5 : 7]
-        softmax_lse_per_step = ctx.saved_tensors[7 : 9]
-        rng_states = ctx.saved_tensors[9 : 11]
-
-        causal = ("causal" in ctx.attn_mask_type)
-        padding = ("padding" in ctx.attn_mask_type)
+        (q, k, v, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded) = ctx.saved_tensors[:7]
+        out_per_step = ctx.saved_tensors[7 : 9]
+        softmax_lse_per_step = ctx.saved_tensors[9 : 11]
+        rng_states = ctx.saved_tensors[11 : 13]
 
         dout = dout.view_as(q)
         dq = torch.empty_like(q)
@@ -2641,20 +2677,60 @@ class SWAFuncWithCP(torch.autograd.Function):
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(len(local_seq_chunk_ids)):
+            chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
+                local_seq_chunk_ids[i],
+                cp_size,
+                ctx.max_seqlen_q,
+                ctx.max_seqlen_kv,
+                ctx.window_size[0]
+            )
+            num_kv_chunks = chunk_ids_to_kv_ag.numel()
             if ctx.use_fused_attention:
-                # TODO: will add the code
-                assert False
+                if ctx.qkv_format == "bshd":
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                    q_ = q[:, i].contiguous()
+                    # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
+                    k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[0], -1, *k.shape[-2:])
+                    v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[0], -1, *v.shape[-2:])
+                elif ctx.qkv_format == "sbhd":
+                    # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q[i].contiguous()
+                    # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
+                    k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
+                    v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
+                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                out_ = out_per_step[i]
+                dout_ = dout[:, i].contiguous().view_as(out_)
+                aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
+                dq_, dk_, dv_, _ = fused_attn_bwd(
+                    ctx.max_seqlen_q,
+                    ctx.max_seqlen_kv * num_kv_chunks,
+                    cu_seqlens_q,
+                    cu_seqlens_kv * num_kv_chunks,
+                    q_, k_, v_, out_, dout_,
+                    TE_DType[q.dtype],
+                    TE_DType[kv.dtype],
+                    aux_ctx_tensors,
+                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_paddedi * num_kv_chunks,
+                    attn_scale=ctx.softmax_scale,
+                    dropout=ctx.dropout_p,
+                    qkv_layout=qkv_layout,
+                    attn_mask_type=ctx.attn_mask_type,
+                    attn_bias_type=ctx.attn_bias_type,
+                )
+                if ctx.qkv_format == "bshd":
+                    dq[:, i].copy_(dq_)
+                    dk_ = dk_.view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
+                    dv_ = dv_.view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:]).movedim(0, 2).contiguous()
+                elif ctx.qkv_format == "sbhd":
+                    dq[i].copy_(dq_)
+                    dk_ = dk_.view(num_kv_chunks, -1, *k.shape[-3:])
+                    dv_ = dv_.view(num_kv_chunks, -1, *v.shape[-3:])
             else:
                 # [b, 2, sq//2, np, hn] -> [b*sq//2, np, hn]
                 q_ = q[:, i].contiguous().view(-1, *q.shape[-2:])
-                chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
-                    local_seq_chunk_ids[i],
-                    cp_size,
-                    ctx.max_seqlen_q,
-                    ctx.max_seqlen_kv,
-                    ctx.window_size[0]
-                )
-                num_kv_chunks = chunk_ids_to_kv_ag.numel()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [b*num_kv_chunks*sq//2, np, hn]
                 k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *k.shape[-2:])
                 v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(-1, *v.shape[-2:])
@@ -2685,8 +2761,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                 dq[:, i].copy_(dq_.view_as(dq[:, i]))
                 dk_ = dk_.view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
                 dv_ = dv_.view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:]).movedim(0, 2).contiguous()
-                dk.index_add_(0, chunk_ids_to_kv_ag, dk_)
-                dv.index_add_(0, chunk_ids_to_kv_ag, dv_)
+            dk.index_add_(0, chunk_ids_to_kv_ag, dk_)
+            dv.index_add_(0, chunk_ids_to_kv_ag, dv_)
 
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
