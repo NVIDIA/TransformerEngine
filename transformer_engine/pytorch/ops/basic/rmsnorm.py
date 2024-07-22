@@ -114,6 +114,7 @@ class RMSNorm(BasicOperation):
             dtype=dtype,
         )
         weight = torch.nn.Parameter(weight)
+        self.weight: torch.nn.Parameter
         self.register_parameter("weight", weight)
         if not defer_param_init:
             self.reset_parameters()

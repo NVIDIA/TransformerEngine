@@ -121,6 +121,8 @@ class LayerNorm(BasicOperation):
         )
         weight = torch.nn.Parameter(weight)
         bias = torch.nn.Parameter(bias)
+        self.weight: torch.nn.Parameter
+        self.bias: torch.nn.Parameter
         self.register_parameter("weight", weight)
         self.register_parameter("bias", bias)
         if not defer_param_init:
