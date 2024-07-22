@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
@@ -272,11 +273,7 @@ def copy_common_headers(te_src, dst):
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
-    import importlib
+    main_package = package.split("[")[0]
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    globals()[main_package] = importlib.import_module(main_package)
 
-    try:
-        importlib.import_module(package)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    finally:
-        globals()[package] = importlib.import_module(package)
