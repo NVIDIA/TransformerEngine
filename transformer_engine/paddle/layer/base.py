@@ -84,15 +84,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_weights = []
         self.fp8_weight_cache = {}
         self.registered_pp_start_callback = False
-
-        self.current_step_id = paddle.to_tensor([1], dtype=paddle.int32, place=paddle.CPUPlace())
-
-        def current_step_id_callback(step_id=None, **kwargs):  # pylint: disable=unused-argument
-            self.current_step_id.copy_(
-                paddle.to_tensor([step_id], dtype=paddle.int32, place=paddle.CPUPlace()), True
-            )
-
-        register_pp_fwd_begin_hook(current_step_id_callback)
+        self.current_step_id = None
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -301,6 +293,26 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
                 global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
                 global_fp8_fwd_buffer.wait()
+                # Register PP forward begin hook when CUDAGraph is enabled.
+                # NOTE(tizheng): register_pp_fwd_begin_hook prevents layer parameters from being freed
+                # when the layer object is deleted. Need to find a better way.
+                if get_global_fp8_state().is_cudagraph_enabled() and self.current_step_id is None:
+                    self.current_step_id = paddle.to_tensor(
+                        [1], dtype=paddle.int32, place=paddle.CPUPlace()
+                    )
+
+                    def current_step_id_callback(
+                        step_id=None, **kwargs
+                    ):  # pylint: disable=unused-argument
+                        self.current_step_id.copy_(
+                            paddle.to_tensor(
+                                [step_id], dtype=paddle.int32, place=paddle.CPUPlace()
+                            ),
+                            True,
+                        )
+
+                    register_pp_fwd_begin_hook(current_step_id_callback)
+
                 if self.fp8_meta["recipe"].reduce_amax:
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
                     amax_and_scale_update(
