@@ -277,3 +277,12 @@ def install_and_import(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
 
+
+def uninstall_te_fw_packages():
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "uninstall", "-y",
+        "transformer_engine_torch",
+        "transformer_engine_paddle",
+        "transformer_engine_jax"
+    ])
+

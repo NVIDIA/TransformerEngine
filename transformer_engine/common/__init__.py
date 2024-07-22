@@ -37,17 +37,18 @@ def _dlopen_cudnn():
     # First look at python site packages
     lib_path = glob.glob(
         os.path.join(
-            sysconfig.get_path("purelib"), "nvidia/cudnn/lib/libcudnn.so.*[0-9]"
+            sysconfig.get_path("purelib"),
+            "nvidia/cudnn/lib/libcudnn.{_get_sys_extension()}.*[0-9]"
         )
     )
 
     if lib_path:
         assert (
             len(lib_path) == 1
-        ), f"Found {len(lib_path)} libcudnn.so.x in nvidia-cudnn-cuXX."
+        ), f"Found {len(lib_path)} libcudnn.{_get_sys_extension()}.x in nvidia-cudnn-cuXX."
         lib = ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
     else:  # Fallback
-        lib = ctypes.CDLL("libcudnn.so", mode=ctypes.RTLD_GLOBAL)
+        lib = ctypes.CDLL("libcudnn.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
     return lib
 
 

@@ -70,3 +70,4 @@ if __name__ == "__main__":
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
+        shutil.rmtree("build_tools")

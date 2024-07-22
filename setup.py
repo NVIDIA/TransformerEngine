@@ -18,6 +18,7 @@ from build_tools.utils import (
     remove_dups,
     get_frameworks,
     install_and_import,
+    uninstall_te_fw_packages,
 )
 from build_tools.te_version import te_version
 
@@ -85,6 +86,9 @@ if __name__ == "__main__":
 
     ext_modules = [setup_common_extension()]
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        # Remove residual FW packages since compiling from source
+        # results in a single binary with FW extensions included.
+        uninstall_te_fw_packages()
         if "pytorch" in frameworks:
             from build_tools.pytorch import setup_pytorch_extension
 
