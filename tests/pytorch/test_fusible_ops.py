@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import transformer_engine
+import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -833,6 +834,65 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.parametrize("cast_forward", (False, True))
+    @pytest.mark.parametrize("cast_backward", (False, True))
+    def test_cast_float8(
+        self,
+        *,
+        in_shape: Iterable[int] = (1,),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        cast_forward: bool,
+        cast_backward: bool,
+    ) -> None:
+        """FP8 cast"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+            test_is_fp8=True,
+        )
+        x_test = x_test.from_float8().requires_grad_()
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+            test_is_fp8=True,
+        )
+        dy_test = dy_test.from_float8()
+
+        # Plain PyTorch implementation
+        y_ref = x_ref
+        dx_ref = dy_ref
+
+        # Implementation with fusible operation
+        op = te_ops.CastFloat8(
+            cast_forward=cast_forward,
+            cast_backward=cast_backward,
+        )
+        recipe = transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+        with te.fp8_autocast(fp8_recipe=recipe):
+            y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        # Check tensor types
+        assert is_float8_tensor(y_test) == cast_forward
+        assert is_float8_tensor(x_test.grad) == cast_backward
+
+        # Check values
+        tols = dict(rtol=0, atol=0)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, dx_ref, **tols)
 
 
 class TestFusedOps:

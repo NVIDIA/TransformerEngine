@@ -126,9 +126,7 @@ class LayerNorm(BasicOperation):
         if not defer_param_init:
             self.reset_parameters()
 
-        # Number of SMs to exclude when launching CUDA kernels. This
-        # helps overlap with other kernels, e.g. communication
-        # kernels.
+        # Number of SMs to exclude when launching CUDA kernels
         self._sm_margins: dict[str, int] = dict(
             fwd=int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", str(sm_margin))),
             bwd=int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", str(sm_margin))),
