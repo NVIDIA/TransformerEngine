@@ -38,7 +38,7 @@ def _dlopen_cudnn():
     lib_path = glob.glob(
         os.path.join(
             sysconfig.get_path("purelib"),
-            "nvidia/cudnn/lib/libcudnn.{_get_sys_extension()}.*[0-9]"
+            f"nvidia/cudnn/lib/libcudnn.{_get_sys_extension()}.*[0-9]"
         )
     )
 
@@ -48,7 +48,7 @@ def _dlopen_cudnn():
         ), f"Found {len(lib_path)} libcudnn.{_get_sys_extension()}.x in nvidia-cudnn-cuXX."
         lib = ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
     else:  # Fallback
-        lib = ctypes.CDLL("libcudnn.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
+        lib = ctypes.CDLL(f"libcudnn.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
     return lib
 
 
