@@ -311,7 +311,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                             True,
                         )
 
-                    register_pp_fwd_begin_hook(current_step_id_callback)
+                    if is_pp_enabled():
+                        register_pp_fwd_begin_hook(current_step_id_callback)
 
                 if self.fp8_meta["recipe"].reduce_amax:
                     global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
