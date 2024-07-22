@@ -127,6 +127,9 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_QKV =
         makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -288,6 +291,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                                           amax_dQKV.value().data_ptr(),
                                           scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQKV.fill_(0);
+    }
     // BF16 or FP16
     te_QKV =
         makeTransformerEngineTensor(QKV.data_ptr(), qkv_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -327,6 +333,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                             static_cast<int64_t>(max_seqlen)},
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
     }
   }
 
@@ -427,6 +436,9 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_KV =
@@ -614,6 +626,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                                          amax_dQKV.value().data_ptr(),
                                          scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQ.fill_(0);
+      dKV.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_KV =
@@ -683,6 +699,9 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                             static_cast<int64_t>(max_seqlen_kv)},
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
     }
   }
 
@@ -774,6 +793,9 @@ std::vector<at::Tensor> fused_attn_fwd(
     te_O = makeTransformerEngineTensor(O.data_ptr(), q_shape, qkv_type, amax_O.value().data_ptr(),
                                        scale_O.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      O.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -1037,6 +1059,11 @@ std::vector<at::Tensor> fused_attn_bwd(
         makeTransformerEngineTensor(dV.data_ptr(), v_shape, dqkv_type, amax_dQKV.value().data_ptr(),
                                     scale_dQKV.value().data_ptr(), nullptr);
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dQ.fill_(0);
+      dK.fill_(0);
+      dV.fill_(0);
+    }
     // BF16 or FP16
     te_Q = makeTransformerEngineTensor(Q.data_ptr(), q_shape, qkv_type, nullptr, nullptr, nullptr);
     te_K = makeTransformerEngineTensor(K.data_ptr(), k_shape, qkv_type, nullptr, nullptr, nullptr);
@@ -1108,6 +1135,9 @@ std::vector<at::Tensor> fused_attn_bwd(
                             static_cast<int64_t>(max_seqlen_kv)},
                            options);
       te_dBias = makeTransformerEngineTensor(dBias);
+    }
+    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+      dBias.fill_(0);
     }
   }
 
