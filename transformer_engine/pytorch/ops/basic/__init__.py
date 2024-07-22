@@ -13,3 +13,4 @@ from .identity import Identity
 from .layer_norm import LayerNorm
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
+from .rmsnorm import RMSNorm

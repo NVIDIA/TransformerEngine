@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusable operation for Layer Normalization."""
+"""Fusable operation for RMSNorm."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -13,11 +13,11 @@ from typing import Optional
 import torch
 
 from transformer_engine.pytorch.cpp_extensions import (
-    layernorm_bwd,
-    layernorm_fwd,
-    layernorm_fwd_fp8,
-    layernorm_fwd_fp8_inf,
-    layernorm_fwd_inf,
+    rmsnorm_bwd,
+    rmsnorm_fwd,
+    rmsnorm_fwd_fp8,
+    rmsnorm_fwd_fp8_inf,
+    rmsnorm_fwd_inf,
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -37,26 +37,25 @@ from .._common import (
 from ...utils import clear_tensor_data
 
 
-class LayerNorm(BasicOperation):
-    r"""Layer Normalization
+class RMSNorm(BasicOperation):
+    r"""Root Mean Square Layer Normalization
 
-    Applies Layer Normalization over a mini-batch of inputs as described in
-    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__
+    Applies Root Mean Square Layer Normalization over a mini-batch of
+    inputs as described in the paper
+    `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma + \beta
+        y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma
 
-    :math:`\gamma` and :math:`\beta` are learnable affine transform
-    parameters that match the inner-most dimensions of the input
-    tensor.
+    :math:`\gamma` is a learnable affine transform parameter that
+    matches the inner-most dimensions of the input tensor.
 
     Parameters
     ----------
     normalized_shape: int or iterable of int
         Inner dimensions of input tensor
     eps : float, default = 1e-5
-        A value added to the denominator of layer normalization for
-        numerical stability
+        A value added to the denominator for numerical stability
     device: torch.device, default = default CUDA device
         Tensor device
     dtype: torch.dtype, default = default dtype
@@ -66,7 +65,7 @@ class LayerNorm(BasicOperation):
         and the calculation changes to
 
             .. math::
-                y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma) + \beta
+                y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma)
 
     sm_margin: int, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
@@ -114,15 +113,8 @@ class LayerNorm(BasicOperation):
             device="meta",
             dtype=dtype,
         )
-        bias = torch.empty(
-            self._shape,
-            device="meta",
-            dtype=dtype,
-        )
         weight = torch.nn.Parameter(weight)
-        bias = torch.nn.Parameter(bias)
         self.register_parameter("weight", weight)
-        self.register_parameter("bias", bias)
         if not defer_param_init:
             self.reset_parameters()
 
@@ -138,32 +130,24 @@ class LayerNorm(BasicOperation):
 
         # Make sure parameter is initialized
         weight = self.weight
-        bias = self.bias
         if weight.device.type != "cuda":
             weight = torch.empty_like(weight, device=self.device)
-        if bias.device.type != "cuda":
-            bias = torch.empty_like(bias, device=self.device)
         weight = weight.to(device=self.device, dtype=self.dtype)
-        bias = bias.to(device=self.device, dtype=self.dtype)
 
         # Initialize values
         if self._zero_centered_gamma:
             weight.zero_()
         else:
             weight.fill_(1)
-        bias.zero_()
 
         # Save updated parameter
         if not isinstance(weight, torch.nn.Parameter):
             weight = torch.nn.Parameter(weight)
-        if not isinstance(bias, torch.nn.Parameter):
-            bias = torch.nn.Parameter(bias)
         self.weight = weight
-        self.bias = bias
 
     def pre_forward(self) -> None:
         super().pre_forward()
-        if self.weight.device.type == "meta" or self.bias.device.type == "meta":
+        if self.weight.device.type == "meta":
             self.reset_parameters()
 
     def op_forward(
@@ -188,20 +172,13 @@ class LayerNorm(BasicOperation):
         dtype = self.dtype
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
-        b = reshape(self.bias, (inner_dim,), device=device, dtype=dtype)
         if is_float8_tensor(x):
             x = x.from_float8()
         if is_float8_tensor(w):
             w = w.from_float8()
-        if is_float8_tensor(b):
-            b = x.from_float8()
 
         # Check if backward pass is needed
-        requires_grad = (
-            input_.requires_grad
-            or self.weight.requires_grad
-            or self.bias.requires_grad
-        )
+        requires_grad = input_.requires_grad or self.weight.requires_grad
 
         # Check if FP8 is enabled
         with_fp8_output = (
@@ -213,9 +190,8 @@ class LayerNorm(BasicOperation):
         if with_fp8_output:
             output_fp8_meta = next_op.get_fp8_meta("input")
 
-        # Compute layer norm
+        # Compute RMSNorm
         y = None
-        means = None
         rstdevs = None
         sm_margin = self._sm_margins["fwd" if requires_grad else "inf"]
         if with_fp8_output:
@@ -224,7 +200,6 @@ class LayerNorm(BasicOperation):
             args = (
                 x,
                 w,
-                b,
                 self._eps,
                 output_fp8_meta[fp8_meta_key],
                 0,  # fp8_meta_index
@@ -233,9 +208,9 @@ class LayerNorm(BasicOperation):
                 self._zero_centered_gamma,
             )
             if requires_grad:
-                data, means, rstdevs = layernorm_fwd_fp8(*args)
+                data, rstdevs = rmsnorm_fwd_fp8(*args)
             else:
-                data = layernorm_fwd_fp8_inf(*args)
+                data = rmsnorm_fwd_fp8_inf(*args)
             y = Float8Tensor(
                 data=data,
                 fp8_meta=output_fp8_meta,
@@ -248,20 +223,19 @@ class LayerNorm(BasicOperation):
             args = (
                 x,
                 w,
-                b,
                 self._eps,
                 sm_margin,
                 self._zero_centered_gamma,
             )
             if requires_grad:
-                y, means, rstdevs = layernorm_fwd(*args)
+                y, rstdevs = rmsnorm_fwd(*args)
             else:
-                y = layernorm_fwd_inf(*args)
+                y = rmsnorm_fwd_inf(*args)
 
         # Save state for backward pass
         if not requires_grad:
             x = None
-        ctx.save_for_backward(x, means, rstdevs)
+        ctx.save_for_backward(x, rstdevs)
         ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
@@ -275,7 +249,7 @@ class LayerNorm(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Saved tensors from forward pass
-        x, means, rstdevs = ctx.saved_tensors
+        x, rstdevs = ctx.saved_tensors
 
         # Check input tensors
         inner_dim = x.size(-1)
@@ -288,11 +262,10 @@ class LayerNorm(BasicOperation):
         if is_float8_tensor(dy):
             dy = dy.from_float8()
 
-        # Compute layer norm backward pass
-        dx, dw, db = layernorm_bwd(
+        # Compute RMSNorm backward pass
+        dx, dw = rmsnorm_bwd(
             dy,
             x,
-            means,
             rstdevs,
             w,
             self._sm_margins["bwd"],
@@ -302,11 +275,9 @@ class LayerNorm(BasicOperation):
         # Clear saved tensors if possible
         if ctx.has_prev_op:
             clear_tensor_data(x)
-        clear_tensor_data(means)
         clear_tensor_data(rstdevs)
 
         # Reshape results
         grad_input = reshape(dx, grad_output.size())
         grad_weight = reshape(dw, self._shape)
-        grad_bias = reshape(db, self._shape)
-        return grad_input, (grad_weight, grad_bias)
+        return grad_input, (grad_weight,)
