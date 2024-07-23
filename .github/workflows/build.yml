@@ -77,7 +77,10 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install . -v
+        run: |
+          apt-get update
+          apt-get install -y libgoogle-glog-dev
+          pip install . -v
         env:
           NVTE_FRAMEWORK: paddle
       - name: 'Sanity check'
