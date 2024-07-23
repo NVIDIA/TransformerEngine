@@ -58,12 +58,6 @@ if __name__ == "__main__":
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy", "praxis"],
-        include_package_data=True,
-        package_data={
-            "csrc": package_files("csrc"),
-            common_headers_dir: package_files(common_headers_dir),
-            "build_tools": package_files("build_tools"),
-        },
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
