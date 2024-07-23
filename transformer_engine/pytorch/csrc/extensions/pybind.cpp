@@ -231,9 +231,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, int, int, bool, int,
+      .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, int, bool, int,
                     bool, ubuf::UbufBootstrapCallbacks &>(),
-                    py::call_guard<py::gil_scoped_release>())
+           py::call_guard<py::gil_scoped_release>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs,
@@ -257,9 +257,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, int, bool, bool, int,
+      .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, bool, bool, int,
                     bool, bool, bool, ubuf::UbufBootstrapCallbacks &>(),
-                    py::call_guard<py::gil_scoped_release>())
+           py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs,

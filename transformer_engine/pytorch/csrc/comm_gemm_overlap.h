@@ -18,6 +18,7 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
+
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #include "common/common.h"
@@ -74,16 +75,15 @@ class UbufBootstrapCallbacks : torch::CustomClassHolder {
     backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
     NVTE_CHECK(intra_node_group->getBackendType() == backend,
-              "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
-              "group!", world_group->getBackendName());
+               "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
+               "group!", world_group->getBackendName());
     pgs.insert({"intra", intra_node_group});
 
     initialized = true;
   }
 
   ~UbufBootstrapCallbacks() {
-    for (auto &pg : pgs)
-      pg.second = nullptr;
+    for (auto &pg : pgs) pg.second = nullptr;
     backend_is_nccl = false;
     initialized = false;
   }
@@ -171,11 +171,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 #ifdef NVTE_UB_WITH_MPI
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
-      create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                   std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks,
-                                             _1, _2, _3, _4, _5),
-                                   std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1),
-                                   1, 1, tp_size, 1);
+      create_communicator_grouped2(
+          &_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+          std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks, _1, _2, _3, _4, _5),
+          std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1), 1, 1, tp_size, 1);
 #endif
       comm_created = true;
     }
@@ -688,11 +687,10 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 #ifdef NVTE_UB_WITH_MPI
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
-      create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                   std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks,
-                                             _1, _2, _3, _4, _5),
-                                   std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1),
-                                   1, 1, tp_size, 1);
+      create_communicator_grouped2(
+          &_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
+          std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks, _1, _2, _3, _4, _5),
+          std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1), 1, 1, tp_size, 1);
 #endif
       comm_created = true;
     }
