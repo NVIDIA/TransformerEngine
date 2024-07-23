@@ -28,6 +28,7 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
+
 install_and_import("pybind11[global]")
 
 if "pytorch" in frameworks:
@@ -140,13 +141,13 @@ if __name__ == "__main__":
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        python_requires='>=3.8, <3.13',
+        python_requires=">=3.8, <3.13",
         classifiers=[
-            'Programming Language :: Python :: 3.8',
-            'Programming Language :: Python :: 3.9',
-            'Programming Language :: Python :: 3.10',
-            'Programming Language :: Python :: 3.11',
-            'Programming Language :: Python :: 3.12',
+            "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.9",
+            "Programming Language :: Python :: 3.10",
+            "Programming Language :: Python :: 3.11",
+            "Programming Language :: Python :: 3.12",
         ],
         setup_requires=setup_requires,
         install_requires=install_requires,

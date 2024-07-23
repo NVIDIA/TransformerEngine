@@ -40,7 +40,7 @@ def _load_cudnn():
     lib_path = glob.glob(
         os.path.join(
             sysconfig.get_path("purelib"),
-            f"nvidia/cudnn/lib/libcudnn.{_get_sys_extension()}.*[0-9]"
+            f"nvidia/cudnn/lib/libcudnn.{_get_sys_extension()}.*[0-9]",
         )
     )
 
