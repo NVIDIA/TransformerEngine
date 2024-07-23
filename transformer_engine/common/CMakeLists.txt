@@ -83,7 +83,6 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
                       CUDA::cudart
-                      CUDA::nvrtc
                       CUDA::nvToolsExt
                       pybind11::headers
                       ${Python_LIBRARIES})

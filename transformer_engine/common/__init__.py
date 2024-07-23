@@ -6,6 +6,7 @@
 
 import glob
 import sysconfig
+import subprocess
 import ctypes
 import os
 import platform
@@ -33,8 +34,9 @@ def _get_sys_extension():
     return extension
 
 
-def _dlopen_cudnn():
-    # First look at python site packages
+def _load_cudnn():
+    """Load CUDNN shared library."""
+
     lib_path = glob.glob(
         os.path.join(
             sysconfig.get_path("purelib"),
@@ -63,6 +65,19 @@ def _load_library():
     return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
 
 
+def _load_nvrtc():
+    """Load NVRTC shared library."""
+
+    libs = subprocess.check_output("ldconfig -p | grep 'libnvrtc'", shell=True)
+    libs = libs.decode("utf-8").split("\n")
+    sos = []
+    for lib in libs:
+        if "libnvrtc" in lib and "=>" in lib:
+            sos.append(lib.split(">")[1].strip())
+    return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+
+
 if "NVTE_PROJECT_BUILDING" not in os.environ:
-    _CUDNN_LIB_CTYPES = _dlopen_cudnn()
+    _CUDNN_LIB_CTYPES = _load_cudnn()
+    _NVRTC_LIB_CTYPES = _load_nvrtc()
     _TE_LIB_CTYPES = _load_library()
