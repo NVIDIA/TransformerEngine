@@ -525,6 +525,10 @@ class TransformerLayer(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = None,
+        max_seqlen_kv: int = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
@@ -660,6 +664,10 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
             fast_zero_fill=fast_zero_fill,
         )
 

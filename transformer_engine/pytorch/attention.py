@@ -6459,6 +6459,10 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = None,
+        max_seqlen_kv: int = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
@@ -6639,6 +6643,11 @@ class MultiheadAttention(torch.nn.Module):
                 for x in (query_layer, key_layer, value_layer)
             )
 
+            if self.qkv_format == "thd":
+                query_layer, key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(2), x.size(3))
+                    for x in (query_layer, key_layer, value_layer)
+                )
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -6752,8 +6761,10 @@ class MultiheadAttention(torch.nn.Module):
             key_layer,
             value_layer,
             qkv_format=self.qkv_format,
-            cu_seqlens_q=None,
-            cu_seqlens_kv=None,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             window_size=window_size,
