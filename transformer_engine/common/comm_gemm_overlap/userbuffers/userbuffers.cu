@@ -2493,7 +2493,7 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
 
 // reset_counters
 static __global__ void set_counters_kernel(void *atomic_ptr, int first_chunk_i, int num_chunks,
-                                             unsigned int val) {
+                                           unsigned int val) {
   // Set specified range of counters to the given value -- 0: ready, 1: not ready
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     for (int i = first_chunk_i; i < num_chunks; i++) {

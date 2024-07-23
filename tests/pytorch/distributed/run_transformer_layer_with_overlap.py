@@ -71,6 +71,7 @@ def parse_args(argv=None, namespace=None):
     )
     return parser.parse_args(argv, namespace)
 
+
 @record
 def train(opts):
     WORLD_RANK = int(os.getenv("RANK"))
@@ -133,12 +134,7 @@ def train(opts):
         "ub_tp_comm_overlap": True,
         "parallel_attention_mlp": False,
     }
-    te_gpt = te.TransformerLayer(
-        hidden_size,
-        4 * hidden_size,
-        opts.num_heads,
-        **te_kwargs
-    )
+    te_gpt = te.TransformerLayer(hidden_size, 4 * hidden_size, opts.num_heads, **te_kwargs)
 
     # Create new TransformerLayer without comm overlap
     te_kwargs["ub_tp_comm_overlap"] = False
@@ -244,11 +240,11 @@ def train(opts):
     dist.all_reduce(numerics_failed_tensor, dist.ReduceOp.MAX)
     numerics_failed = bool(numerics_failed_tensor[0].item())
     if not numerics_failed:
-        max_diff_all = [ None for _ in range(WORLD_SIZE) ]
+        max_diff_all = [None for _ in range(WORLD_SIZE)]
         dist.all_gather_object(max_diff_all, max_diff)
-        max_diff_idx_all = [ None for _ in range(WORLD_SIZE) ]
+        max_diff_idx_all = [None for _ in range(WORLD_SIZE)]
         dist.all_gather_object(max_diff_idx_all, max_diff_idx)
-        max_diff_name_all = [ None for _ in range(WORLD_SIZE) ]
+        max_diff_name_all = [None for _ in range(WORLD_SIZE)]
         dist.all_gather_object(max_diff_name_all, max_diff_name)
         max_diff = max(max_diff_all)
         diff_idx = max_diff_all.index(max_diff)

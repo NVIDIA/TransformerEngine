@@ -91,9 +91,7 @@ def initialize_ub(
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     if not tex.device_supports_multicast():
-        assert (
-            bool(os.getenv("UB_SKIPMC", "0"))
-        ), (
+        assert bool(os.getenv("UB_SKIPMC", "0")), (
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
             + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
         )
@@ -112,8 +110,7 @@ def initialize_ub(
     world_size = torch.distributed.get_world_size(world_group)
 
     if world_rank == 0:
-        print(f"Bootstrapping Userbuffers with backend=\"{bootstrap_backend}\"\n", end='',
-              flush=True)
+        print(f'Bootstrapping Userbuffers with backend="{bootstrap_backend}"\n', end="", flush=True)
 
     # Construct an intra-node communicator -- this should include ALL ranks in the node
     # NOTE: This may be different than the tensor-parallel group (e.g. two TP groups in a node),
@@ -131,8 +128,9 @@ def initialize_ub(
         local_rank = world_rank
         local_size = world_size
     else:
-        intra_node_group = torch.distributed.new_group(backend=bootstrap_backend,
-                                                       ranks=intra_node_ranks)
+        intra_node_group = torch.distributed.new_group(
+            backend=bootstrap_backend, ranks=intra_node_ranks
+        )
         local_rank = torch.distributed.get_rank(intra_node_group)
         local_size = torch.distributed.get_world_size(intra_node_group)
 
@@ -142,8 +140,8 @@ def initialize_ub(
         print(
             f"Found {num_nodes} physical node{'s' if num_nodes > 1 else ''}\n"
             + f"Global ranks on node {node_id}: {intra_node_ranks}\n",
-            end='',
-            flush=True
+            end="",
+            flush=True,
         )
 
     # Increase the workspace by the number of maximum concurrent streams
@@ -244,7 +242,7 @@ def initialize_ub(
                 "their atomic GEMM + RS overlap pairs in the same TP block. The AG + GEMM overlap "
                 f"in `{rs_ag_pairs[name]}` and the GEMM + RS overlap in `{name}` form one such TP "
                 "block. When one of these overlaps is configured with the `atomic_gemm = True` and "
-                "`method = \"ring_exchange\"` options, the other must also use the same overlap "
+                '`method = "ring_exchange"` options, the other must also use the same overlap '
                 "configuration for the atomic shuffle/un-shuffle to work correctly."
             )
             if name in layers_atomic_ring_exchange:
@@ -330,8 +328,9 @@ def initialize_ub(
         for name in dgrad_reduce_scatter_overlap:
             if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
                 wgrad_name = name.replace("dgrad", "wgrad")
-                assert wgrad_name not in ub_cfgs, \
-                    f"Cannot overlap reduce-scatter for both {name} and {wgrad_name}."
+                assert (
+                    wgrad_name not in ub_cfgs
+                ), f"Cannot overlap reduce-scatter for both {name} and {wgrad_name}."
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)

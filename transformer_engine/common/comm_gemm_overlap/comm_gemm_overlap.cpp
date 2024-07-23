@@ -5,16 +5,17 @@
  ************************************************************************/
 
 // Standard library includes
-#include <cstring>
 #include <cassert>
+#include <cstring>
 
 // TE/common includes
-#include <transformer_engine/gemm.h>
 #include <transformer_engine/comm_gemm_overlap.h>
-#include "common/util/logging.h"
-#include "common/util/cuda_driver.h"
-#include "common/util/system.h"
+#include <transformer_engine/gemm.h>
+
 #include "common/common.h"
+#include "common/util/cuda_driver.h"
+#include "common/util/logging.h"
+#include "common/util/system.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
@@ -27,8 +28,8 @@ bool device_supports_multicast() {
 
   NVTE_CHECK_CUDA(cudaGetDevice(&dev));
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, dev);
-  NVTE_CALL_CHECK_CUDA_DRIVER(
-      cuDeviceGetAttribute, &supports_multicast, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &supports_multicast,
+                              CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
 
   return static_cast<bool>(supports_multicast);
 }
@@ -53,7 +54,7 @@ CommGemmOverlapBase::CommGemmOverlapBase(
     create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
     create_communicator_grouped2(&_ub_comm, worldrank, worldsize, localrank, localsize, nodeid,
-                                  numnodes, allgather_handle, barrier_handle, 1, 1, tp_size, 1);
+                                 numnodes, allgather_handle, barrier_handle, 1, 1, tp_size, 1);
 #endif
     if (worldrank == 0) {
       printf("[%s] Communicator initialized\n", _name);
@@ -104,8 +105,8 @@ CommGemmOverlapBase::~CommGemmOverlapBase() {
 }
 
 void CommGemmOverlapBase::register_gpu_buffer(void **gpuptr, size_t bytes, bool alloc) {
-  NVTE_CHECK(_comm_created,
-              "[%s] Communicator must be initialized before buffer registration.", _name);
+  NVTE_CHECK(_comm_created, "[%s] Communicator must be initialized before buffer registration.",
+             _name);
   NVTE_CHECK(!_buffer_registered, "[%s] GPU buffer is already registered.", _name);
   _ub_reg = register_user_buffer_collective(gpuptr, bytes, _ub_comm, alloc);
   _buffer_registered = true;
@@ -119,9 +120,9 @@ void CommGemmOverlapBase::register_gpu_buffer(void **gpuptr, size_t bytes, bool 
 ***************************************************************************************************/
 
 CommGemmOverlap::CommGemmOverlap(
-    int worldrank, int worldsize, int localrank, int localsize, int nodeid,
-    int numnodes, int tp_size, int num_splits, int num_max_streams, int cga_size,
-    int num_comm_sms, bool set_sm_margin, bool use_ce, bool atomic_gemm,
+    int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
+    int tp_size, int num_splits, int num_max_streams, int cga_size, int num_comm_sms,
+    bool set_sm_margin, bool use_ce, bool atomic_gemm,
     std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
     std::function<void(void *, size_t, int, char *)> bcast_handle,
     std::function<void(char *)> barrier_handle)
@@ -132,7 +133,7 @@ CommGemmOverlap::CommGemmOverlap(
   if (_atomic_gemm) {
     _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 1);
     NVTE_CHECK(0 <= _rs_kernel_type && _rs_kernel_type < 3,
-                "[%s] Invalid choice for NVTE_RS_STRIDED_ATOMIC", _name);
+               "[%s] Invalid choice for NVTE_RS_STRIDED_ATOMIC", _name);
     if (worldrank == 0 && _rs_kernel_type == 0) {
       NVTE_ERROR("[%s] Non-atomic RS overlap (BF16) is incompatible with Atomic GEMM (FP8).",
                  _name);
@@ -155,12 +156,14 @@ CommGemmOverlap::~CommGemmOverlap() {
 /*
   Bulk GEMM + All-Gather/Reduce-Scatter
 */
-void CommGemmOverlap::bulk_gemm_overlap(
-    cudaStream_t stream_main, const TensorWrapper &A, bool A_trans, const TensorWrapper &B,
-    bool B_trans, const TensorWrapper &bias, const TensorWrapper &D,
-    const TensorWrapper &pre_gelu_out, const TensorWrapper &ubuf, const TensorWrapper &rs_output,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-    NVTE_Comm_Overlap_Type comm_type) {
+void CommGemmOverlap::bulk_gemm_overlap(cudaStream_t stream_main, const TensorWrapper &A,
+                                        bool A_trans, const TensorWrapper &B, bool B_trans,
+                                        const TensorWrapper &bias, const TensorWrapper &D,
+                                        const TensorWrapper &pre_gelu_out,
+                                        const TensorWrapper &ubuf, const TensorWrapper &rs_output,
+                                        const TensorWrapper &workspace, bool grad, bool accumulate,
+                                        bool use_split_accumulator,
+                                        NVTE_Comm_Overlap_Type comm_type) {
   int ori_sm = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _comm_sms;
@@ -187,10 +190,9 @@ void CommGemmOverlap::bulk_gemm_overlap(
       assert(rs_output.element_size() == 2);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-        rs_output.dtype(), fp8_type,
-        reducescatter2_userbuff_fp8<fp8_type>(rs_output_ptr, ubuf.scale_inv(), _ub_reg, 0,
-                                              comm_elements, _ub_comm, _stream_comm);
-      )
+          rs_output.dtype(), fp8_type,
+          reducescatter2_userbuff_fp8<fp8_type>(rs_output_ptr, ubuf.scale_inv(), _ub_reg, 0,
+                                                comm_elements, _ub_comm, _stream_comm);)
     } else {
       reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm);
     }
@@ -199,9 +201,9 @@ void CommGemmOverlap::bulk_gemm_overlap(
   }
 
   assert(pre_gelu_out.numel() == 0);
-  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), A_trans,
-                    B_trans, grad, workspace.data(), accumulate, use_split_accumulator, _math_sms,
-                    stream_main);
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), A_trans, B_trans,
+                   grad, workspace.data(), accumulate, use_split_accumulator, _math_sms,
+                   stream_main);
 
   _ub_comm->sms = ori_sm;
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
@@ -233,8 +235,7 @@ void CommGemmOverlap::atomic_gemm_overlap_rs(
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
 
   assert(pre_gelu_out.numel() == 0);
-  if (_rs_kernel_type == 0)
-    assert(ubuf.element_size() == 2);
+  if (_rs_kernel_type == 0) assert(ubuf.element_size() == 2);
 
   // Reset counters to "not ready" (1)
   reset_counters(counter_ptr, _num_splits, -1, stream_main);
@@ -261,36 +262,34 @@ void CommGemmOverlap::atomic_gemm_overlap_rs(
         // TODO (Alp): RS kernels for FP8 GEMM output is numerically incorrect.
         float *d_scale_inv_ptr = reinterpret_cast<float *>(ubuf.scale_inv());
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          D.dtype(), fp8_type,
-          reducescatter2_userbuff_strided_atomic_fp8<fp8_type>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m, _num_splits,
-              &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
-        );
+            D.dtype(), fp8_type,
+            reducescatter2_userbuff_strided_atomic_fp8<fp8_type>(
+                rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m, _num_splits,
+                &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm););
       } else {
         reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
-                                                _num_splits, &counter_ptr[i], _ub_comm,
-                                                (cudaStream_t)_stream_comm);
+                                               _num_splits, &counter_ptr[i], _ub_comm,
+                                               (cudaStream_t)_stream_comm);
       }
     } else if (_rs_kernel_type == 2) {
       if (ubuf.element_size() == 1) {
         // TODO (Alp): RS kernels for FP8 GEMM output is numerically incorrect.
         float *d_scale_inv_ptr = reinterpret_cast<float *>(ubuf.scale_inv());
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          D.dtype(), fp8_type,
-          reducescatter2_userbuff_strided_multiatomic_fp8<fp8_type>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
-              counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
-        );
+            D.dtype(), fp8_type,
+            reducescatter2_userbuff_strided_multiatomic_fp8<fp8_type>(
+                rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
+                counter_ptr, _ub_comm, (cudaStream_t)_stream_comm););
       } else {
-        reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk, m_chunk, n,
-                                                    m, _num_splits, counter_ptr, _ub_comm,
+        reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk, m_chunk, n, m,
+                                                    _num_splits, counter_ptr, _ub_comm,
                                                     (cudaStream_t)_stream_comm);
       }
       break;
     } else {
       consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
-      reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
-                                      _ub_comm, (cudaStream_t)_stream_comm);
+      reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, _ub_comm,
+                                      (cudaStream_t)_stream_comm);
     }
 
     rs_output_ptr += m_chunk * rs_output.element_size();
@@ -350,8 +349,8 @@ void CommGemmOverlap::split_gemm_overlap_rs(
                                                   {workspace_size_chunk}, workspace.dtype());
 
     nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
-                      pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                      accumulate, use_split_accumulator, _math_sms, _stream_compute[0]);
+                     pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                     accumulate, use_split_accumulator, _math_sms, _stream_compute[0]);
 
     for (int i = 1; i < _num_splits; i++) {
       input_a_chunk_ptr += input_a_chunk_size * B.element_size();
@@ -361,17 +360,17 @@ void CommGemmOverlap::split_gemm_overlap_rs(
           TensorWrapper(reinterpret_cast<void *>(input_a_chunk_ptr), {m_chunk, k}, A.dtype(),
                         A.amax(), A.scale(), A.scale_inv());
       TensorWrapper output_chunk =
-          TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk},
-                        ubuf.dtype(), ubuf.amax(), ubuf.scale(), ubuf.scale_inv());
+          TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk}, ubuf.dtype(),
+                        ubuf.amax(), ubuf.scale(), ubuf.scale_inv());
       TensorWrapper workspace_chunk =
           TensorWrapper(reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) *
-                                                                      workspace_size_chunk),
+                                                                     workspace_size_chunk),
                         {workspace_size_chunk}, workspace.dtype());
 
       nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
-                        pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                        accumulate, use_split_accumulator, _math_sms,
-                        _stream_compute[i % _stream_compute.size()]);
+                       pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                       accumulate, use_split_accumulator, _math_sms,
+                       _stream_compute[i % _stream_compute.size()]);
 
       NVTE_CHECK_CUDA(
           cudaEventRecord(_start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
@@ -380,11 +379,10 @@ void CommGemmOverlap::split_gemm_overlap_rs(
       // Communication chunk
       if (ubuf.element_size() == 1) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          D.dtype(), fp8_type,
-          reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
-              rs_output_ptr, ubuf.scale_inv(), _ub_reg, (i - 1) * output_chunk_size, m_chunk, n, m,
-              _ub_comm, _stream_comm);
-        );
+            D.dtype(), fp8_type,
+            reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
+                rs_output_ptr, ubuf.scale_inv(), _ub_reg, (i - 1) * output_chunk_size, m_chunk, n,
+                m, _ub_comm, _stream_comm););
       } else {
         reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, (i - 1) * output_chunk_size,
                                               m_chunk, n, m, _ub_comm, _stream_comm);
@@ -401,11 +399,10 @@ void CommGemmOverlap::split_gemm_overlap_rs(
     _ub_comm->sms = UB_MAX_SM;
     if (ubuf.element_size() == 1) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-        D.dtype(), fp8_type,
-        reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
-            rs_output_ptr, ubuf.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size,
-            m_chunk, n, m, _ub_comm, _stream_comm);
-      );
+          D.dtype(), fp8_type,
+          reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
+              rs_output_ptr, ubuf.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size,
+              m_chunk, n, m, _ub_comm, _stream_comm););
     } else {
       reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
                                             (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
@@ -417,17 +414,17 @@ void CommGemmOverlap::split_gemm_overlap_rs(
           TensorWrapper(reinterpret_cast<void *>(input_a_chunk_ptr), {m_chunk, k}, A.dtype(),
                         A.amax(), A.scale(), A.scale_inv());
       TensorWrapper output_chunk =
-          TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk},
-                        ubuf.dtype(), ubuf.amax(), ubuf.scale(), ubuf.scale_inv());
+          TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk}, ubuf.dtype(),
+                        ubuf.amax(), ubuf.scale(), ubuf.scale_inv());
       TensorWrapper workspace_chunk =
           TensorWrapper(reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) *
-                                                                      workspace_size_chunk),
+                                                                     workspace_size_chunk),
                         {workspace_size_chunk}, workspace.dtype());
 
       nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
-                        pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                        accumulate, use_split_accumulator, _math_sms,
-                        _stream_compute[i % _stream_compute.size()]);
+                       pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                       accumulate, use_split_accumulator, _math_sms,
+                       _stream_compute[i % _stream_compute.size()]);
 
       NVTE_CHECK_CUDA(cudaEventRecord(_start_comm, _stream_compute[i % _stream_compute.size()]));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _start_comm, 0));
@@ -553,8 +550,8 @@ void CommGemmOverlapP2P::atomic_gemm_overlap_ag(
     if (_ag_sendrecv_multiatomic) {
       if (i == 0) {
         userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
-                                          _ub_comm, _next_rank, _prev_rank, _tp_size, counter_ptr,
-                                          true, _stream_recv);
+                                         _ub_comm, _next_rank, _prev_rank, _tp_size, counter_ptr,
+                                         true, _stream_recv);
       }
     } else {
       // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk The
@@ -565,18 +562,18 @@ void CommGemmOverlapP2P::atomic_gemm_overlap_ag(
       int send_offset = comm_bytes * send_chunk_id;
       int recv_offset = comm_bytes * recv_chunk_id;
 
-      userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                        _next_rank, _stream_recv);
-      userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                        _prev_rank, _stream_recv);
+      userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, _next_rank,
+                       _stream_recv);
+      userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, _prev_rank,
+                       _stream_recv);
       producer(counter_ptr, recv_chunk_id, _stream_recv);
     }
 
     if (i == 0) {
       nvte_cublas_atomic_gemm(A.data(), ubuf.data(), D.data(), bias.data(), pre_gelu_out.data(),
                               A_trans, B_trans, grad, workspace_chunk.data(), accumulate,
-                              use_split_accumulator, _math_sms, 0, _tp_size, false,
-                              counters.data(), stream_main);
+                              use_split_accumulator, _math_sms, 0, _tp_size, false, counters.data(),
+                              stream_main);
     }
   }
 
@@ -604,12 +601,14 @@ void CommGemmOverlapP2P::atomic_gemm_overlap_ag(
 /*
   Split AllGather + GEMM using P2P communication
 */
-void CommGemmOverlapP2P::split_gemm_overlap_ag(
-    cudaStream_t stream_main, const TensorWrapper &A, bool A_trans, const TensorWrapper &B,
-    bool B_trans, const TensorWrapper &bias, const TensorWrapper &D,
-    const TensorWrapper &pre_gelu_out, const std::vector<TensorWrapper> &ubufs,
-    const TensorWrapper &B_copy, const TensorWrapper &workspace, bool grad, bool accumulate,
-    bool use_split_accumulator) {
+void CommGemmOverlapP2P::split_gemm_overlap_ag(cudaStream_t stream_main, const TensorWrapper &A,
+                                               bool A_trans, const TensorWrapper &B, bool B_trans,
+                                               const TensorWrapper &bias, const TensorWrapper &D,
+                                               const TensorWrapper &pre_gelu_out,
+                                               const std::vector<TensorWrapper> &ubufs,
+                                               const TensorWrapper &B_copy,
+                                               const TensorWrapper &workspace, bool grad,
+                                               bool accumulate, bool use_split_accumulator) {
   int ori_sm = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _comm_sms;
@@ -650,9 +649,9 @@ void CommGemmOverlapP2P::split_gemm_overlap_ag(
     int recv_offset = comm_bytes * recv_chunk_id;
     int peer_rank = (_tp_id % 2 == 0) ? _next_rank : _prev_rank;
     userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm, peer_rank,
-                      _stream_send);
+                     _stream_send);
     userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, peer_rank,
-                      _stream_recv);
+                     _stream_recv);
 
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
@@ -670,12 +669,12 @@ void CommGemmOverlapP2P::split_gemm_overlap_ag(
       recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      TensorWrapper input_b_chunk = TensorWrapper(
-          reinterpret_cast<void *>(input_b_ptr + send_offset), {n_chunk * 2, k}, ubufs[0].dtype(),
-          ubufs[0].amax(), ubufs[0].scale(), ubufs[0].scale_inv());
-      TensorWrapper output_chunk = TensorWrapper(
-          reinterpret_cast<void *>(output_ptr + (send_chunk_id * output_chunk_bytes)),
-          {n_chunk * 2, m}, D.dtype(), D.amax(), D.scale(), D.scale_inv());
+      TensorWrapper input_b_chunk =
+          TensorWrapper(reinterpret_cast<void *>(input_b_ptr + send_offset), {n_chunk * 2, k},
+                        ubufs[0].dtype(), ubufs[0].amax(), ubufs[0].scale(), ubufs[0].scale_inv());
+      TensorWrapper output_chunk =
+          TensorWrapper(reinterpret_cast<void *>(output_ptr + (send_chunk_id * output_chunk_bytes)),
+                        {n_chunk * 2, m}, D.dtype(), D.amax(), D.scale(), D.scale_inv());
       TensorWrapper pre_gelu_out_chunk =
           TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
       if (do_gelu) {
@@ -685,25 +684,25 @@ void CommGemmOverlapP2P::split_gemm_overlap_ag(
       }
       TensorWrapper workspace_chunk =
           TensorWrapper(reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) *
-                                                                      workspace_size_chunk),
+                                                                     workspace_size_chunk),
                         {workspace_size_chunk}, workspace.dtype());
 
       nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
-                        pre_gelu_out_chunk.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                        accumulate, use_split_accumulator, _math_sms,
-                        _stream_compute[i % _stream_compute.size()]);
+                       pre_gelu_out_chunk.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                       accumulate, use_split_accumulator, _math_sms,
+                       _stream_compute[i % _stream_compute.size()]);
 
       if (i < num_steps - 1) {
         // P2P communication
         userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes * 2, _ub_comm,
-                          next_rank, _stream_send);
+                         next_rank, _stream_send);
         userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes * 2, _ub_comm,
-                          prev_rank, _stream_recv);
+                         prev_rank, _stream_recv);
 
         NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
-        NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()],
-                                            _stop_recv, 0));
+        NVTE_CHECK_CUDA(
+            cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
       } else if (B_copy.numel() > 0) {
         assert(B_copy.numel() == ubufs[_tp_id].numel());
         assert(B_copy.element_size() == ubufs[_tp_id].element_size());
@@ -724,9 +723,9 @@ void CommGemmOverlapP2P::split_gemm_overlap_ag(
       int recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      TensorWrapper output_chunk = TensorWrapper(
-          reinterpret_cast<void *>(output_ptr + (send_chunk_id * output_chunk_bytes)),
-          {n_chunk, m}, D.dtype(), D.amax(), D.scale(), D.scale_inv());
+      TensorWrapper output_chunk =
+          TensorWrapper(reinterpret_cast<void *>(output_ptr + (send_chunk_id * output_chunk_bytes)),
+                        {n_chunk, m}, D.dtype(), D.amax(), D.scale(), D.scale_inv());
       TensorWrapper pre_gelu_out_chunk =
           TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
       if (do_gelu) {
@@ -736,25 +735,25 @@ void CommGemmOverlapP2P::split_gemm_overlap_ag(
       }
       TensorWrapper workspace_chunk =
           TensorWrapper(reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) *
-                                                                      workspace_size_chunk),
+                                                                     workspace_size_chunk),
                         {workspace_size_chunk}, workspace.dtype());
 
       nvte_cublas_gemm(A.data(), ubufs[send_chunk_id].data(), output_chunk.data(), bias.data(),
-                        pre_gelu_out_chunk.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                        accumulate, use_split_accumulator, _math_sms,
-                        _stream_compute[i % _stream_compute.size()]);
+                       pre_gelu_out_chunk.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                       accumulate, use_split_accumulator, _math_sms,
+                       _stream_compute[i % _stream_compute.size()]);
 
       if (i < _tp_size - 1) {
         // P2P communication
         userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
-                          _next_rank, _stream_send);
+                         _next_rank, _stream_send);
         userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                          _prev_rank, _stream_recv);
+                         _prev_rank, _stream_recv);
 
         NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _stop_recv, 0));
-        NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()],
-                                            _stop_recv, 0));
+        NVTE_CHECK_CUDA(
+            cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
       } else if (B_copy.numel() > 0) {
         assert(B_copy.numel() == ubufs[_tp_id].numel());
         assert(B_copy.element_size() == ubufs[_tp_id].element_size());
@@ -826,9 +825,9 @@ void CommGemmOverlapP2P::atomic_gemm_overlap_rs(
 
     consumer(counter_ptr, send_chunk_id, _stream_recv);
     userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, send_rank,
-                      _stream_recv);
+                     _stream_recv);
     userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, recv_rank,
-                      _stream_recv);
+                     _stream_recv);
   }
 
   _ub_comm->sms = ori_sm;
@@ -839,11 +838,13 @@ void CommGemmOverlapP2P::atomic_gemm_overlap_rs(
 /*
   Split ReduceScatter + Pipelined GEMM using P2P communication
 */
-void CommGemmOverlapP2P::split_gemm_overlap_rs(
-    cudaStream_t stream_main, const TensorWrapper &A, bool A_trans, const TensorWrapper &B,
-    bool B_trans, const TensorWrapper &bias, const TensorWrapper &D,
-    const TensorWrapper &pre_gelu_out, const std::vector<TensorWrapper> &ubufs,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator) {
+void CommGemmOverlapP2P::split_gemm_overlap_rs(cudaStream_t stream_main, const TensorWrapper &A,
+                                               bool A_trans, const TensorWrapper &B, bool B_trans,
+                                               const TensorWrapper &bias, const TensorWrapper &D,
+                                               const TensorWrapper &pre_gelu_out,
+                                               const std::vector<TensorWrapper> &ubufs,
+                                               const TensorWrapper &workspace, bool grad,
+                                               bool accumulate, bool use_split_accumulator) {
   int ori_sm = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _comm_sms;
@@ -874,18 +875,19 @@ void CommGemmOverlapP2P::split_gemm_overlap_rs(
     // GEMM chunk
     int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
     char *input_b_chunk_ptr = input_b_ptr + (input_b_chunk_id * input_b_chunk_bytes);
-    TensorWrapper input_b_chunk = TensorWrapper(
-      reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk, k}, B.dtype(), nullptr, nullptr,
-      B.scale_inv());
-    TensorWrapper workspace_chunk = TensorWrapper(
-      reinterpret_cast<void *>(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk),
-      {workspace_size_chunk}, workspace.dtype());
+    TensorWrapper input_b_chunk =
+        TensorWrapper(reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk, k}, B.dtype(), nullptr,
+                      nullptr, B.scale_inv());
+    TensorWrapper workspace_chunk =
+        TensorWrapper(reinterpret_cast<void *>(workspace_ptr +
+                                               (i % _stream_compute.size()) * workspace_size_chunk),
+                      {workspace_size_chunk}, workspace.dtype());
 
-    cudaStream_t gemm_stream = (i == _tp_size - 1) ? stream_main
-                                                   : _stream_compute[i % _stream_compute.size()];
+    cudaStream_t gemm_stream =
+        (i == _tp_size - 1) ? stream_main : _stream_compute[i % _stream_compute.size()];
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), ubufs[i].data(), bias.data(),
-                      pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
-                      accumulate, use_split_accumulator, _math_sms, gemm_stream);
+                     pre_gelu_out.data(), A_trans, B_trans, grad, workspace_chunk.data(),
+                     accumulate, use_split_accumulator, _math_sms, gemm_stream);
 
     if (i > 0) {
       // P2P communication chunk
@@ -893,14 +895,14 @@ void CommGemmOverlapP2P::split_gemm_overlap_rs(
       int recv_offset = comm_bytes * (i - 1 + _tp_size);
       int send_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
       int recv_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
-      NVTE_CHECK_CUDA(cudaEventRecord(
-          _start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
+      NVTE_CHECK_CUDA(
+          cudaEventRecord(_start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send, _start_comm, 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_comm, 0));
-      userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                        send_rank, _stream_send);
-      userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                        recv_rank, _stream_recv);
+      userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, send_rank,
+                       _stream_send);
+      userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, recv_rank,
+                       _stream_recv);
     }
   }
 

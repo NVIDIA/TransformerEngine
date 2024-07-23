@@ -4,13 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <common/util/pybind_helper.h>
 #include <pybind11/functional.h>
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/script.h>
 #include <torch/torch.h>
 
-#include <common/util/pybind_helper.h>
 #include "../common.h"
 #include "../extensions.h"
 
@@ -270,7 +270,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<te_torch::CommGemmOverlapP2P>(m, "CommGemmOverlapP2P", py::module_local())
       .def(py::init</* sample_tensor */ torch::Tensor &, /* world_rank */ int, /* world_size */ int,
-                    /* local_rank */ int, /* local_size */ int, /* node_id */int,
+                    /* local_rank */ int, /* local_size */ int, /* node_id */ int,
                     /* num_nodes */ int, /* tp_size */ int, /* num_max_streams */ int,
                     /* cga_size */ int, /* num_comm_sm */ int, /* set_sm_margin */ bool,
                     /* use_ce */ bool, /* atomic_gemm */ bool, /* aggregate */ bool,

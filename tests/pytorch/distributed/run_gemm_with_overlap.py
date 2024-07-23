@@ -53,9 +53,7 @@ def _parse_args(argv=None, namespace=None):
         "-d", "--head-dim", type=int, default=128, help="Dimension of each attention head."
     )
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
-    parser.add_argument(
-        "--fp8", action="store_true", default=False, help="Enable FP8 GEMM."
-    )
+    parser.add_argument("--fp8", action="store_true", default=False, help="Enable FP8 GEMM.")
     parser.add_argument(
         "--p2p", action="store_true", default=False, help="Test overlap with P2P comms."
     )
@@ -78,7 +76,7 @@ def _parse_args(argv=None, namespace=None):
         "--bulk-overlap",
         action="store_true",
         default=False,
-        help="Enable bulk AG or RS overlap for a tensor that is not involved in the GEMM compute."
+        help="Enable bulk AG or RS overlap for a tensor that is not involved in the GEMM compute.",
     )
     parser.add_argument(
         "--check-numerics",
@@ -111,7 +109,7 @@ def _parse_args(argv=None, namespace=None):
         "--tcp-init",
         action="store_true",
         default=False,
-        help="Initialize torch.distributed with TcpStore."
+        help="Initialize torch.distributed with TcpStore.",
     )
     parser.add_argument(
         "--init-method", type=str, default=None, help="Set the torch.distributed init method."
@@ -120,7 +118,9 @@ def _parse_args(argv=None, namespace=None):
         "--bind-to-device",
         action="store_true",
         default=False,
-        help="Initialize torch.distributed with 'device_id' argument to bind each rank to 1 device."
+        help=(
+            "Initialize torch.distributed with 'device_id' argument to bind each rank to 1 device."
+        ),
     )
     parser.add_argument(
         "--bootstrap-backend",
@@ -132,7 +132,11 @@ def _parse_args(argv=None, namespace=None):
             + "initialization."
         ),
     )
-    parser.add_argument("--use-cuda-graphs", action="store_true", default=False,)
+    parser.add_argument(
+        "--use-cuda-graphs",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     opts = parser.parse_args(argv, namespace)
 
@@ -158,6 +162,7 @@ def _parse_args(argv=None, namespace=None):
             opts.fp8 = True
 
     return opts
+
 
 @record
 def _main(opts):
@@ -258,8 +263,12 @@ def _main(opts):
     elif opts.bootstrap_backend == "mpi":
         assert dist.is_mpi_available()
     bootstrap_pg = dist.new_group(backend=opts.bootstrap_backend)
-    dist_print(f"Bootstrapping comm+GEMM overlap with backend=\"{opts.bootstrap_backend}\"", src=0,
-               info=True, section=True)
+    dist_print(
+        f'Bootstrapping comm+GEMM overlap with backend="{opts.bootstrap_backend}"',
+        src=0,
+        info=True,
+        section=True,
+    )
 
     # torch.distributed callback wrappers for bootstrapping userbuffers
     def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
@@ -444,8 +453,7 @@ def _main(opts):
             inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
             if ub_obj2 is not None:
                 ker2_g = te.distributed.gather_along_first_dim(
-                    torch.transpose(kernel2_t, 0, 1),
-                    tp_group
+                    torch.transpose(kernel2_t, 0, 1), tp_group
                 )[0]
         else:
             # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
@@ -462,7 +470,7 @@ def _main(opts):
             ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
         else:
             # First all-gather all the bulk inputs into a list
-            bulk_inp_list = [ torch.zeros_like(bulk_inp) for _ in range(LOCAL_SIZE) ]
+            bulk_inp_list = [torch.zeros_like(bulk_inp) for _ in range(LOCAL_SIZE)]
             dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
@@ -482,8 +490,7 @@ def _main(opts):
         fp8_dtype = tex.DType.kFloat8E4M3
         fp8_meta = tex.FP8TensorMeta()
         num_gemms = 6 if ub_obj2 is not None else 3
-        fp8_meta.amax_history = torch.zeros((2, num_gemms),
-                                            dtype=torch.float, device="cuda")
+        fp8_meta.amax_history = torch.zeros((2, num_gemms), dtype=torch.float, device="cuda")
         fp8_meta.scale = torch.ones(num_gemms, dtype=torch.float, device="cuda")
         fp8_meta.scale_inv = torch.ones(num_gemms, dtype=torch.float, device="cuda")
 
@@ -537,7 +544,7 @@ def _main(opts):
                     kernel2_t.to(dtype=torch.float32),
                     kernel2_t_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_WEIGHT],
                     rtol=0.125,
-                    atol=0.0675
+                    atol=0.0675,
                 )
 
         # Set Fp8 scales for userbuffers
@@ -624,7 +631,7 @@ def _main(opts):
             ub_algo=tex.NVTE_Comm_Overlap_Algo.ATOMIC_GEMM_RS_P2P,
             ub=ub_obj2,
             extra_output_tensor=rs_out2,
-            out=ubuf_out2
+            out=ubuf_out2,
         )
 
     def _gemm():
@@ -743,8 +750,12 @@ def _main(opts):
                     # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
                     output = all_outputs[0]
                     test_out = torch.transpose(
-                        te.distributed.gather_along_first_dim(torch.transpose(output, 0, 1),
-                                                              tp_group)[0], 0, 1)
+                        te.distributed.gather_along_first_dim(
+                            torch.transpose(output, 0, 1), tp_group
+                        )[0],
+                        0,
+                        1,
+                    )
             else:
                 # RS Output: (M/P, N) -> gather -> (M, N)
                 output = rs_out
@@ -774,14 +785,12 @@ def _main(opts):
             ref_out = ref2_g if ub_obj2 is not None else ref_g
             ref_nonzeros = torch.count_nonzero(ref_out)
             nonzero_info = (
-                f"output nonzeros = {test_nonzeros} "
-                + f"| reference count = {ref_nonzeros}"
+                f"output nonzeros = {test_nonzeros} " + f"| reference count = {ref_nonzeros}"
             )
             dist_print(nonzero_info, src=0, section=True)
 
             sizing_info = (
-                f"input: {list(inp.shape)} "
-                + f"| GEMM1 weights: {list(kernel_t.shape)[::-1]} "
+                f"input: {list(inp.shape)} " + f"| GEMM1 weights: {list(kernel_t.shape)[::-1]} "
             )
             if ub_obj2 is not None:
                 sizing_info += f"| GEMM2 weights: {list(kernel2_t.shape)[::-1]} "
@@ -789,14 +798,12 @@ def _main(opts):
             dist_print(sizing_info, section=True)
 
             sizing_info_g = (
-                f"input: {list(inp_g.shape)} "
-                + f"| GEMM1 weights: {list(ker_g.shape)} "
+                f"input: {list(inp_g.shape)} " + f"| GEMM1 weights: {list(ker_g.shape)} "
             )
             if ub_obj2 is not None:
                 sizing_info_g += f"| GEMM2 weights: {list(ker2_g.shape)} "
             sizing_info_g += (
-                f"| output: {list(test_out.shape)} "
-                + f"| reference: {list(ref_out.shape)}\n"
+                f"| output: {list(test_out.shape)} " + f"| reference: {list(ref_out.shape)}\n"
             )
             dist_print(sizing_info_g, src=0)
 

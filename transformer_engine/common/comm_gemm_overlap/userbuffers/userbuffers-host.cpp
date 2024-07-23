@@ -19,8 +19,8 @@
 #include <map>
 #include <utility>
 
-#include "../util/logging.h"
 #include "../util/cuda_driver.h"
+#include "../util/logging.h"
 #include "ipcsocket.h"
 #include "userbuffers.h"
 
@@ -49,9 +49,7 @@ void ub_mpi_allgather(void *globaldata, size_t globalbytes, void *localdata, siz
                              static_cast<MPI_Comm>(comm)));
 }
 
-void ub_mpi_barrier(ExtComm comm) {
-  UB_MPI_CHECK(MPI_Barrier(static_cast<MPI_Comm>(comm)));
-}
+void ub_mpi_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(static_cast<MPI_Comm>(comm))); }
 #else
 static char EXT_COMM_WORLD[] = "world";
 static char EXT_COMM_INTRA[] = "intra";
@@ -219,7 +217,6 @@ int create_communicator_grouped2(
     mcProp.numDevices = (*comm)->ar2_nvsize;
     mcProp.size = (*comm)->mc_maxsize;
     mcProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
-
 
     NVTE_CALL_CHECK_CUDA_DRIVER(
         cuMulticastGetGranularity, &gran, &mcProp,

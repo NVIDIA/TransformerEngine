@@ -12,6 +12,7 @@
 
 // TE includes
 #include <transformer_engine/transformer_engine.h>
+
 #include "../comm_gemm_overlap/userbuffers/userbuffers.h"
 
 #ifdef __cplusplus
@@ -20,10 +21,7 @@ extern "C" {
 
 static const size_t NVTE_COMM_OVERLAP_MAX_STREAMS = 3;
 
-enum NVTE_Comm_Overlap_Type {
-  ALL_GATHER = 0,
-  REDUCE_SCATTER = 1
-};
+enum NVTE_Comm_Overlap_Type { ALL_GATHER = 0, REDUCE_SCATTER = 1 };
 
 enum NVTE_Comm_Overlap_Algo {
   // bulk overlaps (no dependence between comm and compute)
@@ -77,13 +75,13 @@ class CommGemmOverlapBase {
   std::vector<cudaStream_t> _stream_compute;
 
  public:
-  CommGemmOverlapBase(
-      int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
-      int tp_size, int num_splits, int num_max_streams, int cga_size, int num_comm_sms,
-      bool set_sm_margin, bool use_ce, bool atomic_gemm, const char *name,
-      std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
-      std::function<void(void *, size_t, int, char *)> bcast_handle,
-      std::function<void(char *)> barrier_handle);
+  CommGemmOverlapBase(int worldrank, int worldsize, int localrank, int localsize, int nodeid,
+                      int numnodes, int tp_size, int num_splits, int num_max_streams, int cga_size,
+                      int num_comm_sms, bool set_sm_margin, bool use_ce, bool atomic_gemm,
+                      const char *name,
+                      std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
+                      std::function<void(void *, size_t, int, char *)> bcast_handle,
+                      std::function<void(char *)> barrier_handle);
 
   virtual ~CommGemmOverlapBase();
 
@@ -218,7 +216,6 @@ class CommGemmOverlap : public CommGemmOverlapBase {
 
 };  // CommGemmOverlap
 
-
 /*! \struct CommGemmOverlapP2P
  *  \brief Structure to manage and execute point-to-point comm+GEMM overlap algorithms.
  */
@@ -257,13 +254,13 @@ class CommGemmOverlapP2P : public CommGemmOverlapBase {
    *  \param[in]  allgather_handle   Function pointer for external allgather op (e.g. DL framework).
    *  \param[in]  barrier_handle     Function pointer for external barrier op (e.g. DL framework).
    */
-  CommGemmOverlapP2P(
-      int worldrank, int worldsize, int localrank, int localsize, int nodeid, int numnodes,
-      int tp_size, int num_max_streams, int cga_size, int num_comm_sms, bool set_sm_margin,
-      bool use_ce, bool atomic_gemm, bool aggregate, bool is_reduce_scatter,
-      std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
-      std::function<void(void *, size_t, int, char *)> bcast_handle,
-      std::function<void(char *)> barrier_handle);
+  CommGemmOverlapP2P(int worldrank, int worldsize, int localrank, int localsize, int nodeid,
+                     int numnodes, int tp_size, int num_max_streams, int cga_size, int num_comm_sms,
+                     bool set_sm_margin, bool use_ce, bool atomic_gemm, bool aggregate,
+                     bool is_reduce_scatter,
+                     std::function<void(void *, size_t, void *, size_t, char *)> allgather_handle,
+                     std::function<void(void *, size_t, int, char *)> bcast_handle,
+                     std::function<void(char *)> barrier_handle);
 
   ~CommGemmOverlapP2P();
 
