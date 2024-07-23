@@ -35,6 +35,7 @@ from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension
 
 
+os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension)
 
 

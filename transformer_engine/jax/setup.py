@@ -36,6 +36,7 @@ from build_tools.jax import setup_jax_extension
 install_and_import("pybind11")
 from pybind11.setup_helpers import build_ext as BuildExtension
 
+os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension)
 
 
