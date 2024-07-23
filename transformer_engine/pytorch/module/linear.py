@@ -310,8 +310,6 @@ class _Linear(torch.autograd.Function):
                     saved_inputmat = inputmat_no_fp8
 
                 if cpu_offloading:
-                    if fuse_wgrad_accumulation:
-                        weight.main_grad.weight_offloading = True
                     if fp8 and weight_fp8 is not None:
                         weight_fp8.weight_offloading = True
                     weight.weight_offloading = True
@@ -403,7 +401,7 @@ class _Linear(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = torch.nn.Parameter(weight, False)
+                weight = torch.nn.Parameter(weight.requires_grad)
                 weight.main_grad = main_grad
 
             tp_world_size = get_distributed_world_size(ctx.tp_group)

@@ -333,7 +333,9 @@ def initialize_ub(
                 assert wgrad_name not in ub_cfgs, \
                     f"Cannot overlap reduce-scatter for both {name} and {wgrad_name}."
                 layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+                methods["pipeline"].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         ub_cfg = get_default_config(name)

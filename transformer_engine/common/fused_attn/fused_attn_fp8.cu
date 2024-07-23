@@ -1687,6 +1687,9 @@ void fused_attn_fp8_fwd_impl_v1(
                                layout,
                                bias_type,
                                mask_type,
+                               0,
+                               0,
+                               true,
                                fwd_tensor_type,
                                fwd_tensor_type};
 
@@ -1981,6 +1984,9 @@ void fused_attn_fp8_bwd_impl_v1(
                                layout,
                                bias_type,
                                mask_type,
+                               0,
+                               0,
+                               false,
                                fwd_tensor_type,
                                bwd_tensor_type};
 

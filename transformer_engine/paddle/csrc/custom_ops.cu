@@ -595,10 +595,12 @@ void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_p
   // extract random number generator seed and offset
   const phi::DeviceContext *dev_ctx =
       paddle::experimental::DeviceContextPool::Instance().Get(place);
+
   phi::Generator *gen_cuda = dev_ctx->GetGenerator();
   auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  auto state_index = gen_cuda->GetStateIndex();
   int64_t *rng_state_p = static_cast<int64_t *>(rng_state.data());
+#if PADDLE_VERSION > 261
+  auto state_index = gen_cuda->GetStateIndex();
 
   auto parameterSetter = [gen_cuda, state_index,
                           rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
@@ -618,6 +620,9 @@ void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_p
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  set_rng_state<<<1, 1, 0, stream>>>(0, seed_offset, rng_state_p);
+#endif
 }
 
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
@@ -673,7 +678,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_cu_seqlens.data(),
                                 dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen,
                                 is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, workspace.data(), QKV.stream());
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
@@ -687,7 +692,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_cu_seqlens.data(),
                                 dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen,
                                 is_training, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -758,7 +763,7 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
                                 te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
                                 attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
@@ -769,7 +774,7 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                 &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
                                 te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
                                 attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, workspace.data(), QKV.stream());
+                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -840,12 +845,12 @@ void te_fused_attn_fwd_kvpacked(
 
   auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_fwd_kvpacked(te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(), te_O.data(),
-                               &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                               te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
-                               dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q,
-                               max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout_enum,
-                               bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
+  nvte_fused_attn_fwd_kvpacked(
+      te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
+      te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
+      dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
+      workspace.data(), Q.stream());
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -855,12 +860,12 @@ void te_fused_attn_fwd_kvpacked(
   output_s->data.dptr = GetOptionalDataPtr(softmax_aux);
 
   // execute the kernel
-  nvte_fused_attn_fwd_kvpacked(te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(), te_O.data(),
-                               &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                               te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
-                               dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q,
-                               max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout_enum,
-                               bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
+  nvte_fused_attn_fwd_kvpacked(
+      te_Q.data(), te_KV.data(), te_Bias.data(), te_S.data(), te_O.data(), &nvte_aux_tensor_pack,
+      te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), dummy_seq_offsets.data(),
+      dummy_seq_offsets.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
+      workspace.data(), Q.stream());
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -935,24 +940,24 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
 
   auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_bwd_kvpacked(te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(),
-                               te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(),
-                               te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-                               dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
-                               max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum,
-                               bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
+  nvte_fused_attn_bwd_kvpacked(
+      te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
+      &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
+      te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
+      max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
+      -1, -1, true, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
 
   // execute kernel
-  nvte_fused_attn_bwd_kvpacked(te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(),
-                               te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(),
-                               te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-                               dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
-                               max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum,
-                               bias_type_enum, attn_mask_type_enum, workspace.data(), Q.stream());
+  nvte_fused_attn_bwd_kvpacked(
+      te_Q.data(), te_KV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
+      &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
+      te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
+      max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
+      -1, -1, true, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1005,9 +1010,10 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
   auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
   auto gen_cuda = dev_ctx->GetGenerator();
   auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-  auto state_index = gen_cuda->GetStateIndex();
-  auto rng_state_p = static_cast<int64_t *>(rng_state.data());
   auto stream = Q.stream();
+  auto rng_state_p = static_cast<int64_t *>(rng_state.data());
+#if PADDLE_VERSION > 261
+  auto state_index = gen_cuda->GetStateIndex();
   auto parameterSetter = [gen_cuda, state_index,
                           rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
     // ensure the generator use correct state index
@@ -1026,6 +1032,9 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  set_rng_state<<<1, 1, 0, stream>>>(0, seed_offset, rng_state_p);
+#endif
 
   auto te_rng_state = MakeNvteTensor(rng_state);
 
@@ -1042,7 +1051,7 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
                       te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training, attn_scale,
-                      p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
+                      p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
                       workspace.data(), Q.stream());
 
   // allocate memory for workspace and auxiliary output tensors
@@ -1058,7 +1067,7 @@ void te_fused_attn_fwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(),
                       te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training, attn_scale,
-                      p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
+                      p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
                       workspace.data(), Q.stream());
 
   // destroy tensor wrappers, but not allocated memory
@@ -1140,7 +1149,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -1152,7 +1161,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1354,6 +1363,7 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
                                           bool update_weight_scale_inv, bool fwd_update,
                                           float fp8_max, float margin,
                                           const std::string &amax_compute) {
+#if PADDLE_VERSION > 261
   NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
 
   paddle::Tensor amax;
@@ -1401,6 +1411,10 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
       };
   phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(parameterSetter,
                                                                          cudaKernelCallback);
+#else
+  NVTE_ERROR(
+      "amax_and_scale_update_inplace_legacy is not supported in old version of PaddlePaddle\n");
+#endif
 }
 
 void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT

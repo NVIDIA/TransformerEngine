@@ -24,6 +24,7 @@
 
 #include <common/util/logging.h>
 #include <common/util/system.h>
+#include <common/common.h>
 #include "../common.h"
 #include "../extensions.h"
 
@@ -668,8 +669,11 @@ void te_torch::CommGemmOverlapP2P::atomic_gemm_overlap_rs(
     assert(rs_output.element_size() == 2);
     float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv_ptr);
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
-                                          _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      D_type, fp8_type,
+      reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
+                                       _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
+    );
   } else {
     torch::Tensor reduce_buf = torch::from_blob(
         reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
@@ -739,8 +743,11 @@ void te_torch::CommGemmOverlapP2P::split_overlap_rs(
     assert(rs_output.element_size() == 2);
     float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv_ptr);
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
-                                          _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      D_type, fp8_type,
+      reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
+                                       _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
+    );
   } else {
     torch::Tensor reduce_buf = torch::from_blob(
         reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());

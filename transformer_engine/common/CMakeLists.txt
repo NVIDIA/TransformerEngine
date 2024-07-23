@@ -14,9 +14,6 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 project(transformer_engine LANGUAGES CUDA CXX)
 
-find_package(Python COMPONENTS Interpreter Development)
-
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()

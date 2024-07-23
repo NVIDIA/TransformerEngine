@@ -670,7 +670,7 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, 
         apply_residual_connection_post_layernorm=True,
         output_layernorm=True,
         zero_centered_gamma=zero_centered_gamma,
-        self_attn_mask_type="padding",
+        self_attn_mask_type="causal",
         normalization=normalization,
         device="cuda",
     )

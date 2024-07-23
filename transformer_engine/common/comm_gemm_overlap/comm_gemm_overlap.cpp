@@ -11,9 +11,10 @@
 // TE/common includes
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/comm_gemm_overlap.h>
-#include "../util/logging.h"
-#include "../util/cuda_driver.h"
-#include "../util/system.h"
+#include "common/util/logging.h"
+#include "common/util/cuda_driver.h"
+#include "common/util/system.h"
+#include "common/common.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
@@ -185,8 +186,11 @@ void CommGemmOverlap::bulk_gemm_overlap(
       assert(rs_output.size(0) == ubuf.size(0) / _tp_size);
       assert(rs_output.element_size() == 2);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
-      reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, ubuf.scale_inv(), _ub_reg, 0,
-                                                  comm_elements, _ub_comm, _stream_comm);
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        rs_output.dtype(), fp8_type,
+        reducescatter2_userbuff_fp8<fp8_type>(rs_output_ptr, ubuf.scale_inv(), _ub_reg, 0,
+                                              comm_elements, _ub_comm, _stream_comm);
+      )
     } else {
       reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm);
     }
@@ -256,9 +260,12 @@ void CommGemmOverlap::atomic_gemm_overlap_rs(
       if (ubuf.element_size() == 1) {
         // TODO (Alp): RS kernels for FP8 GEMM output is numerically incorrect.
         float *d_scale_inv_ptr = reinterpret_cast<float *>(ubuf.scale_inv());
-        reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
-            rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m, _num_splits,
-            &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          D.dtype(), fp8_type,
+          reducescatter2_userbuff_strided_atomic_fp8<fp8_type>(
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m, _num_splits,
+              &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        );
       } else {
         reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
                                                 _num_splits, &counter_ptr[i], _ub_comm,
@@ -268,9 +275,12 @@ void CommGemmOverlap::atomic_gemm_overlap_rs(
       if (ubuf.element_size() == 1) {
         // TODO (Alp): RS kernels for FP8 GEMM output is numerically incorrect.
         float *d_scale_inv_ptr = reinterpret_cast<float *>(ubuf.scale_inv());
-        reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
-            rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
-            counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          D.dtype(), fp8_type,
+          reducescatter2_userbuff_strided_multiatomic_fp8<fp8_type>(
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
+              counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        );
       } else {
         reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk, m_chunk, n,
                                                     m, _num_splits, counter_ptr, _ub_comm,
@@ -369,9 +379,12 @@ void CommGemmOverlap::split_gemm_overlap_rs(
 
       // Communication chunk
       if (ubuf.element_size() == 1) {
-        reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-            rs_output_ptr, ubuf.scale_inv(), _ub_reg, (i - 1) * output_chunk_size, m_chunk, n, m,
-            _ub_comm, _stream_comm);
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          D.dtype(), fp8_type,
+          reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
+              rs_output_ptr, ubuf.scale_inv(), _ub_reg, (i - 1) * output_chunk_size, m_chunk, n, m,
+              _ub_comm, _stream_comm);
+        );
       } else {
         reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, (i - 1) * output_chunk_size,
                                               m_chunk, n, m, _ub_comm, _stream_comm);
@@ -387,9 +400,12 @@ void CommGemmOverlap::split_gemm_overlap_rs(
     // Last communication chunk with max SM
     _ub_comm->sms = UB_MAX_SM;
     if (ubuf.element_size() == 1) {
-      reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-          rs_output_ptr, ubuf.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size,
-          m_chunk, n, m, _ub_comm, _stream_comm);
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        D.dtype(), fp8_type,
+        reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
+            rs_output_ptr, ubuf.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size,
+            m_chunk, n, m, _ub_comm, _stream_comm);
+      );
     } else {
       reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
                                             (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
@@ -421,9 +437,11 @@ void CommGemmOverlap::split_gemm_overlap_rs(
         _ub_comm->sms = UB_MAX_SM;
       }
       if (ubuf.element_size() == 1) {
-        reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-            rs_output_ptr, ubuf.scale_inv(), _ub_reg, i * output_chunk_size, m_chunk, n, m,
-            _ub_comm, _stream_comm);
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          D.dtype(), fp8_type,
+          reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
+              rs_output_ptr, ubuf.scale_inv(), _ub_reg, i * output_chunk_size, m_chunk, n, m,
+              _ub_comm, _stream_comm);
       } else {
         reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
                                               m_chunk, n, m, _ub_comm, _stream_comm);

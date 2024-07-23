@@ -184,7 +184,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_dtype_forward,
                         out=ln_out_fp8,
                     )
-                    ln_out = ln_out_fp8
+                    ln_out = torch.empty_like(ln_out_fp8)
                 else:
                     ln_out_total = tex.cast_to_fp8(
                         ln_out_total,
@@ -290,8 +290,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             if cpu_offloading:
-                if fuse_wgrad_accumulation:
-                    weight.main_grad.weight_offloading = True
                 if fp8 and weight_fp8 is not None:
                     weight_fp8.weight_offloading = True
                 ln_weight.weight_offloading = True
@@ -412,7 +410,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = torch.nn.Parameter(weight, False)
+                weight = torch.nn.Parameter(weight.requires_grad)
                 weight.main_grad = main_grad
 
             if ctx.ub_overlap_rs_dgrad:

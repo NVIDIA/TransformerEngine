@@ -64,6 +64,8 @@ AttnMaskType = {
     "padding": NVTE_Mask_Type.NVTE_PADDING_MASK,
     "causal": NVTE_Mask_Type.NVTE_CAUSAL_MASK,
     "padding_causal": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK,
+    "causal_bottom_right": NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK,
+    "padding_causal_bottom_right": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
 }
 
 FusedAttnBackend = {
@@ -98,6 +100,7 @@ def fused_attn_fwd_qkvpacked(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed QKV input.
@@ -150,6 +153,11 @@ def fused_attn_fwd_qkvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -234,6 +242,7 @@ def fused_attn_fwd_qkvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens,
         qkv,
         qkv_dtype,
@@ -280,6 +289,8 @@ def fused_attn_bwd_qkvpacked(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed QKV input.
 
@@ -344,6 +355,13 @@ def fused_attn_bwd_qkvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -391,6 +409,8 @@ def fused_attn_bwd_qkvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens,
         qkv,
         o,
@@ -439,6 +459,7 @@ def fused_attn_fwd_kvpacked(
     qkv_layout: str = "sbhd_sbh2d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed KV input.
@@ -501,6 +522,11 @@ def fused_attn_fwd_kvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -586,6 +612,7 @@ def fused_attn_fwd_kvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -639,6 +666,8 @@ def fused_attn_bwd_kvpacked(
     qkv_layout: str = "sbhd_sbh2d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -714,6 +743,13 @@ def fused_attn_bwd_kvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -764,6 +800,8 @@ def fused_attn_bwd_kvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -816,6 +854,7 @@ def fused_attn_fwd(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
@@ -884,6 +923,11 @@ def fused_attn_fwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -969,6 +1013,7 @@ def fused_attn_fwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -1024,6 +1069,8 @@ def fused_attn_bwd(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -1104,6 +1151,13 @@ def fused_attn_bwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -1156,6 +1210,8 @@ def fused_attn_bwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
