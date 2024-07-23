@@ -18,7 +18,7 @@ def _load_library():
     try:
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"transformer_engine_jax.*.{extension}"))
-    except StopIteration as e1:
+    except StopIteration:
         so_dir = get_te_path()
         so_path = next(so_dir.glob(f"transformer_engine_jax.*.{extension}"))
 
