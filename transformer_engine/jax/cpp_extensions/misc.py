@@ -147,7 +147,7 @@ def is_ffi_enabled():
     """
     Helper function checking if XLA Custom Call with FFI is enabled
     """
-    # TODO (Phuong): fixes for cudaGraph was not included in 0.4.30, confirm and update to newer version when it is available
+    # TODO(Phuong): fixes for cudaGraph was not included in 0.4.30, confirm and update to newer version when it is available
     is_supported = jax_version_meet_requirement("0.4.30")
     # New APIs with FFI are enabled by default
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
