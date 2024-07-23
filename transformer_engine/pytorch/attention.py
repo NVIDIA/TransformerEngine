@@ -2577,8 +2577,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                 q_ = q[:, i].contiguous()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
-                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[0], -1, *k.shape[-2:])
-                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[0], -1, *v.shape[-2:])
+                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[1], -1, *k.shape[-2:])
+                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[1], -1, *v.shape[-2:])
             elif qkv_format == "sbhd":
                 # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                 q_ = q[i].contiguous()
@@ -2691,8 +2691,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                 q_ = q[:, i].contiguous()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
-                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[0], -1, *k.shape[-2:])
-                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[0], -1, *v.shape[-2:])
+                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[1], -1, *k.shape[-2:])
+                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[1], -1, *v.shape[-2:])
             elif ctx.qkv_format == "sbhd":
                 # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                 q_ = q[i].contiguous()
