@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 
 import os
+import sys
 import socket
 import warnings
 import subprocess
@@ -272,23 +273,11 @@ def _main(opts):
     if WORLD_RANK == 0:
         print("\n", end="", flush=True)
 
-    if not tex.ubuf_built_with_mpi():
-        # torch.distributed callback wrappers for bootstrapping userbuffers
-        def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
-            del group
-            global_tmp = global_data.cuda() if opts.bootstrap_backend == "nccl" else global_data
-            local_tmp = local_data.cuda() if opts.bootstrap_backend == "nccl" else local_data
-            dist.all_gather_into_tensor(global_tmp, local_tmp, group=bootstrap_pg)
-            if opts.bootstrap_backend == "nccl":
-                global_data.copy_(global_tmp.cpu())
-                global_tmp.data = torch.Tensor()
-                local_tmp.data = torch.Tensor()
-
-        def barrier_callback(group: str):
-            del group
-            dist.barrier(group=bootstrap_pg)
-
-        tex.set_ubuf_bootstrap_callbacks(allgather_callback, barrier_callback)
+    ub_callbacks = (
+        tex.UbufBootstrapCallbacks()
+        if tex.ubuf_built_with_mpi()
+        else tex.UbufBootstrapCallbacks(bootstrap_pg, bootstrap_pg)
+    )
 
     if opts.comm_type == 0:
         if opts.bulk_overlap:
@@ -343,6 +332,7 @@ def _main(opts):
             opts.comm_type == 0,  # overlap with reduce scatter
             opts.atomic,  # use a single GEMM with atomic-counters
             True,  # Use copy engine for P2P communications
+            ub_callbacks,
         )
         if opts.p2p
         else tex.UbufCommOverlap(
@@ -360,6 +350,7 @@ def _main(opts):
             True,  # Set SM margin
             3,  # Max concurrent GEMM streams
             opts.atomic,  # uUe a single GEMM with atomic-counters
+            ub_callbacks,
         )
     )
 
@@ -384,6 +375,7 @@ def _main(opts):
             True,  # overlap with reduce scatter
             True,  # use a single GEMM with atomic-counters
             True,  # use copy engine for P2P communications
+            ub_callbacks,
         )
 
     # Figure out problem sizing:
@@ -815,7 +807,4 @@ def _main(opts):
 
 
 if __name__ == "__main__":
-    try:
-        os._exit(_main(_parse_args()))
-    except:
-        os._exit(1)
+    sys.exit(_main(_parse_args()))

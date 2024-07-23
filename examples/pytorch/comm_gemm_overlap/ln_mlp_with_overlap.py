@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 
 import os
+import sys
 import socket
 import argparse
 import warnings
@@ -291,4 +292,4 @@ def _train(opts):
 
 
 if __name__ == "__main__":
-    os._exit(_train(_parse_args()))
+    sys.exit(_train(_parse_args()))

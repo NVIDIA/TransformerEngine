@@ -206,16 +206,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-  // Communication functions to initialize Userbuffers communicators
-  // Note: Callbacks are not called, so safe to release GIL.
-  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
-        py::call_guard<py::gil_scoped_release>());
-
   m.def("device_supports_multicast", &ubuf::device_supports_multicast,
         py::call_guard<py::gil_scoped_release>());
 
   m.def("ubuf_built_with_mpi", &ubuf::ubuf_built_with_mpi,
         py::call_guard<py::gil_scoped_release>());
+
+  py::class_<ubuf::UbufBootstrapCallbacks>(m, "UbufBootstrapCallbacks")
+      .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
+      .def(py::init<c10d::ProcessGroup *, c10d::ProcessGroup *>(),
+           py::call_guard<py::gil_scoped_release>());
 
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
       .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
@@ -232,7 +232,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communication)
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
       .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, int, int, bool, int,
-                    bool>())
+                    bool, ubuf::UbufBootstrapCallbacks &>(),
+                    py::call_guard<py::gil_scoped_release>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs,
@@ -257,7 +258,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
       .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, int, int, bool, bool, int,
-                    bool, bool, bool>())
+                    bool, bool, bool, ubuf::UbufBootstrapCallbacks &>(),
+                    py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs,

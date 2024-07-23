@@ -110,6 +110,7 @@ def initialize_ub(
         local_size = tp_size
         node_id = world_rank // tp_size
         num_nodes = world_size // tp_size
+        ub_callbacks = tex.UbufBootstrapCallbacks()
     else:
         assert (
             torch.distributed.is_initialized()
@@ -183,29 +184,7 @@ def initialize_ub(
                 flush=True,
             )
 
-        ub_pgs = {
-            "world": world_group,
-            "intra": intra_node_group,
-        }
-
-        def allgather_callback(global_data: torch.Tensor, local_data: torch.Tensor, group: str):
-            global_tmp = global_data.cuda() if bootstrap_backend == "nccl" else global_data
-            local_tmp = local_data.cuda() if bootstrap_backend == "nccl" else local_data
-
-            group_size = torch.distributed.get_world_size(ub_pgs[group])
-            torch.distributed.all_gather(
-                list(global_tmp.chunk(group_size)), local_tmp, group=ub_pgs[group]
-            )
-
-            if bootstrap_backend == "nccl":
-                global_data.copy_(global_tmp.cpu())
-                global_tmp.data = torch.Tensor()
-                local_tmp.data = torch.Tensor()
-
-        def barrier_callback(group: str):
-            torch.distributed.barrier(group=ub_pgs[group])
-
-        tex.set_ubuf_bootstrap_callbacks(allgather_callback, barrier_callback)
+        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -326,6 +305,7 @@ def initialize_ub(
                 is_reduce_scatter,  # Overlap with reduce scatter
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 use_ce,  # Use copy engine for P2P communications
+                ub_callbacks,
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -343,6 +323,7 @@ def initialize_ub(
                 set_sm_margin,  # Set SM margin
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
                 atomic_gemm,  # Use a single GEMM with atomic-counters
+                ub_callbacks,
             )
         _ub_communicators[name] = ub_obj
 

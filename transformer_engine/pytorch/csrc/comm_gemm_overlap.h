@@ -18,6 +18,7 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #include "common/common.h"
 #include "common/util/cuda_driver.h"
@@ -30,6 +31,7 @@
 #define UB_MAX_SM 32
 
 using namespace torch::indexing;
+using namespace std::placeholders;
 
 namespace ubuf {
 
@@ -53,54 +55,72 @@ bool ubuf_built_with_mpi() {
 #endif
 }
 
-/*
-** Container for Python callbacks to torch.distributed collectives
-*/
-static struct TorchCallbacks {
+class UbufBootstrapCallbacks : torch::CustomClassHolder {
+ private:
   bool initialized{false};
-  std::function<void(at::Tensor &, at::Tensor &, const std::string &)> allgather;
-  std::function<void(const std::string &)> barrier;
-} torch_callbacks = {0};
+  bool backend_is_nccl{false};
+  std::map<std::string, c10d::ProcessGroup *> pgs;
 
-/*
-** Helper function for setting Python callbacks to torch.distributed collectives.
-*/
-void set_ubuf_bootstrap_callbacks(
-    std::function<void(at::Tensor &, at::Tensor &, const std::string &)> allgather,
-    std::function<void(const std::string &)> barrier) {
-  torch_callbacks.allgather = allgather;
-  torch_callbacks.barrier = barrier;
-  torch_callbacks.initialized = true;
-}
+ public:
+  UbufBootstrapCallbacks() {
+#ifndef NVTE_UB_WITH_MPI
+    NVTE_ERROR("Internal TE error: Dummy UbufBootstrapCallbacks init without NVTE_UB_WITH_MPI=1!");
+#endif
+  };  // empty constructor for NVTE_UB_WITH_MPI=1
 
-/*
-** Python callback for globaldata = torch.distributed.all_gather(localdata, tp_group).
-** This *creates* a new tensor, which Userbuffers later frees with a separate callback.
-*/
-void ub_torch_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
-                        char *group) {
-  NVTE_CHECK(torch_callbacks.initialized,
-             "Internal TE error: must set torch.distributed callbacks before initialize_ub()");
-  auto localtensor =
-      torch::from_blob(localdata, {static_cast<int64_t>(localbytes / sizeof(uint8_t))},
-                       at::device(torch::kCPU).dtype(torch::kUInt8));
-  auto globaltensor =
-      torch::from_blob(globaldata, {static_cast<int64_t>(globalbytes / sizeof(uint8_t))},
-                       at::device(torch::kCPU).dtype(torch::kUInt8));
-  torch_callbacks.allgather(globaltensor, localtensor, group);
-  if (globaltensor.data_ptr() != globaldata) {
-    memcpy(globaldata, globaltensor.data_ptr(), globalbytes);
+  UbufBootstrapCallbacks(c10d::ProcessGroup *world_group, c10d::ProcessGroup *intra_node_group) {
+    pgs.insert({"world", world_group});
+    c10d::ProcessGroup::BackendType backend = world_group->getBackendType();
+    backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
+
+    NVTE_CHECK(intra_node_group->getBackendType() == backend,
+              "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
+              "group!", world_group->getBackendName());
+    pgs.insert({"intra", intra_node_group});
+
+    initialized = true;
   }
-}
 
-/*
-** Python callback for torch.distributed.barrier(tp_group).
-*/
-void ub_torch_barrier(char *group) {
-  NVTE_CHECK(torch_callbacks.initialized,
-             "Internal TE error: must set torch.distributed callbacks before initialize_ub()");
-  torch_callbacks.barrier(group);
-}
+  ~UbufBootstrapCallbacks() {
+    for (auto &pg : pgs)
+      pg.second = nullptr;
+    backend_is_nccl = false;
+    initialized = false;
+  }
+
+  void ub_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
+                    char *group) {
+    NVTE_CHECK(initialized, "Internal TE error: tex.UbufBootstrapCallbacks() is not initialized ",
+               "with valid process groups!");
+
+    auto localtensor =
+        torch::from_blob(localdata, {static_cast<int64_t>(localbytes / sizeof(uint8_t))},
+                         at::device(torch::kCPU).dtype(torch::kUInt8));
+    auto localtmp = (backend_is_nccl) ? localtensor.cuda() : localtensor;
+    auto globaltensor =
+        torch::from_blob(globaldata, {static_cast<int64_t>(globalbytes / sizeof(uint8_t))},
+                         at::device(torch::kCPU).dtype(torch::kUInt8));
+    auto globaltmp = (backend_is_nccl) ? globaltensor.cuda() : globaltensor;
+
+    std::vector<std::vector<torch::Tensor>> globalchunks = {globaltmp.chunk(pgs[group]->getSize())};
+    std::vector<torch::Tensor> localchunk = {localtmp};
+    auto work = pgs[group]->allgather(globalchunks, localchunk);
+    work->wait();
+
+    if (backend_is_nccl) {
+      globaltensor.copy_(globaltmp.cpu());
+      globaltmp = torch::Tensor();
+      localtmp = torch::Tensor();
+    }
+  }
+
+  void ub_barrier(char *group) {
+    NVTE_CHECK(initialized, "Internal TE error: tex.UbufBootstrapCallbacks() is not initialized ",
+               "with valid process groups!");
+    auto work = pgs[group]->barrier();
+    work->wait();
+  }
+};
 
 enum class COMM_TYPE { RS = 0, AG = 1 };
 
@@ -141,7 +161,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
   UbufCommOverlap(torch::Tensor sample, int myrank, int numranks, int mylocal, int numlocal,
                   int mynode, int numnodes, int tp_size, int num_comm_sm, int comm_cga_size,
-                  int num_splits, bool set_sm_margin, int num_max_streams, bool atomic_gemm) {
+                  int num_splits, bool set_sm_margin, int num_max_streams, bool atomic_gemm,
+                  UbufBootstrapCallbacks &callbacks) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
@@ -151,7 +172,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
       create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                   &ub_torch_allgather, &ub_torch_barrier, 1, 1, tp_size, 1);
+                                   std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks,
+                                             _1, _2, _3, _4, _5),
+                                   std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1),
+                                   1, 1, tp_size, 1);
 #endif
       comm_created = true;
     }
@@ -654,7 +678,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   UbufP2PCommOverlap(torch::Tensor sample, int myrank, int numranks, int mylocal, int numlocal,
                      int mynode, int numnodes, int tp_size, int num_comm_sm, int comm_cga_size,
                      bool set_sm_margin, bool aggregate2, int num_max_streams,
-                     bool is_reduce_scatter, bool atomic_gemm, bool use_ce) {
+                     bool is_reduce_scatter, bool atomic_gemm, bool use_ce,
+                     UbufBootstrapCallbacks &callbacks) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
@@ -664,7 +689,10 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
       create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                   &ub_torch_allgather, &ub_torch_barrier, 1, 1, tp_size, 1);
+                                   std::bind(&UbufBootstrapCallbacks::ub_allgather, callbacks,
+                                             _1, _2, _3, _4, _5),
+                                   std::bind(&UbufBootstrapCallbacks::ub_barrier, callbacks, _1),
+                                   1, 1, tp_size, 1);
 #endif
       comm_created = true;
     }
