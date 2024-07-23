@@ -72,7 +72,7 @@ def _load_nvrtc():
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
-        if "stub" in lib:
+        if "stub" in lib or "libnvrtc-builtins" in lib:
             continue
         if "libnvrtc" in lib and "=>" in lib:
             sos.append(lib.split(">")[1].strip())
