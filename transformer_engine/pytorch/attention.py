@@ -2603,6 +2603,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     attn_bias=None,
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
+                    window_size=window_size,
                 )
             else:
                 q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
@@ -2720,6 +2721,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     qkv_layout=qkv_layout,
                     attn_mask_type=ctx.attn_mask_type,
                     attn_bias_type=ctx.attn_bias_type,
+                    window_size=ctx.window_size,
                 )
             else:
                 q_, k_, v_, dq_, dk_, dv_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_, dq_, dk_, dv_]]
