@@ -15,39 +15,11 @@
 #include <functional>
 #include <stdexcept>
 
-#ifdef UB_MPI_BOOTSTRAP
+#include "common/util/logging.h"
+
+#ifdef NVTE_UB_WITH_MPI
 #include <mpi.h>
-
-#include <stdexcept>
-
-#define UB_MPI_CHECK(expr)                                                                   \
-  do {                                                                                       \
-    const int mpicode = (expr);                                                              \
-    if (mpicode != MPI_SUCCESS) {                                                            \
-      char mpimsg[MPI_MAX_ERROR_STRING];                                                     \
-      int mpilen;                                                                            \
-      MPI_Error_string(mpicode, mpimsg, &mpilen);                                            \
-      std::vector<char> errmsg(1024);                                                        \
-      snprintf(errmsg.data(), errmsg.size(), "%s:%s in function %s: %s", __FILE__, __LINE__, \
-               __func__, mpimsg);                                                            \
-      throw std::runtime_error(errmsg.data());                                               \
-    }                                                                                        \
-  } while (false)
-
 typedef MPI_Comm ExtComm;
-
-void ub_alloc_copy_allgather(void **globaldata, void *localdata, size_t localbytes, ExtComm comm) {
-  int myrank, nranks;
-  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
-  UB_MPI_CHECK(MPI_Comm_size(comm, &nranks));
-  *globaldata = malloc(nranks * localbytes);
-  UB_MPI_CHECK(MPI_Allgather(localdata, localbytes, MPI_BYTE, *globaldata, nranks * localbytes,
-                             MPI_BYTE, comm));
-}
-
-void ub_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
-
-void ub_free(void *ptr) { free(ptr); }
 #else
 typedef char *ExtComm;
 #endif
@@ -170,14 +142,13 @@ struct communicator {
   volatile int tail;
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
-  std::function<void(void **, void *, size_t, ExtComm)> _alloc_copy_allgather;
+  std::function<void(void *, size_t, void *, size_t, ExtComm)> _allgather;
   std::function<void(ExtComm)> _barrier;
-  std::function<void(void *)> _free;
 
   ExtComm comm_world,
       comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
       comm_intra;  // full intranode (all ndev GPUS)
-#ifdef UB_MPI_BOOTSTRAP
+#ifdef NVTE_UB_WITH_MPI
   MPI_Request mpihndl[NVTE_MAX_SHARP];
 #endif
 
@@ -194,20 +165,19 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 /*  creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes);
+    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
+    int tensornodes);
 
 int create_communicator_grouped(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes);
+    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes);
 
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free);
+int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
+                        int mynode, int numnodes,
+                        std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+                        std::function<void(ExtComm)> ext_barrier);
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes);
