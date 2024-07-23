@@ -138,6 +138,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
 
                     # Dynamically load required_libs.
                     from transformer_engine.common import _load_cudnn, _load_nvrtc
+
                     _load_cudnn()
                     _load_nvrtc()
                 else:
