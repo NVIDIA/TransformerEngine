@@ -53,7 +53,6 @@ if __name__ == "__main__":
     setuptools.setup(
         name="transformer_engine_jax",
         version=te_version(),
-        packages=["csrc", common_headers_dir, "build_tools"],
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
