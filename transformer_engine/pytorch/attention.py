@@ -2619,7 +2619,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                 )
             if qkv_format == "bshd":
                 out[:, i].copy_(out_per_step[i].view_as(out[:, i]))
-            elif: qkv_format == "sbhd":
+            elif qkv_format == "sbhd":
                 out[i].copy_(out_per_step[i].view_as(out[i]))
 
         if use_fused_attention:
