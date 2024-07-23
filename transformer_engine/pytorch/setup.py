@@ -30,7 +30,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import package_files, copy_common_headers
+from build_tools.utils import copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension
 

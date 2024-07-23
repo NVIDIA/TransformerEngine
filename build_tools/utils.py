@@ -254,15 +254,6 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
-def package_files(directory):
-    paths = []
-    for path, _, filenames in os.walk(directory):
-        path = Path(path)
-        for filename in filenames:
-            paths.append(str(path / filename).replace(f"{directory}/", ""))
-    return paths
-
-
 def copy_common_headers(te_src, dst):
     headers = te_src / "common"
     for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
