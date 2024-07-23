@@ -237,9 +237,6 @@ class _GroupedLinear(torch.autograd.Function):
                     saved_inputmats = inputmats_no_fp8
 
                 if cpu_offloading:
-                    if fuse_wgrad_accumulation:
-                        for w in weights:
-                            w.main_grad.weight_offloading = True
                     if fp8:
                         for w in weights_fp8:
                             if w is not None:
@@ -303,7 +300,7 @@ class _GroupedLinear(torch.autograd.Function):
             main_grads = saved_tensors[4 * ctx.num_gemms :]
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in ctx.num_gemms:
-                    w = torch.nn.Parameter(weights[i], False)
+                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
                     w.main_grad = main_grads[i]
                     weights[i] = w
 
