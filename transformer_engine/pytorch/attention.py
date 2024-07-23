@@ -2534,6 +2534,8 @@ class SWAFuncWithCP(torch.autograd.Function):
         if _flash_attn_2_4_plus:
             fa_optional_forward_kwargs["alibi_slopes"] = None
 
+        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
@@ -2654,6 +2656,8 @@ class SWAFuncWithCP(torch.autograd.Function):
         out_per_step = ctx.saved_tensors[7 : 9]
         softmax_lse_per_step = ctx.saved_tensors[9 : 11]
         rng_states = ctx.saved_tensors[11 : 13]
+
+        qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         dout = dout.view_as(q)
         dq = torch.empty_like(q)
