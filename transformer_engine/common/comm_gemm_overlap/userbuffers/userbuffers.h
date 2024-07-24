@@ -19,9 +19,6 @@
 
 #ifdef NVTE_UB_WITH_MPI
 #include <mpi.h>
-typedef MPI_Comm ExtComm;
-#else
-typedef char *ExtComm;
 #endif
 
 #define NVTE_MAX_REGIONS 16
@@ -64,6 +61,14 @@ typedef char *ExtComm;
 #define NVTE_HF_NVREDUCEDONE (userbuffers_op_types + 3)
 #define NVTE_MAX_SHARP 16
 
+namespace userbuffers {
+
+#ifdef NVTE_UB_WITH_MPI
+typedef MPI_Comm ExtComm;
+#else
+typedef char *ExtComm;
+#endif
+
 typedef struct ub_request {
   int optype;
   int blocksize;
@@ -88,6 +93,9 @@ enum req_type {
   userbuffers_op_types
 };
 
+/*
+  Userbuffers communicator struct
+*/
 struct communicator {
   int myrank, nranks;  // global job communicator
   int nvrank, nvsize;  // single node comm_intra
@@ -158,21 +166,18 @@ struct communicator {
 };
 typedef struct communicator communicator;
 
-void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
-void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
-void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
-
-/*  creates communicator, allocates all internal buffers if necessary */
+// Constructors
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
-    int tensornodes);
+    int numnodes, int pipegpus, int pipenodes, int tensorgpus, int tensornodes,
+    std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier);
 
 int create_communicator_grouped(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes);
+    int numnodes, int pipegpus, int pipenodes,
+    std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier);
 
 int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
                         int mynode, int numnodes,
@@ -186,44 +191,55 @@ int create_communicator_grouped_mpi(communicator **comm, int pipegpus, int pipen
 
 int create_communicator_mpi(communicator **comm);
 
+// Destructors
 void destroy_communicator(communicator *comm);
 
 void destroy_communicator_mpi(communicator *comm);
 
-// int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
-/*
-    local calls, doesnt communicate between peers
-    returns handler if buffer is registered already, or -1 if not.
-    returned offset is offset of gpubuff relative to buffer registered
-*/
+// helper function to help walk across allreduce1 x allreduce2 groups
+// data-parallel and tensor-parallel position within data and tensor
+// groups would be preserved
+int pipe_rank(communicator *comm, int step);
 
-int pipe_rank(communicator *comm,
-              int step);  // helper function to help walk across allreduce1 x allreduce2 groups
-                          // data-parallel and tensor-parallel position within data and tensor
-                          // groups would be preserved
-
+// returns handler and registers buffers. assumed to be collective i.e. you use same groups and
+// dont mix buffers for different operations returns -1 if cant register (too many preregistered
+// regions already) if alloc==true will allocate memory and fill the pointers (required for NVL
+// SHARP and NSO/MNNVL)
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
-/*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
-   dont mix buffers for different operations returns -1 if cant register (too many preregistered
-   regions already) if alloc==true will allocate memory and fill the pointers (required for NVL
-   SHARP and NSO/MNNVL)
-*/
 
-// for TP-parallelism, only single node is implemented
+/*
+  Utilities to manage atomic GEMM counters
+*/
+void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
+void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
+void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
+void reset_counters(void *atomic_ptr, int num_chunks, int self_chunk_id, cudaStream_t stream);
+
+/*
+  ALL-GATHER
+
+  each Rank input is
+  allgather2_userbuff_inplace: offset+myrank*elements
+  allgather2_userbuff_inplace_sliced: offset+myrank*elements*nslices+slice_id*elements
+
+  equivalent codes would be:
+  for(int slice=0;slice<ncslices;slice++)
+  allgather2_userbuff_inplace_sliced(hndl,offset, elements,comm,slice,nslices,stream);
+
+  and
+
+  allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
+*/
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream = 0);
+
 /*
-each Rank input is
-allgather2_userbuff_inplace: offset+myrank*elements
-allgather2_userbuff_inplace_sliced: offset+myrank*elements*nslices+slice_id*elements
+  REDUCE-SCATTER
 
-equivalent codes would be:
-for(int slice=0;slice<ncslices;slice++)
- allgather2_userbuff_inplace_sliced(hndl,offset, elements,comm,slice,nslices,stream);
+  everything should be 16byte aligned = 8 elts aligned
+  output is strided: row starts separated by stride elements
 
- and
-
- allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
+  inplace allreduce: offset should be same for all peers
 */
 void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
                                      communicator *comm, cudaStream_t stream = 0);
@@ -267,17 +283,15 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
                                                  const int strideelements, const int numchunks,
                                                  void *counters, communicator *comm,
                                                  cudaStream_t stream = 0);
-/* everything should be 16byte aligned = 8 elts aligned
-output is strided: row starts separated by stride elements*/
 
-/*  inplace allreduce: works only with buffers registered by previous call. offset should be same
- * for all peers */
+/*
+  POINT-TO-POINT SEND/RECV
 
-// two matching pairs, intended to work as push from sender or pull by receiver
-// either way signal is a write by sender meaning
-// push model: data arrived and visible at receiver(barrier enforced)
-// pull model: data ready to be pulled by receiver(no barrier needed)
-
+  two matching pairs, intended to work as push from sender or pull by receiver
+  either way signal is a write by sender meaning
+  push model: data arrived and visible at receiver(barrier enforced)
+  pull model: data ready to be pulled by receiver(no barrier needed)
+*/
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, cudaStream_t stream = 0);
@@ -297,21 +311,14 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                                       const int recv_peer, const int nchunks, void *counters,
                                       bool shuffle, cudaStream_t stream = 0);
 
-// alltoall split send and recv to allow for overlap
-// send kicks in sending data to the destination - invoke on same stream as data generation
-// recv returns once data has received
-// send and recv can be on different streams
-void userbuffers_alltoall_send(const int srchandler, const size_t srcoffset, const int dsthandler,
-                               const size_t dstoffset, const size_t bytes, communicator *comm,
-                               cudaStream_t stream = 0);
-void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
-
-// void unregister_user_buffer(int handler);
-
-void destroy_communicator(communicator *comm);
-
+/*
+  LOCAL REDUCTIONS
+*/
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs, int input_size,
                             cudaStream_t stream);
+void reduce_fp16(void *input, void *output, int num_inputs, int input_size, cudaStream_t steram);
+
+}  // namespace userbuffers
 
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

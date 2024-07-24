@@ -24,6 +24,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
@@ -41,11 +42,12 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
 #include "common/util/logging.h"
 
-namespace transformer_engine {
+namespace transformer_engine_torch {
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
@@ -58,7 +60,7 @@ class FP8TensorMeta {
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
-enum FP8FwdTensors {
+enum class FP8FwdTensors {
   GEMM1_INPUT = 0,
   GEMM1_WEIGHT = 1,
   GEMM1_OUTPUT = 2,
@@ -72,7 +74,7 @@ enum FP8FwdTensors {
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
-enum FP8BwdTensors {
+enum class FP8BwdTensors {
   GRAD_OUTPUT1 = 0,
   GRAD_INPUT1 = 1,
   GRAD_OUTPUT2 = 2,
@@ -81,7 +83,7 @@ enum FP8BwdTensors {
   GRAD_INPUT3 = 5
 };
 
-}  // namespace transformer_engine
+}  // namespace transformer_engine_torch
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);

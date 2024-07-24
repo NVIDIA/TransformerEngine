@@ -98,18 +98,12 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
 
-    if tex.ubuf_built_with_mpi():
+    if tex.userbuffers_built_with_mpi():
         # Userbuffers will ignore all these values when it is built with MPI, so these are just
         # placeholders based on an assumption that tp_size covers all devices in a physical node.
         assert torch.distributed.is_mpi_available()
-        mpi_group = torch.distributed.new_group(backend="mpi")
-        world_rank = torch.distributed.get_rank(mpi_group)
-        world_size = torch.distributed.get_world_size(mpi_group)
-        local_rank = world_rank % tp_size
-        local_size = tp_size
-        node_id = world_rank // tp_size
-        num_nodes = world_size // tp_size
-        ub_callbacks = tex.UbufBootstrapCallbacks()
+        _ = torch.distributed.new_group(backend="mpi")
+        bootstrap_helper = tex.CommOverlapHelper()
     else:
         assert (
             torch.distributed.is_initialized()
@@ -124,15 +118,7 @@ def initialize_ub(
             assert bootstrap_backend in ["gloo", "mpi", "nccl"]
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
-        world_rank = torch.distributed.get_rank(world_group)
         world_size = torch.distributed.get_world_size(world_group)
-
-        if world_rank == 0:
-            print(
-                f'!!! [NVTE] Bootstrapping Userbuffers with backend="{bootstrap_backend}"\n',
-                end="",
-                flush=True,
-            )
 
         # Construct an intra-node communicator based on global ranks that share the same hostname
         # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
@@ -163,27 +149,13 @@ def initialize_ub(
                 intra_node_ranks.append(i)
         if len(intra_node_ranks) == world_size:
             intra_node_group = world_group
-            local_rank = world_rank
-            local_size = world_size
             intra_node_ranks = list(range(world_size))
         else:
             intra_node_group = torch.distributed.new_group(
-                backend=bootstrap_backend, ranks=intra_node_ranks
-            )
-            local_rank = torch.distributed.get_rank(intra_node_group)
-            local_size = torch.distributed.get_world_size(intra_node_group)
-
-        node_id = world_rank // local_size
-        num_nodes = world_size // local_size
-        if local_rank == 0:
-            print(
-                f"!!! [NVTE] Number of physical nodes: {num_nodes}\n"
-                + f"!!! [NVTE] Global ranks on node {node_id}: {intra_node_ranks}\n",
-                end="",
-                flush=True,
+                backend=bootstrap_backend, ranks=intra_node_ranks, use_local_synchronization=True
             )
 
-        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
+        bootstrap_helper = tex.CommOverlapHelper(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -287,42 +259,35 @@ def initialize_ub(
             shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
         )
         if method == "ring_exchange":
-            ub_obj = tex.UbufP2PCommOverlap(
+            comm_type = (
+                tex.CommOverlapType.RS
+                if is_reduce_scatter
+                else tex.CommOverlapType.AG
+            )
+            ub_obj = tex.CommOverlapP2P(
                 sample_buffer,  # Sample userbuffer
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                node_id,  # Node ID
-                num_nodes,  # Number of nodes
+                bootstrap_helper,  # Helper class for bootstrapping with torch.distributed
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                set_sm_margin,  # Set SM margin
-                aggregate,  # Aggregate 2X GEMM chunks
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # Overlap with reduce scatter
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                use_ce,  # Use copy engine for P2P communications
-                ub_callbacks,
+                comm_type,  # Type of collective to overlap with GEMM
+                num_max_streams=tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max concurrent GEMM streams
+                cga_size=cga_size,  # CGA cluster size
+                num_comm_sm=num_sm,  # Number of communication SMs
+                set_sm_margin=set_sm_margin,  # Set SM margin
+                use_ce=use_ce,  # Use copy engine for P2P communications
+                atomic_gemm=atomic_gemm,  # Use a single GEMM with atomic-counters
+                aggregate=aggregate,  # Aggregate 2X GEMM chunks
             )
         else:
-            ub_obj = tex.UbufCommOverlap(
+            ub_obj = tex.CommOverlap(
                 sample_buffer,  # Sample userbuffer
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                node_id,  # Node ID
-                num_nodes,  # Number of nodes
+                bootstrap_helper,  # Helper class for bootstrapping with torch.distributed
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                num_splits,  # Number of communication splits
-                set_sm_margin,  # Set SM margin
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                ub_callbacks,
+                num_splits=num_splits,  # Number of chunks to split the work into
+                num_max_streams=tex.NVTE_COMM_OVERLAP_MAX_STREAMS,  # Max concurrent GEMM streams
+                cga_size=cga_size,  # CGA cluster size
+                num_comm_sm=num_sm,  # Number of communication SMs
+                set_sm_margin=set_sm_margin,  # Set SM margin
+                atomic_gemm=atomic_gemm,  # Use a single GEMM with atomic-counters
             )
         _ub_communicators[name] = ub_obj
 
@@ -737,8 +702,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not ctx.ub_overlap_ag:
                     grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
                 else:
-                    ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
-                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(1)
+                    ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, tex.CommOverlapBuffer.LOCAL)
+                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(
+                        tex.CommOverlapBuffer.GLOBAL
+                    )
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -756,7 +723,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 grad_bias = None
             if ctx.ub_overlap_ag:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
             if not isinstance(grad_output_mat, Float8Tensor):
@@ -776,7 +743,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     grad_output_t = grad_output_c.transpose_2d()
             else:
-                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
                 grad_output_t = None
 
             return grad_output_mat, grad_output_c, grad_output_t, grad_bias

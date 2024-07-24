@@ -26,7 +26,7 @@ extern "C" {
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 
-enum class NVTE_Activation_Type {
+enum NVTE_Activation_Type {
   GELU,
   GEGLU,
   SILU,

@@ -68,21 +68,38 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
-     recipe/delayed_scaling.cu)
+     recipe/delayed_scaling.cu
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cpp
+     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-target_include_directories(transformer_engine PUBLIC
-                           "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(transformer_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 
 # Configure dependencies
-target_link_libraries(transformer_engine PUBLIC
-                      CUDA::cublas
-                      CUDA::cuda_driver
-                      CUDA::cudart)
+set(transformer_engine_LIBS)
+list(APPEND transformer_engine_LIBS
+     CUDA::cublas
+     CUDA::cuda_driver
+     CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+                           ${CUDNN_FRONTEND_INCLUDE_DIR})
+
+# Check for MPI (optional)
+option(NVTE_UB_WITH_MPI "Build Userbuffers with MPI-based bootstrapping." OFF)
+message(STATUS "Userbuffers MPI bootstrap: ${NVTE_UB_WITH_MPI}")
+if (NVTE_UB_WITH_MPI)
+     find_package(MPI REQUIRED COMPONENTS CXX)
+     list(APPEND transformer_engine_LIBS MPI::MPI_CXX)
+     target_compile_definitions(transformer_engine PRIVATE NVTE_UB_WITH_MPI)
+     target_include_directories(transformer_engine PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+endif()
+
+# Link configured dependencies
+target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LIBS})
 
 # Make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
@@ -115,6 +132,20 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
+set(USERBUFFERS_CUDA_SUPPRESS
+    -Xcudafe --diag_suppress=177     # variable declared but never referenced
+    -Xcudafe --diag_suppress=550     # variable set but never used
+    -Xcudafe --diag_suppress=949     # nonstandard default argument on declaration
+    -Xcudafe --diag_suppress=1143)   # arithmetic on pointer to void or function type
+set(USERBUFFERS_CXX_SUPPRESS
+    -Wno-pointer-arith
+    -Wno-return-local-addr)
+set_source_files_properties(userbuffers/userbuffers.cu
+                            PROPERTIES
+                            COMPILE_OPTIONS "${USERBUFFERS_CUDA_SUPPRESS}")
+set_source_files_properties(userbuffers/userbuffers-host.cpp
+                            PROPERTIES
+                            COMPILE_OPTIONS "${USERBUFFERS_CXX_SUPPRESS}")
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -123,6 +154,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
-# Install library
+# Install core library
 install(TARGETS transformer_engine DESTINATION .)
 
