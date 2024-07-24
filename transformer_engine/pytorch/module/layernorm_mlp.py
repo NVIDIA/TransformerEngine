@@ -567,8 +567,8 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                fc1_weight = Parameter(fc1_weight.requires_grad)
-                fc2_weight = Parameter(fc2_weight.requires_grad)
+                fc1_weight = Parameter(fc1_weight, fc1_weight.requires_grad)
+                fc2_weight = Parameter(fc2_weight, fc2_weight.requires_grad)
 
                 fc1_weight.main_grad = fc1_weight_main_grad
                 fc2_weight.main_grad = fc2_weight_main_grad
