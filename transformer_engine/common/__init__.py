@@ -79,7 +79,7 @@ def _load_nvrtc():
     return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
 
 
-if "NVTE_PROJECT_BUILDING" not in os.environ:
+if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     _CUDNN_LIB_CTYPES = _load_cudnn()
     _NVRTC_LIB_CTYPES = _load_nvrtc()
     _TE_LIB_CTYPES = _load_library()

@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 PLATFORM=${1:-manylinux_2_28_x86_64}
-BUILD_COMMON==${2:-true}
+BUILD_COMMON=${2:-true}
 BUILD_JAX=${3:-true}
 BUILD_PYTORCH=${4:-true}
 BUILD_PADDLE=${5:-true}
