@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+set -e
+
 PLATFORM=${1:-manylinux_2_28_x86_64}
 BUILD_COMMON=${2:-true}
 BUILD_JAX=${3:-true}
