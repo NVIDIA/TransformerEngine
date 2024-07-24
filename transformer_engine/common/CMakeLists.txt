@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
@@ -18,7 +18,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+find_package(CUDAToolkit REQUIRED)
 
 # Check for cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -79,8 +79,7 @@ target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAM
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvToolsExt)
+                      CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
