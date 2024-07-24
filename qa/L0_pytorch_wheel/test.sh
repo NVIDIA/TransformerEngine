@@ -17,3 +17,5 @@ export NVTE_RELEASE_BUILD=0
 pip install dist/*
 cd $TE_PATH
 pip install dist/*
+
+python $TE_PATH/tests/pytorch/test_sanity_import.py
