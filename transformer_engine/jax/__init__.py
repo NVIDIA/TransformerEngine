@@ -5,7 +5,6 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import os
 import ctypes
 
 from transformer_engine.common import get_te_path

@@ -6,7 +6,6 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import os
 import importlib
 import sys
 import torch
