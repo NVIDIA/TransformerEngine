@@ -140,7 +140,11 @@ def _get_attention_backends(
     )
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
-    if config.attn_bias_type == "post_scale_bias" and config.head_dim_qk <= 128 and config.head_dim_k <= 128:
+    if (
+        config.attn_bias_type == "post_scale_bias"
+        and config.head_dim_qk <= 128
+        and config.head_dim_k <= 128
+    ):
         core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
@@ -347,15 +351,29 @@ def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
+
 model_configs_mla = {
     #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
-    "mla_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias", head_dim_v=128),  # self , 0
-    "mla_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128),  # cross, 0
-    "mla_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64),  # self , 1
-    "mla_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64),  # cross, 1
-    "mla_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64),  # inference
-    "mla_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128),  # inference
+    "mla_1_0": ModelConfig(
+        8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # self , 0
+    "mla_1_1": ModelConfig(
+        4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # cross, 0
+    "mla_2_0": ModelConfig(
+        2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64
+    ),  # self , 1
+    "mla_2_1": ModelConfig(
+        1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64
+    ),  # cross, 1
+    "mla_3_0": ModelConfig(
+        8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64
+    ),  # inference
+    "mla_3_1": ModelConfig(
+        8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # inference
 }
+
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -364,6 +382,7 @@ model_configs_mla = {
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
@@ -776,7 +795,7 @@ def _run_dot_product_attention(
             layout = layout.replace("s", "skv")
             layout = layout.replace("h", "hg")
             layout = layout.replace("t", "tg")
-        if i == len(qkv_layout.split("_"))-1:
+        if i == len(qkv_layout.split("_")) - 1:
             layout = layout.replace("d", "dv")
         else:
             layout = layout.replace("d", "dqk")

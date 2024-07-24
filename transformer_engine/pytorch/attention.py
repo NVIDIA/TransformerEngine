@@ -371,7 +371,7 @@ def get_attention_backend(
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention = False
-    qkv_layout_group = qkv_layout.replace('b','').replace('s','').replace('t','')
+    qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
     if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
         logger.debug(
             "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
@@ -2974,7 +2974,9 @@ def get_qkv_layout(
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
         stride = k.stride()
-        check_strides_kv = np.all(np.array(stride[:-1])/k.shape[-1] == np.array(v.stride()[:-1])/v.shape[-1])
+        check_strides_kv = np.all(
+            np.array(stride[:-1]) / k.shape[-1] == np.array(v.stride()[:-1]) / v.shape[-1]
+        )
 
         shape = q.shape
         check_shapes_qkv = all(shape == x.shape for x in [q, k, v])

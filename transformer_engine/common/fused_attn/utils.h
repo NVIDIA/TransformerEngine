@@ -111,8 +111,8 @@ struct FADescriptor_v1 {
     return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, bias_b, bias_h, attnScale, isTraining,
                     dropoutProbability, layout, mask_type, window_size_left, window_size_right,
                     deterministic, bias_type, fwd_tensor_type, bwd_tensor_type) <
-           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.bias_b, rhs.bias_h,
-                    rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.layout,
+           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.bias_b,
+                    rhs.bias_h, rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.layout,
                     rhs.mask_type, rhs.window_size_left, rhs.window_size_right, rhs.deterministic,
                     rhs.bias_type, rhs.fwd_tensor_type, rhs.bwd_tensor_type);
   }
@@ -127,7 +127,8 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu
                                              int32_t *kv_seqlens);
 
 __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
-                                             size_t hg, size_t d_qk, size_t d_v, int32_t *cu_seqlens_q_padded,
+                                             size_t hg, size_t d_qk, size_t d_v,
+                                             int32_t *cu_seqlens_q_padded,
                                              int32_t *cu_seqlens_kv_padded, int32_t *offsets_q,
                                              int32_t *offsets_k, int32_t *offsets_v,
                                              int32_t *offsets_o);
