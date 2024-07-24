@@ -48,10 +48,16 @@ def _load_cudnn():
         assert (
             len(lib_path) == 1
         ), f"Found {len(lib_path)} libcudnn.{_get_sys_extension()}.x in nvidia-cudnn-cuXX."
-        lib = ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
-    else:  # Fallback
-        lib = ctypes.CDLL(f"libcudnn.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
-    return lib
+        return ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
+
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home:
+        libs = glob.glob(f"{cuda_home}/*/libcudnn*")
+        libs.sort(reverse=True, key=os.path.basename)
+        if libs:
+            return ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
+
+    return ctypes.CDLL(f"libcudnn.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
 
 def _load_library():
@@ -67,6 +73,13 @@ def _load_library():
 
 def _load_nvrtc():
     """Load NVRTC shared library."""
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home:
+        libs = glob.glob(f"{cuda_home}/*/libnvrtc*")
+        libs = list(filter(lambda x: not("stub" in x or "libnvrtc-builtins" in x), libs))
+        libs.sort(reverse=True, key=os.path.basename)
+        if libs:
+            return ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
 
     libs = subprocess.check_output("ldconfig -p | grep 'libnvrtc'", shell=True)
     libs = libs.decode("utf-8").split("\n")
@@ -76,7 +89,9 @@ def _load_nvrtc():
             continue
         if "libnvrtc" in lib and "=>" in lib:
             sos.append(lib.split(">")[1].strip())
-    return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+    if sos:
+        return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+    return ctypes.CDLL(f"libnvrtc.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
