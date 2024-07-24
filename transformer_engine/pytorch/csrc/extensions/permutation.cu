@@ -10,12 +10,11 @@
 
 using torch::Tensor;
 
-std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(Tensor input, Tensor indices,
-                                                                int64_t num_out_tokens,
-                                                                std::vector<Tensor> workspace,
-                                                                int64_t max_expanded_token_num) {
+std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(
+    Tensor input, const transformer_engine::DType dtype, Tensor indices, int64_t num_out_tokens,
+    std::vector<Tensor> workspace, int64_t max_expanded_token_num) {
   const int num_tokens = input.size(0);
-  const int num_cols = input.size(1);
+  int num_cols = input.size(1);
   const int num_topK = indices.size(1);
 
   // initialize the workspace on the first run
@@ -55,7 +54,12 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(Tensor input, Te
                                   num_tokens * num_topK);
 
   // activations type
-  const at::ScalarType _st = input.scalar_type();
+  at::ScalarType _st;
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    _st = at::ScalarType::Float;
+  else
+    _st = input.scalar_type();
 
   // Output buffer alloc
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * num_topK;
@@ -71,36 +75,40 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(Tensor input, Te
   void *input_ptr = getDataPtr(input, 0);
   void *permuted_output_ptr = getDataPtr(permuted_output, 0);
 
-  switch (_st) {
-    case at::ScalarType::Float: {
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    num_cols *= 4;
+
+  switch (dtype) {
+    case transformer_engine::DType::kFloat32: {
       nvte_permutation<float, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
                                     row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
                                     num_out_tokens, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::Half: {
+    case transformer_engine::DType::kFloat16: {
       nvte_permutation<half, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
                                    row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
                                    num_out_tokens, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::BFloat16: {
+    case transformer_engine::DType::kBFloat16: {
       nvte_permutation<__nv_bfloat16, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
                                             row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
                                             num_out_tokens, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e5m2: {
+    case transformer_engine::DType::kFloat8E5M2: {
       nvte_permutation<__nv_fp8_e5m2, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
                                             row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
                                             num_out_tokens, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e4m3fn: {
+    case transformer_engine::DType::kFloat8E4M3: {
       nvte_permutation<__nv_fp8_e4m3, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
                                             row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
                                             num_out_tokens, nullptr, nullptr, stream);
@@ -114,17 +122,22 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(Tensor input, Te
   return std::make_tuple(permuted_output, row_id_map, workspace);
 }
 
-Tensor moe_permute_bwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t num_tokens,
-                       int64_t num_topK) {
-  return moe_unpermute_fwd(input, row_id_map, prob, num_tokens, num_topK);
+Tensor moe_permute_bwd(Tensor input, const transformer_engine::DType dtype, Tensor row_id_map,
+                       Tensor prob, int64_t num_tokens, int64_t num_topK) {
+  return moe_unpermute_fwd(input, dtype, row_id_map, prob, num_tokens, num_topK);
 }
 
-Tensor moe_unpermute_fwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t num_tokens,
-                         int64_t num_topK) {
-  const int num_cols = input.size(1);
+Tensor moe_unpermute_fwd(Tensor input, const transformer_engine::DType dtype, Tensor row_id_map,
+                         Tensor prob, int64_t num_tokens, int64_t num_topK) {
+  int num_cols = input.size(1);
 
   // activations type
-  const at::ScalarType _st = input.scalar_type();
+  at::ScalarType _st;
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    _st = at::ScalarType::Float;
+  else
+    _st = input.scalar_type();
 
   // Output buffer alloc
   Tensor unpermuted_output = torch::empty(
@@ -137,36 +150,40 @@ Tensor moe_unpermute_fwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t n
   void *input_ptr = getDataPtr(input, 0);
   void *unpermuted_output_ptr = getDataPtr(unpermuted_output, 0);
 
-  switch (_st) {
-    case at::ScalarType::Float: {
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    num_cols *= 4;
+
+  switch (dtype) {
+    case transformer_engine::DType::kFloat32: {
       nvte_permutation<float, false>(input_ptr, unpermuted_output_ptr, nullptr, row_id_map_ptr,
                                      prob_ptr, num_tokens, num_topK, num_cols, 0, nullptr, nullptr,
                                      stream);
 
       break;
     }
-    case at::ScalarType::Half: {
+    case transformer_engine::DType::kFloat16: {
       nvte_permutation<half, false>(input_ptr, unpermuted_output_ptr, nullptr, row_id_map_ptr,
                                     prob_ptr, num_tokens, num_topK, num_cols, 0, nullptr, nullptr,
                                     stream);
 
       break;
     }
-    case at::ScalarType::BFloat16: {
+    case transformer_engine::DType::kBFloat16: {
       nvte_permutation<__nv_bfloat16, false>(input_ptr, unpermuted_output_ptr, nullptr,
                                              row_id_map_ptr, prob_ptr, num_tokens, num_topK,
                                              num_cols, 0, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e5m2: {
+    case transformer_engine::DType::kFloat8E5M2: {
       nvte_permutation<__nv_fp8_e5m2, false>(input_ptr, unpermuted_output_ptr, nullptr,
                                              row_id_map_ptr, prob_ptr, num_tokens, num_topK,
                                              num_cols, 0, nullptr, nullptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e4m3fn: {
+    case transformer_engine::DType::kFloat8E4M3: {
       nvte_permutation<__nv_fp8_e4m3, false>(input_ptr, unpermuted_output_ptr, nullptr,
                                              row_id_map_ptr, prob_ptr, num_tokens, num_topK,
                                              num_cols, 0, nullptr, nullptr, stream);
@@ -180,17 +197,23 @@ Tensor moe_unpermute_fwd(Tensor input, Tensor row_id_map, Tensor prob, int64_t n
   return unpermuted_output;
 }
 
-std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd, Tensor row_id_map,
-                                             Tensor prob) {
+std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd,
+                                             const transformer_engine::DType dtype,
+                                             Tensor row_id_map, Tensor prob) {
   const int num_topK = (prob.numel() > 0) ? prob.size(1) : 1;
   const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
-  const int num_cols = input_bwd.size(1);
+  int num_cols = input_bwd.size(1);
 
   int *row_id_map_ptr = reinterpret_cast<int *>(getDataPtr(row_id_map, 0));
   float *prob_ptr = (prob.numel() > 0) ? reinterpret_cast<float *>(getDataPtr(prob, 0)) : nullptr;
 
   // activations type
-  const at::ScalarType _st = input_bwd.scalar_type();
+  at::ScalarType _st;
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    _st = at::ScalarType::Float;
+  else
+    _st = input_bwd.scalar_type();
 
   // Output buffer alloc
   Tensor act_grad = torch::empty({input_fwd.size(0), num_cols},
@@ -206,36 +229,40 @@ std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd,
   void *input_fwd_ptr = getDataPtr(input_fwd, 0);
   void *act_grad_ptr = getDataPtr(act_grad, 0);
 
-  switch (_st) {
-    case at::ScalarType::Float: {
+  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
+      dtype == transformer_engine::DType::kFloat8E5M2)
+    num_cols *= 4;
+
+  switch (dtype) {
+    case transformer_engine::DType::kFloat32: {
       nvte_permutation<float, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr, prob_ptr,
                                     num_tokens, num_topK, num_cols, 0, prob_grad_ptr, input_fwd_ptr,
                                     stream);
 
       break;
     }
-    case at::ScalarType::Half: {
+    case transformer_engine::DType::kFloat16: {
       nvte_permutation<half, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr, prob_ptr,
                                    num_tokens, num_topK, num_cols, 0, prob_grad_ptr, input_fwd_ptr,
                                    stream);
 
       break;
     }
-    case at::ScalarType::BFloat16: {
+    case transformer_engine::DType::kBFloat16: {
       nvte_permutation<__nv_bfloat16, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
                                             prob_ptr, num_tokens, num_topK, num_cols, 0,
                                             prob_grad_ptr, input_fwd_ptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e5m2: {
+    case transformer_engine::DType::kFloat8E5M2: {
       nvte_permutation<__nv_fp8_e5m2, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
                                             prob_ptr, num_tokens, num_topK, num_cols, 0,
                                             prob_grad_ptr, input_fwd_ptr, stream);
 
       break;
     }
-    case at::ScalarType::Float8_e4m3fn: {
+    case transformer_engine::DType::kFloat8E4M3: {
       nvte_permutation<__nv_fp8_e4m3, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
                                             prob_ptr, num_tokens, num_topK, num_cols, 0,
                                             prob_grad_ptr, input_fwd_ptr, stream);

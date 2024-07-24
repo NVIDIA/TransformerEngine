@@ -4,11 +4,12 @@
 
 import torch
 import pytest
-from typing import Dict
+from typing import Dict, List
 
-from transformer_engine.pytorch import Permute as te_permute, Unpermute as te_unpermute
+from transformer_engine.pytorch import permute as te_permute, unpermute as te_unpermute
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -16,6 +17,13 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
+
+# TE tensor dtypes
+_te_dtypes: List[tex.DType] = [tex.DType.kFloat32, tex.DType.kFloat16]
+if is_bf16_compatible():
+    _te_dtypes.append(tex.DType.kBFloat16)
+if fp8_available:
+    _te_dtypes.extend([tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
 
 
 def pytorch_permute(tokens, indices, num_out_tokens: int = None):
@@ -95,31 +103,60 @@ def pytorch_unpermute(
     return unpermuted_tokens
 
 
-def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
+def dtype_tols(te_dtype: tex.DType) -> Dict[str, float]:
     """Estimated tolerances for a datatype
 
     Based on tolerances for torch.testing.assert_close.
 
     """
-    if dtype == torch.float32:
+    if te_dtype == tex.DType.kFloat32:
         return dict(rtol=1.0e-6, atol=1.0e-6)
-    if dtype == torch.float16:
+    if te_dtype == tex.DType.kFloat16:
         return dict(rtol=3.0e-3, atol=1.0e-5)
-    if dtype == torch.bfloat16:
+    if te_dtype == tex.DType.kBFloat16:
         return dict(rtol=2.0e-2, atol=1.0e-5)
-    if dtype == torch.float8_e5m2 or dtype == torch.float8_e4m3fn:
+    if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
         return dict(rtol=2.0e-1, atol=1.0e-1)
-    raise ValueError(f"Unsuppored dtype ({dtype})")
+    raise ValueError(f"Unsuppored dtype ({te_dtype})")
 
 
-param_dtypes = [torch.float32, torch.float16]
-if is_bf16_compatible():
-    param_dtypes.append(torch.bfloat16)
-if fp8_available:
-    param_dtypes.extend([torch.float8_e5m2, torch.float8_e4m3fn])
+def fp8_to_fp16(uint8_tensor, e4m3: bool = True):
+    assert uint8_tensor.dtype == torch.uint8, "Input tensor must be uint8"
+
+    float16_tensor = torch.zeros_like(uint8_tensor, dtype=torch.float16)
+
+    sign = (uint8_tensor >> 7) & 1
+    exponent_mask = 0xF if e4m3 else 0x1F
+    if e4m3:
+        exponent = (uint8_tensor >> 3) & exponent_mask
+        mantissa = uint8_tensor & 0x7
+    else:
+        exponent = (uint8_tensor >> 2) & exponent_mask
+        mantissa = uint8_tensor & 0x3
+
+    exponent_bias = 7 if e4m3 else 15
+    mantissa_max = 8.0 if e4m3 else 4.0
+
+    normal_mask = (exponent != 0) & ~(exponent == exponent_mask)
+    actual_exponent = exponent[normal_mask].to(torch.float16) - exponent_bias
+    actual_mantissa = (mantissa[normal_mask].to(torch.float16) + mantissa_max) / mantissa_max
+    float16_tensor[normal_mask] = (
+        ((-1) ** sign[normal_mask].to(torch.float16)) * (2**actual_exponent) * actual_mantissa
+    )
+
+    subnormal_mask = (exponent == 0) & (mantissa != 0)
+    subnormal_exponent = 1 - exponent_bias
+    subnormal_mantissa = mantissa[subnormal_mask].to(torch.float16) / mantissa_max
+    float16_tensor[subnormal_mask] = (
+        ((-1) ** sign[subnormal_mask].to(torch.float16))
+        * (2**subnormal_exponent)
+        * subnormal_mantissa
+    )
+
+    return float16_tensor
 
 
-@pytest.mark.parametrize("dtype", param_dtypes)
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [8, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
@@ -127,7 +164,7 @@ if fp8_available:
 @pytest.mark.parametrize("num_out_tokens", [None, 4050])
 @pytest.mark.parametrize("with_probs", [True, False])
 def test_permutation(
-    dtype,
+    te_dtype,
     num_tokens,
     num_expert,
     hidden_size,
@@ -137,22 +174,58 @@ def test_permutation(
     BENCHMARK=False,
 ):
     if not with_probs and topK > 1:
-        print("Only permutations with topK=1 and without probabilities are supported.")
-        return
+        pytest.skip("Only permutations with topK=1 and without probabilities are supported.")
 
     if topK > num_expert:
-        print("topK should be smaller than the number of experts.")
-        return
+        pytest.skip("topK should be smaller than the number of experts.")
 
     if num_out_tokens == None:
         num_out_tokens = num_tokens * topK
 
-    print(f"token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {dtype}")
+    print(
+        f"token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {te_dtype}"
+    )
 
-    permute_input = torch.rand((num_tokens, hidden_size), dtype=torch.float32).cuda().to(dtype)
-    if fp8_available and dtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
-        permute_input = permute_input.half()
-    permute_input.requires_grad_(True)
+    fp8 = False
+    # Convert TE dtypes to PyTorch dtypes
+    if te_dtype == tex.DType.kFloat32:
+        dtype = torch.float32
+    elif te_dtype == tex.DType.kFloat16:
+        dtype = torch.float16
+    elif te_dtype == tex.DType.kBFloat16:
+        dtype = torch.bfloat16
+    elif fp8_available and (te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3):
+        dtype = torch.uint8
+        fp8 = True
+    else:
+        pytest.skip("Invalid dtype.")
+
+    if fp8:
+        N = 56 if te_dtype == tex.DType.kFloat8E4M3 else 60
+        permute_fwd_input = torch.randint(
+            low=0, high=N + 1, size=(num_tokens, hidden_size), dtype=torch.uint8
+        ).cuda()
+        permute_bwd_input = torch.randint(
+            low=0, high=N + 1, size=(num_out_tokens, hidden_size), dtype=torch.uint8
+        ).cuda()
+        unpermute_bwd_input = torch.randint(
+            low=0, high=N + 1, size=(num_tokens, hidden_size), dtype=torch.uint8
+        ).cuda()
+        pytorch_permute_fwd_input = fp8_to_fp16(
+            permute_fwd_input, te_dtype == tex.DType.kFloat8E4M3
+        )
+        pytorch_permute_bwd_input = fp8_to_fp16(
+            permute_bwd_input, te_dtype == tex.DType.kFloat8E4M3
+        )
+        pytorch_unpermute_bwd_input = fp8_to_fp16(
+            unpermute_bwd_input, te_dtype == tex.DType.kFloat8E4M3
+        )
+    else:
+        pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
+        pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
+        pytorch_unpermute_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
+
+    pytorch_permute_fwd_input.requires_grad_(True)
 
     if num_tokens > 0:
         indices = torch.stack([torch.randperm(num_expert)[:topK] for _ in range(num_tokens)])
@@ -169,63 +242,99 @@ def test_permutation(
 
     ###################################################################################################################################
     #
-    # PyTorch
+    # PyTorch Permutation
     #
     ###################################################################################################################################
-    permute_output, sorted_indices = pytorch_permute(permute_input, indices, num_out_tokens)
-    permute_bwd_input = torch.rand_like(permute_output)
-    permute_output.backward(permute_bwd_input, retain_graph=True)
+    pytorch_permute_output, sorted_indices = pytorch_permute(
+        pytorch_permute_fwd_input, indices, num_out_tokens
+    )
+    pytorch_permute_output.backward(pytorch_permute_bwd_input, retain_graph=True)
 
-    unpermute_input = permute_output.detach()
-    unpermute_input.requires_grad_(True)
+    pytorch_unpermute_fwd_input = pytorch_permute_output.detach()
+    pytorch_unpermute_fwd_input.requires_grad_(True)
 
-    unpermute_output = pytorch_unpermute(unpermute_input, sorted_indices, probs=probs)
-    unpermute_bwd_input = torch.rand_like(unpermute_output)
-    unpermute_output.backward(unpermute_bwd_input, retain_graph=True)
+    pytorch_unpermute_output = pytorch_unpermute(
+        pytorch_unpermute_fwd_input, sorted_indices, probs=probs
+    )
+    pytorch_unpermute_output.backward(pytorch_unpermute_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
     #
-    # TE
+    # TE Permutation
     #
     ###################################################################################################################################
-    te_permute_input = permute_input.detach().to(dtype)
-    te_permute_bwd_input = permute_bwd_input.detach().to(dtype)
-    te_unpermute_bwd_input = unpermute_bwd_input.detach().to(dtype)
-    te_permute_input.requires_grad_(True)
+    te_permute_fwd_input = (
+        permute_fwd_input.view(torch.float32) if fp8 else pytorch_permute_fwd_input.detach()
+    )
+    te_permute_fwd_input.requires_grad_(True)
+    te_permute_bwd_input = (
+        permute_bwd_input.view(torch.float32) if fp8 else pytorch_permute_bwd_input.detach()
+    )
 
-    te_permute_output, row_id_map = te_permute(te_permute_input, indices, num_out_tokens)
+    te_permute_output, row_id_map = te_permute(
+        te_permute_fwd_input, te_dtype, indices, num_out_tokens
+    )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
     te_probs = None
     if with_probs:
         te_probs = probs.detach()
         te_probs.requires_grad_(True)
-    te_unpermute_input = te_permute_output.detach()
-    te_unpermute_input.requires_grad_(True)
+    te_unpermute_fwd_input = te_permute_output.detach()
+    te_unpermute_fwd_input.requires_grad_(True)
+    te_unpermute_bwd_input = (
+        unpermute_bwd_input.view(torch.float32) if fp8 else pytorch_unpermute_bwd_input.detach()
+    )
 
-    te_unpermute_output = te_unpermute(te_unpermute_input, row_id_map, te_probs)
+    te_unpermute_output = te_unpermute(te_unpermute_fwd_input, te_dtype, row_id_map, te_probs)
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
-    tols = dtype_tols(dtype)
+    ###################################################################################################################################
+    #
+    # Results Check
+    #
+    ###################################################################################################################################
+    tols = dtype_tols(te_dtype)
+
+    if fp8:
+        te_permute_output_ = fp8_to_fp16(
+            te_permute_output.view(torch.uint8), te_dtype == tex.DType.kFloat8E4M3
+        )
+        te_permute_fwd_input_grad = fp8_to_fp16(
+            te_permute_fwd_input.grad.view(torch.uint8), te_dtype == tex.DType.kFloat8E4M3
+        )
+        te_unpermute_output_ = fp8_to_fp16(
+            te_unpermute_output.view(torch.uint8), te_dtype == tex.DType.kFloat8E4M3
+        )
+        te_unpermute_fwd_input_grad = fp8_to_fp16(
+            te_unpermute_fwd_input.grad.view(torch.uint8), te_dtype == tex.DType.kFloat8E4M3
+        )
+    else:
+        te_permute_output_ = te_permute_output
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad
+        te_unpermute_output_ = te_unpermute_output
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad
 
     torch.testing.assert_close(
-        permute_output.float(), te_permute_output.float(), msg=f"Mismatch in te_permute fwd"
+        pytorch_permute_output.float(),
+        te_permute_output_.float(),
+        msg=f"Mismatch in te_permute fwd",
     )
     torch.testing.assert_close(
-        permute_input.grad.float(),
-        te_permute_input.grad.float(),
+        pytorch_permute_fwd_input.grad.float(),
+        te_permute_fwd_input_grad.float(),
         msg=f"Mismatch in te_permute bwd",
         **tols,
     )
     torch.testing.assert_close(
-        unpermute_output.float(),
-        te_unpermute_output.float(),
+        pytorch_unpermute_output.float(),
+        te_unpermute_output_.float(),
         msg=f"Mismatch in te_unpermute fwd",
         **tols,
     )
     torch.testing.assert_close(
-        unpermute_input.grad.float(),
-        te_unpermute_input.grad.float(),
+        pytorch_unpermute_fwd_input.grad.float(),
+        te_unpermute_fwd_input_grad.float(),
         msg=f"Mismatch in te_unpermute bwd",
         **tols,
     )
@@ -234,8 +343,8 @@ def test_permutation(
             probs.grad.float(), te_probs.grad.float(), msg=f"Mismatch in te_unpermute bwd", **tols
         )
 
-    if not permute_input.numel():
-        print("Empty permute_input activation test passed.")
+    if not pytorch_permute_fwd_input.numel():
+        print("Empty pytorch_permute_fwd_input activation test passed.")
         return
 
     ###################################################################################################################################
@@ -253,15 +362,19 @@ def test_permutation(
         return act.backward(backward_input, retain_graph=retain_graph)
 
     if BENCHMARK:
-        t1 = perf_test_cuda_kernel(lambda: pytorch_permute(permute_input, indices, num_out_tokens))
-        t2 = perf_test_cuda_kernel(lambda: te_permute(te_permute_input, indices, num_out_tokens))
+        t1 = perf_test_cuda_kernel(
+            lambda: pytorch_permute(pytorch_permute_fwd_input, indices, num_out_tokens)
+        )
+        t2 = perf_test_cuda_kernel(
+            lambda: te_permute(te_permute_fwd_input, te_dtype, indices, num_out_tokens)
+        )
         print(f"permute\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
         t1 = perf_test_cuda_kernel(
             lambda: backward_wrapper(
-                permute_output,
-                permute_bwd_input,
-                forward_input=[permute_input],
+                pytorch_permute_output,
+                pytorch_permute_bwd_input,
+                forward_input=[pytorch_permute_fwd_input],
                 retain_graph=True,
                 accumulate_grad=False,
             )
@@ -270,7 +383,7 @@ def test_permutation(
             lambda: backward_wrapper(
                 te_permute_output,
                 te_permute_bwd_input,
-                forward_input=[te_permute_input],
+                forward_input=[te_permute_fwd_input],
                 retain_graph=True,
                 accumulate_grad=False,
             )
@@ -278,16 +391,22 @@ def test_permutation(
         print(f"permute\t\tbwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
         t1 = perf_test_cuda_kernel(
-            lambda: pytorch_unpermute(unpermute_input, sorted_indices, probs=probs)
+            lambda: pytorch_unpermute(pytorch_unpermute_fwd_input, sorted_indices, probs=probs)
         )
-        t2 = perf_test_cuda_kernel(lambda: te_unpermute(te_unpermute_input, row_id_map, te_probs))
+        t2 = perf_test_cuda_kernel(
+            lambda: te_unpermute(te_unpermute_fwd_input, te_dtype, row_id_map, te_probs)
+        )
         print(f"unpermute\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
         t1 = perf_test_cuda_kernel(
             lambda: backward_wrapper(
-                unpermute_output,
-                unpermute_bwd_input,
-                forward_input=[unpermute_input, probs] if with_probs else [unpermute_input],
+                pytorch_unpermute_output,
+                pytorch_unpermute_bwd_input,
+                forward_input=(
+                    [pytorch_unpermute_fwd_input, probs]
+                    if with_probs
+                    else [pytorch_unpermute_fwd_input]
+                ),
                 retain_graph=True,
                 accumulate_grad=False,
             )
@@ -297,7 +416,7 @@ def test_permutation(
                 te_unpermute_output,
                 te_unpermute_bwd_input,
                 forward_input=(
-                    [te_unpermute_input, te_probs] if with_probs else [te_unpermute_input]
+                    [te_unpermute_fwd_input, te_probs] if with_probs else [te_unpermute_fwd_input]
                 ),
                 retain_graph=True,
                 accumulate_grad=False,
@@ -325,4 +444,37 @@ def perf_test_cuda_kernel(cuda_kernel_fn):
         elapsed_time_ms = start_event.elapsed_time(end_event)
         return elapsed_time_ms / 100
     else:
-        print("CUDA is not available.")
+        pytest.skip("CUDA is not available.")
+
+
+def test_permute_single_case():
+    print("GPU:", torch.cuda.get_device_name(0))
+
+    # te_dtype = tex.DType.kFloat32
+    # te_dtype = tex.DType.kFloat16
+    # te_dtype = tex.DType.kBFloat16
+    te_dtype = tex.DType.kFloat8E5M2
+    # te_dtype = tex.DType.kFloat8E4M3
+
+    num_tokens = 10
+    num_expert = 4
+    hidden_size = 16
+    topK = 2
+    num_out_tokens = num_tokens * topK - 1
+    with_probs = True
+    Benchmark = True
+
+    test_permutation(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=Benchmark,
+    )
+
+
+if __name__ == "__main__":
+    test_permute_single_case()

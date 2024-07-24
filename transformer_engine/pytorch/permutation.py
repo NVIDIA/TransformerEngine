@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 
-class _Permute(torch.autograd.Function):
+class _permute(torch.autograd.Function):
     """functional Permute"""
 
     workspace = None
@@ -27,6 +27,7 @@ class _Permute(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
+        dtype: tex.DType,
         indices: torch.Tensor,
         num_out_tokens: int,
         max_token_num: int,
@@ -52,16 +53,16 @@ class _Permute(torch.autograd.Function):
         topK = indices.size(1)
 
         input_max_expanded_token_num = max(max_token_num, inp.size(0)) * topK
-        if _Permute.max_expanded_token_num < input_max_expanded_token_num:
-            _Permute.max_expanded_token_num = input_max_expanded_token_num
-            _Permute.workspace = []
+        if _permute.max_expanded_token_num < input_max_expanded_token_num:
+            _permute.max_expanded_token_num = input_max_expanded_token_num
+            _permute.workspace = []
 
-        if _Permute.dtype != inp.dtype:
-            _Permute.dtype = inp.dtype
-            _Permute.workspace = []
+        if _permute.dtype != dtype:
+            _permute.dtype = dtype
+            _permute.workspace = []
 
-        permuted_act, row_id_map, _Permute.workspace = tex.moe_permute_fwd(
-            inp, indices, num_out_tokens, _Permute.workspace, _Permute.max_expanded_token_num
+        permuted_act, row_id_map, _permute.workspace = tex.moe_permute_fwd(
+            inp, dtype, indices, num_out_tokens, _permute.workspace, _permute.max_expanded_token_num
         )
 
         ctx.row_id_map = row_id_map
@@ -86,19 +87,23 @@ class _Permute(torch.autograd.Function):
         num_tokens = ctx.num_tokens
         topK = ctx.topK
 
-        unpermuted_act_grad = tex.moe_permute_bwd(
-            permuted_act_grad, row_id_map, torch.empty(0), num_tokens, topK
-        )
-        return unpermuted_act_grad, None, None, None
+        act_grad = None
+        if ctx.needs_input_grad[0]:
+            act_grad = tex.moe_permute_bwd(
+                permuted_act_grad, _permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
+            )
+
+        return act_grad, None, None, None, None
 
 
-class _Unpermute(torch.autograd.Function):
+class _unpermute(torch.autograd.Function):
     """functional Unpermute"""
 
     @staticmethod
     def forward(
         ctx,
         inp: torch.Tensor,
+        dtype: tex.DType,
         row_id_map: torch.Tensor,
         probs: torch.Tensor,
     ) -> torch.Tensor:
@@ -137,8 +142,9 @@ class _Unpermute(torch.autograd.Function):
             )
             row_id_map = row_id_map.to(torch.int32)
 
-        unpermuted_output = tex.moe_unpermute_fwd(inp, row_id_map, probs, num_tokens, topK)
+        unpermuted_output = tex.moe_unpermute_fwd(inp, dtype, row_id_map, probs, num_tokens, topK)
 
+        ctx.dtype = dtype
         ctx.save_for_backward(inp, row_id_map, probs)
         return unpermuted_output
 
@@ -158,15 +164,18 @@ class _Unpermute(torch.autograd.Function):
 
         act_grad = None
         if ctx.needs_input_grad[0]:
-            act_grad, prob_grad = tex.moe_unpermute_bwd(unpermuted_act_grad, inp, row_id_map, probs)
-
-        if not ctx.needs_input_grad[2]:
+            act_grad, prob_grad = tex.moe_unpermute_bwd(
+                unpermuted_act_grad, inp, ctx.dtype, row_id_map, probs
+            )
+        if not ctx.needs_input_grad[3]:
             prob_grad = None
-        return act_grad, None, prob_grad
+
+        return act_grad, None, None, prob_grad
 
 
-def Permute(
+def permute(
     inp: torch.Tensor,
+    dtype: tex.DType,
     indices: torch.Tensor,
     num_out_tokens: int = -1,
     max_token_num: int = -1,
@@ -188,11 +197,12 @@ def Permute(
         By default, set to '-1', meaning the calculation of the size of workspace is
         automatically taken over by the operator.
     """
-    return _Permute.apply(inp, indices, num_out_tokens, max_token_num)
+    return _permute.apply(inp, dtype, indices, num_out_tokens, max_token_num)
 
 
-def Unpermute(
+def unpermute(
     inp: torch.Tensor,
+    dtype: tex.DType,
     row_id_map: torch.Tensor,
     probs: torch.Tensor = None,
 ) -> torch.Tensor:
@@ -212,4 +222,4 @@ def Unpermute(
         the unpermuted tokens will be merged with their respective probabilities.
         By default, set to an empty tensor, which means that the tokens are directly merged by accumulation.
     """
-    return _Unpermute.apply(inp, row_id_map, probs)
+    return _unpermute.apply(inp, dtype, row_id_map, probs)
