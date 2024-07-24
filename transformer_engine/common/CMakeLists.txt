@@ -32,10 +32,7 @@ endif()
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(pybind11 REQUIRED)
-
 include_directories(${PROJECT_SOURCE_DIR}/..)
-include_directories(${Python_INCLUDE_DIRS})
 
 # Configure Transformer Engine library
 set(transformer_engine_SOURCES)
@@ -83,9 +80,7 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
                       CUDA::cudart
-                      CUDA::nvToolsExt
-                      pybind11::headers
-                      ${Python_LIBRARIES})
+                      CUDA::nvToolsExt)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")

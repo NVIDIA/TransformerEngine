@@ -30,13 +30,13 @@ current_file_path = Path(__file__).parent.resolve()
 from setuptools.command.build_ext import build_ext as BuildExtension
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
-install_and_import("pybind11[global]")
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks:
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
+    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
