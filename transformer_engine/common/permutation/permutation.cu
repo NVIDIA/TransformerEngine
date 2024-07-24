@@ -9,19 +9,19 @@
 #include "../common.h"
 
 static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id_map,
-                                           const int num_rows, const int num_topK,
+                                           const int num_rows, const int topK,
                                            const int num_out_tokens) {
   // Each block corresponds to one source token
-  // row_id_map[num_topK][num_rows]
+  // row_id_map[topK][num_rows]
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
   const int idx = bid * blockDim.x + tid;
 
-  if (idx >= num_rows * num_topK) return;
+  if (idx >= num_rows * topK) return;
 
   int source_row = sorted_row_id[idx];
-  int source_token_id = source_row / num_topK;
-  int source_topK_id = source_row % num_topK;
+  int source_token_id = source_row / topK;
+  int source_topK_id = source_row % topK;
 
   if (idx >= num_out_tokens) {
     row_id_map[source_topK_id * num_rows + source_token_id] = -1;
@@ -32,7 +32,7 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
 
 template <typename T, typename TCompute, bool hasProb>
 __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const int *row_id_map,
-                                     const float *prob, const int num_rows, const int num_topK,
+                                     const float *prob, const int num_rows, const int topK,
                                      const int num_cols) {
   extern __shared__ int8_t s_mem[];
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
@@ -42,8 +42,8 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
   const int tid = threadIdx.x;
 
   if (hasProb) {
-    for (int i = tid; i < num_topK; i += blockDim.x * blockDim.y) {
-      s_prob[i] = TCompute(prob[source_token * num_topK + i]);
+    for (int i = tid; i < topK; i += blockDim.x * blockDim.y) {
+      s_prob[i] = TCompute(prob[source_token * topK + i]);
     }
     __syncthreads();
   }
@@ -79,7 +79,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
       }
     }
 
-    for (int k = 1; k < num_topK; k++) {
+    for (int k = 1; k < topK; k++) {
       source_row = row_id_map[k * num_rows + source_token];
 
       if (source_row == -1) continue;
@@ -116,7 +116,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
 template <typename T, typename TCompute, int topKTile, bool hasProb>
 __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *act_grad,
                                    const float *prob, float *prob_grad, const int *row_id_map,
-                                   const int num_rows, const int num_topK, const int num_cols) {
+                                   const int num_rows, const int topK, const int num_cols) {
   extern __shared__ int8_t s_mem[];
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
@@ -124,8 +124,8 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   const int tid = threadIdx.x;
 
   if (hasProb) {
-    for (int i = tid; i < num_topK; i += blockDim.x) {
-      s_prob[i] = TCompute(prob[source_token * num_topK + i]);
+    for (int i = tid; i < topK; i += blockDim.x) {
+      s_prob[i] = TCompute(prob[source_token * topK + i]);
     }
     __syncthreads();
   }
@@ -148,7 +148,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
     int index = source_token;
 
     for (int k = 0; k < topKTile; k++) {
-      if (k == num_topK) break;
+      if (k == topK) break;
 
       int dest_row = row_id_map[index];
       index += num_rows;
@@ -183,7 +183,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
   if (hasProb) {
     for (int k = 0; k < topKTile; k++) {
-      if (k == num_topK) break;
+      if (k == topK) break;
 
       for (int mask = 16; mask > 0; mask /= 2) {
         accum[k] = accum[k] + __shfl_xor_sync(0xffffffff, accum[k], mask, 32);
@@ -192,8 +192,8 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
     if (tid == 0) {
       for (int k = 0; k < topKTile; k++) {
-        if (k == num_topK) break;
-        prob_grad[source_token * num_topK + k] = accum[k];
+        if (k == topK) break;
+        prob_grad[source_token * topK + k] = accum[k];
       }
     }
   }
@@ -201,7 +201,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
 template <typename T>
 void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, int *row_id_map,
-                           const float *prob, const int num_rows, const int num_topK,
+                           const float *prob, const int num_rows, const int topK,
                            const int num_cols, const int num_out_tokens, float *prob_grad,
                            const T *input_fwd, cudaStream_t stream) {
   using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
@@ -214,52 +214,52 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
     if (input_fwd == nullptr) {
       // Permute fwd
       int threads = 64;
-      int blocks = (num_rows * num_topK + threads - 1) / threads;
-      moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows,
-                                                          num_topK, num_out_tokens);
+      int blocks = (num_rows * topK + threads - 1) / threads;
+      moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
+                                                          num_out_tokens);
 
       blocks = num_rows;
       threads = std::min(num_cols / kElementsPerAccess, 1024);
       moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
-          input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, num_topK, num_cols);
+          input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
     } else {
       // Unpermute bwd without probs for topK == 1
       int blocks = num_rows;
       int threads = 32;
 
       moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
     }
   } else {
     // Unpermute bwd with probs
     int blocks = num_rows;
     int threads = 32;
-    size_t smem_bytes = num_topK * sizeof(TCompute);
+    size_t smem_bytes = topK * sizeof(TCompute);
 
-    if (num_topK <= 8) {
+    if (topK <= 8) {
       moe_permute_kernel<T, TCompute, 8, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
-    } else if (num_topK <= 16) {
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+    } else if (topK <= 16) {
       moe_permute_kernel<T, TCompute, 16, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
-    } else if (num_topK <= 32) {
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+    } else if (topK <= 32) {
       moe_permute_kernel<T, TCompute, 32, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
-    } else if (num_topK <= 64) {
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+    } else if (topK <= 64) {
       moe_permute_kernel<T, TCompute, 64, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
-    } else if (num_topK <= 128) {
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+    } else if (topK <= 128) {
       moe_permute_kernel<T, TCompute, 128, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, num_topK, num_cols);
+          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
     } else {
-      NVTE_ERROR("num_topK cannot exceed 128.");
+      NVTE_ERROR("topK cannot exceed 128.");
     }
   }
 }
 
 template <typename T>
 void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const float *prob,
-                             const int num_rows, const int num_topK, const int num_cols,
+                             const int num_rows, const int topK, const int num_cols,
                              cudaStream_t stream) {
   using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
                                               std::is_same<T, __nv_fp8_e4m3>::value),
@@ -269,37 +269,37 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
 
   int blocks = num_rows;
   int threads = std::min(num_cols / kElementsPerAccess, 1024);
-  size_t smem_bytes = num_topK * sizeof(TCompute);
+  size_t smem_bytes = topK * sizeof(TCompute);
 
   if (prob == nullptr) {
     // Permute bwd
     // Unpermute fwd without probs
     moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
-        input, output, row_id_map, prob, num_rows, num_topK, num_cols);
+        input, output, row_id_map, prob, num_rows, topK, num_cols);
   } else {
     // Unpermute fwd with probs
     moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
-        input, output, row_id_map, prob, num_rows, num_topK, num_cols);
+        input, output, row_id_map, prob, num_rows, topK, num_cols);
   }
 }
 
 void nvte_permute(const void *input, void *output, const transformer_engine::DType dtype,
                   const int *sorted_row_id, int *row_id_map, const float *prob, const int num_rows,
-                  const int num_topK, const int num_cols, const int num_out_tokens,
-                  float *prob_grad, const void *input_fwd, cudaStream_t stream) {
+                  const int topK, const int num_cols, const int num_out_tokens, float *prob_grad,
+                  const void *input_fwd, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
       dtype, T,
       nvte_permute_launcher(reinterpret_cast<const T *>(input), reinterpret_cast<T *>(output),
-                            sorted_row_id, row_id_map, prob, num_rows, num_topK, num_cols,
+                            sorted_row_id, row_id_map, prob, num_rows, topK, num_cols,
                             num_out_tokens, prob_grad, reinterpret_cast<const T *>(input_fwd),
                             stream););
 }
 
 void nvte_unpermute(const void *input, void *output, const transformer_engine::DType dtype,
-                    int *row_id_map, const float *prob, const int num_rows, const int num_topK,
+                    int *row_id_map, const float *prob, const int num_rows, const int topK,
                     const int num_cols, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
       dtype, T,
       nvte_unpermute_launcher(reinterpret_cast<const T *>(input), reinterpret_cast<T *>(output),
-                              row_id_map, prob, num_rows, num_topK, num_cols, stream););
+                              row_id_map, prob, num_rows, topK, num_cols, stream););
 }
