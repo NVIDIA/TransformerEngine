@@ -23,15 +23,6 @@
 
 #define MAX_THREADS 1024
 
-#define CUDACHECK(cmd)                                                                      \
-  do {                                                                                      \
-    cudaError_t e = cmd;                                                                    \
-    if (e != cudaSuccess) {                                                                 \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      exit(EXIT_FAILURE);                                                                   \
-    }                                                                                       \
-  } while (0)
-
 #define ATOMIC_CONSUMER(chunk)                                             \
   if (counters) {                                                          \
     if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
@@ -1391,7 +1382,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
-    CUDACHECK(cudaLaunchKernelExC(                                                                 \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                           \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>   \
                                                      : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>), \
@@ -1416,7 +1407,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),     \
                           reinterpret_cast<void *>(&arg11)};                                     \
-    CUDACHECK(cudaLaunchKernelExC(                                                               \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                         \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_ag<x>), kernelArgs)); \
   }
 
@@ -1436,7 +1427,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),      \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};    \
-    CUDACHECK(cudaLaunchKernelExC(                                                               \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                         \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>), kernelArgs)); \
   }
 
@@ -1458,7 +1449,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),     \
                           reinterpret_cast<void *>(&arg11)};                                     \
-    CUDACHECK(cudaLaunchKernelExC(                                                               \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                         \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs<x>), kernelArgs)); \
   }
 
@@ -1481,7 +1472,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10), \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
                           reinterpret_cast<void *>(&arg13)};                                  \
-    CUDACHECK(cudaLaunchKernelExC(                                                            \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                      \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>),        \
         kernelArgs));                                                                         \
   }
@@ -1506,7 +1497,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)}; \
-    CUDACHECK(cudaLaunchKernelExC(                                                             \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                       \
         &cfg,                                                                                  \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8<x, fp8type>),  \
         kernelArgs));                                                                          \
@@ -1532,7 +1523,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)}; \
-    CUDACHECK(cudaLaunchKernelExC(                                                             \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                       \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs_oop<x>),         \
         kernelArgs));                                                                          \
   }
@@ -1562,7 +1553,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),  \
                           reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),  \
                           reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)}; \
-    CUDACHECK(cudaLaunchKernelExC(                                                             \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                       \
         &cfg,                                                                                  \
         reinterpret_cast<void *>(                                                              \
             userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_atomic_fp8<x, fp8type>),                \
@@ -1588,7 +1579,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10), \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
                           reinterpret_cast<void *>(&arg13)};                                  \
-    CUDACHECK(cudaLaunchKernelExC(                                                            \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                      \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride<x>), \
         kernelArgs));                                                                         \
   }
@@ -1614,7 +1605,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),    \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),    \
                           reinterpret_cast<void *>(&arg15)};                                     \
-    CUDACHECK(cudaLaunchKernelExC(                                                               \
+    NVTE_CHECK_CUDA(cudaLaunchKernelExC(                                                         \
         &cfg,                                                                                    \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic<x>),   \
         kernelArgs));                                                                            \
@@ -1641,7 +1632,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
                           reinterpret_cast<void *>(&arg15)};                                       \
-    CUDACHECK(                                                                                     \
+    NVTE_CHECK_CUDA(                                                                               \
         cudaLaunchKernelExC(&cfg,                                                                  \
                             reinterpret_cast<void *>(                                              \
                                 userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_multiatomic<x>), \
@@ -1890,8 +1881,15 @@ template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
-
+template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e5m2>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements_out, const int strideelements_in,
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements_out, const int strideelements_in,
+    const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
+template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e5m2>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
@@ -2199,15 +2197,6 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
   }
 }
 
-#define CUDACHECK(cmd)                                                                      \
-  do {                                                                                      \
-    cudaError_t e = cmd;                                                                    \
-    if (e != cudaSuccess) {                                                                 \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      exit(EXIT_FAILURE);                                                                   \
-    }                                                                                       \
-  } while (0)
-
 // Return TRUE if two ranks share the same NV domain
 #define INTRANODE(peer) ((peer / comm->nvsize) == (comm->myrank / comm->nvsize))
 
@@ -2252,7 +2241,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
     if (comm->use_ce) {
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-      CUDACHECK(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
@@ -2262,7 +2251,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
-    CUDACHECK(
+    NVTE_CHECK_CUDA(
         cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
   }
 }
@@ -2284,7 +2273,8 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-    CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+    NVTE_CHECK_CUDA(
+        cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
@@ -2316,7 +2306,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15)};
-  CUDACHECK(
+  NVTE_CHECK_CUDA(
       cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
 }
 
@@ -2339,7 +2329,8 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
       reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-    CUDACHECK(cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+    NVTE_CHECK_CUDA(
+        cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
@@ -2372,8 +2363,8 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
-  CUDACHECK(cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic),
-                                kernelArgs));
+  NVTE_CHECK_CUDA(cudaLaunchKernelExC(
+      &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic), kernelArgs));
 }
 
 void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler,
@@ -2418,7 +2409,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),
                         reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)};
-  CUDACHECK(cudaLaunchKernelExC(
+  NVTE_CHECK_CUDA(cudaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
 }
 
@@ -2444,7 +2435,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     if (!signalonly)
       kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
     if (comm->use_ce) {
-      CUDACHECK(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(

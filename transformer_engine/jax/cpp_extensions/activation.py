@@ -4,8 +4,9 @@
 """JAX/TE custom ops for activation"""
 from typing import Tuple, Sequence, Union, Callable
 import operator
-from functools import reduce
+from functools import reduce, partial
 
+import jax
 import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters.mlir import ir
@@ -22,6 +23,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     get_padded_spec,
 )
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
@@ -40,6 +42,35 @@ ActivationEnum = {
     ("squared_relu",): NVTE_Activation_Type.SRELU,
     ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
 }
+
+
+def _convert_to_activation_function(fn_or_string):
+    """Convert a string to an activation function."""
+    if fn_or_string == "linear":
+        return lambda x: x
+    if fn_or_string == "quick_gelu":
+        return lambda x: jax.nn.sigmoid(1.702 * x) * x
+    if fn_or_string == "squared_relu":
+        return lambda x: reduce(operator.mul, [jax.nn.relu(x), jax.nn.relu(x)])
+    if isinstance(fn_or_string, str):
+        return getattr(jax.nn, fn_or_string)
+    if callable(fn_or_string):
+        return fn_or_string
+    raise ValueError(f"Unsupported {fn_or_string} to an activation function")
+
+
+def _jax_act_lu(inputs, activation_type):
+    """
+    JAX native activation implementation
+    """
+    x = jnp.split(inputs, len(activation_type), axis=-2)
+    acts = []
+    for idx, act_fn in enumerate(activation_type):
+        x_i = _convert_to_activation_function(act_fn)(x[idx])
+        acts.append(x_i)
+    x = reduce(operator.mul, acts)
+    x = jnp.squeeze(x, axis=-2)
+    return x
 
 
 class ActLuPrimitive(BasePrimitive):
@@ -98,7 +129,7 @@ class ActLuPrimitive(BasePrimitive):
 
         out = custom_caller(ActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(x, act_enum):
@@ -155,6 +186,9 @@ def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]])
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
+    if not ActLuPrimitive.enabled():
+        return _jax_act_lu(inputs, activation_type)
+
     act_type_id = ActivationEnum[activation_type]
     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
 
@@ -226,7 +260,7 @@ class DActLuPrimitive(BasePrimitive):
 
         out = custom_caller(DActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(dz, x, act_enum):
@@ -286,6 +320,11 @@ def dact_lu(
     dact_lu fusion wrapper
     Return dgated_act_lu(inputs)
     """
+
+    if not DActLuPrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
+        return vjp_func(inputs)[0]
+
     act_type_id = ActivationEnum[activation_type]
     return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
 
@@ -443,6 +482,11 @@ def act_lu_fp8(
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
+    if not ActLuFp8Primitive.enabled():
+        act_lu_output = _jax_act_lu(x, activation_type)
+        casted_output, updated_amax = _jax_cast_fp8(act_lu_output, scale, amax, out_dtype)
+        return casted_output, updated_amax
+
     act_type_id = ActivationEnum[activation_type]
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id

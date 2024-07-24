@@ -54,7 +54,8 @@ struct KernelConfig {
   size_t elements_per_store_t = 0;    // Elements per L1 cache store to transposed output
 
   KernelConfig(size_t row_length, size_t num_rows, size_t itype_size, size_t itype2_size,
-               size_t otype_size, size_t load_size_, size_t store_size_, bool is_dact_)
+               size_t otype_size, size_t load_size_, size_t store_size_, size_t sm_count,
+               bool is_dact_)
       : load_size{load_size_}, store_size{store_size_}, is_dact{is_dact_} {
     if (is_dact) {
       if (load_size > desired_load_size_dact || store_size > desired_store_size_dact) {
@@ -85,8 +86,7 @@ struct KernelConfig {
 
     // Parameters for performance model
     constexpr size_t warps_per_sm = 16;  // Rough estimate for saturated SMs
-    active_sm_count = std::min(DIVUP(num_blocks * n_warps_per_tile, warps_per_sm),
-                               static_cast<size_t>(cuda::sm_count()));
+    active_sm_count = std::min(DIVUP(num_blocks * n_warps_per_tile, warps_per_sm), sm_count);
     elements_per_load = (std::min(cache_line_size, tile_size_x * itype_size) / itype_size);
     elements_per_load_dact = (std::min(cache_line_size, tile_size_x * itype2_size) / itype2_size);
     elements_per_store_c = (std::min(cache_line_size, tile_size_x * otype_size) / otype_size);
@@ -535,9 +535,10 @@ void cast_transpose_fused(const Tensor &input, const Tensor &act_input, Tensor *
             // Pick kernel config
             std::vector<KernelConfig> kernel_configs;
             kernel_configs.reserve(16);
+            const size_t sm_count = static_cast<size_t>(cuda::sm_count());
             auto add_config = [&](size_t load_size_config, size_t store_size_config) {
               kernel_configs.emplace_back(row_length, num_rows, itype_size, itype2_size, otype_size,
-                                          load_size_config, store_size_config, IS_DACT);
+                                          load_size_config, store_size_config, sm_count, IS_DACT);
             };
             add_config(8, 8);
             add_config(4, 8);
