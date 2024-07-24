@@ -50,7 +50,7 @@ def _load_cudnn():
         ), f"Found {len(lib_path)} libcudnn.{_get_sys_extension()}.x in nvidia-cudnn-cuXX."
         return ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
 
-    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home:
         libs = glob.glob(f"{cuda_home}/*/libcudnn*")
         libs.sort(reverse=True, key=os.path.basename)
@@ -73,10 +73,10 @@ def _load_library():
 
 def _load_nvrtc():
     """Load NVRTC shared library."""
-    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home:
         libs = glob.glob(f"{cuda_home}/*/libnvrtc*")
-        libs = list(filter(lambda x: not("stub" in x or "libnvrtc-builtins" in x), libs))
+        libs = list(filter(lambda x: not ("stub" in x or "libnvrtc-builtins" in x), libs))
         libs.sort(reverse=True, key=os.path.basename)
         if libs:
             return ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
