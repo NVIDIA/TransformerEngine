@@ -79,45 +79,8 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(
       dtype == transformer_engine::DType::kFloat8E5M2)
     num_cols *= 4;
 
-  switch (dtype) {
-    case transformer_engine::DType::kFloat32: {
-      nvte_permutation<float, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
-                                    row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
-                                    num_out_tokens, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat16: {
-      nvte_permutation<half, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
-                                   row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
-                                   num_out_tokens, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kBFloat16: {
-      nvte_permutation<__nv_bfloat16, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
-                                            row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
-                                            num_out_tokens, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E5M2: {
-      nvte_permutation<__nv_fp8_e5m2, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
-                                            row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
-                                            num_out_tokens, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E4M3: {
-      nvte_permutation<__nv_fp8_e4m3, true>(input_ptr, permuted_output_ptr, sorted_row_id_ptr,
-                                            row_id_map_ptr, nullptr, num_tokens, num_topK, num_cols,
-                                            num_out_tokens, nullptr, nullptr, stream);
-
-      break;
-    }
-    default:
-      NVTE_ERROR("Wrong activation tensor type.");
-  }
+  nvte_permute(input_ptr, permuted_output_ptr, dtype, sorted_row_id_ptr, row_id_map_ptr, nullptr,
+               num_tokens, num_topK, num_cols, num_out_tokens, nullptr, nullptr, stream);
 
   return std::make_tuple(permuted_output, row_id_map, workspace);
 }
@@ -154,45 +117,8 @@ Tensor moe_unpermute_fwd(Tensor input, const transformer_engine::DType dtype, Te
       dtype == transformer_engine::DType::kFloat8E5M2)
     num_cols *= 4;
 
-  switch (dtype) {
-    case transformer_engine::DType::kFloat32: {
-      nvte_permutation<float, false>(input_ptr, unpermuted_output_ptr, nullptr, row_id_map_ptr,
-                                     prob_ptr, num_tokens, num_topK, num_cols, 0, nullptr, nullptr,
-                                     stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat16: {
-      nvte_permutation<half, false>(input_ptr, unpermuted_output_ptr, nullptr, row_id_map_ptr,
-                                    prob_ptr, num_tokens, num_topK, num_cols, 0, nullptr, nullptr,
-                                    stream);
-
-      break;
-    }
-    case transformer_engine::DType::kBFloat16: {
-      nvte_permutation<__nv_bfloat16, false>(input_ptr, unpermuted_output_ptr, nullptr,
-                                             row_id_map_ptr, prob_ptr, num_tokens, num_topK,
-                                             num_cols, 0, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E5M2: {
-      nvte_permutation<__nv_fp8_e5m2, false>(input_ptr, unpermuted_output_ptr, nullptr,
-                                             row_id_map_ptr, prob_ptr, num_tokens, num_topK,
-                                             num_cols, 0, nullptr, nullptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E4M3: {
-      nvte_permutation<__nv_fp8_e4m3, false>(input_ptr, unpermuted_output_ptr, nullptr,
-                                             row_id_map_ptr, prob_ptr, num_tokens, num_topK,
-                                             num_cols, 0, nullptr, nullptr, stream);
-
-      break;
-    }
-    default:
-      NVTE_ERROR("Wrong activation tensor type.");
-  }
+  nvte_unpermute(input_ptr, unpermuted_output_ptr, dtype, row_id_map_ptr, prob_ptr, num_tokens,
+                 num_topK, num_cols, stream);
 
   return unpermuted_output;
 }
@@ -233,45 +159,8 @@ std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd,
       dtype == transformer_engine::DType::kFloat8E5M2)
     num_cols *= 4;
 
-  switch (dtype) {
-    case transformer_engine::DType::kFloat32: {
-      nvte_permutation<float, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr, prob_ptr,
-                                    num_tokens, num_topK, num_cols, 0, prob_grad_ptr, input_fwd_ptr,
-                                    stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat16: {
-      nvte_permutation<half, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr, prob_ptr,
-                                   num_tokens, num_topK, num_cols, 0, prob_grad_ptr, input_fwd_ptr,
-                                   stream);
-
-      break;
-    }
-    case transformer_engine::DType::kBFloat16: {
-      nvte_permutation<__nv_bfloat16, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
-                                            prob_ptr, num_tokens, num_topK, num_cols, 0,
-                                            prob_grad_ptr, input_fwd_ptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E5M2: {
-      nvte_permutation<__nv_fp8_e5m2, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
-                                            prob_ptr, num_tokens, num_topK, num_cols, 0,
-                                            prob_grad_ptr, input_fwd_ptr, stream);
-
-      break;
-    }
-    case transformer_engine::DType::kFloat8E4M3: {
-      nvte_permutation<__nv_fp8_e4m3, true>(input_bwd_ptr, act_grad_ptr, nullptr, row_id_map_ptr,
-                                            prob_ptr, num_tokens, num_topK, num_cols, 0,
-                                            prob_grad_ptr, input_fwd_ptr, stream);
-
-      break;
-    }
-    default:
-      NVTE_ERROR("Wrong activation tensor type.");
-  }
+  nvte_permute(input_bwd_ptr, act_grad_ptr, dtype, nullptr, row_id_map_ptr, prob_ptr, num_tokens,
+               num_topK, num_cols, 0, prob_grad_ptr, input_fwd_ptr, stream);
 
   return std::make_tuple(act_grad, prob_grad);
 }
