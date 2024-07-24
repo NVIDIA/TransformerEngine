@@ -18,7 +18,7 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim, int64_t window_size_left, int64_t window_size_right);
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right);
 
 std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     size_t max_seqlen, bool is_training, float attn_scale, float p_dropout, bool set_zero,

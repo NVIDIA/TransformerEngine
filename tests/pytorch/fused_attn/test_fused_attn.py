@@ -78,12 +78,13 @@ class ModelConfig:
         batch_size: int,
         num_heads: int,
         num_gqa_groups: int,
-        head_dim: int,
+        head_dim_qk: int,
         max_seqlen_q: int,
         max_seqlen_kv: int,
         dropout_p: float,
         attn_mask_type: str,
         attn_bias_type: str,
+        head_dim_v: int = None,
         alibi_type: str = "none",
         num_layers: int = 1,
         bias_shape: str = "1hss",
@@ -92,9 +93,10 @@ class ModelConfig:
         self.batch_size = batch_size
         self.num_heads = num_heads
         self.num_gqa_groups = num_gqa_groups
-        self.head_dim = head_dim
-        self.hidden_size = num_heads * head_dim
-        self.hidden_size_kv = num_gqa_groups * head_dim
+        self.head_dim_qk = head_dim_qk
+        self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
+        self.hidden_size = num_heads * head_dim_qk
+        self.hidden_size_kv = num_gqa_groups * self.head_dim_v
         self.max_seqlen_q = max_seqlen_q
         self.max_seqlen_kv = max_seqlen_kv
         self.dropout_p = dropout_p
@@ -138,7 +140,7 @@ def _get_attention_backends(
     )
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
-    if config.attn_bias_type == "post_scale_bias" and config.head_dim <= 128:
+    if config.attn_bias_type == "post_scale_bias" and config.head_dim_qk <= 128 and config.head_dim_k <= 128:
         core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
@@ -154,7 +156,8 @@ def _get_attention_backends(
             num_gqa_groups=config.num_gqa_groups,
             max_seqlen_q=config.max_seqlen_q,
             max_seqlen_kv=config.max_seqlen_kv,
-            head_dim=config.head_dim,
+            head_dim_qk=config.head_dim_qk,
+            head_dim_v=config.head_dim_v,
             attn_mask_type=config.attn_mask_type,
             window_size=window_size,
             alibi_slopes_shape=alibi_slopes_shape,
@@ -219,11 +222,12 @@ def test_dot_product_attention(
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
     config = model_configs[model]
+    is_mla = config.head_dim_qk != config.head_dim_v
     if qkv_layout is None:
         if config.attn_type == "self":
-            qkv_layout = "sb3hd"
+            qkv_layout = "sb3hd" if not is_mla else "sbhd_sbhd_sbhd"
         else:
-            qkv_layout = "sbhd_sb2hd"
+            qkv_layout = "bshd_bs2hd" if not is_mla else "bshd_bshd_bshd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
@@ -249,7 +253,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim <= 128
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -343,6 +347,23 @@ def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
+model_configs_mla = {
+    #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
+    "mla_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias", head_dim_v=128),  # self , 0
+    "mla_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128),  # cross, 0
+    "mla_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64),  # self , 1
+    "mla_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64),  # cross, 1
+    "mla_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64),  # inference
+    "mla_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128),  # inference
+}
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_mla])
+@pytest.mark.parametrize("model", model_configs_mla.keys())
+def test_dpa_mla(dtype, model_configs, model):
+    """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
@@ -737,7 +758,8 @@ def _run_dot_product_attention(
         "skv": config.max_seqlen_kv,
         "h": config.num_heads,
         "hg": config.num_gqa_groups,
-        "d": config.head_dim,
+        "dqk": config.head_dim_qk,
+        "dv": config.head_dim_v,
         "t": cu_seqlens_q_after_pad[-1],
         "tg": cu_seqlens_kv_after_pad[-1],
         "3": 3,
@@ -754,6 +776,10 @@ def _run_dot_product_attention(
             layout = layout.replace("s", "skv")
             layout = layout.replace("h", "hg")
             layout = layout.replace("t", "tg")
+        if i == len(qkv_layout.split("_"))-1:
+            layout = layout.replace("d", "dv")
+        else:
+            layout = layout.replace("d", "dqk")
         tensor_shape = [dim_to_num[j] for j in layout.split("_")]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_orig = tensor
@@ -812,6 +838,7 @@ def _run_dot_product_attention(
     # Create output gradient
     qkv_format_kv = "_".join(qkv_format)
     qkv_format_kv = qkv_format_kv.replace("s", "sq")
+    qkv_format_kv = qkv_format_kv.replace("d", "dv")
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split("_")]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
@@ -852,7 +879,7 @@ def _run_dot_product_attention(
     # Set up model
     block = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
@@ -1169,7 +1196,7 @@ def _run_transformer_layer(
     # Create RoPE
     rotary_pos_emb = None
     if RoPE:
-        PE = RotaryPositionEmbedding(dim=config.head_dim)
+        PE = RotaryPositionEmbedding(dim=config.head_dim_qk)
         rotary_pos_emb = PE(config.max_seqlen_q).to(device="cuda")
 
     # Set up model
@@ -1184,7 +1211,7 @@ def _run_transformer_layer(
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         layer_number=layer_number,
-        kv_channels=config.head_dim,
+        kv_channels=config.head_dim_qk,
         self_attn_mask_type=config.attn_mask_type,
         tp_group=None,
         tp_size=1,
@@ -1357,7 +1384,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
         mha = MultiheadAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_heads,
-            kv_channels=config.head_dim,
+            kv_channels=config.head_dim_qk,
             num_gqa_groups=config.num_gqa_groups,
             attention_dropout=config.dropout_p,
             layer_number=1,
@@ -1388,7 +1415,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
         "skv": config.max_seqlen_kv,
         "h": config.num_heads,
         "hg": config.num_gqa_groups,
-        "d": config.head_dim,
+        "d": config.head_dim_qk,
         "t": cu_seqlens_q[-1],
         "tg": cu_seqlens_kv[-1],
         "3": 3,
@@ -1532,7 +1559,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
     with fp8_model_init(enabled=fp8_dpa):
         dpa = DotProductAttention(
             config.num_heads,
-            config.head_dim,
+            config.head_dim_qk,
             num_gqa_groups=config.num_gqa_groups,
             attention_dropout=config.dropout_p,
             sequence_parallel=False,
@@ -1561,7 +1588,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
         "skv": config.max_seqlen_kv,
         "h": config.num_heads,
         "hg": config.num_gqa_groups,
-        "d": config.head_dim,
+        "d": config.head_dim_qk,
         "t": cu_seqlens_q[-1],
         "tg": cu_seqlens_kv[-1],
         "3": 3,
@@ -1733,7 +1760,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     inp = 0.0001 * torch.randint(
         -100,
         100,
-        (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim),
+        (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim_qk),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -1744,7 +1771,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
 
     out_grad = 0.01 * torch.randn(
         config.batch_size * config.max_seqlen_q,
-        config.num_heads * config.head_dim,
+        config.num_heads * config.head_dim_qk,
         dtype=dtype,
         device="cuda",
     )
@@ -1767,7 +1794,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     return (
         out.view(config.batch_size, config.max_seqlen_q, -1),
         dqkv.view(
-            config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim
+            config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim_qk
         ).contiguous(),
     )
 
@@ -1810,7 +1837,7 @@ def _run_ref_mha_f16(dtype, config, backend):
 
     block = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         attention_dropout=config.dropout_p,
         sequence_parallel=False,
         tp_size=1,
@@ -2106,7 +2133,7 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         self.p_dropout = config.dropout_p
         self.h = config.num_heads
         self.hidden_size = config.hidden_size
-        self.head_dim = config.head_dim
+        self.head_dim = config.head_dim_qk
         self.fast_zero_fill = True
         self.mask_type = config.attn_mask_type
 

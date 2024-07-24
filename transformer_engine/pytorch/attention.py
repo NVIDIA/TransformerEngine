@@ -141,8 +141,10 @@ class AttentionParams:
         Maximum sequence length of the query tensor.
     max_seqlen_kv: int, default = 128
         Maximum sequence length of the key and value tensors.
-    head_dim: int, default = 64
-        The size of each attention head.
+    head_dim_qk: int, default = 64
+        The size of each attention head in query and key tensors.
+    head_dim_v: int, default = 64
+        The size of each attention head in the value tensor.
     attn_mask_type: str, default = `no_mask`
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
@@ -181,7 +183,8 @@ class AttentionParams:
     num_gqa_groups: int = 16
     max_seqlen_q: int = 128
     max_seqlen_kv: int = 128
-    head_dim: int = 64
+    head_dim_qk: int = 64
+    head_dim_v: int = 64
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     alibi_slopes_shape: Union[torch.Size, List, None] = None
@@ -244,7 +247,8 @@ def get_attention_backend(
     num_gqa_groups = attention_params.num_gqa_groups
     max_seqlen_q = attention_params.max_seqlen_q
     max_seqlen_kv = attention_params.max_seqlen_kv
-    head_dim = attention_params.head_dim
+    head_dim_qk = attention_params.head_dim_qk
+    head_dim_v = attention_params.head_dim_v
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
     alibi_slopes_shape = attention_params.alibi_slopes_shape
@@ -352,18 +356,28 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if use_flash_attention and (
-        head_dim > 256
-        or head_dim % 8 != 0
-        or (head_dim > 192 and device_compute_capability not in ((8, 0), (9, 0)))
+        head_dim_qk != head_dim_v
+        or head_dim_qk > 256
+        or head_dim_qk % 8 != 0
+        or (head_dim_qk > 192 and device_compute_capability not in ((8, 0), (9, 0)))
     ):
         logger.debug(
-            "Disabling FlashAttention due to unsupported head_dim. "
-            "Supported: head_dim %%8 = 0, head_dim <= 256 (>192 requires sm80/90). "
-            "Found: head_dim = %s on sm%s.",
-            head_dim,
+            "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
+            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
+            "head_dim_qk <= 256 (>192 requires sm80/90). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            head_dim_qk,
+            head_dim_v,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention = False
+    qkv_layout_group = qkv_layout.replace('b','').replace('s','').replace('t','')
+    if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
+        logger.debug(
+            "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
+            qkv_layout,
+        )
+        use_fused_attention = False
 
     # Filter: QKV layout
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
@@ -556,7 +570,8 @@ def get_attention_backend(
             num_gqa_groups,
             max_seqlen_q,
             max_seqlen_kv,
-            head_dim,
+            head_dim_qk,
+            head_dim_v,
             window_size[0],
             window_size[1],
         )
@@ -2959,12 +2974,12 @@ def get_qkv_layout(
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
         stride = k.stride()
-        check_strides_kv = all(stride == x.stride() for x in [k, v])
+        check_strides_kv = np.all(np.array(stride[:-1])/k.shape[-1] == np.array(v.stride()[:-1])/v.shape[-1])
 
         shape = q.shape
         check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
         shape = k.shape
-        check_shapes_kv = all(shape == x.shape for x in [k, v])
+        check_shapes_kv = shape[:-1] == v.shape[:-1]
 
         last_dim_size = q.shape[-1]
         check_last_dim_offsets_qkv = all(
@@ -4994,8 +5009,10 @@ class DotProductAttention(TransformerEngineBaseModule):
     ----------
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    kv_channels : int
-                number of key-query-value channels per attention head.
+    k_channels : int
+                number of channels per attention head in key.
+    v_channels : Optional[int] = None
+                number of channels per attention head in value.
     num_gqa_groups : Optional[int] = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
@@ -5081,7 +5098,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     def __init__(
         self,
         num_attention_heads: int,
-        kv_channels: int,
+        k_channels: int,
+        v_channels: Optional[int] = None,
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
@@ -5121,7 +5139,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
-        self.hidden_size_per_attention_head = kv_channels
+        self.hidden_size_per_attention_head = k_channels
+        self.v_channels = k_channels if v_channels is None else v_channels
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
@@ -5139,7 +5158,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_dropout_ctx = self.rng_states_tracker.fork
 
         if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(kv_channels)
+            softmax_scale = 1.0 / math.sqrt(k_channels)
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -5285,16 +5304,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Argument :attr:`attention_mask` is only used when :attr:`attn_mask_type`
             includes '"padding"' or `"arbitrary"`.
-
-        .. note::
-
-            Input tensor :attr:`query_layer` must be of shape
-            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`,
-            :attr:`kv_channels`) and the tensors :attr:`key_layer` and :attr:`value_layer`
-            must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
-            :attr:`num_gqa_groups`, :attr:`kv_channels`). Output of shape
-            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
-            * :attr:`kv_channels`) is returned.
 
         .. note::
 
@@ -5445,7 +5454,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
-            assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
+            assert (
+                key_layer.shape[:-1] == value_layer.shape[:-1]
+            ), "Keys and values must have the same batch size, sequence length and number of heads!"
 
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
@@ -5671,7 +5682,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 num_gqa_groups=key_layer.shape[-2],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                head_dim=query_layer.shape[-1],
+                head_dim_qk=query_layer.shape[-1],
+                head_dim_v=value_layer.shape[-1],
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
