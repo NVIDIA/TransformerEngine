@@ -1369,7 +1369,8 @@ void amax_and_scale_update_inplace_legacy(
   auto amax_numel = amax.numel();
   size_t num_blocks = (amax_history_numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-  const int *current_step_id_ptr = GetOptionalDataPtr<int>(current_step_id_tensor);
+  const int *current_step_id_ptr =
+      reinterpret_cast<const int *>(GetOptionalDataPtr(current_step_id_tensor));
   auto parameterSetter = [current_step_id_ptr,
                           fwd_update](phi::backends::gpu::CUDAKernelParams &params) {
     if (fwd_update) {
