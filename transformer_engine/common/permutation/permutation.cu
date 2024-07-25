@@ -24,8 +24,10 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
   int source_topK_id = source_row % topK;
 
   if (idx >= num_out_tokens) {
+    // Set the indices of dropped tokens to -1
     row_id_map[source_topK_id * num_rows + source_token_id] = -1;
   } else {
+    // Create a row id map for subsequent unpermute operation
     row_id_map[source_topK_id * num_rows + source_token_id] = idx;
   }
 }
@@ -37,28 +39,33 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
   extern __shared__ int8_t s_mem[];
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
-  // each block corresponds to one source token
+  // Each block corresponds to one dest token
   const int source_token = blockIdx.x;
   const int tid = threadIdx.x;
 
   if (hasProb) {
     for (int i = tid; i < topK; i += blockDim.x * blockDim.y) {
+      // Load all the topK probs related to the source row into smem
       s_prob[i] = TCompute(prob[source_token * topK + i]);
     }
     __syncthreads();
   }
 
+  // Register buffers for vector type (float4) memory access
   float4 frag_load_store;
   T *frag_load_store_ptr = reinterpret_cast<T *>(&frag_load_store);
 
+  // Number of elemments in frag_load_store
   static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
+  // Traverse along the hidden dimention
   for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess) {
     TCompute frag_elem[kElementsPerAccess];
     TCompute frag_sum[kElementsPerAccess];
 
     int source_row = row_id_map[source_token];
 
+    // source_row == -1 represents a dropped token
     if (source_row != -1) {
       const T *source_row_ptr = input + source_row * num_cols;
 
@@ -120,24 +127,32 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   extern __shared__ int8_t s_mem[];
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
+  // Each block corresponds to one source token
   const int source_token = blockIdx.x;
   const int tid = threadIdx.x;
 
   if (hasProb) {
     for (int i = tid; i < topK; i += blockDim.x) {
+      // Load all the topK probs related to the source row into smem
       s_prob[i] = TCompute(prob[source_token * topK + i]);
     }
     __syncthreads();
   }
 
+  // Accumulators for the calculation of prob_grad
   float accum[topKTile] = {0.0f};
 
+  // Register buffers for vector type (float4) memory access
   float4 frag_load_store;
   T *frag_load_store_ptr = reinterpret_cast<T *>(&frag_load_store);
 
+  // Number of elemments in frag_load_store
   static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
+  // The starting address of each source row
   const T *source_row_ptr = input_bwd + source_token * num_cols;
+
+  // Traverse along the hidden dimention
   for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess) {
     TCompute frag_src[kElementsPerAccess];
 
@@ -147,6 +162,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
     int index = source_token;
 
+    // Process each row in the corresponding topK rows
     for (int k = 0; k < topKTile; k++) {
       if (k == topK) break;
 
@@ -155,9 +171,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
       if (dest_row != -1) {
         if (hasProb) {
+          // Calculate act_grad in unpermute bwd
           for (int e = 0; e < kElementsPerAccess; e++)
             frag_load_store_ptr[e] = T(frag_src[e] * s_prob[k]);
         } else {
+          // permute fwd
           for (int e = 0; e < kElementsPerAccess; e++) frag_load_store_ptr[e] = T(frag_src[e]);
         }
 
@@ -165,6 +183,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
         *(float4 *)(dest_row_ptr + i) = frag_load_store;
 
         if (hasProb) {
+          // Inner product calculation for prob_grad in unpermute bwd
           const T *input_fwd_ptr = input_fwd + dest_row * num_cols;
 
           frag_load_store = __ldlu(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
@@ -184,7 +203,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   if (hasProb) {
     for (int k = 0; k < topKTile; k++) {
       if (k == topK) break;
-
+      // Warp-level reduction
       for (int mask = 16; mask > 0; mask /= 2) {
         accum[k] = accum[k] + __shfl_xor_sync(0xffffffff, accum[k], mask, 32);
       }
