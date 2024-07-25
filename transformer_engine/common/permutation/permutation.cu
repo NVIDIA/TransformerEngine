@@ -211,7 +211,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
   static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
   if (input_fwd == nullptr) {
-    // permute fwd
+    // moe_permute_fwd
 
     int threads = 64;
     int blocks = (num_rows * topK + threads - 1) / threads;
@@ -224,18 +224,18 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
     moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
         input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
   } else {
-    // unpermute bwd
+    // moe_unpermute_bwd
 
     int threads = 32;
     int blocks = num_rows;
 
     if (prob == nullptr) {
-      // unpermute bwd without probs
+      // moe_unpermute_bwd without probs
 
       moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
           input, input_fwd, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
     } else {
-      // unpermute bwd with probs
+      // moe_unpermute_bwd with probs
 
       size_t smem_bytes = topK * sizeof(TCompute);
 
@@ -276,13 +276,13 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
   size_t smem_bytes = topK * sizeof(TCompute);
 
   if (prob == nullptr) {
-    // permute bwd
-    // unpermute fwd without probs
+    // moe_permute_bwd
+    // moe_unpermute_fwd without probs
 
     moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, nullptr, num_rows, topK, num_cols);
   } else {
-    // unpermute fwd with probs
+    // moe_unpermute_fwd with probs
 
     moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, prob, num_rows, topK, num_cols);
