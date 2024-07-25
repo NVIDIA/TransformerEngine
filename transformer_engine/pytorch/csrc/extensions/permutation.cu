@@ -17,7 +17,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(
   int num_cols = input.size(1);
   const int topK = indices.size(1);
 
-  // initialize the workspace on the first run
+  // Initialize the workspace on the first run
   if (workspace.empty()) {
     auto options =
         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -53,7 +53,7 @@ std::tuple<Tensor, Tensor, std::vector<Tensor>> moe_permute_fwd(
                                   sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
                                   num_tokens * topK);
 
-  // activations type
+  // Activations type
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
@@ -93,7 +93,7 @@ Tensor moe_unpermute_fwd(Tensor input, const transformer_engine::DType dtype, Te
                          Tensor prob, int64_t num_tokens, int64_t topK) {
   int num_cols = input.size(1);
 
-  // activations type
+  // Activations type
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
@@ -132,7 +132,7 @@ std::tuple<Tensor, Tensor> moe_unpermute_bwd(Tensor input_bwd, Tensor input_fwd,
   int *row_id_map_ptr = reinterpret_cast<int *>(getDataPtr(row_id_map, 0));
   float *prob_ptr = (prob.numel() > 0) ? reinterpret_cast<float *>(getDataPtr(prob, 0)) : nullptr;
 
-  // activations type
+  // Activations type
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
