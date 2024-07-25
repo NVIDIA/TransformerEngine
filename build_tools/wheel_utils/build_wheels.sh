@@ -11,9 +11,8 @@ BUILD_PYTORCH=${4:-true}
 BUILD_PADDLE=${5:-true}
 
 export NVTE_RELEASE_BUILD=1
-export TARGET_BRANCH=${TARGET_BRANCH:-wheels}
-mkdir /wheelhouse
-mkdir /wheelhouse/logs
+export TARGET_BRANCH=${TARGET_BRANCH:-}
+mkdir -p /wheelhouse/logs
 
 # Generate wheels for common library.
 git config --global --add safe.directory /TransformerEngine
