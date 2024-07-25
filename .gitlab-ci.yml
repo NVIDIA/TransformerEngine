@@ -889,6 +889,14 @@ L0_jax_unittest--H100_1GPU:
     - .L0_test
     - .H100_1GPU
 
+L0_jax_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
 L0_jax_unittest--L40_1GPU:
     variables:
       FRAMEWORK: jax
@@ -929,6 +937,14 @@ L0_paddle_unittest--H100_1GPU:
     - .L0_test
     - .H100_1GPU
 
+L0_paddle_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
 L0_paddle_unittest--L40_1GPU:
     variables:
       FRAMEWORK: paddle
@@ -960,6 +976,14 @@ L0_cppunittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+
+L0_pytorch_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
 
 docs:
     variables:
