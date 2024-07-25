@@ -356,9 +356,7 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if use_flash_attention and head_dim_qk != head_dim_v:
-        logger.debug(
-            "Disabling FlashAttention as it does not support MLA."
-        )
+        logger.debug("Disabling FlashAttention as it does not support MLA.")
         use_flash_attention = False
     if use_flash_attention and (
         head_dim_qk > 256
