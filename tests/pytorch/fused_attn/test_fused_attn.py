@@ -143,7 +143,7 @@ def _get_attention_backends(
     if (
         config.attn_bias_type == "post_scale_bias"
         and config.head_dim_qk <= 128
-        and config.head_dim_k <= 128
+        and config.head_dim_v <= 128
     ):
         core_attention_bias_requires_grad = True
 
