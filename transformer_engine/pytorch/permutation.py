@@ -187,6 +187,8 @@ def permute(
     ----------
     inp: torch.Tensor
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
+    dtype: tex.DType
+        Data type of the input tensor.
     indices: torch.Tensor
         The token to expert indices tensor of shape [num_tokens, topK] and dtype 'int32'.
     num_out_tokens: int, default = -1
@@ -214,6 +216,8 @@ def unpermute(
     ----------
     inp: torch.Tensor
         Input tensor with permuted tokens of shape `[num_tokens, hidden_size]` to be unpermuted.
+    dtype: tex.DType
+        Data type of the input tensor.
     row_id_map: torch.Tensor
         The tensor of a mapping table for sorted indices used to unpermute the tokens,
         which is the second output tensor of `Permute`.
