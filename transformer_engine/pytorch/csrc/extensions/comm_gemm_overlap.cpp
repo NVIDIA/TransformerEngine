@@ -117,17 +117,8 @@ te_torch::CommGemmOverlap::CommGemmOverlap(torch::Tensor sample, int world_rank,
   _ubuf_dtype = (sample.element_size() == 1) ? te::DType::kFloat8E4M3
                                              : GetTransformerEngineDType(sample.scalar_type());
   void *ubuf_ptr;
-  if (te::getenv<bool>("UB_SKIPMC")) {
-    // Multicast is disabled so we have to pre-allocate the buffer here.
-    _ubuf = torch::empty({sample.size(0), sample.size(1)}, sample.options());
-    ubuf_ptr = _ubuf.data_ptr();
-    this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, false);
-  } else {
-    // Multicast requires UB to allocate the buffer with specific memory options
-    // that PyTorch allocator does not support.
-    this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, true);
-    _ubuf = torch::from_blob(ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
-  }
+  this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, true);
+  _ubuf = torch::from_blob(ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
   if (_atomic_gemm) {
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -406,20 +397,10 @@ te_torch::CommGemmOverlapP2P::CommGemmOverlapP2P(
                                              : GetTransformerEngineDType(sample.scalar_type());
 
   void *ubuf_ptr;
-  if (te::getenv<bool>("UB_SKIPMC")) {
-    // Multicast is disabled so we have to pre-allocate the buffer here.
-    _ubuf = torch::empty({(sample.size(0) / _tp_size) * _num_ubuf_chunks, sample.size(1)},
-                         sample.options());
-    ubuf_ptr = _ubuf.data_ptr();
-    this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, false);
-  } else {
-    // Multicast requires UB to allocate the buffer with specific memory options
-    // that PyTorch allocator does not support.
-    this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, true);
-    _ubuf =
-        torch::from_blob(ubuf_ptr, {(sample.size(0) / _tp_size) * _num_ubuf_chunks, sample.size(1)},
-                         sample.options());
-  }
+  this->register_gpu_buffer(&ubuf_ptr, _ubuf_bytes, true);
+  _ubuf =
+      torch::from_blob(ubuf_ptr, {(sample.size(0) / _tp_size) * _num_ubuf_chunks, sample.size(1)},
+                        sample.options());
 
   // Create tensor chunks for easy management
   char *ubuf_byte_ptr = reinterpret_cast<char *>(ubuf_ptr);
