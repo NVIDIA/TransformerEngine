@@ -37,6 +37,7 @@ include_directories(${PROJECT_SOURCE_DIR}/..)
 # Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
+     pycudnn.cpp
      transformer_engine.cpp
      transpose/cast_transpose.cu
      transpose/transpose.cu
@@ -71,6 +72,8 @@ list(APPEND transformer_engine_SOURCES
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
