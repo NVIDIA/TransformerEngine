@@ -377,7 +377,7 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
 
   char(*hostnames)[MPI_MAX_PROCESSOR_NAME] =
       static_cast<char(*)[MPI_MAX_PROCESSOR_NAME]>(malloc(numranks * MPI_MAX_PROCESSOR_NAME));
-  strcpy(hostnames[myrank], hostname);
+  strcpy(hostnames[myrank], hostname);  // NOLINT(*)
   for (int n = 0; n < numranks; n++)
     UB_MPI_CHECK(MPI_Bcast(&(hostnames[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, EXT_COMM_WORLD));
   qsort(hostnames, numranks, MPI_MAX_PROCESSOR_NAME, stringCmp);

@@ -2151,6 +2151,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         ctx.dropout_p,
                         ctx.softmax_scale,
                         False,
+                        rng_state=rng_states[cp_size - i - 1],
                         **fa_optional_backward_kwargs,
                     )
 

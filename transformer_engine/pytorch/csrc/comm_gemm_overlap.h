@@ -67,7 +67,7 @@ class UbufBootstrapCallbacks : torch::CustomClassHolder {
 #ifndef NVTE_UB_WITH_MPI
     NVTE_ERROR("Internal TE error: Dummy UbufBootstrapCallbacks init without NVTE_UB_WITH_MPI=1!");
 #endif
-  };  // empty constructor for NVTE_UB_WITH_MPI=1
+  }  // empty constructor for NVTE_UB_WITH_MPI=1
 
   UbufBootstrapCallbacks(c10d::ProcessGroup *world_group, c10d::ProcessGroup *intra_node_group) {
     pgs.insert({"world", world_group});
