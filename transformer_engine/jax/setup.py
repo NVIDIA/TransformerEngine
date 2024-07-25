@@ -29,13 +29,14 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import package_files, copy_common_headers, install_and_import
+from build_tools.utils import copy_common_headers, install_and_import
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
 install_and_import("pybind11")
 from pybind11.setup_helpers import build_ext as BuildExtension
 
+os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension)
 
 
@@ -53,18 +54,12 @@ if __name__ == "__main__":
     setuptools.setup(
         name="transformer_engine_jax",
         version=te_version(),
-        packages=["csrc", common_headers_dir, "build_tools"],
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy", "praxis"],
-        include_package_data=True,
-        package_data={
-            "csrc": package_files("csrc"),
-            common_headers_dir: package_files(common_headers_dir),
-            "build_tools": package_files("build_tools"),
-        },
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
+        shutil.rmtree("build_tools")

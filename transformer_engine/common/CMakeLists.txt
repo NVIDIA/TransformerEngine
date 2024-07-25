@@ -32,7 +32,6 @@ endif()
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-
 include_directories(${PROJECT_SOURCE_DIR}/..)
 
 # Configure Transformer Engine library
@@ -77,9 +76,7 @@ target_include_directories(transformer_engine PUBLIC
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvrtc
-                      CUDNN::cudnn)
+                      CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -125,3 +122,4 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+
