@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/extensions.h"
+#include "extensions.h"
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
