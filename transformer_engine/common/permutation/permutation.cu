@@ -210,49 +210,53 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
 
   static constexpr int kElementsPerAccess = 16 / sizeof(T);
 
-  if (prob == nullptr) {
-    if (input_fwd == nullptr) {
-      // Permute fwd
-      int threads = 64;
-      int blocks = (num_rows * topK + threads - 1) / threads;
-      moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
-                                                          num_out_tokens);
+  if (input_fwd == nullptr) {
+    // permute fwd
 
-      blocks = num_rows;
-      threads = std::min(num_cols / kElementsPerAccess, 1024);
-      moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
-          input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
-    } else {
-      // Unpermute bwd without probs for topK == 1
-      int blocks = num_rows;
-      int threads = 32;
+    int threads = 64;
+    int blocks = (num_rows * topK + threads - 1) / threads;
+
+    moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
+                                                        num_out_tokens);
+
+    blocks = num_rows;
+    threads = std::min(num_cols / kElementsPerAccess, 1024);
+    moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
+        input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
+  } else {
+    // unpermute bwd
+
+    int threads = 32;
+    int blocks = num_rows;
+
+    if (prob == nullptr) {
+      // unpermute bwd without probs
 
       moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
-    }
-  } else {
-    // Unpermute bwd with probs
-    int blocks = num_rows;
-    int threads = 32;
-    size_t smem_bytes = topK * sizeof(TCompute);
-
-    if (topK <= 8) {
-      moe_permute_kernel<T, TCompute, 8, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
-    } else if (topK <= 16) {
-      moe_permute_kernel<T, TCompute, 16, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
-    } else if (topK <= 32) {
-      moe_permute_kernel<T, TCompute, 32, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
-    } else if (topK <= 64) {
-      moe_permute_kernel<T, TCompute, 64, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
-    } else if (topK <= 128) {
-      moe_permute_kernel<T, TCompute, 128, true><<<blocks, threads, smem_bytes, stream>>>(
-          input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+          input, input_fwd, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
     } else {
-      NVTE_ERROR("topK cannot exceed 128.");
+      // unpermute bwd with probs
+
+      size_t smem_bytes = topK * sizeof(TCompute);
+
+      if (topK <= 8) {
+        moe_permute_kernel<T, TCompute, 8, true><<<blocks, threads, smem_bytes, stream>>>(
+            input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+      } else if (topK <= 16) {
+        moe_permute_kernel<T, TCompute, 16, true><<<blocks, threads, smem_bytes, stream>>>(
+            input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+      } else if (topK <= 32) {
+        moe_permute_kernel<T, TCompute, 32, true><<<blocks, threads, smem_bytes, stream>>>(
+            input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+      } else if (topK <= 64) {
+        moe_permute_kernel<T, TCompute, 64, true><<<blocks, threads, smem_bytes, stream>>>(
+            input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+      } else if (topK <= 128) {
+        moe_permute_kernel<T, TCompute, 128, true><<<blocks, threads, smem_bytes, stream>>>(
+            input, input_fwd, output, prob, prob_grad, row_id_map, num_rows, topK, num_cols);
+      } else {
+        NVTE_ERROR("topK cannot exceed 128.");
+      }
     }
   }
 }
@@ -272,12 +276,14 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
   size_t smem_bytes = topK * sizeof(TCompute);
 
   if (prob == nullptr) {
-    // Permute bwd
-    // Unpermute fwd without probs
+    // permute bwd
+    // unpermute fwd without probs
+
     moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
-        input, output, row_id_map, prob, num_rows, topK, num_cols);
+        input, output, row_id_map, nullptr, num_rows, topK, num_cols);
   } else {
-    // Unpermute fwd with probs
+    // unpermute fwd with probs
+
     moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, prob, num_rows, topK, num_cols);
   }
