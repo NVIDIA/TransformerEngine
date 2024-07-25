@@ -15,7 +15,6 @@ cd transformer_engine/paddle
 python setup.py bdist_wheel
 
 export NVTE_RELEASE_BUILD=0
-cd $TE_PATH
 pip install dist/*
 
 python $TE_PATH/tests/paddle/test_sanity_import.py
