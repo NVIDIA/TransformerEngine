@@ -2688,21 +2688,22 @@ class SWAFuncWithCP(torch.autograd.Function):
                 ctx.max_seqlen_kv * cp_size * 2 if ctx.window_size[0] == -1 else ctx.window_size[0]
             )
             num_kv_chunks = chunk_ids_to_kv_ag.numel()
+            out_ = out_per_step[i]
             if ctx.qkv_format == "bshd":
                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                 q_ = q[:, i].contiguous()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
                 k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[1], -1, *k.shape[-2:])
                 v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[1], -1, *v.shape[-2:])
+                dout_ = dout[:, i].contiguous().view_as(out_)
             elif ctx.qkv_format == "sbhd":
                 # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                 q_ = q[i].contiguous()
                 # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
                 k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
                 v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
+                dout_ = dout[i].contiguous().view_as(out_)
             dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-            out_ = out_per_step[i]
-            dout_ = dout[:, i].contiguous().view_as(out_)
             if ctx.use_fused_attention:
                 aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
                 dq_, dk_, dv_, _ = fused_attn_bwd(
