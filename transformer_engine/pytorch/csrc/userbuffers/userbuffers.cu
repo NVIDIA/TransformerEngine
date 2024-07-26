@@ -9,7 +9,6 @@
 
 #if __CUDA_ARCH__ >= 800
 #include <cuda_bf16.h>
-#define half nv_bfloat16
 #else
 #include <cuda_fp16.h>
 #endif
