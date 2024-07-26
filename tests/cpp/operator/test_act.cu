@@ -100,8 +100,8 @@ void performTest(const size_t N, const size_t H) {
   nvte_act(input.data(), output.data(), 0);
 
   float ref_amax;
-  compute_ref_act_cast(input.cpu_dptr<IType>(), ref_output.get(),
-                        output.scale(), &ref_amax, N, H);
+  compute_ref_act_cast<ref_act>(input.cpu_dptr<IType>(), ref_output.get(),
+                                output.scale(), &ref_amax, N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -251,8 +251,8 @@ TEST_P(ActTestSuite, TestSwiGLU) {
 namespace {
 
 std::vector<std::pair<size_t, size_t>> gelu_test_cases = {{2048, 12288},
-                                                          {4096, 2048}, 
-                                                          {768, 2816}, 
+                                                          {4096, 2048},
+                                                          {768, 2816},
                                                           {128, 10240},
                                                           {768, 1024},
                                                           {256, 65536},
@@ -265,12 +265,12 @@ std::vector<std::pair<size_t, size_t>> gelu_test_cases = {{2048, 12288},
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
-    GELUTestSuite,
+    ActTestSuite,
     ::testing::Combine(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::ValuesIn(test::all_fp_types),
         ::testing::ValuesIn(gelu_test_cases)),
-    [](const testing::TestParamInfo<SimpleActTestSuite::ParamType>& info) {
+    [](const testing::TestParamInfo<ActTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                          test::typeName(std::get<1>(info.param)) + "X" +
                          std::to_string(std::get<2>(info.param).first) + "X" +
