@@ -130,12 +130,13 @@ class _LayerNormLinear(torch.autograd.Function):
             if return_layernorm_output:
                 # First prepare LN output in higher precision,
                 # which will be later copied to a FP8 UB
-                ln_out = torch.empty_like(inputmat)
+                ln_out = torch.empty_like(inputmat, memory_format=torch.contiguous_format)
             else:
                 ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
-            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype,
+                                      memory_format=torch.contiguous_format)
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 

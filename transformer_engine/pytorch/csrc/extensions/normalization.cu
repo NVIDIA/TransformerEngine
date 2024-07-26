@@ -237,8 +237,11 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input, const at::Tenso
                                         const int scale_inv_offset) {
   using namespace transformer_engine;
 
-  auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(otype)));
-  return rmsnorm_fwd_fp8_noalloc(input, weight, eps, scale, ln_out, amax, scale_inv, otype,
+  const auto &input_ = input.contiguous();
+  const auto &weight_ = weight.contiguous();
+
+  auto ln_out = at::empty_like(input_, at::CUDA(GetATenDType(otype)));
+  return rmsnorm_fwd_fp8_noalloc(input_, weight_, eps, scale, ln_out, amax, scale_inv, otype,
                                  sm_margin, zero_centered_gamma, scale_offset, amax_offset,
                                  scale_inv_offset);
 }
@@ -251,9 +254,6 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
                                                 const int scale_offset, const int amax_offset,
                                                 const int scale_inv_offset) {
   using namespace transformer_engine;
-
-  const auto &input_ = input.contiguous();
-  const auto &weight_ = weight.contiguous();
 
   // Choose kernel implementation
   const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
@@ -270,8 +270,8 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
   // Construct Transformer Engine tensors
   DType itype = GetTransformerEngineDType(input.scalar_type());
   auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-  auto input_cu = makeTransformerEngineTensor(input_);
-  auto gamma_cu = makeTransformerEngineTensor(weight_);
+  auto input_cu = makeTransformerEngineTensor(input);
+  auto gamma_cu = makeTransformerEngineTensor(weight);
   auto z_cu = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype, amax_dptr, scale_dptr,
                                           scale_inv_dptr);
   auto rsigma_cu = makeTransformerEngineTensor(rsigma);
@@ -316,10 +316,13 @@ std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input, const at::Tensor &w
                                     const int sm_margin, const bool zero_centered_gamma) {
   using namespace transformer_engine;
 
-  DType itype = GetTransformerEngineDType(input.scalar_type());
-  auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
+  const auto &input_ = input.contiguous();
+  const auto &weight_ = weight.contiguous();
 
-  return rmsnorm_fwd_noalloc(input, weight, ln_out, eps, sm_margin, zero_centered_gamma);
+  DType itype = GetTransformerEngineDType(input.scalar_type());
+  auto ln_out = at::empty_like(input_, at::CUDA(GetATenDType(itype)));
+
+  return rmsnorm_fwd_noalloc(input_, weight_, ln_out, eps, sm_margin, zero_centered_gamma);
 }
 
 std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input, const at::Tensor &weight,

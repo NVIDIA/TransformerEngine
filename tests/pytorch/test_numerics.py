@@ -1852,6 +1852,13 @@ def test_noncontiguous():
 
     assert_allclose(out, outT, 1e-7)
 
+    # RMSNorm
+    ln1, ln2 = _create2modules(RMSNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT, 1e-7)
+
     # GEMM
     g1, g2 = _create2modules(Linear, [128, 128])
     outT = _run_module(g1, a)
