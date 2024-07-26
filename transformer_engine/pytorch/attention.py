@@ -2570,7 +2570,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                 cp_size,
                 max_seqlen_q,
                 max_seqlen_kv,
-                window_size[0]
+                max_seqlen_kv * cp_size * 2 if window_size[0] == -1 else window_size[0]
             )
             num_kv_chunks = chunk_ids_to_kv_ag.numel()
             if qkv_format == "bshd":
@@ -2643,6 +2643,7 @@ class SWAFuncWithCP(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.qkv_format = qkv_format
         ctx.attn_mask_type = attn_mask_type
+        ctx.attn_bias_type = attn_bias_type
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         ctx.window_size = window_size
@@ -2684,7 +2685,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                 cp_size,
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
-                ctx.window_size[0]
+                ctx.max_seqlen_kv * cp_size * 2 if ctx.window_size[0] == -1 else ctx.window_size[0]
             )
             num_kv_chunks = chunk_ids_to_kv_ag.numel()
             if ctx.qkv_format == "bshd":
@@ -2711,11 +2712,11 @@ class SWAFuncWithCP(torch.autograd.Function):
                     cu_seqlens_kv * num_kv_chunks,
                     q_, k_, v_, out_, dout_,
                     TE_DType[q.dtype],
-                    TE_DType[kv.dtype],
+                    TE_DType[k.dtype],
                     aux_ctx_tensors,
                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded=cu_seqlens_kv_paddedi * num_kv_chunks,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
                     attn_scale=ctx.softmax_scale,
                     dropout=ctx.dropout_p,
                     qkv_layout=qkv_layout,
