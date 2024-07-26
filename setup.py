@@ -5,10 +5,13 @@
 """Installation script."""
 
 import os
+import time
+import atexit
 from pathlib import Path
 from typing import List, Tuple
 
 import setuptools
+from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.utils import (
@@ -39,8 +42,31 @@ elif "jax" in frameworks:
     install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
+# Start timing
+start_time = time.time()
+
+
+def print_total_time():
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"Total build time: {total_time:.2f} seconds")
+
+
+# Register the print_total_time function to be called at exit
+atexit.register(print_total_time)
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
+
+
+class TimedBdist(bdist_wheel):
+    """Helper class to measure build time"""
+
+    def run(self):
+        start_time = time.time()
+        super().run()
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"Time for bdist_wheel: {total_time:.2f} seconds")
 
 
 def setup_common_extension() -> CMakeExtension:
@@ -141,7 +167,7 @@ if __name__ == "__main__":
         },
         description="Transformer acceleration library",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension},
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8, <3.13",
         classifiers=[
             "Programming Language :: Python :: 3.8",
