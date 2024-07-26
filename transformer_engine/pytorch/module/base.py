@@ -48,6 +48,7 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
+# Must be identical to `num_streams` in transformer_engine/common/include/transformer_engine/gemm.h
 _NUM_MAX_CUBLAS_STREAMS = 4
 layers_atomic_ring_exchange = []
 
