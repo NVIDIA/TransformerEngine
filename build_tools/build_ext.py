@@ -135,8 +135,14 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                     search_paths = list(Path(__file__).resolve().parent.parent.iterdir())
                     # Source compilation from top-level
                     search_paths.extend(list(Path(self.build_lib).iterdir()))
+
+                    # Dynamically load required_libs.
+                    from transformer_engine.common import _load_cudnn, _load_nvrtc
+
+                    _load_cudnn()
+                    _load_nvrtc()
                 else:
-                    # Only during release sdist build.
+                    # Only during release bdist build for paddlepaddle.
                     import transformer_engine
 
                     search_paths = list(Path(transformer_engine.__path__[0]).iterdir())
