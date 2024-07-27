@@ -2286,6 +2286,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         ctx.dropout_p,
                         ctx.softmax_scale,
                         False,
+                        rng_state=rng_states[cp_size - i - 1],
                         **fa_optional_backward_kwargs,
                     )
 
@@ -5301,7 +5302,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.hidden_size_per_attention_head = kv_channels
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
-        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
 
         assert (
             num_attention_heads % self.num_gqa_groups == 0
