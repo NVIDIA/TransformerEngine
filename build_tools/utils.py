@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
@@ -253,15 +254,6 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
-def package_files(directory):
-    paths = []
-    for path, _, filenames in os.walk(directory):
-        path = Path(path)
-        for filename in filenames:
-            paths.append(str(path / filename).replace(f"{directory}/", ""))
-    return paths
-
-
 def copy_common_headers(te_src, dst):
     headers = te_src / "common"
     for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
@@ -272,11 +264,21 @@ def copy_common_headers(te_src, dst):
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
-    import importlib
+    main_package = package.split("[")[0]
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    globals()[main_package] = importlib.import_module(main_package)
 
-    try:
-        importlib.import_module(package)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    finally:
-        globals()[package] = importlib.import_module(package)
+
+def uninstall_te_fw_packages():
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "transformer_engine_torch",
+            "transformer_engine_paddle",
+            "transformer_engine_jax",
+        ]
+    )
