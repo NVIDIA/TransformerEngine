@@ -2645,9 +2645,14 @@ class SWAFuncWithCP(torch.autograd.Function):
 
         ctx.save_for_backward(
             q, k, v,
-            cu_seqlens_q, cu_seqlens_kv,
-            cu_seqlens_q_padded, cu_seqlens_kv_padded,
-            *out_per_step, *softmax_lse_per_step, *rng_states
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            *chunk_ids_to_kv_ag_per_step,
+            *out_per_step,
+            *softmax_lse_per_step,
+            *rng_states
         )
         ctx.cp_group = cp_group
         ctx.cp_stream = cp_stream
@@ -2669,9 +2674,10 @@ class SWAFuncWithCP(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
 
         (q, k, v, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded) = ctx.saved_tensors[:7]
-        out_per_step = ctx.saved_tensors[7 : 9]
-        softmax_lse_per_step = ctx.saved_tensors[9 : 11]
-        rng_states = ctx.saved_tensors[11 : 13]
+        chunk_ids_to_kv_ag_per_step = ctx.saved_tensors[7 : 9]
+        out_per_step = ctx.saved_tensors[9 : 11]
+        softmax_lse_per_step = ctx.saved_tensors[11 : 13]
+        rng_states = ctx.saved_tensors[13 : 15]
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
@@ -2694,13 +2700,7 @@ class SWAFuncWithCP(torch.autograd.Function):
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(len(local_seq_chunk_ids)):
-            chunk_ids_to_kv_ag = get_seq_chunk_ids_to_all_gathered_kv(
-                local_seq_chunk_ids[i],
-                cp_size,
-                ctx.max_seqlen_q,
-                ctx.max_seqlen_kv,
-                ctx.max_seqlen_kv * cp_size * 2 if ctx.window_size[0] == -1 else ctx.window_size[0]
-            )
+            chunk_ids_to_kv_ag = chunk_ids_to_kv_ag_per_step[i]
             num_kv_chunks = chunk_ids_to_kv_ag.numel()
             out_ = out_per_step[i]
             if ctx.qkv_format == "bshd":
@@ -2717,8 +2717,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                 k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
                 v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
                 dout_ = dout[i].contiguous().view_as(out_)
-            dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
             if ctx.use_fused_attention:
+                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
                 aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
                 dq_, dk_, dv_, _ = fused_attn_bwd(
                     ctx.max_seqlen_q,
@@ -2740,7 +2740,8 @@ class SWAFuncWithCP(torch.autograd.Function):
                     window_size=ctx.window_size,
                 )
             else:
-                q_, k_, v_, dq_, dk_, dv_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_, dq_, dk_, dv_]]
+                q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
+                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
                 _flash_attn_backward(
                     dout_,
                     q_,
@@ -2762,6 +2763,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     rng_state=rng_states[i],
                     **fa_optional_backward_kwargs,
                 )
+
             if ctx.qkv_format == "bshd":
                 dq[:, i].copy_(dq_.view_as(dq[:, i]))
                 dk_ = dk_.view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
