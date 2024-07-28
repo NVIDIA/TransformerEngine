@@ -2554,8 +2554,12 @@ class SWAFuncWithCP(torch.autograd.Function):
                 # [s, b, np, hn] -> [2, s//2, b, np, hn]
                 q = q.view(2, q.shape[0] // 2, *q.shape[1:])
 
+        # create two streams to resolve wave quantization issue of Flash Attn in each step
+        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
+
         k_ag, _ = gather_along_first_dim(k, cp_group)
         v_ag, _ = gather_along_first_dim(v, cp_group)
+        cp_stream.wait_stream(torch.cuda.current_stream())
         k_ag = k_ag.view(2*cp_size, k.shape[0]//2, *k.shape[1:])
         v_ag = v_ag.view(2*cp_size, v.shape[0]//2, *v.shape[1:])
 
@@ -2565,9 +2569,6 @@ class SWAFuncWithCP(torch.autograd.Function):
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
         out = torch.empty_like(q)
-
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
@@ -2633,7 +2634,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     elif qkv_format == "sbhd":
                         out[i-1].copy_(out_per_step[i-1].view_as(out[i-1]))
 
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+        torch.cuda.current_stream().wait_stream(cp_stream)
 
         if use_fused_attention:
             if qkv_format == "bshd":
@@ -2796,7 +2797,7 @@ class SWAFuncWithCP(torch.autograd.Function):
                     if i < len(local_seq_chunk_ids):
                         flash_attn_streams[i-1].record_event(dkv_update_done)
 
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+        torch.cuda.current_stream().wait_stream(ctx.cp_stream)
 
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
