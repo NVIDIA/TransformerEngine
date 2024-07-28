@@ -2685,9 +2685,18 @@ class SWAFuncWithCP(torch.autograd.Function):
         dq = torch.empty_like(q)
         dk = torch.zeros((2*cp_size, k.shape[0]//2, *k.shape[1:]), dtype=k.dtype, device=k.device)
         dv = torch.zeros_like(dk)
+        dq_per_step = [None, None]
+        dk_per_step = [None, None]
+        dv_per_step = [None, None]
+
+        # create two streams to resolve wave quantization issue of Flash Attn in each step
+        flash_attn_streams = [torch.cuda.current_stream(), ctx.cp_stream]
+        # synchronize dkv update across steps
+        dkv_update_done = torch.cuda.Event()
 
         k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
         v_ag, _ = gather_along_first_dim(v, ctx.cp_group)
+        ctx.cp_stream.wait_stream(torch.cuda.current_stream())
         k_ag = k_ag.view(2*cp_size, k.shape[0]//2, *k.shape[1:])
         v_ag = v_ag.view(2*cp_size, v.shape[0]//2, *v.shape[1:])
 
@@ -2699,81 +2708,95 @@ class SWAFuncWithCP(torch.autograd.Function):
         if _flash_attn_2_4_1_plus:
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
-        for i in range(len(local_seq_chunk_ids)):
-            chunk_ids_to_kv_ag = chunk_ids_to_kv_ag_per_step[i]
-            num_kv_chunks = chunk_ids_to_kv_ag.numel()
-            out_ = out_per_step[i]
-            if ctx.qkv_format == "bshd":
-                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                q_ = q[:, i].contiguous()
-                # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
-                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[1], -1, *k.shape[-2:])
-                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[1], -1, *v.shape[-2:])
-                dout_ = dout[:, i].contiguous().view_as(out_)
-            elif ctx.qkv_format == "sbhd":
-                # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                q_ = q[i].contiguous()
-                # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
-                k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
-                v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
-                dout_ = dout[i].contiguous().view_as(out_)
-            if ctx.use_fused_attention:
-                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-                aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
-                dq_, dk_, dv_, _ = fused_attn_bwd(
-                    ctx.max_seqlen_q,
-                    ctx.max_seqlen_kv * num_kv_chunks,
-                    cu_seqlens_q,
-                    cu_seqlens_kv * num_kv_chunks,
-                    q_, k_, v_, out_, dout_,
-                    TE_DType[q.dtype],
-                    TE_DType[k.dtype],
-                    aux_ctx_tensors,
-                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                    cu_seqlens_q_padded=cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
-                    attn_scale=ctx.softmax_scale,
-                    dropout=ctx.dropout_p,
-                    qkv_layout=qkv_layout,
-                    attn_mask_type=ctx.attn_mask_type,
-                    attn_bias_type=ctx.attn_bias_type,
-                    window_size=ctx.window_size,
-                )
-            else:
-                q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
-                dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-                _flash_attn_backward(
-                    dout_,
-                    q_,
-                    k_,
-                    v_,
-                    out_,
-                    softmax_lse_per_step[i],
-                    dq_,
-                    dk_,
-                    dv_,
-                    cu_seqlens_q,
-                    cu_seqlens_kv * num_kv_chunks,
-                    ctx.max_seqlen_q,
-                    ctx.max_seqlen_kv * num_kv_chunks,
-                    ctx.dropout_p,
-                    ctx.softmax_scale,
-                    True,
-                    window_size=ctx.window_size,
-                    rng_state=rng_states[i],
-                    **fa_optional_backward_kwargs,
-                )
+        for i in range(len(local_seq_chunk_ids) + 1):
+            if i < len(local_seq_chunk_ids):
+                with torch.cuda.stream(flash_attn_streams[i]):
+                    chunk_ids_to_kv_ag = chunk_ids_to_kv_ag_per_step[i]
+                    num_kv_chunks = chunk_ids_to_kv_ag.numel()
+                    out_ = out_per_step[i]
+                    if ctx.qkv_format == "bshd":
+                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                        q_ = q[:, i].contiguous()
+                        # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
+                        k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(k.shape[1], -1, *k.shape[-2:])
+                        v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).movedim(2, 0).contiguous().view(v.shape[1], -1, *v.shape[-2:])
+                        dout_ = dout[:, i].contiguous().view_as(out_)
+                    elif ctx.qkv_format == "sbhd":
+                        # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                        q_ = q[i].contiguous()
+                        # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
+                        k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *k.shape[-3:])
+                        v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_to_kv_ag).view(-1, *v.shape[-3:])
+                        dout_ = dout[i].contiguous().view_as(out_)
+                    if ctx.use_fused_attention:
+                        dq_per_step[i], dk_per_step[i], dv_per_step[i] = [torch.empty_like(x) for x in [q_, k_, v_]]
+                        aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
+                        dq_per_step[i], dk_per_step[i], dv_per_step[i], _ = fused_attn_bwd(
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv * num_kv_chunks,
+                            cu_seqlens_q,
+                            cu_seqlens_kv * num_kv_chunks,
+                            q_, k_, v_, out_, dout_,
+                            TE_DType[q.dtype],
+                            TE_DType[k.dtype],
+                            aux_ctx_tensors,
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            cu_seqlens_q_padded=cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
+                            attn_scale=ctx.softmax_scale,
+                            dropout=ctx.dropout_p,
+                            qkv_layout=qkv_layout,
+                            attn_mask_type=ctx.attn_mask_type,
+                            attn_bias_type=ctx.attn_bias_type,
+                            window_size=ctx.window_size,
+                        )
+                    else:
+                        q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
+                        dq_per_step[i], dk_per_step[i], dv_per_step[i] = [torch.empty_like(x) for x in [q_, k_, v_]]
+                        _flash_attn_backward(
+                            dout_,
+                            q_,
+                            k_,
+                            v_,
+                            out_,
+                            softmax_lse_per_step[i],
+                            dq_per_step[i],
+                            dk_per_step[i],
+                            dv_per_step[i],
+                            cu_seqlens_q,
+                            cu_seqlens_kv * num_kv_chunks,
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv * num_kv_chunks,
+                            ctx.dropout_p,
+                            ctx.softmax_scale,
+                            True,
+                            window_size=ctx.window_size,
+                            rng_state=rng_states[i],
+                            **fa_optional_backward_kwargs,
+                        )
 
-            if ctx.qkv_format == "bshd":
-                dq[:, i].copy_(dq_.view_as(dq[:, i]))
-                dk_ = dk_.view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
-                dv_ = dv_.view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:]).movedim(0, 2).contiguous()
-            elif ctx.qkv_format == "sbhd":
-                dq[i].copy_(dq_.view_as(dq[i]))
-                dk_ = dk_.view(num_kv_chunks, -1, *k.shape[-3:])
-                dv_ = dv_.view(num_kv_chunks, -1, *v.shape[-3:])
-            dk.index_add_(0, chunk_ids_to_kv_ag, dk_)
-            dv.index_add_(0, chunk_ids_to_kv_ag, dv_)
+            if i > 0:
+                with torch.cuda.stream(flash_attn_streams[i-1]):
+                    chunk_ids_to_kv_ag = chunk_ids_to_kv_ag_per_step[i-1]
+                    num_kv_chunks = chunk_ids_to_kv_ag.numel()
+                    if ctx.qkv_format == "bshd":
+                        dq[:, i-1].copy_(dq_per_step[i-1].view_as(dq[:, i-1]))
+                        dk_per_step[i-1] = dk_per_step[i-1].view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:]).movedim(0, 2).contiguous()
+                        dv_per_step[i-1] = dv_per_step[i-1].view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:]).movedim(0, 2).contiguous()
+                    elif ctx.qkv_format == "sbhd":
+                        dq[i-1].copy_(dq_per_step[i-1].view_as(dq[i-1]))
+                        dk_per_step[i-1] = dk_per_step[i-1].view(num_kv_chunks, -1, *k.shape[-3:])
+                        dv_per_step[i-1] = dv_per_step[i-1].view(num_kv_chunks, -1, *v.shape[-3:])
+
+                    # wait until dkv update of last step is done
+                    if i > 1:
+                        flash_attn_streams[i-1].wait_event(dkv_update_done)
+                    dk.index_add_(0, chunk_ids_to_kv_ag, dk_per_step[i-1])
+                    dv.index_add_(0, chunk_ids_to_kv_ag, dv_per_step[i-1])
+                    if i < len(local_seq_chunk_ids):
+                        flash_attn_streams[i-1].record_event(dkv_update_done)
+
+        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
