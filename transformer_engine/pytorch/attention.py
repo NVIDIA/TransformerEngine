@@ -1202,7 +1202,7 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
-class AttnFuncWithCP(torch.autograd.Function):
+class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
     Attention implementation with context parallelism.
     Split attention compute into multiple steps, and overlap current-step
@@ -2486,7 +2486,7 @@ def get_seq_chunk_ids_to_all_gathered_kv(local_chunk_id, cp_size, max_seqlen_q, 
     return chunk_ids_to_all_gathered_kv
 
 
-class SWAFuncWithCP(torch.autograd.Function):
+class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     """
     Sliding window attention implementation with context parallelism.
     """
@@ -2894,7 +2894,11 @@ def attn_forward_func_with_cp(
         f"{qkv_format} format and attention bias!"
     )
 
-    func_with_cp = SWAFuncWithCP if swa_attn else AttnFuncWithCP
+    if swa_attn:
+        func_with_cp = AttnFuncWithCPAndKVAllGather
+    else:
+        func_with_cp = AttnFuncWithCPAndKVP2P
+
     out = func_with_cp.apply(
         is_training,
         q,
