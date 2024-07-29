@@ -86,7 +86,8 @@ class FusedAttnHelper:
 
     @staticmethod
     @cache
-    def allow_non_deterministic():
+    def is_non_deterministic_allowed():
+        """Check if non-deterministic kernels are allowed"""
         return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     @staticmethod
@@ -370,7 +371,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
-            not FusedAttnHelper.allow_non_deterministic(),
+            not FusedAttnHelper.is_non_deterministic_allowed(),
         )
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -641,7 +642,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        deterministic = not FusedAttnHelper.allow_non_deterministic()
+        deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
 
         input_batch = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
@@ -766,7 +767,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
-            not FusedAttnHelper.allow_non_deterministic(),
+            not FusedAttnHelper.is_non_deterministic_allowed(),
         )
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
