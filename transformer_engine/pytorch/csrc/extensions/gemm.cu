@@ -137,7 +137,8 @@ void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int 
   }
 
   // For now, we only have multi-stream cublas backend.
-  nvte_multi_stream_cublas_gemm(te_A, te_B, te_D, te_bias, te_pre_gelu_out, transa, transb, grad,
-                                te_workspace, accumulate, use_split_accumulator, math_sm_count,
+  nvte_multi_stream_cublas_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
+                                te_pre_gelu_out.data(), te_A.size(), transa, transb, grad, te_workspace.data(),
+                                accumulate, use_split_accumulator, math_sm_count,
                                 at::cuda::getCurrentCUDAStream());
 }
