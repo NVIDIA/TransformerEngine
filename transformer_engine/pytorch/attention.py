@@ -2132,6 +2132,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         ctx.dropout_p,
                         ctx.softmax_scale,
                         False,
+                        rng_state=rng_states[cp_size - i - 1],
                         **fa_optional_backward_kwargs,
                     )
 
@@ -3068,7 +3069,7 @@ def check_set_window_size(
             warnings.warn(
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
-        elif orig_window_size[0] < 0 or orig_window_size[0] < 0:
+        elif orig_window_size[0] < 0 or orig_window_size[1] < 0:
             assert False, (
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
@@ -5124,7 +5125,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.hidden_size_per_attention_head = kv_channels
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
-        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
 
         assert (
             num_attention_heads % self.num_gqa_groups == 0

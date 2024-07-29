@@ -284,11 +284,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             debug=debug,
         )
         self.num_prefetch_group = num_prefetch_group
-
-        # prepare for tensor buffer
-        self.tensor_id_to_tensor_buf_double_bufs = []
-        for _ in range(2):
-            self.tensor_id_to_tensor_buf_double_bufs.append({})
+        # Data Structure to maintain reference to activation tensors
+        self.tensor_tag_to_buf = {}
 
         # allocate streams and events for synchronization
         self.d2h_stream = torch.cuda.Stream()
@@ -299,37 +296,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.h2d_finish_events.append(torch.cuda.Event())
             self.compute_stream_bwd_start_events.append(torch.cuda.Event())
         self.d2h_final_event = torch.cuda.Event()
-
-    def get_tensor_buf_for_offloaded_tensor(self, tensor, tensor_tag):
-        """Get tensor buffer for offloaded tensor."""
-        group_id, tensor_id = tensor_tag
-        # obtain ping-pong buffer
-        id_buf_map = self.tensor_id_to_tensor_buf_double_bufs[(group_id % 2)]
-
-        if not tensor_id in id_buf_map:
-            allocate_new_buf = True
-        else:
-            tensor_buf = id_buf_map[tensor_id]
-            allocate_new_buf = (
-                tensor_buf.size() != tensor.size() or tensor_buf.dtype != tensor.dtype
-            )
-
-        if allocate_new_buf:
-            # supposed to only execute once
-            fp8_offload = isinstance(tensor, Float8Tensor)
-            buffer = torch.empty(
-                tensor.size(),
-                dtype=torch.uint8 if fp8_offload else tensor.dtype,
-                layout=tensor.layout,
-                device=tensor.device,
-            )
-
-            if isinstance(tensor, Float8Tensor):
-                id_buf_map[tensor_id] = Float8Tensor.make_like(tensor, data=buffer)
-            else:
-                id_buf_map[tensor_id] = buffer
-
-        return id_buf_map[tensor_id]
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
 
@@ -347,21 +313,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.tensor_count_current_group += 1
             assert tensor_tag not in self.tensor_tag_to_state
 
+            self.tensor_tag_to_state[tensor_tag] = tensor
+
             if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
                 tensor
             ):
-                # first copy the tensor to tensorbuf,
-                # so that the original tensor will not be deleted
-                tensor_buf = self.get_tensor_buf_for_offloaded_tensor(tensor, tensor_tag)
-                tensor_buf.copy_(tensor)
-                if hasattr(tensor, "weight_offloading"):
-                    tensor_buf.weight_offloading = True
-                if hasattr(tensor, "activation_offloading"):
-                    tensor_buf.activation_offloading = True
-                # Here we just save it, and at commit, bulk_offload_group will handle it
-                self.tensor_tag_to_state[tensor_tag] = tensor_buf
-            else:
-                self.tensor_tag_to_state[tensor_tag] = tensor
+                self.tensor_tag_to_buf[tensor_tag] = tensor
         else:
             tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
@@ -373,6 +330,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
+        self.tensor_tag_to_buf.pop(tensor_tag, None)
         # the tensor should have been copied back in on_group_commit_backward()
         # which invokes bulk_reload_group.
         assert not isinstance(tensor, tuple)
@@ -389,10 +347,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
                     # if offload, return the reference to cpu copy
                     if self.tensor_need_offloading_checker(tensor_on_device):
-                        if hasattr(tensor_on_device, "weight_offloading"):
-                            delattr(tensor_on_device, "weight_offloading")
-                        if hasattr(tensor_on_device, "activation_offloading"):
-                            delattr(tensor_on_device, "activation_offloading")
                         state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         self.tensor_tag_to_state[tensor_tag] = state
 
@@ -403,12 +357,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         previous_group = current_group - 1
         if previous_group < self.num_offload_group:
             torch.cuda.synchronize()
-            # TODO (guyueh): this part is originally designed to reduce the peak memory usage. # pylint: disable=fixme
-            # however, uncommenting this part will cause illegal access, have not figured out why.
 
-            if previous_group + 2 >= self.num_offload_group:
-                # this buffer is no longer required
-                self.tensor_id_to_tensor_buf_double_bufs[(previous_group % 2)] = {}
+            # Have to release the memory held by activations of the previous layer
+            if previous_group >= 0:
+                for tensor_tag, _ in self.tensor_tag_to_buf.items():
+                    if tensor_tag[0] == previous_group:
+                        self.tensor_tag_to_buf[tensor_tag] = None
 
         # the copying of this group should wait for the computation stream event
         if current_group < self.num_offload_group:

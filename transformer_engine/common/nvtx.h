@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NVTX_H_
 #define TRANSFORMER_ENGINE_COMMON_NVTX_H_
 
-#include <nvToolsExt.h>
+#include <nvtx3/nvToolsExt.h>
 
 #include <string>
 
