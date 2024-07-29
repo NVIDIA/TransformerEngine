@@ -3,8 +3,9 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
 from dataclasses import dataclass
-from functools import partial, reduce
+from functools import partial, reduce, cache
 import operator
+import os
 from typing import Optional, Tuple
 import warnings
 
@@ -82,6 +83,11 @@ class FusedAttnHelper:
             self.kv_max_seqlen,
             self.head_dim,
         )
+
+    @staticmethod
+    @cache
+    def allow_non_deterministic():
+        return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     @staticmethod
     def parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout):
@@ -364,6 +370,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
+            not FusedAttnHelper.allow_non_deterministic(),
         )
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -634,6 +641,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+        deterministic = not FusedAttnHelper.allow_non_deterministic()
+
         input_batch = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
             input_batch,
@@ -651,6 +660,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             qkv_layout,
             jax_dtype_to_te_dtype(q_aval.dtype),
             is_training,
+            deterministic,
             max_segments_per_seq,
         )
 
@@ -756,6 +766,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
+            not FusedAttnHelper.allow_non_deterministic(),
         )
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
