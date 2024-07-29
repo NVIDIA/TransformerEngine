@@ -2488,8 +2488,8 @@ def get_seq_chunk_ids_to_all_gathered_kv(local_chunk_id, cp_size, max_seqlen_q, 
 
 class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     """
-    Attention implementation with context parallelism. KV all-gather between
-    CP ranks is exposed.
+    Attention implementation with context parallelism.
+    KV all-gather between CP ranks is exposed.
     """
 
     @staticmethod
