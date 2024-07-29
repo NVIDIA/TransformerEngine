@@ -111,7 +111,7 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(weight)
 
         tp_world_size = get_distributed_world_size(tp_group)
-        ub_overlap_rs = False if tp_world_size == 1 else ub_overlap_rs
+        ub_overlap_rs = False if tp_world_size == 1 or parallel_mode != "row" else ub_overlap_rs
 
         # Cast input to expected dtype
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -405,7 +405,7 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             tp_world_size = get_distributed_world_size(ctx.tp_group)
-            ctx.ub_overlap_ag = False if tp_world_size == 1 else ctx.ub_overlap_ag
+            ctx.ub_overlap_ag = False if tp_world_size == 1 or ctx.parallel_mode != "row" else ctx.ub_overlap_ag
             if ctx.ub_overlap_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
