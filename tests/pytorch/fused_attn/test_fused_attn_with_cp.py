@@ -16,11 +16,13 @@ from transformer_engine.pytorch.utils import (
 )
 
 model_configs_flash_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
-    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
-    "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-    "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
+    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias,  window
+    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", (-1, 0)),  # MHA
+    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", (-1, -1)),  # MHA
+    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", (512, 0)),  # MHA
+    "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias", (-1, 0)),  # GQA
+    "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias", (-1, -1)),  # GQA
+    "cp_2_2": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias", (512, 0)),  # GQA
 }
 
 
@@ -39,7 +41,14 @@ def get_bash_arguments(**kwargs):
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-def test_cp_with_flash_attention(dtype, model, qkv_format):
+@pytest.mark.parametrize("kv_comm_type", ["p2p", "all_gather"])
+def test_cp_with_flash_attention(dtype, model, qkv_format, kv_comm_type):
+    config = configs_flash_attn[model]
+    if kv_comm_type == "all_gather" and (qkv_format == "thd" or "causal" not in config.attn_mask_type or config.attn_bias_type != "no_bias"):
+        pytest.skip(f"KV all-gather implementation cannot work with THD format, {config.attn_mask_type} mask type, and {config.attn_bias_type} bias type!")
+    if kv_comm_type == "p2p" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
+        pytest.skip(f"Sliding window attention only works with the implementation of KV all-gather!")
+
     subprocess.run(
         get_bash_arguments(
             dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FlashAttention"
@@ -49,15 +58,15 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
 
 
 model_configs_fused_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,              bias
-    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
-    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
-    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
-    "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
-    "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-    "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
-    "cp_2_2": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
-    "cp_2_3": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
+    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,     bias,   window
+    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", (-1, 0)),  # MHA
+    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", (-1, -1)),  # MHA
+    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias", (-1, 0)),  # MHA
+    "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias", (-1, -1)),  # MHA
+    "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias", (-1, 0)),  # GQA
+    "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias", (-1, -1)),  # GQA
+    "cp_2_2": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "post_scale_bias", (-1, 0)),  # GQA
+    "cp_2_3": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias", (-1, -1)),  # GQA
 }
 
 
@@ -66,9 +75,21 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-def test_cp_with_fused_attention(dtype, model, qkv_format):
+@pytest.mark.parametrize("kv_comm_type", ["p2p", "all_gather"])
+def test_cp_with_fused_attention(dtype, model, qkv_format, kv_comm_type):
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+.")
+    if kv_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
+        pytest.skip("KV all-gather implementation is only supported with cuDNN >= 9.3.0")
+
+    config = configs_fused_attn[model]
+    if qkv_format == "thd" and (config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"):
+        pytest.skip(f"THD format cannot work with QGA/MQA and {config.attn_bias_type} bias type!")
+    if kv_comm_type == "all_gather" and (qkv_format == "thd" or "causal" not in config.attn_mask_type or config.attn_bias_type != "no_bias"):
+        pytest.skip(f"KV all-gather implementation cannot work with THD format, {config.attn_mask_type} mask type, and {config.attn_bias_type} bias type!")
+    if config.window_size != (-1, 0) and config.window_size != (-1, -1):
+        pytest.skip(f"Sliding window attention + context parallelism cannot work with Fused Attention now!")
+
     subprocess.run(
         get_bash_arguments(
             dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FusedAttention"

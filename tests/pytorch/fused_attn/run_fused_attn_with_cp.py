@@ -13,7 +13,7 @@ from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fuse
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 
-def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention"):
+def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", kv_comm_type="p2p"):
     """Test DotProductAttention module with context parallelism"""
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -24,10 +24,19 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
-        if qkv_format == "thd" and (
-            config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"
-        ):
-            return
+
+    assert config.attn_mask_type in [
+        "causal",
+        "no_mask",
+    ], f"{config.attn_mask_type} is an unsupported attention mask type!"
+    if kernel_backend == "FusedAttention" and qkv_format == "thd":
+        if "causal" in config.attn_mask_type:
+            config.attn_mask_type = "padding_causal"
+        else:
+            config.attn_mask_type = "padding"
+
+    if kv_comm_type == "all_gather":
+        os.environ["NVTE_CONTEXT_PARALLEL_KV_ALL_GATHER"] = "1"
 
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -49,17 +58,6 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
 
-    assert config.attn_mask_type in [
-        "causal",
-        "no_mask",
-    ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-
-    if kernel_backend == "FusedAttention" and qkv_format == "thd":
-        if "causal" in config.attn_mask_type:
-            config.attn_mask_type = "padding_causal"
-        else:
-            config.attn_mask_type = "padding"
-
     # instantiate core attn module
     core_attn = DotProductAttention(
         config.num_heads,
@@ -68,6 +66,7 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
     )
     core_attn = core_attn.cuda()
 
