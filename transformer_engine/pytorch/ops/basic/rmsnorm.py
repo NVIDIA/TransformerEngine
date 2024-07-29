@@ -84,8 +84,8 @@ class RMSNorm(BasicOperation):
         sm_margin: int = 0,
     ) -> None:
         super().__init__()
-        self._eps: float = eps
-        self._zero_centered_gamma: bool = zero_centered_gamma
+        self.eps: float = eps
+        self.zero_centered_gamma: bool = zero_centered_gamma
 
         # Parameter shape
         if not isinstance(normalized_shape, Iterable):
@@ -136,10 +136,10 @@ class RMSNorm(BasicOperation):
         weight = weight.to(device=self.device, dtype=self.dtype)
 
         # Initialize values
-        if self._zero_centered_gamma:
-            weight.zero_()
+        if self.zero_centered_gamma:
+            torch.nn.init.zeros_(weight)
         else:
-            weight.fill_(1)
+            torch.nn.init.ones_(weight)
 
         # Save updated parameter
         if not isinstance(weight, torch.nn.Parameter):
@@ -201,12 +201,12 @@ class RMSNorm(BasicOperation):
             args = (
                 x,
                 w,
-                self._eps,
+                self.eps,
                 output_fp8_meta[fp8_meta_key],
                 0,  # fp8_meta_index
                 fp8_dtype,
                 sm_margin,
-                self._zero_centered_gamma,
+                self.zero_centered_gamma,
             )
             if requires_grad:
                 data, rstdevs = rmsnorm_fwd_fp8(*args)
@@ -224,9 +224,9 @@ class RMSNorm(BasicOperation):
             args = (
                 x,
                 w,
-                self._eps,
+                self.eps,
                 sm_margin,
-                self._zero_centered_gamma,
+                self.zero_centered_gamma,
             )
             if requires_grad:
                 y, rstdevs = rmsnorm_fwd(*args)
@@ -270,7 +270,7 @@ class RMSNorm(BasicOperation):
             rstdevs,
             w,
             self._sm_margins["bwd"],
-            self._zero_centered_gamma,
+            self.zero_centered_gamma,
         )
 
         # Clear saved tensors if possible
