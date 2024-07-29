@@ -1204,9 +1204,9 @@ def get_cu_seqlens_on_cp_rank(
 
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
-    Attention implementation with context parallelism.
-    Split attention compute into multiple steps, and overlap current-step
-    compute with next-step communication.
+    Attention implementation with context parallelism. Exchange KV between CP ranks
+    with P2P in ring topology. Split attention compute into multiple steps, and overlap
+    current-step compute with next-step communication.
     """
 
     @staticmethod
@@ -2488,7 +2488,8 @@ def get_seq_chunk_ids_to_all_gathered_kv(local_chunk_id, cp_size, max_seqlen_q, 
 
 class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     """
-    Sliding window attention implementation with context parallelism.
+    Attention implementation with context parallelism. KV all-gather between
+    CP ranks is exposed.
     """
 
     @staticmethod
