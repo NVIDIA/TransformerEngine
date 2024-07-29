@@ -44,10 +44,14 @@ def get_bash_arguments(**kwargs):
 @pytest.mark.parametrize("kv_comm_type", ["p2p", "all_gather"])
 def test_cp_with_flash_attention(dtype, model, qkv_format, kv_comm_type):
     config = model_configs_flash_attn[model]
-    if kv_comm_type == "all_gather" and (qkv_format == "thd" or "causal" not in config.attn_mask_type or config.attn_bias_type != "no_bias"):
-        pytest.skip(f"KV all-gather implementation cannot work with THD format, {config.attn_mask_type} mask type, and {config.attn_bias_type} bias type!")
+    if kv_comm_type == "all_gather" and qkv_format == "thd":
+        pytest.skip(f"KV all-gather implementation does not support {qkv_format} format yet!")
+    if kv_comm_type == "all_gather" and "causal" not in config.attn_mask_type:
+        pytest.skip(f"KV all-gather implementation does not support {config.attn_mask_type} mask type yet!")
+    if kv_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
+        pytest.skip(f"KV all-gather implementation does not support {config.attn_bias_type} bias type yet!")
     if kv_comm_type == "p2p" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip(f"Sliding window attention only works with the implementation of KV all-gather!")
+        pytest.skip(f"KV P2P implementation does not support window size {config.window_size} yet!")
 
     subprocess.run(
         get_bash_arguments(
@@ -83,12 +87,18 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, kv_comm_type):
         pytest.skip("KV all-gather implementation is only supported with cuDNN >= 9.3.0")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and (config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"):
-        pytest.skip(f"THD format cannot work with QGA/MQA and {config.attn_bias_type} bias type!")
-    if kv_comm_type == "all_gather" and (qkv_format == "thd" or "causal" not in config.attn_mask_type or config.attn_bias_type != "no_bias"):
-        pytest.skip(f"KV all-gather implementation cannot work with THD format, {config.attn_mask_type} mask type, and {config.attn_bias_type} bias type!")
+    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
+        pytest.skip(f"{qkv_format} format does not support QGA/MQA yet!")
+    if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
+        pytest.skip(f"{qkv_format} format does not support {config.attn_bias_type} bias type yet!")
+    if kv_comm_type == "all_gather" and qkv_format == "thd":
+        pytest.skip(f"KV all-gather implementation does not support {qkv_format} format yet!")
+    if kv_comm_type == "all_gather" and "causal" not in config.attn_mask_type:
+        pytest.skip(f"KV all-gather implementation does not support {config.attn_mask_type} mask type yet!")
+    if kv_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
+        pytest.skip(f"KV all-gather implementation does not support {config.attn_bias_type} bias type yet!")
     if config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip(f"Sliding window attention + context parallelism cannot work with Fused Attention now!")
+        pytest.skip(f"Fused attention does not support sliding window attention + context parallelism yet!")
 
     subprocess.run(
         get_bash_arguments(
