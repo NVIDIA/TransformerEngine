@@ -295,7 +295,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # Logic to make offloading load balance across computation
         # for optimal CPU/GPU interconnect usage
         constant = 0
-        for i in range (self.num_offload_group):
+        for i in range(self.num_offload_group):
             self.layer_window_map[i] = ((self.num_layers // self.num_offload_group) * (i + 1)) - 1
             if i < (self.num_layers % self.num_offload_group):
                 self.layer_window_map[i] += i + 1
@@ -362,17 +362,17 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
- 
+
         # For the first group, kickstart the offload after we have
         # the first compute completion
         if current_group == 0:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
             self.bulk_offload_group(current_group)
 
-        # Window map data structure helps us synchronize based on number 
+        # Window map data structure helps us synchronize based on number
         # of layers offloaded
         if self.layer_window_map[self.offloaded_group_count] == current_group:
-         
+
             # Stream synchronization both ways
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
             torch.cuda.current_stream().wait_stream(self.d2h_stream)
