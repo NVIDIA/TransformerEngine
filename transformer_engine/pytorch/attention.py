@@ -2578,7 +2578,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         cp_size,
                         max_seqlen_q,
                         max_seqlen_kv,
-                        max_seqlen_kv * cp_size * 2 if window_size[0] == -1 else window_size[0]
+                        max_seqlen_kv * cp_size * 2 if (window_size is None or window_size[0] == -1) else window_size[0]
                     )
                     chunk_ids_to_kv_ag_per_step[i] = chunk_ids_to_kv_ag
                     num_kv_chunks = chunk_ids_to_kv_ag.numel()
