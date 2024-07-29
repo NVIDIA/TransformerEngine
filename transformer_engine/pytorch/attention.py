@@ -2524,11 +2524,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_size = get_distributed_world_size(cp_group)
         rank = get_distributed_rank(cp_group)
 
-        if use_fused_attention:
-            attn_mask_type = attn_mask_type + "_bottom_right"
         causal = ("causal" in attn_mask_type)
         padding = ("padding" in attn_mask_type)
         assert(causal and not padding), f"{attn_mask_type} mask type is not supported!"
+        if use_fused_attention and causal and 'bottom_right' not in attn_mask_type:
+            attn_mask_type = attn_mask_type + "_bottom_right"
+
+        assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (use_fused_attention or _flash_attn_2_3_plus), \
             "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
@@ -2536,6 +2538,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if _flash_attn_2_4_plus:
             fa_optional_forward_kwargs["alibi_slopes"] = None
 
+        assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
@@ -2623,7 +2626,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             cu_seqlens_q, cu_seqlens_kv * num_kv_chunks,
                             max_seqlen_q, max_seqlen_kv * num_kv_chunks,
                             dropout_p, softmax_scale,
-                            causal=causal, return_softmax=False,
+                            causal=True, return_softmax=False,
                             window_size=window_size,
                             **fa_optional_forward_kwargs
                         )
@@ -2862,7 +2865,11 @@ def attn_forward_func_with_cp(
     use_fused_attention=False,
     window_size=None,
 ) -> torch.Tensor:
-    """Attention implementation with context parallelism"""
+    """
+    Attention implementation with context parallelism.
+    """
+
+    assert "bottom_right" not in attn_mask_type, f"Context parallelism is not supported for {attn_mask_type} mask type!"
     assert qkv_format in [
         "bshd",
         "sbhd",
@@ -2887,15 +2894,10 @@ def attn_forward_func_with_cp(
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
 
-    swa_attn = window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
-    assert (
-        not swa_attn or (qkv_format != "thd" and attn_bias_type == "no_bias")
-    ), (
-        f"Context parallelism is not supported for sliding window attention with "
-        f"{qkv_format} format and attention bias!"
-    )
+    sliding_window_attn = window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
+    kv_all_gather = int(os.getenv("NVTE_CONTEXT_PARALLEL_KV_ALL_GATHER", "0"))
 
-    if swa_attn:
+    if sliding_window_attn or kv_all_gather:
         func_with_cp = AttnFuncWithCPAndKVAllGather
     else:
         func_with_cp = AttnFuncWithCPAndKVP2P
