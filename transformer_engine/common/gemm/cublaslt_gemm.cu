@@ -379,8 +379,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 }
 
 void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-                                   const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms, bool transa,
-                                   bool transb, bool grad, NVTETensor *workspace, bool accumulate,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor *workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
