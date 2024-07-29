@@ -405,7 +405,9 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             tp_world_size = get_distributed_world_size(ctx.tp_group)
-            ctx.ub_overlap_ag = False if tp_world_size == 1 or ctx.parallel_mode != "row" else ctx.ub_overlap_ag
+            ctx.ub_overlap_ag = (
+                False if tp_world_size == 1 or ctx.parallel_mode != "row" else ctx.ub_overlap_ag
+            )
             if ctx.ub_overlap_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
