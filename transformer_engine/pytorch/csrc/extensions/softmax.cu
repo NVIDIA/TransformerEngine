@@ -301,7 +301,7 @@ void __global__ CrossEntropyFwdSumExpKernel(float* sum_exp_logits_ptr,
       for (int k = 0; k < 8; k++) {
         dtype data_bf16 = bf_16_p[k];
         float data_fp32 = float(data_bf16);  //convert to float
-        row_item = __expf(data_fp32 - cur_row_max);
+        row_item = exp(data_fp32 - cur_row_max);
         cur_thread_exp_sum += row_item;
       }
     }
@@ -314,14 +314,14 @@ void __global__ CrossEntropyFwdSumExpKernel(float* sum_exp_logits_ptr,
     for (size_t k = cur_vocab_parallel_logits_ptr_begin;
          k < (cur_vocab_parallel_logits_ptr_begin + begin_offset); k++) {
       float val = float(vocab_parallel_logits_ptr[k]);
-      row_item = __expf(val - cur_row_max);
+      row_item = exp(val - cur_row_max);
       row_sum += row_item;
     }
 #pragma unroll
     for (size_t k = cur_vocab_parallel_logits_ptr_begin + end_offset + 1;
          k < cur_vocab_parallel_logits_ptr_end; k++) {
       float val = float(vocab_parallel_logits_ptr[k]);
-      row_item = __expf(val - cur_row_max);
+      row_item = exp(val - cur_row_max);
       row_sum += row_item;
     }
     sum_exp_logits_ptr[rowIdx] = row_sum;
@@ -330,9 +330,9 @@ void __global__ CrossEntropyFwdSumExpKernel(float* sum_exp_logits_ptr,
 
 float __device__ __forceinline__ compute_mean_log(float data_fp32, float cur_row_max,
                                                   float cur_row_exp_sum) {
-  float row_item = expf(data_fp32 - cur_row_max);
+  float row_item = exp(data_fp32 - cur_row_max);
   row_item = row_item / cur_row_exp_sum;  //compute softmax
-  row_item = __logf(row_item);            //after softmax, compute log
+  row_item = log(row_item);            //after softmax, compute log
   return row_item;
 }
 
@@ -403,7 +403,7 @@ float __device__ __forceinline__ compute_exp_bwd_smooth(float row, float logits_
                                                         long masked_target_1d, float softmax_update,
                                                         float label_smoothing, float smoothing,
                                                         float average_grad, float grad_output) {
-  row = __expf(row - logits_max);
+  row = exp(row - logits_max);
   row /= sum_exp_logits;
   if (i == (size_t)masked_target_1d) {  // i == masked_target_1d
     row = row - softmax_update;
