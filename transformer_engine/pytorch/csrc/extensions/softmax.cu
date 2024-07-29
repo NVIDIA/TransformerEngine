@@ -332,7 +332,7 @@ float __device__ __forceinline__ compute_mean_log(float data_fp32, float cur_row
                                                   float cur_row_exp_sum) {
   float row_item = exp(data_fp32 - cur_row_max);
   row_item = row_item / cur_row_exp_sum;  //compute softmax
-  row_item = log(row_item);            //after softmax, compute log
+  row_item = log(row_item);               //after softmax, compute log
   return row_item;
 }
 
