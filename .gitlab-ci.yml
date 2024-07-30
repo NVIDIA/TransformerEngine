@@ -642,81 +642,19 @@ upload_logs:
 "Run all L2 tests":
     <<: *MANUAL_TEST_TRIGGER
 
-.P100_4GPU: &P100_4GPU
-    tags:
-    - P100
-    - 4GPU
-
-.V100_4GPU: &V100_4GPU
-    tags:
-    - V100
-    - 4GPU
-
 .V100_1GPU: &V100_1GPU
     tags:
     - V100
     - 1GPU
 
-.V100_R410_8GPU: &V100_R410_8GPU
+.T4_1GPU: &T4_1GPU
     tags:
-    - V100
-    - R410
-    - 8GPU
-
-.TU102_R445_1GPU: &TU102_R445_1GPU
-    tags:
-    - TU102
-    - R445
-    - 1GPU
-
-.TU104_1GPU: &TU104_1GPU
-    tags:
-    - TU104
-    - 1GPU
-
-.TitanXP_R384_2GPU: &TitanXP_R384_2GPU
-    tags:
-    - TitanXP
-    - R384
-    - 2GPU
-
-.P40_R384_1GPU: &P40_R384_1GPU
-    tags:
-    - P40
-    - R384
-    - 1GPU
+    - T4
 
 .A100_1GPU: &A100_1GPU
     tags:
     - A100
     - 1GPU
-
-.A100_vGPU: &A100_vGPU
-    tags:
-    - A100-vGPU
-
-.A100_2GPU_P2P: &A100_2GPU_P2P
-    tags:
-    - A100
-    - 2GPU
-    - P2P
-
-.A102_1GPU: &A102_1GPU
-    tags:
-    - A102
-    - 1GPU
-
-.M40_R384_1GPU: &M40_R384_1GPU
-    tags:
-    - M40
-    - R384
-    - 1GPU
-
-.DGX2_R410_16GPU: &DGX2_R410_16GPU
-    tags:
-    - V100
-    - R410
-    - 16GPU
 
 .H100_1GPU:
     tags:
@@ -825,13 +763,13 @@ L0_pytorch_unittest--A100_1GPU:
     - .L0_test
     - .A100_1GPU
 
-L0_pytorch_unittest--TU102_R445_1GPU:
+L0_pytorch_unittest--T4_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
     extends:
     - .L0_test
-    - .TU102_R445_1GPU
+    - .T4_1GPU
 
 L0_pytorch_unittest--H100_1GPU:
     variables:
