@@ -1233,7 +1233,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
-        window_size,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2462,7 +2461,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias,
             None,
             None,
-            None,
         )
 
 
@@ -2470,6 +2468,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 def get_seq_chunk_ids_to_all_gathered_kv(
     local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size_left
 ):
+    """Compute sequence chunk ids to the all-gathered KV."""
     seq_end_idx = (local_chunk_id + 1) * max_seqlen_kv
     seq_start_idx = max(0, seq_end_idx - max_seqlen_q - window_size_left)
     seqlen = seq_end_idx - seq_start_idx
@@ -2507,7 +2506,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cu_seqlens_kv_padded,
         dropout_p,
         cp_group,
-        cp_global_ranks,
         cp_stream,
         softmax_scale,
         qkv_format,
@@ -2618,7 +2616,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             -1, *v.shape[-3:]
                         )
                     if use_fused_attention:
-                        out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = (
+                        out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = (
                             fused_attn_fwd(
                                 is_training,
                                 max_seqlen_q,
@@ -2635,7 +2633,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 qkv_layout=qkv_layout,
                                 attn_mask_type=attn_mask_type,
                                 attn_bias_type=attn_bias_type,
-                                attn_bias=None,
+                                attn_bias=attn_bias,
                                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                                 cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
                                 window_size=window_size,
@@ -2909,7 +2907,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
-            None,
         )
 
 
@@ -2974,36 +2971,56 @@ def attn_forward_func_with_cp(
     )
 
     if sliding_window_attn or cp_comm_type == "all_gather":
-        func_with_cp = AttnFuncWithCPAndKVAllGather
+        out = AttnFuncWithCPAndKVAllGather.apply(
+            is_training,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            dropout_p,
+            cp_group,
+            cp_stream,
+            softmax_scale,
+            qkv_format,
+            attn_mask_type,
+            attn_bias_type,
+            attn_bias,
+            deterministic,
+            use_fused_attention,
+            window_size,
+        )
     elif cp_comm_type == "p2p":
-        func_with_cp = AttnFuncWithCPAndKVP2P
+        out = AttnFuncWithCPAndKVP2P.apply(
+            is_training,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            dropout_p,
+            cp_group,
+            cp_global_ranks,
+            cp_stream,
+            softmax_scale,
+            qkv_format,
+            attn_mask_type,
+            attn_bias_type,
+            attn_bias,
+            deterministic,
+            use_fused_attention,
+        )
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
-    out = func_with_cp.apply(
-        is_training,
-        q,
-        k,
-        v,
-        cu_seqlens_q,
-        cu_seqlens_kv,
-        max_seqlen_q,
-        max_seqlen_kv,
-        cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
-        dropout_p,
-        cp_group,
-        cp_global_ranks,
-        cp_stream,
-        softmax_scale,
-        qkv_format,
-        attn_mask_type,
-        attn_bias_type,
-        attn_bias,
-        deterministic,
-        use_fused_attention,
-        window_size,
-    )
     return out
 
 
