@@ -132,13 +132,13 @@ def get_padded_spec(spec, ndim):
     return spec + (None,) * (ndim - len(spec))
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, **kwargs):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
     if mesh_resource is not None:
         _, resource = _get_mesh_info(mesh_resource)
-        return ops(x, resource)
+        return ops(x, resource, **kwargs)
     return x
 
 
@@ -147,6 +147,22 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_mesh_axis_size(axis, mesh=None):
+    """
+    Get the axis size of the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    if axis == None:
+        return 1
+
+    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh f{mesh.shape}"
+    return mesh.shape[axis]
 
 
 @dataclass
@@ -167,14 +183,18 @@ class MeshResource:
         The axis name in Mesh used to split the batch and weights along.
         If it is None, then full-sharded data parallelism is disabled.
     pp_resource : str, default = None
-        The axis name in Mesh used to split model layers. along.
+        The axis name in Mesh used to split model layers along.
         If it is None, then pipeline parallelism is disabled.
+    cp_resource : str, default = None
+        The axis name in Mesh used to split sequence dimensions along
+        in the attention. If it is None, then pipeline parallelism is disabled.
     """
 
     dp_resource: str = None
     tp_resource: str = None
     fsdp_resource: str = None
     pp_resource: str = None
+    cp_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = MeshResource()
