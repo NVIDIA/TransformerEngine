@@ -94,16 +94,17 @@ void compute_ref_act_cast(const IT *input_h,
   *amax_h = amax;
 }
 
-template <float (*dact)(const float), typename IT, typename OT, typename CT>
+template <float (*dact)(const float), typename IT, typename OT>
 void compute_ref_dact_cast(const IT *input_h,
                            const IT *grad_h,
                            OT *output_h,
                            const size_t N,
                            const size_t H) {
+  using CT = float;
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT elt = static_cast<CT>(input_h[i * H + j]);
-      elt = act(elt);
+      elt = dact(elt);
       CT grad = static_cast<CT>(grad_h[i * H + j]);
       output_h[i * H + j] = static_cast<OT>(grad * elt);
     }
@@ -132,10 +133,11 @@ void compute_ref_glu_act_cast(const IT *input_h, OT *output_h, const CT scale, C
 }
 
 template <float (*dact)(const float), float (*act)(const float),
-          typename IT, typename OT, typename CT>
+          typename IT, typename OT>
 void compute_ref_dglu_act_cast(const IT *input_h, const IT *grad_h, OT *output_h,
                                const size_t N, const size_t H) {
   const int col = H * 2;
+  using CT = float;
 
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
@@ -276,7 +278,7 @@ TEST_P(ActTestSuite, TestGELU) {
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<gelu, dgelu. nvte_gelu, nvte_dgelu,
+        performTest<gelu, dgelu, nvte_gelu, nvte_dgelu,
                     InputType, OutputType>(size.first, size.second);
       );
     );
@@ -342,7 +344,7 @@ TEST_P(ActTestSuite, TestReGLU) {
       input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           output_type, OutputType,
-          performTestGLU<relu, drelu. nvte_reglu, nvte_dreglu, InputType,
+          performTestGLU<relu, drelu, nvte_reglu, nvte_dreglu, InputType,
                          OutputType>(size.first, size.second);););
 }
 
