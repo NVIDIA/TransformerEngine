@@ -249,7 +249,7 @@ def test_dot_product_attention(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
-    if pad_between_seqs:
+    if pad_between_seqs and not (config.max_seqlen_q != config.max_seqlen_kv and config.attn_mask_type in ["causal", "padding_causal"]):
         flash_attn_supported = True
 
     # Skip if only unfused backend is supported
@@ -626,14 +626,16 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    pad_between_seqs = False
-    test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
-    )
     pad_between_seqs = True
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
+    if get_cudnn_version() >= (9, 3, 0):
+        # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
+        pad_between_seqs = False
+        test_dot_product_attention(
+            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+        )
 
 
 def _run_dot_product_attention(
@@ -699,10 +701,6 @@ def _run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
-        print("c111111", seqlens_q, seqlens_kv)
-        print("c111111", seqlens_q_after_pad, seqlens_kv_after_pad)
-        print("c111111", cu_seqlens_q, cu_seqlens_kv)
-        print("c111111", cu_seqlens_q_after_pad, cu_seqlens_kv_after_pad)
 
     # Create attention mask if padding
     attention_mask = None
@@ -865,16 +863,6 @@ def _run_dot_product_attention(
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
     out_grad_orig = out_grad
-    if pad_between_seqs:
-        print(
-            "c2111111",
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            cu_seqlens_q_after_pad,
-            cu_seqlens_kv_after_pad,
-            pad_len,
-            out_grad_shape_new,
-        )
     if qkv_format == "thd" and pad_between_seqs:
         out_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
         if qkv_format_kv == "t_h_dv":
@@ -884,7 +872,6 @@ def _run_dot_product_attention(
                     cu_seqlens_q_after_pad[i] - pad_len[i - 1],
                 )
                 pad_range = (cu_seqlens_q_after_pad[i] - pad_len[i - 1], cu_seqlens_q_after_pad[i])
-                print("grad i", i, out_grad_orig.shape, valid_range, pad_range)
                 out_grad[pad_range[0] : pad_range[1]] = 0.0
                 out_grad_orig = torch.cat(
                     [out_grad_orig, out_grad[valid_range[0] : valid_range[1]]], dim=0
@@ -925,8 +912,6 @@ def _run_dot_product_attention(
         attention_type=config.attn_type,
     ).to(dtype=dtype, device="cuda")
 
-    if pad_between_seqs:
-        print("c22111111", cu_seqlens_q_after_pad, cu_seqlens_kv_after_pad)
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         q = inp_orig[0]
@@ -961,8 +946,6 @@ def _run_dot_product_attention(
     if is_training:
         out.backward(d_out)
 
-    if pad_between_seqs:
-        print("c3111111", cu_seqlens_q_after_pad, cu_seqlens_kv_after_pad)
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
             return out, (q.grad, k.grad, v.grad)
@@ -971,10 +954,10 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
-            q_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
-            k_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
-            v_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
-            print("cccccccc", cu_seqlens_q_after_pad, pad_len)
+            if is_training:
+                q_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
+                k_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
+                v_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             for i in range(1, config.batch_size + 1):
                 valid_range_q = (
                     cu_seqlens_q_after_pad[i - 1],
@@ -984,17 +967,17 @@ def _run_dot_product_attention(
                     cu_seqlens_kv_after_pad[i - 1],
                     cu_seqlens_kv_after_pad[i] - pad_len[i - 1],
                 )
-                print("iiii", i, valid_range_q[0], valid_range_q[1], out_orig.shape)
                 out_orig = torch.cat([out_orig, out[valid_range_q[0] : valid_range_q[1]]], dim=0)
-                q_grad_orig = torch.cat(
-                    [q_grad_orig, q.grad[valid_range_q[0] : valid_range_q[1]]], dim=0
-                )
-                k_grad_orig = torch.cat(
-                    [k_grad_orig, k.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
-                )
-                v_grad_orig = torch.cat(
-                    [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
-                )
+                if is_training:
+                    q_grad_orig = torch.cat(
+                        [q_grad_orig, q.grad[valid_range_q[0] : valid_range_q[1]]], dim=0
+                    )
+                    k_grad_orig = torch.cat(
+                        [k_grad_orig, k.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                    )
+                    v_grad_orig = torch.cat(
+                        [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                    )
             if is_training:
                 return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
             else:
