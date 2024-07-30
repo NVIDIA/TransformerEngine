@@ -699,14 +699,10 @@ def _run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
-<<<<<<< HEAD
-        print("c111111", cu_seqlens_q_after_pad, cu_seqlens_kv_after_pad)
-=======
         print('c111111',seqlens_q, seqlens_kv)
         print('c111111',seqlens_q_after_pad, seqlens_kv_after_pad)
         print('c111111',cu_seqlens_q, cu_seqlens_kv)
         print('c111111',cu_seqlens_q_after_pad, cu_seqlens_kv_after_pad)
->>>>>>> 31b382c (WIP: debug info)
 
     # Create attention mask if padding
     attention_mask = None
