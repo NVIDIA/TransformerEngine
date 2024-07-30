@@ -13,7 +13,9 @@ from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fuse
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 
-def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"):
+def run_dpa_with_cp(
+    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
+):
     """Test DotProductAttention module with context parallelism"""
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -207,7 +209,9 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         )
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
-    core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type)
+    core_attn.set_context_parallel_group(
+        cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+    )
     out_ = core_attn(
         q_,
         k_,
