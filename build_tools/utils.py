@@ -270,7 +270,7 @@ def install_and_import(package):
 
 
 def uninstall_te_fw_packages():
-    subprocess.check_call(
+    subprocess.run(
         [
             sys.executable,
             "-m",
