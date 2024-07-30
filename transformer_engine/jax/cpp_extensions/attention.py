@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial, reduce
 import operator
@@ -9,7 +10,7 @@ from typing import Optional, Tuple
 import warnings
 
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, lax, tree_util
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
@@ -34,7 +35,10 @@ from .misc import (
 from ..sharding import (
     all_reduce_sum_along_dp_fsdp,
     get_all_mesh_axes,
+    get_mesh_axis_size,
+    global_mesh_resource,
     num_of_devices,
+    lax_paral_op,
 )
 
 
@@ -1178,6 +1182,832 @@ def fused_attn_bwd(
         kv_seqlen,
         q_seq_offsets if is_ragged else _not_used,
         kv_seq_offsets if is_ragged else _not_used,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    return tuple(qkv_grads[: len(qkv)]), bias_grad
+
+
+class _FusedRingAttnStatusTracker:
+
+    workload_balacne_of_causal_mask: bool = False
+
+    @staticmethod
+    def _balance_workload_along_seq(*inputs, seq_dim: int = 1):
+        cp_size = get_mesh_axis_size(global_mesh_resource().cp_resource)
+
+        def reorder_tensor(tensor):
+            ori_tensor_shape = tensor.shape
+            tensor = tensor.reshpae(
+                (
+                    *ori_tensor_shape[:seq_dim],
+                    2,
+                    cp_size,
+                    ori_tensor_shape[seq_dim] // 2 // cp_size,
+                    *ori_tensor_shape[seq_dim + 1 :],
+                )
+            )
+            tensor = tensor.transpose(
+                (seq_dim, seq_dim + 1, seq_dim + 1, *[i for i in range(len(tensor.shape) - 3)])
+            )
+            reorded_tensor = jnp.zeros(
+                (
+                    cp_size,
+                    ori_tensor_shape[seq_dim] // cp_size,
+                    *ori_tensor_shape[:seq_dim] * ori_tensor_shape[seq_dim + 1 :],
+                ),
+                dtype=tensor.dtype,
+            )
+            for i in range(cp_size):
+                reorded_tensor = reorded_tensor.at[i, ...].set(
+                    jnp.concat([tensor[0, i, ...], tensor[1, cp_size - i - 1, ...]], axis=0)
+                )
+            reorded_tensor = reorded_tensor.transpose(
+                (
+                    *[i + 2 for i in range(seq_dim)],
+                    0,
+                    1,
+                    *[i for i in range(seq_dim + 2, len(reorded_tensor.shape))],
+                )
+            )
+            reorded_tensor = reorded_tensor.reshape(tensor.shape)
+            return reorded_tensor
+
+        outputs = tree_util.tree_map(reorder_tensor, inputs)
+        return outputs
+
+    @staticmethod
+    @contextmanager
+    def workload_balance_of_context_parallel(*inputs, seq_dim: int = 1):
+        try:
+            outputs = _FusedRingAttnStatusTracker._balance_workload_along_seq(
+                *inputs, seq_dim=seq_dim
+            )
+            _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask = True
+            yield outputs
+        finally:
+            _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask = False
+
+    @staticmethod
+    def is_workload_balanced():
+        return _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask
+
+
+class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
+    """
+    Fused Ring Attention Forward Primitive
+    """
+
+    name = "te_fused_ring_attn_forward"
+    multiple_results = True
+    impl_static_args = (9, 10, 11, 12, 13, 14, 15)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def correct_softmax_aux(softmax_aux, softmax_aux_per_step):
+        max_scale = jnp.maximum(softmax_aux, softmax_aux_per_step)
+        min_scale = jnp.minimum(softmax_aux, softmax_aux_per_step)
+        new_softmax_aux = max_scale + jnp.log(1 + jnp.exp(min_scale - max_scale))
+        return new_softmax_aux
+
+    @staticmethod
+    def adjust_seqlen(seqlen, max_seqlen, idx):
+        seqlen_of_curr_step = seqlen - max_seqlen * idx
+        seqlen_of_curr_step = jnp.where(seqlen_of_curr_step < 0, 0, seqlen_of_curr_step)
+        seqlen_per_step = jnp.where(
+            seqlen_of_curr_step < max_seqlen, seqlen_of_curr_step, max_seqlen
+        )
+        return seqlen_per_step
+
+    @staticmethod
+    def partition(
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos[:-1]] + [seed_sharding])
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+
+        assert dropout_probability <= 0, "Ring Attention currently does not support dropout."
+        assert (
+            attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+        ), "Ring Attention currently only support no_bias."
+        assert (
+            qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
+        ), "Ring Attention currently only support BSHD_BSHD_BSHD QKV layout."
+
+        # arg_shardings[0] is Q sharding
+        # Assume index-1 is the sequence dimension
+        cp_mesh_axis_name = arg_shardings[0].spec.axis_names[1]
+
+        partial_fmha_fwd_no_mask_impl = partial(
+            FusedAttnFwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=NVTE_Mask_Type.NVTE_NO_MASK,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        partial_fmha_fwd_causal_mask_impl = partial(
+            FusedAttnFwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=NVTE_Mask_Type.NVTE_CAUSAL_MASK,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        partial_fmha_fwd_regular_mask_impl = partial(
+            FusedAttnFwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        def ring_attn_fwd_impl(
+            q,
+            k,
+            v,
+            bias,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            seed,
+        ):
+            batch, q_max_seqlen, head, _ = q.shape
+            _, kv_max_seqlen, _, _ = k.shape
+
+            cp_rank = lax.axis_index(cp_mesh_axis_name)
+            cp_size = get_mesh_axis_size(cp_mesh_axis_name)
+
+            output_per_steps = jnp.zeros((cp_size, *q.shape), dtype=jnp.float32)
+            softmax_aux_per_steps = jnp.zeros(
+                (cp_size, batch, head, q_max_seqlen, 1), dtype=jnp.float32
+            )
+            softmax_aux = jnp.full((batch, head, q_max_seqlen, 1), -jnp.inf, dtype=jnp.float32)
+            rng_state = jnp.zeros(result_infos[2].shape).astype(result_infos[2].dtype)
+
+            def scan_kv_block(carry, idx):
+                k_curr, v_curr, output_per_steps, softmax_aux_per_steps, softmax_aux, rng_state = (
+                    carry
+                )
+
+                def causal_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    output_per_step, softmax_aux_per_step, rng_state_per_step = (
+                        partial_fmha_fwd_causal_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            seed,
+                        )
+                    )
+                    return output_per_step, softmax_aux_per_step, rng_state_per_step
+
+                def half_kv_no_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = (
+                        FusedRingAttnFwdPrimitive.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx) // 2
+                    )
+                    k_part = k_curr[:, : kv_max_seqlen // 2, :, :]
+                    v_part = v_curr[:, : kv_max_seqlen // 2, :, :]
+                    output_per_step, softmax_aux_per_step, rng_state_per_step = (
+                        partial_fmha_fwd_no_mask_impl(
+                            q,
+                            k_part,
+                            v_part,
+                            bias,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            seed,
+                        )
+                    )
+                    return output_per_step, softmax_aux_per_step, rng_state_per_step
+
+                def half_q_no_mask_compute():
+                    q_seqlen_per_step = (
+                        FusedRingAttnFwdPrimitive.adjust_seqlen(q_seqlen, q_max_seqlen, idx) // 2
+                    )
+                    kv_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    q_part = q[:, q_max_seqlen // 2 :, :, :]
+                    output_per_step, softmax_aux_per_step, rng_state_per_step = (
+                        partial_fmha_fwd_no_mask_impl(
+                            q_part,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            seed,
+                        )
+                    )
+                    output_per_step = jnp.concat(
+                        [jnp.zeros(q_part.shape, dtype=q_part.dtype), output_per_step], axis=1
+                    )
+                    softmax_aux_per_step = jnp.concat(
+                        [
+                            jnp.full(
+                                (batch, head, q_part.shape[1], 1), -jnp.inf, dtype=jnp.float32
+                            ),
+                            softmax_aux_per_step,
+                        ],
+                        axis=2,
+                    )
+                    return output_per_step, softmax_aux_per_step, rng_state_per_step
+
+                def no_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    output_per_step, softmax_aux_per_step, rng_state_per_step = (
+                        partial_fmha_fwd_no_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            seed,
+                        )
+                    )
+                    return output_per_step, softmax_aux_per_step, rng_state_per_step
+
+                def skip_compute():
+                    output_per_step = jnp.zeros(q.shape, dtype=q.dtype)
+                    softmax_aux_per_step = jnp.full(
+                        (batch, head, q.shape[1], 1), -jnp.inf, dtype=jnp.float32
+                    )
+                    rng_state_per_step = jnp.zeros(rng_state.shape).astype(rng_state.dtype)
+                    return output_per_step, softmax_aux_per_step, rng_state_per_step
+
+                if attn_mask_type == NVTE_Mask_Type.NVTE_CAUSAL_MASK:
+                    # This is for nested jax.lax.cond
+                    def jax_cond_wrap():
+                        if _FusedRingAttnStatusTracker.is_workload_balanced():
+                            return lax.cond(
+                                (idx <= cp_rank), half_kv_no_mask_compute, half_q_no_mask_compute
+                            )
+                        return lax.cond((idx <= cp_rank), no_mask_compute, skip_compute)
+
+                    output_per_step, softmax_aux_per_step, rng_state_per_step = lax.cond(
+                        idx == 0, causal_mask_compute, jax_cond_wrap
+                    )
+                else:
+                    q_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnFwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    output_per_step, softmax_aux_per_step, rng_state = (
+                        partial_fmha_fwd_regular_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            seed,
+                        )
+                    )
+
+                softmax_aux = FusedRingAttnFwdPrimitive.correct_softmax_aux(
+                    softmax_aux, softmax_aux_per_step
+                )
+                output_per_steps = output_per_steps.at[idx].set(output_per_step.astype(jnp.float32))
+                softmax_aux_per_steps = softmax_aux_per_steps.at[idx].set(softmax_aux_per_step)
+
+                k_curr = lax_paral_op(
+                    k_curr,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+                v_curr = lax_paral_op(
+                    v_curr,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+
+                return (
+                    k_curr,
+                    v_curr,
+                    softmax_aux,
+                    output_per_steps,
+                    softmax_aux_per_steps,
+                    rng_state_per_step,
+                ), None
+
+            k_curr = k
+            v_curr = v
+
+            (k_curr, v_curr, softmax_aux, output_per_steps, softmax_aux_per_steps, rng_state), _ = (
+                lax.scan(
+                    scan_kv_block,
+                    init=(
+                        k_curr,
+                        v_curr,
+                        softmax_aux,
+                        output_per_steps,
+                        softmax_aux_per_steps,
+                        rng_state,
+                    ),
+                    xs=jnp.arange(0, cp_size),
+                )
+            )
+
+            output = jnp.zeros(q.shape).astype(jnp.float32)
+            for idx in range(cp_size):
+                output = output + output_per_steps[idx].astype(jnp.float32) * jnp.exp(
+                    softmax_aux_per_steps[idx] - softmax_aux
+                ).transpose(0, 2, 1, 3)
+            output = output.astype(q.dtype)
+            return output, softmax_aux, rng_state
+
+        return mesh, ring_attn_fwd_impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedRingAttnFwdPrimitive)
+
+
+class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
+    """
+    Fused Ring Attention Backward Primitive
+    """
+
+    name = "te_fused_ring_attn_backward"
+    multiple_results = True
+    impl_static_args = (12, 13, 14, 15, 16, 17, 18)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def partition(
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+
+        assert dropout_probability <= 0, "Ring Attention currently does not support dropout."
+        assert (
+            attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+        ), "Ring Attention currently only support no_bias."
+        assert (
+            qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
+        ), "Ring Attention currently only support BSHD_BSHD_BSHD QKV layout."
+
+        # Assume index-1 is the sequence dimension
+        cp_mesh_axis_name = q_spec[1]
+
+        partial_fmha_bwd_causal_mask_impl = partial(
+            FusedAttnBwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=NVTE_Mask_Type.NVTE_CAUSAL_MASK,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        partial_fmha_bwd_no_mask_impl = partial(
+            FusedAttnBwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=NVTE_Mask_Type.NVTE_NO_MASK,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        partial_fmha_bwd_regular_mask_impl = partial(
+            FusedAttnBwdPrimitive.impl,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+        )
+
+        def ring_attn_bwd_impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+        ):
+            _, q_max_seqlen, _, _ = q.shape
+            _, kv_max_seqlen, _, _ = k.shape
+
+            cp_rank = lax.axis_index(cp_mesh_axis_name)
+            cp_size = get_mesh_axis_size(cp_mesh_axis_name)
+
+            dq = jnp.zeros(q.shape, dtype=q.dtype)
+            dk = jnp.zeros(k.shape, dtype=k.dtype)
+            dv = jnp.zeros(v.shape, dtype=v.dtype)
+            dbias = jnp.zeros(bias.shape, dtype=bias.dtype)
+
+            def scan_kv_block(carry, idx):
+
+                k_curr, v_curr, dq, dk, dv, dbias = carry
+
+                def causal_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = (
+                        partial_fmha_bwd_causal_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            softmax_aux,
+                            rng_state,
+                            output,
+                            doutput,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                        )
+                    )
+                    return dq_per_step, dk_per_step, dv_per_step, dbias_per_step
+
+                def half_kv_no_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = (
+                        FusedRingAttnBwdPrimitive.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx) // 2
+                    )
+                    k_part = k_curr[:, : kv_max_seqlen // 2, :, :]
+                    v_part = v_curr[:, : kv_max_seqlen // 2, :, :]
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = (
+                        partial_fmha_bwd_no_mask_impl(
+                            q,
+                            k_part,
+                            v_part,
+                            bias,
+                            softmax_aux,
+                            rng_state,
+                            output,
+                            doutput,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                        )
+                    )
+                    dk_per_step = jnp.concat(
+                        [dk_per_step, jnp.zeros(k_part.shape, dtype=k_part.dtype)], axis=1
+                    )
+                    dv_per_step = jnp.concat(
+                        [dv_per_step, jnp.zeros(v_part.shape, dtype=v_part.dtype)], axis=1
+                    )
+                    return dq_per_step, dk_per_step, dv_per_step, dbias_per_step
+
+                def half_q_no_mask_compute():
+                    q_seqlen_per_step = (
+                        FusedRingAttnBwdPrimitive.adjust_seqlen(q_seqlen, q_max_seqlen, idx) // 2
+                    )
+                    kv_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    doutput_part = doutput[:, q_max_seqlen // 2 :, :, :]
+                    output_part = output[:, q_max_seqlen // 2 :, :, :]
+                    softmax_aux_part = softmax_aux[:, :, q_max_seqlen // 2 :, 1]
+                    q_part = q[:, q_max_seqlen // 2 :, :, :]
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = (
+                        partial_fmha_bwd_no_mask_impl(
+                            q_part,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            softmax_aux_part,
+                            rng_state,
+                            output_part,
+                            doutput_part,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                        )
+                    )
+                    dq_per_step = jnp.concat(
+                        [jnp.zeros(q_part.shape, dtype=q_part.dtype), dq_per_step], axis=1
+                    )
+                    return dq_per_step, dk_per_step, dv_per_step, dbias_per_step
+
+                def no_mask_compute():
+                    q_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = (
+                        partial_fmha_bwd_no_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            softmax_aux,
+                            rng_state,
+                            output,
+                            doutput,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                        )
+                    )
+                    return dq_per_step, dk_per_step, dv_per_step, dbias_per_step
+
+                def skip_compute():
+                    dq_per_step = jnp.zeros(q.shape, dtype=q.dtype)
+                    dk_per_step = jnp.zeros(k.shape, dtype=k.dtype)
+                    dv_per_step = jnp.zeros(v.shape, dtype=v.dtype)
+                    dbias_per_step = jnp.zeros(bias.shape, dtype=bias.dtype)
+                    return dq_per_step, dk_per_step, dv_per_step, dbias_per_step
+
+                if attn_mask_type == NVTE_Mask_Type.NVTE_CAUSAL_MASK:
+                    # This is for nested jax.lax.cond
+                    def jax_cond_wrap():
+                        if _FusedRingAttnStatusTracker.is_workload_balanced():
+                            return lax.cond(
+                                (idx <= cp_rank), half_kv_no_mask_compute, half_q_no_mask_compute
+                            )
+                        return lax.cond((idx <= cp_rank), no_mask_compute, skip_compute)
+
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = lax.cond(
+                        idx == 0, causal_mask_compute, jax_cond_wrap
+                    )
+                else:
+                    q_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        q_seqlen, q_max_seqlen, idx
+                    )
+                    kv_seqlen_per_step = FusedRingAttnBwdPrimitive.adjust_seqlen(
+                        kv_seqlen, kv_max_seqlen, idx
+                    )
+
+                    dq_per_step, dk_per_step, dv_per_step, dbias_per_step = (
+                        partial_fmha_bwd_regular_mask_impl(
+                            q,
+                            k_curr,
+                            v_curr,
+                            bias,
+                            softmax_aux,
+                            rng_state,
+                            output,
+                            doutput,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                        )
+                    )
+
+                dq = dq + dq_per_step
+                dk = dk + dk_per_step
+                dv = dv + dv_per_step
+                dbias = dbias + dbias_per_step
+
+                k_curr = lax_paral_op(
+                    k_curr,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+                v_curr = lax_paral_op(
+                    v_curr,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+                dk = lax_paral_op(
+                    dk,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+                dv = lax_paral_op(
+                    dv,
+                    lax.ppermute,
+                    cp_mesh_axis_name,
+                    perm=[(i, (i + 1) % cp_size) for i in range(cp_size)],
+                )
+
+                return (k_curr, v_curr, dq, dk, dv, dbias), None
+
+            k_curr = k
+            v_curr = v
+
+            (k_curr, v_curr, dq, dk, dv, dbias), _ = lax.scan(
+                scan_kv_block, init=(k_curr, v_curr, dq, dk, dv, dbias), xs=jnp.arange(0, cp_size)
+            )
+
+            global_dbias = dbias
+            if attn_bias_type is not NVTE_Bias_Type.NVTE_NO_BIAS:
+                global_dbias = all_reduce_sum_along_dp_fsdp(dbias)
+            return dq, dk, dv, global_dbias
+
+        return mesh, ring_attn_bwd_impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnBwdPrimitive)
+
+
+def fused_ring_attn_fwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seqlen: jnp.ndarray,
+    kv_seqlen: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: NVTE_Bias_Type,
+    attn_mask_type: NVTE_Mask_Type,
+    qkv_layout: NVTE_QKV_Layout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+) -> jnp.ndarray:
+
+    assert dropout_probability <= 0, "Ring Attention currently does not support dropout."
+    assert (
+        attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+    ), "Ring Attention currently only support no_bias."
+    assert (
+        qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
+    ), "Ring Attention currently only support BSHD_BSHD_BSHD QKV layout."
+
+    seed = _FusedAttnRNGStateChecker().check_seed(seed, dropout_probability, is_training)
+
+    assert (q_seq_offsets is None) == (
+        kv_seq_offsets is None
+    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
+
+    # For optional tensors, which custom calls doesn't support None
+    _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        assert bias is None
+        bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    return FusedRingAttnFwdPrimitive.outer_primitive.bind(
+        *qkv,
+        bias,
+        q_seqlen,
+        kv_seqlen,
+        _not_used,
+        _not_used,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+
+
+def fused_ring_attn_bwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    softmax_aux: jnp.ndarray,
+    rng_state: jnp.ndarray,
+    output: jnp.ndarray,
+    doutput: jnp.ndarray,
+    q_seqlen: jnp.ndarray,
+    kv_seqlen: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    attn_bias_type: NVTE_Bias_Type,
+    attn_mask_type: NVTE_Mask_Type,
+    qkv_layout: NVTE_QKV_Layout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+):
+
+    assert dropout_probability <= 0, "Ring Attention currently does not support dropout."
+    assert (
+        attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+    ), "Ring Attention currently only support no_bias."
+    assert (
+        qkv_layout == NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
+    ), "Ring Attention currently only support BSHD_BSHD_BSHD QKV layout."
+
+    assert (q_seq_offsets is None) == (
+        kv_seq_offsets is None
+    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
+
+    # For optional tensors, which custom calls doesn't support None
+    _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        assert bias is None
+        bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    *qkv_grads, bias_grad = FusedRingAttnBwdPrimitive.outer_primitive.bind(
+        *qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        doutput,
+        q_seqlen,
+        kv_seqlen,
+        _not_used,
+        _not_used,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
