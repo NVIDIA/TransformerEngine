@@ -2856,6 +2856,7 @@ def attn_forward_func_with_cp(
     cp_group,
     cp_global_ranks,
     cp_stream,
+    cp_comm_type,
     softmax_scale=None,
     qkv_format="bshd",
     attn_mask_type="causal",
@@ -2895,12 +2896,13 @@ def attn_forward_func_with_cp(
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
 
     sliding_window_attn = window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
-    kv_all_gather = int(os.getenv("NVTE_CONTEXT_PARALLEL_KV_ALL_GATHER", "0"))
 
-    if sliding_window_attn or kv_all_gather:
+    if sliding_window_attn or cp_comm_type == "all_gather":
         func_with_cp = AttnFuncWithCPAndKVAllGather
-    else:
+    elif cp_comm_type == "p2p":
         func_with_cp = AttnFuncWithCPAndKVP2P
+    else:
+        raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
     out = func_with_cp.apply(
         is_training,
@@ -3687,6 +3689,7 @@ class FlashAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        cp_comm_type: str = "p2p",
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -3814,6 +3817,7 @@ class FlashAttention(torch.nn.Module):
                     cp_group,
                     cp_global_ranks,
                     cp_stream,
+                    cp_comm_type,
                     softmax_scale=self.softmax_scale,
                     qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
                     attn_mask_type=attn_mask_type,
@@ -5380,6 +5384,7 @@ class FusedAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
@@ -5492,6 +5497,7 @@ class FusedAttention(torch.nn.Module):
                     cp_group,
                     cp_global_ranks,
                     cp_stream,
+                    cp_comm_type,
                     softmax_scale=self.softmax_scale,
                     qkv_format=qkv_format,
                     attn_mask_type=attn_mask_type,
@@ -5645,6 +5651,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                compute and communication overlapping. To address the wave quantization
                issue of each split step, we add an additional CUDA stream so that we
                can overlap two flash attention kernels.
+    cp_comm_type : str
+                  inter-gpu communication type for context parallelism.
+                  Can be "p2p" or "all_gather".
     """
 
     def __init__(
@@ -5665,6 +5674,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
@@ -5689,6 +5699,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+        self.cp_comm_type = cp_comm_type
 
         self.hidden_size_per_attention_head = kv_channels
 
@@ -5805,6 +5816,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
+        cp_comm_type: str = "p2p",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -5818,10 +5830,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
+        cp_comm_type : str
+                      inter-gpu communication type for context parallelism.
+                      Can be "p2p" or "all_gather".
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+        self.cp_comm_type = cp_comm_type
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -6316,6 +6332,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
+                    cp_comm_type=self.cp_comm_type,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                 )
@@ -6358,6 +6375,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_group=self.cp_group,
                         cp_global_ranks=self.cp_global_ranks,
                         cp_stream=self.cp_stream,
+                        cp_comm_type=self.cp_comm_type,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
                     )
@@ -6382,6 +6400,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
+                    cp_comm_type=self.cp_comm_type,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                 )
@@ -6810,6 +6829,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
+        cp_comm_type: str = "p2p",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -6823,13 +6843,16 @@ class MultiheadAttention(torch.nn.Module):
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
+        cp_comm_type : str
+                      inter-gpu communication type for context parallelism.
+                      Can be "p2p" or "all_gather".
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_group"):
-                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream)
+                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream, cp_comm_type)
 
     def forward(
         self,
