@@ -249,7 +249,10 @@ def test_dot_product_attention(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
-    if pad_between_seqs and not (config.max_seqlen_q != config.max_seqlen_kv and config.attn_mask_type in ["causal", "padding_causal"]):
+    if pad_between_seqs and not (
+        config.max_seqlen_q != config.max_seqlen_kv
+        and config.attn_mask_type in ["causal", "padding_causal"]
+    ):
         flash_attn_supported = True
 
     # Skip if only unfused backend is supported
