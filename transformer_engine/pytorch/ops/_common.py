@@ -165,3 +165,13 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
+def maybe_autocast_dtype(
+    *,
+    device_type: str = "cuda",
+    default_dtype: Optional[torch.dtype] = None,
+) -> torch.dtype:
+    """Get autocast dtype if enabled"""
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return canonicalize_dtype(default_dtype)

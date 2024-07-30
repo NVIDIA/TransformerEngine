@@ -951,6 +951,81 @@ class TestBasicOps:
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
+    def test_layer_norm_autocast(
+        self,
+        *,
+        weight_shape: Iterable[int] = (32,),
+        in_shape: Iterable[int] = (32,),
+        dtype: torch.dtype = torch.float16,
+        autocast_dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        eps: float = 0.3,
+    ) -> None:
+        """Layer norm"""
+
+        # Make input and weight shapes consistent
+        in_shape = list(in_shape)[:-1] + list(weight_shape)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=autocast_dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b_ref, b_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=autocast_dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.layer_norm(
+            x_ref,
+            weight_shape,
+            weight=w_ref,
+            bias=b_ref,
+            eps=eps,
+        )
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.LayerNorm(
+            weight_shape,
+            eps=eps,
+            device=device,
+            dtype=dtype,
+        )
+        with torch.no_grad():
+            op.weight.copy_(w_test)
+            op.bias.copy_(b_test)
+            del w_test
+            del b_test
+        with torch.autocast(device, dtype=autocast_dtype):
+            y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        # Check results
+        assert y_test.dtype == autocast_dtype
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
+        db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **dtype_tols(autocast_dtype))
+        torch.testing.assert_close(dx_test, x_ref.grad, **dtype_tols(autocast_dtype))
+        torch.testing.assert_close(dw_test, w_ref.grad, **dtype_tols(dtype))
+        torch.testing.assert_close(db_test, b_ref.grad, **dtype_tols(dtype))
+
     @pytest.mark.parametrize("weight_shape", ((19,), (16, 4)))
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 8, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)

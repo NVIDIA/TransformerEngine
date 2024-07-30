@@ -32,6 +32,7 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     is_float8_tensor,
+    maybe_autocast_dtype,
     reshape,
 )
 from ...utils import clear_tensor_data
@@ -170,7 +171,7 @@ class RMSNorm(BasicOperation):
         # Check input tensors
         inner_dim = math.prod(self._shape)
         device = self.device
-        dtype = self.dtype
+        dtype = maybe_autocast_dtype(default_dtype=self.dtype)
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         if is_float8_tensor(x):
@@ -237,6 +238,7 @@ class RMSNorm(BasicOperation):
         if not requires_grad:
             x = None
         ctx.save_for_backward(x, rstdevs)
+        ctx.dtype = dtype
         ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
@@ -255,7 +257,7 @@ class RMSNorm(BasicOperation):
         # Check input tensors
         inner_dim = x.size(-1)
         device = self.device
-        dtype = self.dtype
+        dtype = ctx.dtype
         dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         if is_float8_tensor(w):
