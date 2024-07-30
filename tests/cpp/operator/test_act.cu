@@ -174,7 +174,7 @@ void performTest(const size_t N, const size_t H) {
   setRandomScale(&output);
 
   std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(N*H);
-  std::unique_ptr<OType[]> ref_igrad = std::make_unique<IType[]>(N*H);
+  std::unique_ptr<IType[]> ref_igrad = std::make_unique<IType[]>(N*H);
 
   nvte_act(input.data(), output.data(), 0);
 
@@ -229,7 +229,7 @@ void performTestGLU(const size_t N, const size_t H) {
   setRandomScale(&output);
 
   std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(N * H);
-  std::unique_ptr<OType[]> ref_igrad = std::make_unique<OType[]>(2 * N * H);
+  std::unique_ptr<IType[]> ref_igrad = std::make_unique<IType[]>(2 * N * H);
 
   nvte_act(input.data(), output.data(), 0);
 
@@ -316,6 +316,38 @@ TEST_P(ActTestSuite, TestRELU) {
     );
 }
 
+TEST_P(ActTestSuite, TestQGELU) {
+    using namespace transformer_engine;
+    using namespace test;
+
+    const DType input_type = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+    const auto size = std::get<2>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+        performTest<qgelu, dqgelu, nvte_qgelu, nvte_dqgelu,
+                    InputType, OutputType>(size.first, size.second);
+      );
+    );
+}
+
+TEST_P(ActTestSuite, TestSRELU) {
+    using namespace transformer_engine;
+    using namespace test;
+
+    const DType input_type = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+    const auto size = std::get<2>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+        performTest<srelu, dsrelu, nvte_srelu, nvte_dsrelu,
+                    InputType, OutputType>(size.first, size.second);
+      );
+    );
+}
+
 TEST_P(ActTestSuite, TestGeGLU) {
   using namespace transformer_engine;
   using namespace test;
@@ -361,6 +393,38 @@ TEST_P(ActTestSuite, TestSwiGLU) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           output_type, OutputType,
           performTestGLU<silu, dsilu, nvte_swiglu, nvte_dswiglu, InputType,
+                         OutputType>(size.first, size.second);););
+}
+
+TEST_P(ActTestSuite, TestQGeGLU) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const DType input_type = std::get<0>(GetParam());
+  const DType output_type = std::get<1>(GetParam());
+  const auto size = std::get<2>(GetParam());
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+      input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          output_type, OutputType,
+          performTestGLU<qgelu, dqgelu, nvte_qgeglu, nvte_dqgeglu, InputType,
+                         OutputType>(size.first, size.second);););
+}
+
+TEST_P(ActTestSuite, TestSReGLU) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const DType input_type = std::get<0>(GetParam());
+  const DType output_type = std::get<1>(GetParam());
+  const auto size = std::get<2>(GetParam());
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+      input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          output_type, OutputType,
+          performTestGLU<srelu, dsrelu, nvte_sreglu, nvte_dsreglu, InputType,
                          OutputType>(size.first, size.second);););
 }
 
