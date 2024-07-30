@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
 import torch
-from pkg_resources import packaging
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init

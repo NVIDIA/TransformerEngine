@@ -5148,7 +5148,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.v_channels = k_channels if v_channels is None else v_channels
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
-        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
 
         assert (
             num_attention_heads % self.num_gqa_groups == 0
