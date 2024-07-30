@@ -150,7 +150,7 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(
-                inputmat, dtype=ln_out_dtype, memory_format=torch.conguous_format
+                inputmat, dtype=ln_out_dtype, memory_format=torch.contiguous_format
             )
         ub_overlap_rs = False if tp_world_size == 1 else ub_overlap_rs
 
