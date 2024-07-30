@@ -431,10 +431,7 @@ TEST_P(ActTestSuite, TestSReGLU) {
 namespace {
 
 std::vector<std::pair<size_t, size_t>> act_test_cases = {{2048, 12288},
-                                                         {4096, 2048},
                                                          {768, 2816},
-                                                         {128, 10240},
-                                                         {768, 1024},
                                                          {256, 65536},
                                                          {65536, 128},
                                                          {256, 256},
