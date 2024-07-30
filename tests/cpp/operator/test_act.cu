@@ -342,7 +342,7 @@ TEST_P(ActTestSuite, TestReGLU) {
       input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           output_type, OutputType,
-          performTestGLU<relu, drelu. nvte_reglu, nvte_dreglu. InputType,
+          performTestGLU<relu, drelu. nvte_reglu, nvte_dreglu, InputType,
                          OutputType>(size.first, size.second);););
 }
 
