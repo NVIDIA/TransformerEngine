@@ -19,15 +19,52 @@
 #include <map>
 #include <utility>
 
-#include "../util/cuda_driver.h"
+#include "common/util/cuda_driver.h"
+#include "common/util/logging.h"
 #include "ipcsocket.h"
 #include "userbuffers.h"
 
-#ifdef UB_MPI_BOOTSTRAP
-#include <mpi.h>
+#ifdef NVTE_UB_WITH_MPI
 static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
 static MPI_Comm EXT_COMM_INTRA;
 static MPI_Comm EXT_COMM_INTER;
+
+#define UB_MPI_CHECK(expr)                                                                   \
+  do {                                                                                       \
+    const int mpicode = (expr);                                                              \
+    if (mpicode != MPI_SUCCESS) {                                                            \
+      char mpimsg[MPI_MAX_ERROR_STRING];                                                     \
+      int mpilen;                                                                            \
+      MPI_Error_string(mpicode, mpimsg, &mpilen);                                            \
+      std::vector<char> errmsg(1024);                                                        \
+      snprintf(errmsg.data(), errmsg.size(), "%s:%d in function %s: %s", __FILE__, __LINE__, \
+               __func__, mpimsg);                                                            \
+      throw std::runtime_error(errmsg.data());                                               \
+    }                                                                                        \
+  } while (false)
+
+void ub_mpi_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
+                      ExtComm group) {
+  // UB_MPI_CHECK(MPI_Allgather(localdata, localbytes, MPI_BYTE,
+  //                            globaldata, globalbytes, MPI_BYTE,
+  //                            static_cast<MPI_Comm>(group)));
+  MPI_Comm comm = static_cast<MPI_Comm>(group);
+  int numranks;
+  UB_MPI_CHECK(MPI_Comm_size(comm, &numranks));
+  assert(globalbytes == numranks * localbytes);
+
+  int myrank;
+  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
+  char *globaltarget = reinterpret_cast<char *>(globaldata) + (myrank * localbytes);
+  memcpy(globaltarget, localdata, localbytes);
+
+  for (int n = 0; n < numranks; n++) {
+    globaltarget = reinterpret_cast<char *>(globaldata) + (n * localbytes);
+    UB_MPI_CHECK(MPI_Bcast(globaltarget, localbytes, MPI_BYTE, n, comm));
+  }
+}
+
+void ub_mpi_barrier(ExtComm group) { UB_MPI_CHECK(MPI_Barrier(static_cast<MPI_Comm>(group))); }
 #else
 static char EXT_COMM_WORLD[] = "world";
 static char EXT_COMM_INTRA[] = "intra";
@@ -38,35 +75,21 @@ static char EXT_COMM_INTER[] = "inter";
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-#define CUDACHECK(cmd)                                                                      \
-  do {                                                                                      \
-    cudaError_t e = cmd;                                                                    \
-    if (e != cudaSuccess) {                                                                 \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      exit(EXIT_FAILURE);                                                                   \
-    }                                                                                       \
+#define IPCCHECK(cmd)                                                                           \
+  do {                                                                                          \
+    ipcSocketResult_t r = cmd;                                                                  \
+    if (r != ipcSocketSuccess) {                                                                \
+      printf("Failed, UDS error %s:%d '%s'\n", __FILE__, __LINE__, ipcSocketGetErrorString(r)); \
+      exit(EXIT_FAILURE);                                                                       \
+    }                                                                                           \
   } while (0)
 
-#define NVTE_UB_ERROR(x)                                                            \
-  do {                                                                              \
-    throw std::runtime_error(std::string(__FILE__ ":") + std::to_string(__LINE__) + \
-                             " in function " + __func__ + ": " + x);                \
-  } while (false)
-#define NCCLCHECK(cmd)                                                                        \
-  do {                                                                                        \
-    ncclResult_t r = cmd;                                                                     \
-    if (r != ncclSuccess) {                                                                   \
-      printf("Failed, NCCL error %s:%d ''\n", __FILE__, __LINE__ /*,ncclGetErrorString(r)*/); \
-      exit(EXIT_FAILURE);                                                                     \
-    }                                                                                         \
-  } while (0)
-
-#define NCCLCHECKGOTO(call, RES, label)                \
-  do {                                                 \
-    RES = call;                                        \
-    if (RES != ncclSuccess && RES != ncclInProgress) { \
-      goto label;                                      \
-    }                                                  \
+#define IPCCHECKGOTO(call, RES, label)                           \
+  do {                                                           \
+    RES = call;                                                  \
+    if (RES != ipcSocketSuccess && RES != ipcSocketInProgress) { \
+      goto label;                                                \
+    }                                                            \
   } while (0);
 
 int pipe_rank(communicator *comm, int step) {
@@ -85,15 +108,14 @@ int pipe_rank(communicator *comm, int step) {
 
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes) {
+    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
+    int tensornodes) {
   *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
-  (*comm)->_alloc_copy_allgather = ext_alloc_copy_allgather;
+  (*comm)->_allgather = ext_allgather;
   (*comm)->_barrier = ext_barrier;
-  (*comm)->_free = ext_free;
   (*comm)->nranks = numranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
@@ -101,9 +123,9 @@ int create_communicator_grouped2(
 
   int cur_dev, ndev;
   cudaDeviceProp device_prop;
-  CUDACHECK(cudaGetDevice(&cur_dev));
-  CUDACHECK(cudaGetDeviceCount(&ndev));
-  CUDACHECK(cudaGetDeviceProperties(&device_prop, cur_dev));
+  NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
+  NVTE_CHECK_CUDA(cudaGetDeviceCount(&ndev));
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, cur_dev));
   (*comm)->sm_arch = device_prop.major;
   // (*comm)->use_rr_kernel = device_prop.major == 8;
   (*comm)->use_rr_kernel = 0;
@@ -119,7 +141,7 @@ int create_communicator_grouped2(
   int device_clock = 0;
   // 110 sec wait time by default
   int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
-  CUDACHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   if ((*comm)->myrank == 0) {
     printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n", sec_timeout,
@@ -154,7 +176,7 @@ int create_communicator_grouped2(
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
       printf("%d: device used %d[%d] ,resetting device to %d\n", myrank, cur_dev, ndev, mylocal);
-    CUDACHECK(cudaSetDevice(mylocal));
+    NVTE_CHECK_CUDA(cudaSetDevice(mylocal));
   }
   (*comm)->mydev = cur_dev;
   // FIXME need to check that numlocal is multiple of pipegpus x tensorgpus
@@ -213,14 +235,14 @@ int create_communicator_grouped2(
     // Broadcast the a POSIX file descriptor from the local root rank to other local ranks.
     // NOTE: This cannot be done via MPI_Bcast or other external comm libraries. They mangle the
     //       file descriptor and prevent cuMemImportFromShareableHandle() from correctly
-    //       interpreting the file. Instead, we use system socket to send/recv the file handle
-    //       without mangling.
+    //       interpreting the file. Instead, we use Unix domain sockets for the kernel to
+    //       recreate the correct file descriptor on every receiving rank.
     int fd;
     volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
+    IpcSocketHandle ipcSock = {0};
     uint64_t opId = 0xdeadcafeb000 + (*comm)->ar2_firstgpu;
-    ncclResult_t ret = ncclSuccess;
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
+    ipcSocketResult_t ret = ipcSocketSuccess;
+    IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
     (*comm)->_barrier((*comm)->comm_world);
 
     if ((*comm)->ar2_nvrank == 0) {
@@ -232,19 +254,22 @@ int create_communicator_grouped2(
 
       for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
-        NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
+        IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
-      for (int i = 0; i < (*comm)->ar2_nvrank; i++) (*comm)->_barrier((*comm)->comm_intra);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
-      for (int i = 0; i < (*comm)->ar2_nvsize - (*comm)->ar2_nvrank - 1; i++)
+      for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
         (*comm)->_barrier((*comm)->comm_intra);
+        if ((*comm)->ar2_nvrank == p) IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &fd), ret, error);
+      }
+    }
+
+  error:
+    if ((*comm)->ar2_nvrank != 0) {
       NVTE_CALL_CHECK_CUDA_DRIVER(
           cuMemImportFromShareableHandle, &(*comm)->mc_handle, reinterpret_cast<void *>(fd),
           static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
-  error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+    IPCCHECK(ipcSocketClose(&ipcSock));
     close(fd);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle,
                                 (CUdeviceptr)(*comm)->mydev);
@@ -275,14 +300,16 @@ int create_communicator_grouped2(
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
-  CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs, LOCALSIZE));  // flags and pointers, no block data yet
-  CUDACHECK(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
-  CUDACHECK(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(
+      cudaMalloc(&(*comm)->gpu_ptrs, LOCALSIZE));  // flags and pointers, no block data yet
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->gpu_ptrs, 0, LOCALSIZE));
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, false);
-  CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(
+      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -291,8 +318,8 @@ int create_communicator_grouped2(
 #define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
 
-  CUDACHECK(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
-  CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
+  NVTE_CHECK_CUDA(cudaMalloc(&(*comm)->flags, 2 * GPU_PAGE_SIZE));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags =
       reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
@@ -321,75 +348,73 @@ int create_communicator_grouped2(
 
 int create_communicator_grouped(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free, int pipegpus,
-    int pipenodes) {
+    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, pipegpus,
-                                      pipenodes, 1, 1);
+                                      ext_allgather, ext_barrier, pipegpus, pipenodes, 1, 1);
 }
 
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void **, void *, size_t, ExtComm)> ext_alloc_copy_allgather,
-    std::function<void(ExtComm)> ext_barrier, std::function<void(void *)> ext_free) {
+int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
+                        int mynode, int numnodes,
+                        std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+                        std::function<void(ExtComm)> ext_barrier) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_alloc_copy_allgather, ext_barrier, ext_free, 1, 1, 1, 1);
+                                      ext_allgather, ext_barrier, 1, 1, 1, 1);
 }
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes) {
-#ifdef UB_MPI_BOOTSTRAP
+#ifdef NVTE_UB_WITH_MPI
   // get global numbers
   int myrank, numranks;
-  MPI_Comm_rank(EXT_COMM_WORLD, &myrank);
-  MPI_Comm_size(EXT_COMM_WORLD, &numranks);
+  UB_MPI_CHECK(MPI_Comm_rank(EXT_COMM_WORLD, &myrank));
+  UB_MPI_CHECK(MPI_Comm_size(EXT_COMM_WORLD, &numranks));
 
   // find intranode numbers and make internode communicator
-  char host_name[MPI_MAX_PROCESSOR_NAME];
-  char(*host_names)[MPI_MAX_PROCESSOR_NAME];
-  int namelen, bytes, color;
-  int rank = (*comm)->myrank, size = (*comm)->nranks;
-  MPI_Get_processor_name(host_name, &namelen);
-  bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
-  host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
-  strcpy(host_names[rank], host_name);  // NOLINT(*)
-  for (int n = 0; n < size; n++)
-    MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, EXT_COMM_WORLD);
-  qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
+  char hostname[MPI_MAX_PROCESSOR_NAME];
+  int namelen;
+  UB_MPI_CHECK(MPI_Get_processor_name(hostname, &namelen));
 
-  color = 0;
-  for (int n = 0; n < size; n++) {
-    if (n > 0 && strcmp(host_names[n - 1], host_names[n])) color++;
-    if (strcmp(host_name, host_names[n]) == 0) break;
+  char(*hostnames)[MPI_MAX_PROCESSOR_NAME] =
+      static_cast<char(*)[MPI_MAX_PROCESSOR_NAME]>(malloc(numranks * MPI_MAX_PROCESSOR_NAME));
+  strcpy(hostnames[myrank], hostname);  // NOLINT(*)
+  for (int n = 0; n < numranks; n++)
+    UB_MPI_CHECK(MPI_Bcast(&(hostnames[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, EXT_COMM_WORLD));
+  qsort(hostnames, numranks, MPI_MAX_PROCESSOR_NAME, stringCmp);
+
+  int color = 0;
+  for (int n = 0; n < numranks; n++) {
+    if (n > 0 && strcmp(hostnames[n - 1], hostnames[n])) color++;
+    if (strcmp(hostname, hostnames[n]) == 0) break;
   }
-  free(host_names);
+  free(hostnames);
 
   int mylocal, numlocal;
-  MPI_Comm_split(EXT_COMM_WORLD, color, rank, &EXT_COMM_INTRA);
-  MPI_Comm_rank(EXT_COMM_INTRA, &mylocal);
-  MPI_Comm_size(EXT_COMM_INTRA, &numlocal);
+  UB_MPI_CHECK(MPI_Comm_split(EXT_COMM_WORLD, color, myrank, &EXT_COMM_INTRA));
+  UB_MPI_CHECK(MPI_Comm_rank(EXT_COMM_INTRA, &mylocal));
+  UB_MPI_CHECK(MPI_Comm_size(EXT_COMM_INTRA, &numlocal));
 
   // find internode numbers and make internode communicator
-  CUDACHECK(cudaFree(0));
+  NVTE_CHECK_CUDA(cudaFree(0));
   int allnodes = numranks / numlocal;
   int datanodes = allnodes / pipenodes / tensornodes;
   // data reduction group node belongs, equals 0 for all if both pipenodes=1 and tensornodes=1
   int datanodegroup_id = myrank / numlocal / datanodes;
   // mpi communicator only needed for SHARP which is always allreduce1/data-parallel
-  MPI_Comm_split(EXT_COMM_WORLD, mylocal + numlocal * datanodegroup_id, rank, &EXT_COMM_INTER);
+  UB_MPI_CHECK(MPI_Comm_split(EXT_COMM_WORLD, mylocal + numlocal * datanodegroup_id, myrank,
+                              &EXT_COMM_INTER));
   // different rails from same group are in different subcommunicators
   int mynode, numnodes;
-  MPI_Comm_size(EXT_COMM_INTER, &numnodes);
-  MPI_Comm_rank(EXT_COMM_INTER, &mynode);
+  UB_MPI_CHECK(MPI_Comm_size(EXT_COMM_INTER, &numnodes));
+  UB_MPI_CHECK(MPI_Comm_rank(EXT_COMM_INTER, &mynode));
 
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      &ub_alloc_copy_allgather, &ub_barrier, &ub_free, pipegpus,
-                                      pipenodes, tensorgpus, tensornodes);
+                                      &ub_mpi_allgather, &ub_mpi_barrier, pipegpus, pipenodes,
+                                      tensorgpus, tensornodes);
 #else
-  NVTE_UB_ERROR(std::string("Bootstrapping Userbuffers with MPI requires ") +
-                std::string("building Transformer Engine with UB_MPI_BOOTSTRAP=1"));
+  NVTE_ERROR(std::string("Bootstrapping Userbuffers with MPI requires building") +
+             std::string("Transformer Engine with NVTE_UB_WITH_MPI=1 and MPI_HOME=/path/to/mpi"));
 #endif
 }
 
@@ -403,49 +428,46 @@ int create_communicator_mpi(communicator **comm) {
 
 void destroy_communicator(communicator *comm) {
   for (int hndl = 0; hndl < comm->free_region; hndl++) {
-    if (comm->mem_dealloc[hndl]) {
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree,
-                                  reinterpret_cast<CUdeviceptr>(comm->ucbase_ptr[hndl]),
-                                  comm->mem_size[hndl] * comm->nvsize);
+    if (hndl > 0 && comm->use_mc && comm->mem_dealloc[hndl]) {
       for (int rank = 0; rank < comm->nvsize; rank++) {
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
+        if (rank == comm->nvrank) {
+          NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
+        } else {
+          comm->uchandles[hndl][rank] = 0;
+        }
       }
       free(reinterpret_cast<void *>(comm->uchandles[hndl]));
     } else {
       for (int rank = 0; rank < comm->nvsize; rank++) {
         if (rank != comm->nvrank) {
           cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]);
+        } else if (comm->mem_dealloc[hndl]) {
+          NVTE_CHECK_CUDA(cudaFree(comm->peer_ptr[hndl][rank]));
         } else {
           comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
         }
       }
-      free(comm->peer_ptr[hndl]);
     }
+    free(comm->peer_ptr[hndl]);
     comm->mem_ptr[hndl] = nullptr;
   }
-  cudaFree(reinterpret_cast<void *>(comm->flags));
   cudaFree(reinterpret_cast<void *>(comm->recv_id));
   cudaFree(reinterpret_cast<void *>(comm->send_id));
   if (comm->use_mc) {
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
-                                comm->mc_maxsize);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
-  }
-  if (comm->mem_dealloc[0]) {
-    cudaFree(comm->gpu_ptrs);
   }
   free(comm->fifo);
   delete comm;
 }
 
 void destroy_communicator_mpi(communicator *comm) {
-#ifdef UB_MPI_BOOTSTRAP
-  MPI_Comm_free(comm->comm_inter);
-  MPI_Comm_free(comm->comm_intra);
+#ifdef NVTE_UB_WITH_MPI
+  MPI_Comm_free(static_cast<MPI_Comm *>(&(comm->comm_inter)));
+  MPI_Comm_free(static_cast<MPI_Comm *>(&(comm->comm_intra)));
   destroy_communicator(comm);
 #else
-  NVTE_UB_ERROR(std::string("Communicator is not bootstrapped with MPI and ") +
-                std::string("can only be deallocated with destroy_communicator()."));
+  NVTE_ERROR(std::string("Communicator is not bootstrapped with MPI and ") +
+             std::string("can only be deallocated with destroy_communicator()."));
 #endif
 }
 
@@ -457,7 +479,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
 
-  if (alloc) {
+  if (comm->use_mc && alloc) {
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
     int myrank = comm->nvrank;
     void **remptrs = reinterpret_cast<void **>(malloc(nranks * sizeof(void *)));
@@ -501,26 +523,22 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         (uint64_t)0);
 
     volatile uint32_t abortFlag = 0;
-    struct ncclIpcSocket ipcSock = {0};
+    IpcSocketHandle ipcSock = {0};
     uint64_t opId = 0xdeadcafebeef;
-    ncclResult_t ret = ncclSuccess;
+    ipcSocketResult_t ret = ipcSocketSuccess;
 
-    // All-gather POSIX file descriptors across local ranks.
-    // NOTE: This cannot be done via MPI_Allgather or other external comm libraries. They mangle
-    //       the file descriptor and prevent cuMemImportFromShareableHandle() from correctly
-    //       interpreting the file. Instead, we use system socket to send/recv the file handle
-    //       without mangling.
-    NCCLCHECK(ncclIpcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
+    // All-gather POSIX file descriptors across local ranks
+    IPCCHECK(ipcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
     for (int p = 1; p < nranks; p++) {
+      int send_to = (myrank + p) % nranks;
+      int recv_from = (myrank + nranks - p) % nranks;
       comm->_barrier(comm->comm_intra);
-      NCCLCHECKGOTO(
-          ncclIpcSocketSendFd(&ipcSock, peerfd[myrank], (myrank + p) % nranks, (uint64_t)opId), ret,
-          error);
-      NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &peerfd[(myrank + nranks - p) % nranks]), ret,
-                    error);
+      IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, peerfd[myrank], send_to, (uint64_t)opId), ret, error);
+      IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &peerfd[recv_from]), ret, error);
     }
+
   error:
-    NCCLCHECK(ncclIpcSocketClose(&ipcSock));
+    IPCCHECK(ipcSocketClose(&ipcSock));
 
     for (int p = 0; p < nranks; p++) {
       if (p != myrank)
@@ -530,6 +548,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
             static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
       close(peerfd[p]);
     }
+    free(peerfd);
+
     CUdeviceptr ptr;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &ptr, (size_t)(aligned_size * nranks),
                                 (size_t)0, (CUdeviceptr)0, (uint64_t)0);
@@ -554,12 +574,11 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, ptr, (size_t)(aligned_size * nranks),
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
-    if (hndl == 0) CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
-    CUDACHECK(
+    if (hndl == 0) NVTE_CHECK_CUDA(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
+    NVTE_CHECK_CUDA(
         cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
                    remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
     free(remptrs);
-    free(peerfd);
     comm->memflags[hndl] = UB_MEM_UC_CONTIG | UB_MEM_ALLOCATED;
 
     if (comm->use_mc && comm->mc_maxsize >= comm->mc_offset + aligned_size) {
@@ -575,29 +594,36 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
   } else {
-    assert(comm->nvsize <= 8);
-    cudaIpcMemHandle_t memhndl;
-    CUDACHECK(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+    if (alloc) {
+      NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
+      NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
+    }
 
-    cudaIpcMemHandle_t *tmp;
-    comm->_alloc_copy_allgather(reinterpret_cast<void **>(&tmp), reinterpret_cast<void *>(&memhndl),
-                                sizeof(cudaIpcMemHandle_t), comm->comm_intra);
+    NVTE_CHECK(comm->nvsize <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
+    cudaIpcMemHandle_t memhndl;
+    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+
+    cudaIpcMemHandle_t *tmp =
+        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
+                     reinterpret_cast<void *>(&memhndl), sizeof(cudaIpcMemHandle_t),
+                     comm->comm_intra);
 
     for (int i = 0; i < comm->nvsize; i++) {
       if (i != comm->nvrank) {
-        CUDACHECK(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
-                                       cudaIpcMemLazyEnablePeerAccess));
+        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
+                                             cudaIpcMemLazyEnablePeerAccess));
       }
     }
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
-    CUDACHECK(cudaDeviceSynchronize());
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-    CUDACHECK(cudaMemcpy(
+    NVTE_CHECK_CUDA(cudaMemcpy(
         reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
-    CUDACHECK(cudaDeviceSynchronize());
-    comm->_free(tmp);
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    free(tmp);
   }
   comm->mem_size[hndl] = aligned_size;
 

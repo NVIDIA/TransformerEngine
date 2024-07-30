@@ -6,7 +6,7 @@
 
 #include "transformer_engine/softmax.h"
 
-#include "jax/csrc/extensions.h"
+#include "extensions.h"
 
 namespace transformer_engine {
 namespace jax {
