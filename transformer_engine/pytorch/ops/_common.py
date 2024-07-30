@@ -93,9 +93,8 @@ def convert_tensor(
     # Convert FP8 tensor
     if is_float8_tensor(tensor):
         data = tensor._data.to(device=device)
-        if (
-            memory_format != torch.preserve_format
-            and not data.is_contiguous(memory_format=memory_format)
+        if memory_format != torch.preserve_format and not data.is_contiguous(
+            memory_format=memory_format
         ):
             # Note: torch.Tensor.to ignores memory_format kwarg (see
             # https://github.com/pytorch/pytorch/issues/132020).
@@ -109,9 +108,8 @@ def convert_tensor(
 
     # Convert standard PyTorch tensor
     tensor = tensor.to(device=device, dtype=dtype)
-    if (
-        memory_format != torch.preserve_format
-        and not tensor.is_contiguous(memory_format=memory_format)
+    if memory_format != torch.preserve_format and not tensor.is_contiguous(
+        memory_format=memory_format
     ):
         # Note: torch.Tensor.to ignores memory_format kwarg (see
         # https://github.com/pytorch/pytorch/issues/132020).
@@ -165,6 +163,7 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
 
 def maybe_autocast_dtype(
     *,
