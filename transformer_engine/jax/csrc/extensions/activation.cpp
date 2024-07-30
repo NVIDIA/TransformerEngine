@@ -6,7 +6,7 @@
 #include "transformer_engine/activation.h"
 
 #include "extensions.h"
-#include "extensions/misc.h"
+#include "transformer_engine/transpose.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {

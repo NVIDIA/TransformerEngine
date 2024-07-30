@@ -9,7 +9,6 @@
 #include "extensions.h"
 #include "xla/ffi/api/ffi.h"
 
-
 namespace transformer_engine {
 namespace jax {
 
