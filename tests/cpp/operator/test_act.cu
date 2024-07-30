@@ -250,8 +250,8 @@ void performTestGLU(const size_t N, const size_t H) {
 
   nvte_dact(ograd.data(), input.data(), igrad.data(), 0);
 
-  compute_ref_dact_cast<ref_dact>(input.cpu_dptr<IType>(), ograd.cpu_dptr<IType>(),
-                                  ref_igrad.get(), N, H);
+  compute_ref_dglu_act_cast<ref_dact, ref_act>(input.cpu_dptr<IType>(), ograd.cpu_dptr<IType>(),
+                                               ref_igrad.get(), N, H);
 
   cudaDeviceSynchronize();
   err = cudaGetLastError();
