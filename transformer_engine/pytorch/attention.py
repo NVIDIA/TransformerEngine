@@ -2616,28 +2616,26 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             -1, *v.shape[-3:]
                         )
                     if use_fused_attention:
-                        out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = (
-                            fused_attn_fwd(
-                                is_training,
-                                max_seqlen_q,
-                                max_seqlen_kv * num_kv_chunks,
-                                cu_seqlens_q,
-                                cu_seqlens_kv * num_kv_chunks,
-                                q_,
-                                k_,
-                                v_,
-                                TE_DType[q.dtype],
-                                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-                                attn_scale=softmax_scale,
-                                dropout=dropout_p,
-                                qkv_layout=qkv_layout,
-                                attn_mask_type=attn_mask_type,
-                                attn_bias_type=attn_bias_type,
-                                attn_bias=attn_bias,
-                                cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
-                                window_size=window_size,
-                            )
+                        out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
+                            is_training,
+                            max_seqlen_q,
+                            max_seqlen_kv * num_kv_chunks,
+                            cu_seqlens_q,
+                            cu_seqlens_kv * num_kv_chunks,
+                            q_,
+                            k_,
+                            v_,
+                            TE_DType[q.dtype],
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            attn_scale=softmax_scale,
+                            dropout=dropout_p,
+                            qkv_layout=qkv_layout,
+                            attn_mask_type=attn_mask_type,
+                            attn_bias_type=attn_bias_type,
+                            attn_bias=attn_bias,
+                            cu_seqlens_q_padded=cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded * num_kv_chunks,
+                            window_size=window_size,
                         )
                     else:
                         q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
