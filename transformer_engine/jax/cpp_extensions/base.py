@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 """JAX/TE base custom ops"""
+import os
+import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
 
@@ -16,6 +18,21 @@ class BasePrimitive(metaclass=ABCMeta):
     """
     jax primitive
     """
+
+    name = None
+
+    @classmethod
+    def enabled(cls):
+        """
+        A custom call is marked as disabled if the `cls.name` does not fully match the
+        `NVTE_JAX_CUSTOM_CALLS_RE` pattern.
+        By default, `NVTE_JAX_CUSTOM_CALLS_RE` is set to `.*`, which matches and enables all names.
+        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!te_act_lu$).+$'` to disable `te_act_lu`.
+        """
+        pattern = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE", r".*")
+        pattern = re.compile(pattern)
+        is_enabled = pattern.fullmatch(cls.name) is not None
+        return is_enabled
 
     @staticmethod
     @abstractmethod

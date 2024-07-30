@@ -4,6 +4,7 @@
 """JAX/TE custom ops for quantization"""
 from typing import Tuple
 
+import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
@@ -24,6 +25,26 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
 __all__ = ["cast_fp8"]
+
+
+def _jax_quantize(x, scale, q_dtype):
+    """
+    Quantize with scale
+    """
+    compute_dtype = scale.dtype
+    dtype_max = (jnp.finfo(q_dtype).max).astype(compute_dtype)
+    scaled_x = x.astype(compute_dtype) * scale
+    clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max)
+    return clipped_scaled_x.astype(q_dtype)
+
+
+def _jax_cast_fp8(inputs, scale, amax, out_dtype):
+    """
+    JAX native fp8 casting implementation
+    """
+    casted_output = _jax_quantize(inputs, scale, q_dtype=out_dtype)
+    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(inputs)).astype(amax.dtype))
+    return casted_output, updated_amax
 
 
 class CastFP8Primitive(BasePrimitive):
@@ -157,4 +178,6 @@ def cast_fp8(
     Cast wrapper
     Return FP8 tensor
     """
+    if not CastFP8Primitive.enabled():
+        return _jax_cast_fp8(x, scale, amax, out_dtype=out_dtype)
     return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)

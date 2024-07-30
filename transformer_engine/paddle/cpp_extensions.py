@@ -593,6 +593,9 @@ def fused_attn_fwd_qkvpacked(
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen, h, d], fill_value=0, dtype=qkv.dtype)
     else:
@@ -656,6 +659,7 @@ def fused_attn_bwd_qkvpacked(
     qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed QKV input"""
 
@@ -676,13 +680,19 @@ def fused_attn_bwd_qkvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
     else:
         dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
 
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
     else:
         dbias = None
     # execute kernel
@@ -706,6 +716,7 @@ def fused_attn_bwd_qkvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
 
     return dqkv, dbias
@@ -772,6 +783,9 @@ def fused_attn_fwd_kvpacked(
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
     else:
@@ -843,6 +857,7 @@ def fused_attn_bwd_kvpacked(
     qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
@@ -867,6 +882,9 @@ def fused_attn_bwd_kvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
         dkv = paddle.full(shape=kv.shape, fill_value=0, dtype=kv.dtype)
@@ -874,7 +892,10 @@ def fused_attn_bwd_kvpacked(
         dq = paddle.empty(shape=q.shape, dtype=q.dtype)
         dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
         dbias = None
     # execute kernel
@@ -903,6 +924,7 @@ def fused_attn_bwd_kvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dkv, dbias
 
@@ -970,6 +992,9 @@ def fused_attn_fwd(
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
     else:
@@ -1040,6 +1065,7 @@ def fused_attn_bwd(
     qkv_layout: str = "bshd_bshd_bshd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
@@ -1065,6 +1091,9 @@ def fused_attn_bwd(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
         dk = paddle.full(shape=k.shape, fill_value=0, dtype=k.dtype)
@@ -1074,7 +1103,10 @@ def fused_attn_bwd(
         dk = paddle.empty(shape=k.shape, dtype=k.dtype)
         dv = paddle.empty(shape=v.shape, dtype=v.dtype)
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
         dbias = None
     # execute kernel
@@ -1103,6 +1135,7 @@ def fused_attn_bwd(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dk, dv, dbias
 

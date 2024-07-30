@@ -6,7 +6,7 @@
 
 #include "transformer_engine/activation.h"
 
-#include "jax/csrc/extensions.h"
+#include "extensions.h"
 #include "transformer_engine/transpose.h"
 
 namespace transformer_engine {
