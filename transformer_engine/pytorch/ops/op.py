@@ -407,7 +407,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if not has_fp8_state:
             return None
 
-        def make_cpu_copy(src: torch.Tensor) -> torch.Tensor:
+        def to_cpu(src: torch.Tensor) -> torch.Tensor:
             """Helper function to make CPU copy of tensor
 
             Memory transfer is asynchronous w.r.t. host, so GPU should
@@ -433,13 +433,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Store tensors
             if "scaling_fwd" in fp8_meta:
-                state[mode]["scale_fwd"] = fp8_meta["scaling_fwd"].scale
-                state[mode]["scale_inv_fwd"] = fp8_meta["scaling_fwd"].scale_inv
-                state[mode]["amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history
+                state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
+                state[mode]["scale_inv_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale_inv)
+                state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
             if "scaling_bwd" in fp8_meta:
-                state[mode]["scale_bwd"] = fp8_meta["scaling_bwd"].scale
-                state[mode]["scale_inv_bwd"] = fp8_meta["scaling_bwd"].scale_inv
-                state[mode]["amax_history_bwd"] = fp8_meta["scaling_bwd"].amax_history
+                state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
+                state[mode]["scale_inv_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale_inv)
+                state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
 
             # Store other picklable items
             extra = {}
@@ -467,6 +467,17 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if state is None:
             return
 
+        def copy_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
+            """Helper function to copy tensor from CPU
+
+            Memory transfer is asynchronous w.r.t. host, so GPU should
+            be synchronized before using result.
+
+            """
+            if src.size() != dst.size():
+                dst.data = torch.empty(src.size(), dtype=dst.dtype, device=dst.device)
+            dst.copy_(src, non_blocking=True)
+
         # Load FP8 state
         for mode in ("input", "param", "grad_output"):
 
@@ -492,14 +503,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             fp8_meta = self.get_fp8_meta(mode)
             if "scaling_fwd" in fp8_meta:
                 fp8_meta_fwd = fp8_meta["scaling_fwd"]
-                fp8_meta_fwd.scale.copy_(state[mode]["scale_fwd"], non_blocking=True)
-                fp8_meta_fwd.scale_inv.copy_(state[mode]["scale_inv_fwd"], non_blocking=True)
-                fp8_meta_fwd.amax_history.copy_(state[mode]["amax_history_fwd"], non_blocking=True)
+                copy_tensor(state[mode]["scale_fwd"], fp8_meta_fwd.scale)
+                copy_tensor(state[mode]["scale_inv_fwd"], fp8_meta_fwd.scale_inv)
+                copy_tensor(state[mode]["amax_history_fwd"], fp8_meta_fwd.amax_history)
             if "scaling_bwd" in fp8_meta:
                 fp8_meta_bwd = fp8_meta["scaling_bwd"]
-                fp8_meta_bwd.scale.copy_(state[mode]["scale_bwd"], non_blocking=True)
-                fp8_meta_bwd.scale_inv.copy_(state[mode]["scale_inv_bwd"], non_blocking=True)
-                fp8_meta_bwd.amax_history.copy_(state[mode]["amax_history_bwd"], non_blocking=True)
+                copy_tensor(state[mode]["scale_bwd"], fp8_meta_bwd.scale)
+                copy_tensor(state[mode]["scale_inv_bwd"], fp8_meta_bwd.scale_inv)
+                copy_tensor(state[mode]["amax_history_bwd"], fp8_meta_bwd.amax_history)
 
         # Finish CPU-GPU memory transfers
         torch.cuda.synchronize()
