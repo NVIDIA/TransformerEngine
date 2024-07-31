@@ -586,7 +586,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         sdpa_backward_options.set_sliding_window_length(window_size_left);
       }
 
-      if (cudnn_runtime_version >= 90000 && sm_arch_ >= 90) {
+      if (cudnn_runtime_version >= 90000) {
         sdpa_backward_options.set_deterministic_algorithm(deterministic);
       }
 
