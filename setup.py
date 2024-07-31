@@ -18,6 +18,7 @@ from build_tools.utils import (
     remove_dups,
     get_frameworks,
     uninstall_te_fw_packages,
+    install_packages,
 )
 from build_tools.te_version import te_version
 
@@ -28,13 +29,19 @@ current_file_path = Path(__file__).parent.resolve()
 
 from setuptools.command.build_ext import build_ext as BuildExtension
 
+# Same list as build_system.requires in pyproject.toml
+install_packages(["setuptools >= 61.0", "cmake>=3.21", "pybind11", "ninja"])
+
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
+    install_packages(["torch>=1.13"])
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks:
+    install_packages(["paddlepaddle-gpu>=2.6.1"])
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
+    install_packages(["jax"])
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 

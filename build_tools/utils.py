@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import sys
-import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
@@ -262,11 +261,11 @@ def copy_common_headers(te_src, dst):
         shutil.copy(file_path, new_path)
 
 
-def install_and_import(package):
-    """Install a package via pip (if not already installed) and import into globals."""
-    main_package = package.split("[")[0]
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    globals()[main_package] = importlib.import_module(main_package)
+def install_packages(packages):
+    """Install a package via pip (if not already installed)."""
+    for package in packages:
+        main_package = package.split("[")[0]
+    subprocess.run([sys.executable, "-m", "pip", "install", package])
 
 
 def uninstall_te_fw_packages():
