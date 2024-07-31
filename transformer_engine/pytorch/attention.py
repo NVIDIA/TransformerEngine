@@ -2351,6 +2351,7 @@ def attn_forward_func_with_cp(
         """Attention bias is only supported with FusedAttention and "causal" """
         """or "no_mask" mask types!"""
     )
+    assert not fp8 or use_fused_attention, "FP8 context parallelism is only supported with Fused Attention!"
     out = AttnFuncWithCP.apply(
         is_training,
         q,
