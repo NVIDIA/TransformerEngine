@@ -1867,6 +1867,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             qkv_layout=qkv_layout,
                             attn_mask_type=ctx.attn_mask_type,
                             attn_bias_type=ctx.attn_bias_type,
+                            deterministic=ctx.deterministic,
                         )
                     else:
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -1948,6 +1949,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             qkv_layout=qkv_layout,
                             attn_mask_type="padding" if padding else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
+                            deterministic=ctx.deterministic,
                         )
                     else:
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -2035,6 +2037,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             qkv_layout=qkv_layout,
                             attn_mask_type="padding" if padding else "no_mask",
                             attn_bias_type=ctx.attn_bias_type,
+                            deterministic=ctx.deterministic,
                         )
                     else:
                         if ctx.qkv_format == "thd":
@@ -2102,6 +2105,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         qkv_layout=qkv_layout,
                         attn_mask_type=ctx.attn_mask_type,
                         attn_bias_type=ctx.attn_bias_type,
+                        deterministic=ctx.deterministic,
                     )
                 else:
                     # [b, sq, np, hn] -> [b*sq, np, hn]
@@ -4930,6 +4934,7 @@ class FusedAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     attn_bias_type=core_attention_bias_type,
                     attn_bias=core_attention_bias,
+                    deterministic=self.deterministic,
                     use_fused_attention=True,
                 )
         else:
