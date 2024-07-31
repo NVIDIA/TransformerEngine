@@ -402,8 +402,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         # Return immediately if op has no FP8 state
         has_fp8_state = any(
-            self.num_fp8_scales(mode) > 0
-            for mode in ("input", "param", "grad_output")
+            self.num_fp8_scales(mode) > 0 for mode in ("input", "param", "grad_output")
         )
         if not has_fp8_state:
             return None

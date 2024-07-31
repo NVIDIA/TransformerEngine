@@ -290,6 +290,7 @@ def test_fp8_model_checkpoint(
             model.weight._scale_inv.item(), fp8_meta_fwd_ref["scale_inv"][meta_index].item()
         )
 
+
 @pytest.mark.parametrize("fp8", (False, True))
 @pytest.mark.parametrize("save_fp8_model", (False, True))
 @pytest.mark.parametrize("load_fp8_model", (False, True))
@@ -332,12 +333,10 @@ def test_sequential_model(
 
     # Synthetic data
     xs_ref = [
-        torch.rand(in_shape, dtype=dtype, device=device)
-        for _ in range(save_steps + load_steps)
+        torch.rand(in_shape, dtype=dtype, device=device) for _ in range(save_steps + load_steps)
     ]
     dys_ref = [
-        torch.rand(in_shape, dtype=dtype, device=device)
-        for _ in range(save_steps + load_steps)
+        torch.rand(in_shape, dtype=dtype, device=device) for _ in range(save_steps + load_steps)
     ]
 
     def train_step(
