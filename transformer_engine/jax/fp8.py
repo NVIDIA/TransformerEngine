@@ -328,8 +328,8 @@ def fp8_autocast(
                     pjit(transformer.init, ...)(...)
 
     .. note::
-        We only support :attr:`margin`, :attr:`fp8_format`, :attr:`amax_history_len`
-        , and :attr:`amax_compute_algo`(with value 'max' and 'most_recent') in
+        We only support :attr:`margin`, :attr:`fp8_format`, :attr:`amax_history_len`,
+        and :attr:`amax_compute_algo` (with value 'max' and 'most_recent') in
         recipe.DelayedScaling currently. Other parameters in recipe.DelayedScaling
         will trigger an assertion.
 
