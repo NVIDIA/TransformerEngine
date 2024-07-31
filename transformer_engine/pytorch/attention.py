@@ -1211,6 +1211,8 @@ class AttnFuncWithCP(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        fp8,
+        fp8_meta,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2298,6 +2300,8 @@ class AttnFuncWithCP(torch.autograd.Function):
             attn_dbias,
             None,
             None,
+            None,
+            None,
         )
 
 
@@ -2323,6 +2327,8 @@ def attn_forward_func_with_cp(
     attn_bias=None,
     deterministic=False,
     use_fused_attention=False,
+    fp8=False,
+    fp8_meta=None,
 ) -> torch.Tensor:
     """Attention implementation with context parallelism"""
     assert qkv_format in [
@@ -2367,6 +2373,8 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
+        fp8,
+        fp8_meta,
     )
     return out
 
@@ -4903,9 +4911,18 @@ class FusedAttention(torch.nn.Module):
             and (fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
         )
 
+        if fp8:
+            assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
+                f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
+                " is required for FP8 attention!"
+            )
+            assert (
+                fp8_meta is not None
+            ), "FP8 metadata fp8_meta is required for FP8 attention!"
+
         if context_parallel:
             assert (
-                fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                fp8 or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
@@ -4936,17 +4953,11 @@ class FusedAttention(torch.nn.Module):
                     attn_bias=core_attention_bias,
                     deterministic=self.deterministic,
                     use_fused_attention=True,
+                    fp8=fp8,
+                    fp8_meta=fp8_meta,
                 )
         else:
             with self.attention_dropout_ctx():
-                if fp8:
-                    assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
-                        f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
-                        " is required for FP8 attention!"
-                    )
-                    assert (
-                        fp8_meta is not None
-                    ), "FP8 metadata fp8_meta is required for FP8 attention!"
                 output = FusedAttnFunc.apply(
                     self.training,
                     max_seqlen_q,
