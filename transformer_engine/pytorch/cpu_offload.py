@@ -274,7 +274,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
     def __init__(
         self,
         num_offload_group,  # must be <= actual number of groups (number of commits)
-        num_prefetch_group=1,
+        num_model_group,
         tensor_need_offloading_checker=(lambda t: True),
         debug=False,
     ) -> None:
@@ -283,19 +283,29 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             tensor_need_offloading_checker=tensor_need_offloading_checker,
             debug=debug,
         )
-        self.num_prefetch_group = num_prefetch_group
+        # Number of layers in the model
+        self.num_layers = num_model_group
         # Data Structure to maintain reference to activation tensors
         self.tensor_tag_to_buf = {}
+        # Tracking the number of layers offloaded
+        self.offloaded_group_count = 0
+        # Core data structure that decides the window for offloading
+        self.layer_window_map = {}
+
+        # Logic to make offloading load balance across computation
+        # for optimal CPU/GPU interconnect usage
+        constant = 0
+        for i in range(self.num_offload_group):
+            self.layer_window_map[i] = ((self.num_layers // self.num_offload_group) * (i + 1)) - 1
+            if i < (self.num_layers % self.num_offload_group):
+                self.layer_window_map[i] += i + 1
+                constant = i + 1
+            else:
+                self.layer_window_map[i] += constant
 
         # allocate streams and events for synchronization
         self.d2h_stream = torch.cuda.Stream()
         self.h2d_stream = torch.cuda.Stream()
-        self.h2d_finish_events = []
-        self.compute_stream_bwd_start_events = []
-        for _ in range(self.num_offload_group):
-            self.h2d_finish_events.append(torch.cuda.Event())
-            self.compute_stream_bwd_start_events.append(torch.cuda.Event())
-        self.d2h_final_event = torch.cuda.Event()
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
 
@@ -352,41 +362,44 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
-        # the host should wait for the copying of previous group
-        # to avoid overwriting buffer
-        previous_group = current_group - 1
-        if previous_group < self.num_offload_group:
-            torch.cuda.synchronize()
 
-            # Have to release the memory held by activations of the previous layer
-            if previous_group >= 0:
-                for tensor_tag, _ in self.tensor_tag_to_buf.items():
-                    if tensor_tag[0] == previous_group:
-                        self.tensor_tag_to_buf[tensor_tag] = None
-
-        # the copying of this group should wait for the computation stream event
-        if current_group < self.num_offload_group:
-            # perform bulk offloading
+        # For the first group, kickstart the offload after we have
+        # the first compute completion
+        if current_group == 0:
+            self.d2h_stream.wait_stream(torch.cuda.current_stream())
             self.bulk_offload_group(current_group)
-            if current_group == self.num_offload_group - 1:
-                self.d2h_stream.record_event(self.d2h_final_event)
+
+        # Window map data structure helps us synchronize based on number
+        # of layers offloaded
+        if self.layer_window_map[self.offloaded_group_count] == current_group:
+
+            # Stream synchronization both ways
+            self.d2h_stream.wait_stream(torch.cuda.current_stream())
+            torch.cuda.current_stream().wait_stream(self.d2h_stream)
+
+            # Time to free the activation memory after usage
+            for tensor_tag, _ in self.tensor_tag_to_buf.items():
+                if tensor_tag[0] == self.offloaded_group_count:
+                    self.tensor_tag_to_buf[tensor_tag] = None
+
+            # Time to offload the next group
+            if self.offloaded_group_count < (self.num_offload_group - 1):
+                self.bulk_offload_group(self.offloaded_group_count + 1)
+
+            # Increment the offload group count to keep track
+            self.offloaded_group_count += 1
 
     def on_group_commit_forward(self):
         """This function will cause host device synchronization"""
         # handle synchronization events
         self.synchronize_on_group_commit_forward(self.current_group)
 
-        # during forward, the next_group_to_fetch always points to the min of
-        # the last commited group, and the last offloaded group
-        self.next_group_to_fetch = min(self.current_group, self.num_offload_group - 1)
-
         super().on_group_commit_forward()
 
     def bulk_reload_group(self, group_to_reload):
         """Bulk reload group."""
         assert group_to_reload < self.num_offload_group
-        if group_to_reload == self.num_offload_group - 1:
-            self.h2d_stream.wait_event(self.d2h_final_event)
+
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self.tensor_tag_to_state.items():
@@ -403,39 +416,29 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.current_group -= 1
         assert self.current_group >= 0
 
-        # decide the range of group to prefetch
-        should_prefetch_until_group = self.current_group - self.num_prefetch_group
-        should_prefetch_until_group = max(should_prefetch_until_group, 0)
+        # Layer window data structure helps us to reload at right times
+        if self.layer_window_map[self.offloaded_group_count - 1] == self.current_group:
 
-        # do prefetch
-        for group_num_to_prefetch in range(
-            self.next_group_to_fetch, should_prefetch_until_group - 1, -1
-        ):
-            # record the event in the compute stream, for h2d to wait
-            torch.cuda.current_stream().record_event(
-                self.compute_stream_bwd_start_events[group_num_to_prefetch]
-            )
+            # Stream synchronization both ways
+            self.h2d_stream.wait_stream(torch.cuda.current_stream())
+            torch.cuda.current_stream().wait_stream(self.h2d_stream)
 
-            # start of h2d should wait for the compute and the d2h
-            self.h2d_stream.wait_event(self.compute_stream_bwd_start_events[group_num_to_prefetch])
+            # Time to reload the next group
+            self.bulk_reload_group(self.offloaded_group_count - 1)
 
-            # recover tensors (copy back from host)
-            self.bulk_reload_group(group_num_to_prefetch)
+            # Decrease the offloading group counter
+            self.offloaded_group_count -= 1 if self.offloaded_group_count > 1 else 0
 
-            # record an event for the backward of this layer to wait
-            self.h2d_stream.record_event(self.h2d_finish_events[group_num_to_prefetch])
-
-        # always is set to -1 at the end of the backward
-        self.next_group_to_fetch = min(self.num_offload_group - 1, should_prefetch_until_group - 1)
-
-        # wait for the current group
-        if self.current_group < self.num_offload_group:
-            torch.cuda.current_stream().wait_event(self.h2d_finish_events[self.current_group])
+        # Last group computation needs to wait till all the reloads complete
+        if self.current_group == 0:
+            torch.cuda.current_stream().wait_stream(self.h2d_stream)
+            self.offloaded_group_count = 0
 
 
 def get_cpu_offload_context(
     enabled: bool = False,
     num_layers: int = 1,
+    model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = True,
 ):
@@ -460,6 +463,8 @@ def get_cpu_offload_context(
     num_layers: int, default = 1
                 Determines the number of transformer layers
                 you want to offload activations/weights for.
+    model_layers: int, default = 1
+                  Number of layers in the model that will be used under this context.
     offload_activations: bool, default = `True`
                          When set to `True`, offloads the activations for the TE layer.
     offload_weights: bool, default = `True`
@@ -491,7 +496,7 @@ def get_cpu_offload_context(
 
     cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
         num_offload_group=num_layers,
-        num_prefetch_group=1,
+        num_model_group=model_layers,
         tensor_need_offloading_checker=tensor_need_offloading_checker,
     )
 
