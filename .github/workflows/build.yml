@@ -43,7 +43,7 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install . -v --no-deps
+        run: pip install . -v
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
