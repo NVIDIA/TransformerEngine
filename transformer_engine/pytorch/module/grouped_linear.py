@@ -833,7 +833,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             out = torch.cat(
                 [
                     o + cast_if_needed(b, self.activation_dtype)
-                    for o, b in zip(torch.split(out.view(-1, self.out_features), m_splits), bias_tensors)
+                    for o, b in zip(
+                        torch.split(out.view(-1, self.out_features), m_splits), bias_tensors
+                    )
                 ]
             ).view(out_shape)
 

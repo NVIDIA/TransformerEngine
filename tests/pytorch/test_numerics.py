@@ -1261,7 +1261,9 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None):
+def test_grouped_linear_accuracy(
+    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -1308,6 +1310,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+
 @pytest.mark.parametrize("parallel_mode", ["column", "row"])
 def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
     """Split the tests to reduce CI time"""
@@ -1320,6 +1323,7 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
         fp8_model_params=True,
         parallel_mode=parallel_mode,
     )
+
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     reset_rng_states()
