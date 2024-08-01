@@ -4,7 +4,6 @@
 
 """Linear API"""
 import os
-import logging
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -51,17 +50,6 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 
-# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
-_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-logging.basicConfig(
-    format="[%(levelname)-8s | %(name)-19s]: %(message)s",
-    level=log_levels[log_level if log_level in [0, 1, 2] else 2],
-)
-
 __all__ = ["Linear"]
 
 
@@ -97,7 +85,6 @@ class _Linear(torch.autograd.Function):
         is_first_module_in_mha: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
-        logger = logging.getLogger("Linear")
         is_input_fp8 = isinstance(inp, Float8Tensor)
         if is_input_fp8:
             fp8_meta["scaling_fwd"].scale_inv[tex.FP8FwdTensors.GEMM1_INPUT] = inp._scale_inv[0]
@@ -158,8 +145,6 @@ class _Linear(torch.autograd.Function):
         else:
             inputmat_total = inputmat
         if fp8:
-            logger.debug("Running forward in FP8")
-
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             bias = cast_if_needed(bias, bias_dtype) if use_bias else bias
 
@@ -248,8 +233,6 @@ class _Linear(torch.autograd.Function):
                     dtype=activation_dtype,
                 )
         else:
-            logger.debug("Running forward in %s", activation_dtype)
-
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -373,7 +356,6 @@ class _Linear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        logger = logging.getLogger("Linear")
         if isinstance(grad_output, Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[
                 tex.FP8BwdTensors.GRAD_OUTPUT1
@@ -450,8 +432,6 @@ class _Linear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
-
                     if ctx.is_input_fp8:
                         out_index, meta_tensor, output_te_dtype, output_dtype = (
                             tex.FP8BwdTensors.GRAD_INPUT1,
@@ -494,8 +474,6 @@ class _Linear(torch.autograd.Function):
                             dtype=ctx.activation_dtype,
                         )
                 else:
-                    logger.debug("Running backward in %s", ctx.activation_dtype)
-
                     dgrad, _, _ = gemm(
                         weight,
                         grad_output,
