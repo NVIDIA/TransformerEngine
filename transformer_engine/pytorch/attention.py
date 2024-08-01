@@ -6528,6 +6528,18 @@ class MultiheadAttention(torch.nn.Module):
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
+        cu_seqlens_q: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
+                   with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        max_seqlen_q: Optional[int], default = `None`
+                      Maximum sequence length in `query_layer`.
+                      Calculated from `cu_seqlens_q` if not provided.
+        max_seqlen_kv: Optional[int], default = `None`
+                       Maximum sequence length in `key_layer` and `value_layer`.
+                       Calculated from `cu_seqlens_kv` if not provided.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         """
