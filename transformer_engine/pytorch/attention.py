@@ -97,12 +97,12 @@ META_DP = tex.FP8BwdTensors.GRAD_INPUT3
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-logging.basicConfig(
-    format="[%(levelname)-8s | %(name)-19s]: %(message)s",
-    level=log_levels[log_level if log_level in [0, 1, 2] else 2],
-)
+_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+_log_level = log_levels[_log_level if _log_level in [0, 1, 2] else 2]
+_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -261,6 +261,9 @@ def get_attention_backend(
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
+    logger.setLevel(_log_level)
+    if not logger.hasHandlers():
+        logger.addHandler(_stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
@@ -3362,9 +3365,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
-            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert isinstance(qkv, Float8Tensor), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
@@ -3448,7 +3449,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", qkv.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training,
                 max_seqlen,
@@ -3501,7 +3501,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -3555,7 +3554,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_qkvpacked"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -3621,7 +3619,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                             ctx.qkv_dtype,
                         ).view(dqkv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", qkv.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
@@ -3739,9 +3736,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
-            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert isinstance(q, Float8Tensor) and isinstance(
                     kv, Float8Tensor
@@ -3838,7 +3833,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training,
                 max_seqlen_q,
@@ -3902,7 +3896,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -3960,7 +3953,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_kvpacked"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -4045,7 +4037,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                             ctx.qkv_dtype,
                         ).view(dkv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
@@ -4176,9 +4167,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc")
         if fp8:
-            logger.debug("Running forward in FP8")
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
@@ -4346,7 +4335,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -4420,7 +4408,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -4482,7 +4469,6 @@ class FusedAttnFunc(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -4620,7 +4606,6 @@ class FusedAttnFunc(torch.autograd.Function):
                                 ctx.qkv_dtype,
                             ).view(dv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dk, dv, *rest = fused_attn_bwd(
@@ -4761,7 +4746,6 @@ class FusedAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.logger = logging.getLogger("FusedAttention")
         self.softmax_scale = softmax_scale
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -5102,6 +5086,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")
+        self.logger.setLevel(_log_level)
+        if not self.logger.hasHandlers():
+            self.logger.addHandler(_stream_handler)
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",", "_")
         if attn_mask_type == "causal_padding":
@@ -5424,7 +5411,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.fp8_meta["recipe"].fp8_mha:
                     if not self.fp8_meta["recipe"].fp8_dpa:
                         self.fp8_meta["recipe"].fp8_dpa = True
-                        self.logger.WARNING(
+                        self.logger.warning(
                             """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
                             """fp8_meta["recipe"].fp8_mha=True"""
                         )
