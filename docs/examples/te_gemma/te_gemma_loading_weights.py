@@ -20,13 +20,15 @@ from transformers.utils.hub import get_checkpoint_shard_files
     both with HF and with TE, we can copy parameters from the first to the second.
 """
 
+
 def _load_weights_for_fp8_model(vanilla_model, hyperparams):
     # The weights are loaded from the file with state_dict
     # of model with weights which contains also fp8 parameters.
     # The weights are in BF16 precision, but they contain fp8 metadata
     # computed by the calibration procedure.
     vanilla_model.load_state_dict(
-        torch.load(hyperparams.fp8_model_weights_filename), strict=False
+        torch.load(hyperparams.fp8_model_weights_filename),
+        strict=False,
         # strict = false, because some parameters have
         # multiple pointers to the same weight
         # vanilla_model._model_context_phase.model
@@ -43,8 +45,12 @@ def _load_weights_for_standard_model(vanilla_model, config):
         state_dict = load_state_dict(shard_file)
         total_dict.update(state_dict)
 
-    replace_params(total_dict, vanilla_model.state_dict(),
-                   config, qkv_fused_and_interleaved=config.fuse_qkv_params)
+    replace_params(
+        total_dict,
+        vanilla_model.state_dict(),
+        config,
+        qkv_fused_and_interleaved=config.fuse_qkv_params,
+    )
     # Copy parameters like embedding:
     _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="")
 
@@ -59,7 +65,7 @@ def load_te_model(cls, config):
     Transformers repo:
     https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
     """
-    config.use_cache = False # To make TransformerLayer compatible with GemmaModel
+    config.use_cache = False  # To make TransformerLayer compatible with GemmaModel
     with fp8_model_init(config.fp8_model_init):
         # there we need only to create model
         vanilla_model = cls(config).to(torch.bfloat16).cuda()
@@ -72,75 +78,82 @@ def load_te_model(cls, config):
 
     return vanilla_model
 
+
 def _get_all_layer_prefixes_to_update(hf_state_dict):
     """
-        There are many parameters in hf_state_dict, whose name start with "model.layers.[number]."
-        This function extracts all strings like "model.layers.[number]."
-        that are starting strings of keys in hf_state_dict.
+    There are many parameters in hf_state_dict, whose name start with "model.layers.[number]."
+    This function extracts all strings like "model.layers.[number]."
+    that are starting strings of keys in hf_state_dict.
     """
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
-        layer_prefix_pat = 'model.layers.\d+.'
+        layer_prefix_pat = "model.layers.\d+."
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())
     return all_layer_prefixes
+
 
 def replace_params(hf_state_dict, te_state_dict, config, qkv_fused_and_interleaved=False):
     """
     Replaces params from TE TransformerLayer state_dict with corresponding parameters
     from HuggingFace GemmaModel state_dict.
     """
-    all_layer_prefixes : List[str] = _get_all_layer_prefixes_to_update(hf_state_dict)
+    all_layer_prefixes: List[str] = _get_all_layer_prefixes_to_update(hf_state_dict)
 
     for layer_prefix in all_layer_prefixes:
+
         def copy_from_ht_to_te(te_name, hf_name, start=None, end=None):
             te_state_dict[layer_prefix + te_name].data[start:end].copy_(
                 hf_state_dict[layer_prefix + hf_name]
             )
 
         copy_from_ht_to_te(
-            'self_attention.layernorm_qkv.layer_norm_weight', 'input_layernorm.weight')
-        copy_from_ht_to_te('self_attention.proj.weight', 'self_attn.o_proj.weight')
-        copy_from_ht_to_te('layernorm_mlp.layer_norm_weight', 'post_attention_layernorm.weight')
-        copy_from_ht_to_te('layernorm_mlp.fc2_weight', 'mlp.down_proj.weight')
+            "self_attention.layernorm_qkv.layer_norm_weight", "input_layernorm.weight"
+        )
+        copy_from_ht_to_te("self_attention.proj.weight", "self_attn.o_proj.weight")
+        copy_from_ht_to_te("layernorm_mlp.layer_norm_weight", "post_attention_layernorm.weight")
+        copy_from_ht_to_te("layernorm_mlp.fc2_weight", "mlp.down_proj.weight")
         copy_from_ht_to_te(
-            'layernorm_mlp.fc1_weight', 'mlp.gate_proj.weight', end=config.intermediate_size)
+            "layernorm_mlp.fc1_weight", "mlp.gate_proj.weight", end=config.intermediate_size
+        )
         copy_from_ht_to_te(
-            'layernorm_mlp.fc1_weight', 'mlp.up_proj.weight', start=config.intermediate_size)
+            "layernorm_mlp.fc1_weight", "mlp.up_proj.weight", start=config.intermediate_size
+        )
 
         if qkv_fused_and_interleaved:
             """
-                When qkv_fused_and_interleaved=True, key, query and value layers are on one tensor
-                in TE TransformerLayer. Moreover they are interleaved within each head.
-                Let q_i, k_i and v_i be query, key and value layers for i-th head respectively.
-                Then TE stores weight tensor in the form:
-                [q1 k1 v1 q2 k2 v2 ...]
-                This is done to maximally optimize performance time.
+            When qkv_fused_and_interleaved=True, key, query and value layers are on one tensor
+            in TE TransformerLayer. Moreover they are interleaved within each head.
+            Let q_i, k_i and v_i be query, key and value layers for i-th head respectively.
+            Then TE stores weight tensor in the form:
+            [q1 k1 v1 q2 k2 v2 ...]
+            This is done to maximally optimize performance time.
             """
-            te_qkv_layer = te_state_dict[layer_prefix + 'self_attention.layernorm_qkv.weight']
+            te_qkv_layer = te_state_dict[layer_prefix + "self_attention.layernorm_qkv.weight"]
+
             def copy_interleave(hf_name, idx):
                 src = hf_state_dict[layer_prefix + hf_name]
                 for head_nr in range(config.num_attention_heads):
                     dst_offset = head_nr * config.head_dim * 3
                     dst_slice = slice(
-                            dst_offset + idx * config.head_dim,
-                            dst_offset + (idx + 1) * config.head_dim
+                        dst_offset + idx * config.head_dim, dst_offset + (idx + 1) * config.head_dim
                     )
                     src_slice = slice(
-                        head_nr * config.head_dim,
-                        head_nr * config.head_dim + config.head_dim
+                        head_nr * config.head_dim, head_nr * config.head_dim + config.head_dim
                     )
                     te_qkv_layer[dst_slice, :] = src[src_slice, :]
-            copy_interleave('self_attn.q_proj.weight', 0)
-            copy_interleave('self_attn.k_proj.weight', 1)
-            copy_interleave('self_attn.v_proj.weight', 2)
+
+            copy_interleave("self_attn.q_proj.weight", 0)
+            copy_interleave("self_attn.k_proj.weight", 1)
+            copy_interleave("self_attn.v_proj.weight", 2)
         else:
             copy_from_ht_to_te(
-                'self_attention.layernorm_qkv.query_weight', 'self_attn.q_proj.weight')
+                "self_attention.layernorm_qkv.query_weight", "self_attn.q_proj.weight"
+            )
+            copy_from_ht_to_te("self_attention.layernorm_qkv.key_weight", "self_attn.k_proj.weight")
             copy_from_ht_to_te(
-                'self_attention.layernorm_qkv.key_weight', 'self_attn.k_proj.weight')
-            copy_from_ht_to_te(
-                'self_attention.layernorm_qkv.value_weight', 'self_attn.v_proj.weight')
+                "self_attention.layernorm_qkv.value_weight", "self_attn.v_proj.weight"
+            )
 
     return all_layer_prefixes

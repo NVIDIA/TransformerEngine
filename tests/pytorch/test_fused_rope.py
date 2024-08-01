@@ -30,14 +30,16 @@ def apply_rotary_pos_emb_thd(
     if start_positions is None:
         return torch.cat(
             [
-                apply_rotary_pos_emb(x.unsqueeze(1), freqs[:x.size(0)])
+                apply_rotary_pos_emb(x.unsqueeze(1), freqs[: x.size(0)])
                 for x in torch.split(t, seqlens)
             ]
         ).squeeze(1)
     else:
         return torch.cat(
             [
-                apply_rotary_pos_emb(x.unsqueeze(1), freqs[start_positions[i]:(x.size(0) + start_positions[i])])
+                apply_rotary_pos_emb(
+                    x.unsqueeze(1), freqs[start_positions[i] : (x.size(0) + start_positions[i])]
+                )
                 for i, x in enumerate(torch.split(t, seqlens))
             ]
         ).squeeze(1)
@@ -85,9 +87,9 @@ def apply_rotary_pos_emb_with_start_positions(
 
     # Only apply the rotary embeddings up to the sequence length of the running
     # input.
-    assert cur_seq_len <= max_seq_len, (
-        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    )
+    assert (
+        cur_seq_len <= max_seq_len
+    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
 
     if tensor_format == "bshd":
         t = t.transpose(0, 1)
@@ -107,7 +109,7 @@ def apply_rotary_pos_emb_with_start_positions(
 
     for b in range(start_positions.shape[0]):
         assert max_seq_len >= start_positions[b]
-        shifted_freq = slice(start_positions[b],(start_positions[b] + cur_seq_len))
+        shifted_freq = slice(start_positions[b], (start_positions[b] + cur_seq_len))
         shifted_sin[:, b, :] = sin_[shifted_freq, 0, ...]
         shifted_cos[:, b, :] = cos_[shifted_freq, 0, ...]
 
@@ -177,9 +179,11 @@ def test_fused_rope(
         # there is no space left for starting with positions >0.
         pytest.skip("Skipping test with margin=0 and start_positions=True")
 
-
-    start_positions = torch.randint(
-        0, margin, (batch_size,), dtype=torch.int32, device=device) if start_positions else None
+    start_positions = (
+        torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device)
+        if start_positions
+        else None
+    )
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(seq_length)
@@ -195,11 +199,7 @@ def test_fused_rope(
 
     # fused
     output_fused = apply_rotary_pos_emb(
-        t,
-        emb,
-        tensor_format=tensor_format,
-        fused=True,
-        start_positions=start_positions
+        t, emb, tensor_format=tensor_format, fused=True, start_positions=start_positions
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
@@ -241,9 +241,11 @@ def test_fused_rope_thd(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    start_positions = torch.randint(
-        0, 20, (cu_seqlens.shape[-1],), dtype=torch.int32, device=device) \
-            if start_positions else None
+    start_positions = (
+        torch.randint(0, 20, (cu_seqlens.shape[-1],), dtype=torch.int32, device=device)
+        if start_positions
+        else None
+    )
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(cu_seqlens[-1])
@@ -257,8 +259,12 @@ def test_fused_rope_thd(
 
     # fused
     output_fused = apply_rotary_pos_emb(
-        t, emb, fused=True, tensor_format="thd",
-        cu_seqlens=cu_seqlens, start_positions=start_positions
+        t,
+        emb,
+        fused=True,
+        tensor_format="thd",
+        cu_seqlens=cu_seqlens,
+        start_positions=start_positions,
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()

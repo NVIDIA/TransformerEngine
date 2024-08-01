@@ -285,9 +285,7 @@ class TransformerLayer(torch.nn.Module):
         super().__init__()
 
         if ub_tp_comm_overlap:
-            assert (
-                tex.userbuf_comm_available()
-            ), "Userbuffer communication backend not available."
+            assert tex.userbuf_comm_available(), "Userbuffer communication backend not available."
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = check_set_window_size(self_attn_mask_type, window_size)

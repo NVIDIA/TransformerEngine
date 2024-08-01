@@ -42,6 +42,7 @@ import transformer_engine_torch as tex
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 @functools.cache
 def _cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
@@ -51,10 +52,12 @@ def _cudnn_version() -> Tuple[int, int, int]:
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
 
+
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return (props.major, props.minor)
+
 
 seed = 1234
 torch.manual_seed(seed)
@@ -1697,29 +1700,32 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     # Check if the fully generated output matches the one generated incrementally
     assert_allclose(full_output, incremental_output, atol[dtype])
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model_key", model_configs_inference.keys())
 @pytest.mark.parametrize("use_RoPE", all_boolean)
 @pytest.mark.parametrize("module", module_inference)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+.")
-@pytest.mark.skipif(_cudnn_version() < (9,0,0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
+)
+@pytest.mark.skipif(_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     """
-        In thd attention sequences can have various lengths,
-        different that 's' dimension of input to the Transformer Layer.
+    In thd attention sequences can have various lengths,
+    different that 's' dimension of input to the Transformer Layer.
 
-        The test contains of:
-        - one context phase when sequences with various lengths(!) are passed through the model,
-        - 2 phases when sequences with length 1 are passed through the model.
+    The test contains of:
+    - one context phase when sequences with various lengths(!) are passed through the model,
+    - 2 phases when sequences with length 1 are passed through the model.
 
-        The output is compared with the case when all this sequences are passed at one.
+    The output is compared with the case when all this sequences are passed at one.
     """
     if dtype == torch.float32:
         pytest.skip("torch.float32 does not support thd")
 
     fused_attn_env = os.environ["NVTE_FUSED_ATTN"]
-    os.environ["NVTE_FUSED_ATTN"] = "1" # Only fused attention supports thd.
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Only fused attention supports thd.
 
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -1730,7 +1736,7 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     B = bs
     H = config.num_attention_heads
     D = config.hidden_size
-    G = 2 # generation phase length
+    G = 2  # generation phase length
     S_max = S + G
     head_size = config.embed
 
@@ -1743,24 +1749,22 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     # dst_tensor should be big enough to fit this sequences.
     def _concat_thd(dst_tensor, dst_seqlens, tensor, seqlens):
         for b in range(B):
-            dst_tensor[b, dst_seqlens[b]:(dst_seqlens[b] + seqlens[b]), :] = \
-                  tensor[b, :seqlens[b], :]
+            dst_tensor[b, dst_seqlens[b] : (dst_seqlens[b] + seqlens[b]), :] = tensor[
+                b, : seqlens[b], :
+            ]
         dst_seqlens.copy_(dst_seqlens + seqlens)
 
     if module == "TransformerLayer":
-        model = (
-            TransformerLayer(
-                hidden_size=D,
-                ffn_hidden_size= 4 * D,
-                num_attention_heads=H,
-                attn_input_format="thd",
-                self_attn_mask_type="padding_causal",
-                layer_number=layer_number,
-                params_dtype=dtype,
-                device="cuda",
-            )
-            .eval()
-        )
+        model = TransformerLayer(
+            hidden_size=D,
+            ffn_hidden_size=4 * D,
+            num_attention_heads=H,
+            attn_input_format="thd",
+            self_attn_mask_type="padding_causal",
+            layer_number=layer_number,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
         attn_name = "self_attn_mask_type"
     else:
         model = (
@@ -1770,7 +1774,7 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
                 qkv_format="thd",
                 layer_number=layer_number,
                 params_dtype=dtype,
-                attn_mask_type="padding_causal"
+                attn_mask_type="padding_causal",
             )
             .cuda()
             .eval()
@@ -1781,7 +1785,7 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
 
     kwargs = {
         "inference_params": inference_params,
-        "rotary_pos_emb": rotary_freqs if use_RoPE else None
+        "rotary_pos_emb": rotary_freqs if use_RoPE else None,
     }
 
     total_sequence_lengths = torch.zeros((B,)).cuda().to(torch.int32)
@@ -1792,18 +1796,17 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
     # context phase
     sequence_lengths = torch.randint(1, S, (B,)).cuda().to(torch.int32)
     chunk = torch.randn((B, S, D)).cuda().to(dtype)
-    inference_params.setup_before_new_input(
-            max_input_length=S, lengths_tensor=sequence_lengths)
-    model(chunk, inference_params=inference_params,
-        rotary_pos_emb=rotary_freqs if use_RoPE else None)
+    inference_params.setup_before_new_input(max_input_length=S, lengths_tensor=sequence_lengths)
+    model(
+        chunk, inference_params=inference_params, rotary_pos_emb=rotary_freqs if use_RoPE else None
+    )
     _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
 
     # generation phase
     for _ in range(G):
         sequence_lengths = torch.ones((B,)).cuda().to(torch.int32)
         chunk = torch.randn((B, 1, D)).cuda().to(dtype)
-        inference_params.setup_before_new_input(
-                max_input_length=1, lengths_tensor=sequence_lengths)
+        inference_params.setup_before_new_input(max_input_length=1, lengths_tensor=sequence_lengths)
         # we need to remove 'causal' from mask
         # otherwise tokens we add will be considered as a first in the sequence,
         # but they need to interact with all tokens from key-value cache.
@@ -1811,28 +1814,25 @@ def test_kv_cache_accuracy_thd(dtype, bs, model_key, use_RoPE, module):
         kwargs[attn_name] = "padding"
         output = model(chunk, **kwargs)
         _concat_thd(total_tensor, total_sequence_lengths, chunk, sequence_lengths)
-    incremental_logits = output[:, - 1, :]  # last element of each seq.
-
+    incremental_logits = output[:, -1, :]  # last element of each seq.
 
     # Sequences passed in one, concatenated chunk.
 
-    kwargs[attn_name] = 'padding_causal' # add 'causal' back to the mask
+    kwargs[attn_name] = "padding_causal"  # add 'causal' back to the mask
     inference_params.reset()
     inference_params.setup_before_new_input(
-        max_input_length=S_max, lengths_tensor=total_sequence_lengths)
+        max_input_length=S_max, lengths_tensor=total_sequence_lengths
+    )
     full_output = model(total_tensor, **kwargs)
     full_logits = full_output[
-        torch.arange(0, B), total_sequence_lengths - 1, :] # last element of each seq.
+        torch.arange(0, B), total_sequence_lengths - 1, :
+    ]  # last element of each seq.
 
     # Final result should be close.
-    torch.testing.assert_close(
-        full_logits,
-        incremental_logits,
-        atol=1e-2,
-        rtol=1e-2
-    )
+    torch.testing.assert_close(full_logits, incremental_logits, atol=1e-2, rtol=1e-2)
 
     os.environ["NVTE_FUSED_ATTN"] = fused_attn_env
+
 
 @pytest.mark.parametrize(
     "shape",

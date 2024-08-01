@@ -14,7 +14,12 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup, AutoConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    get_linear_schedule_with_warmup,
+    AutoConfig,
+)
 from transformers import DataCollatorForLanguageModeling
 from datasets import load_dataset
 from accelerate import Accelerator
@@ -22,6 +27,7 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 
 
 from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
+
 
 class HyperParameters:
     def __init__(self):
@@ -47,19 +53,22 @@ class HyperParameters:
         self.batch_size = 8
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
-        self.num_warmup_steps=5
-        self.num_training_steps=10
+        self.num_warmup_steps = 5
+        self.num_training_steps = 10
 
         # QKV format.
-        self.fuse_qkv_params=False
+        self.fuse_qkv_params = False
         self.qkv_format = "bshd"
+
 
 hyperparams = HyperParameters()
 
-assert torch.backends.cudnn.version() >= 9100, \
-    "cuDNN version >= 9.1.0 is needed to run this tutorial."
+assert (
+    torch.backends.cudnn.version() >= 9100
+), "cuDNN version >= 9.1.0 is needed to run this tutorial."
 
-def get_dataloaders(accelerator:Accelerator, hyperparams):
+
+def get_dataloaders(accelerator: Accelerator, hyperparams):
     dataset = load_dataset(hyperparams.dataset_name, split="train")
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
 
@@ -70,16 +79,12 @@ def get_dataloaders(accelerator:Accelerator, hyperparams):
             padding=False,
             max_length=hyperparams.max_seq_length,
             return_overflowing_tokens=False,
-            return_length=False
+            return_length=False,
         )
         return {"input_ids": outputs["input_ids"], "attention_mask": outputs["attention_mask"]}
 
     with accelerator.main_process_first():
-        dataset = dataset.map(
-            tokenize,
-            batched=True,
-            remove_columns=dataset.column_names
-        )
+        dataset = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
 
     # Simply pad to the multiple of 16 for both FP8 and BF16 precision
     pad_to_multiple_of = 16
@@ -97,6 +102,7 @@ def get_dataloaders(accelerator:Accelerator, hyperparams):
     train_dataloader = DataLoader(dataset, **dataloader_params)
     return train_dataloader
 
+
 def init_baseline_model(hyperparams):
     # Init the model
     config = AutoConfig.from_pretrained(hyperparams.model_name)
@@ -109,13 +115,14 @@ def init_baseline_model(hyperparams):
     )
     return model.cuda()
 
+
 def init_te_gemma_model(hyperparams):
     cls = TEGemmaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
     # Adding all params from the hyperparams to the config to make the code simpler.
     for key, value in hyperparams.__dict__.items():
-                setattr(config, key, value)
+        setattr(config, key, value)
     model = load_te_model(cls, config)
     if hyperparams.generation_cuda_graphs:
         model.record()
@@ -124,20 +131,22 @@ def init_te_gemma_model(hyperparams):
 
 def wrap_with_accelerator(model, hyperparams):
     # Create FP8 kwarg handler if required
-    fp8_kwarg_handler = [FP8RecipeKwargs(backend="te")] if hyperparams.mixed_precision == "fp8" else None
+    fp8_kwarg_handler = (
+        [FP8RecipeKwargs(backend="te")] if hyperparams.mixed_precision == "fp8" else None
+    )
 
     # Init HF accelerator that's used for training
     accelerator = Accelerator(
         log_with="wandb",
         gradient_accumulation_steps=hyperparams.gradient_accumulation_steps,
         mixed_precision=hyperparams.mixed_precision,
-        kwargs_handlers=fp8_kwarg_handler
+        kwargs_handlers=fp8_kwarg_handler,
     )
-    #accelerator.print(f'State: {accelerator.state}')
+    # accelerator.print(f'State: {accelerator.state}')
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
     # Wrap model, optimizer/scheduler, dataloaders in accelerate
-    optimizer = AdamW(params = model.parameters(), lr=hyperparams.learning_rate, fused=True)
+    optimizer = AdamW(params=model.parameters(), lr=hyperparams.learning_rate, fused=True)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
@@ -148,6 +157,7 @@ def wrap_with_accelerator(model, hyperparams):
     )
 
     return accelerator, model, optimizer, train_dataloader, lr_scheduler
+
 
 def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler):
     model.train()
@@ -165,7 +175,7 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-    run_iters(hyperparams.num_warmup_steps) # Warmup iters
+    run_iters(hyperparams.num_warmup_steps)  # Warmup iters
 
     # Get the timers ready
     start = torch.cuda.Event(enable_timing=True)
@@ -173,15 +183,18 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     torch.cuda.synchronize()
 
     start.record()
-    run_iters(hyperparams.num_training_steps) # Training iters
+    run_iters(hyperparams.num_training_steps)  # Training iters
     torch.cuda.synchronize()
     end.record()
     accelerator.end_training()
 
-    print(f"""{hyperparams.num_training_steps} finetuning steps complete!\n
+    print(
+        f"""{hyperparams.num_training_steps} finetuning steps complete!\n
           Average time taken per step:
           {(start.elapsed_time(end)/hyperparams.num_training_steps):.0f}
-          milliseconds""")
+          milliseconds"""
+    )
+
 
 def restart_jupyter_notebook():
     # Try restarting the Jupyter kernel
@@ -190,31 +203,37 @@ def restart_jupyter_notebook():
     # Check whether the device memory has been flushed
     if torch.cuda.memory_allocated() != 0:
         import warnings
+
         warnings.warn("The device memory hasn't been flushed, trying with a second method!")
 
         # Try restarting the Jupyter kernel another way
         # Restart the kernel
         from IPython.core.display import HTML
+
         HTML("<script>Jupyter.notebook.kernel.restart()</script>")
 
         if torch.cuda.memory_allocated() != 0:
-            print("The device memory hasn't been flushed, try manually restarting the Jupyter kernel!")
+            print(
+                "The device memory hasn't been flushed, try manually restarting the Jupyter kernel!"
+            )
 
     # Suppress the warnings
     if not sys.warnoptions:
         import warnings
+
         warnings.simplefilter("ignore")
         torch.set_warn_always(False)
+
 
 @torch.no_grad()
 def run_forward_pass(model, hyperparams, num_iters):
     """
-        It runs num_iters forward passes with sample data.
+    It runs num_iters forward passes with sample data.
     """
     accelerator = Accelerator(
         log_with="wandb",
         gradient_accumulation_steps=hyperparams.gradient_accumulation_steps,
-        mixed_precision="no"
+        mixed_precision="no",
     )
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
@@ -226,53 +245,63 @@ def run_forward_pass(model, hyperparams, num_iters):
         batch["input_ids"] = batch["input_ids"].cuda()
         model(batch["input_ids"])
 
+
 """
     Benchmarking and example generation functions.
 """
+
 
 def print_sample_of_generated_texts(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     prompts = ["Here are the two facts about GPUs:", "Some facts about NVIDIA:"]
     inputs = tokenizer(prompts * 32, return_tensors="pt", padding=True)
 
-    max_length = inputs['input_ids'].size(1)
+    max_length = inputs["input_ids"].size(1)
     new_length = ((max_length + 63) // 64) * 128
-    inputs['input_ids'] = torch.nn.functional.pad(inputs['input_ids'], (new_length - max_length, 0), value=tokenizer.pad_token_id)
-    inputs['attention_mask'] = torch.nn.functional.pad(inputs['attention_mask'], (new_length - max_length, 0), value=0)
+    inputs["input_ids"] = torch.nn.functional.pad(
+        inputs["input_ids"], (new_length - max_length, 0), value=tokenizer.pad_token_id
+    )
+    inputs["attention_mask"] = torch.nn.functional.pad(
+        inputs["attention_mask"], (new_length - max_length, 0), value=0
+    )
 
-    inputs['input_ids'] = inputs['input_ids'].cuda()
-    inputs['attention_mask'] = inputs['attention_mask'].cuda()
+    inputs["input_ids"] = inputs["input_ids"].cuda()
+    inputs["attention_mask"] = inputs["attention_mask"].cuda()
 
     outputs = model.generate(**inputs, max_new_tokens=50)
     generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
     print("=" * 30 + " Generation example 1 " + "=" * 30)
     print("Prompt:")
-    print(generated_texts[0][:len(prompts[0])])
+    print(generated_texts[0][: len(prompts[0])])
     print("Generated text:")
-    print(generated_texts[0][len(prompts[0]):])
+    print(generated_texts[0][len(prompts[0]) :])
     print("=" * 30 + " Generation example 2 " + "=" * 30)
     print("Prompt:")
-    print(generated_texts[1][:len(prompts[1])])
+    print(generated_texts[1][: len(prompts[1])])
     print("")
     print("Generated text:")
-    print(generated_texts[1][len(prompts[1]):])
+    print(generated_texts[1][len(prompts[1]) :])
 
 
 def _generate_random_words(num_words, max_word_length):
     words = []
     for _ in range(num_words):
         word_length = random.randint(1, max_word_length)
-        word = ''.join(random.choices(string.ascii_lowercase, k=word_length))
+        word = "".join(random.choices(string.ascii_lowercase, k=word_length))
         words.append(word)
     return words
+
 
 def benchmark_generation(model):
     batch_size = 64
     context_length = 128
     max_new_tokens = 1024 - 128
     print("=" * 30 + " Benchmarking " + "=" * 30)
-    print(f"Benchmarking for batch_size = {batch_size} and max total tokens = {context_length + max_new_tokens}")
+    print(
+        f"Benchmarking for batch_size = {batch_size} and max total tokens ="
+        f" {context_length + max_new_tokens}"
+    )
 
     input_str = _generate_random_words(batch_size, context_length)
 
@@ -284,10 +313,7 @@ def benchmark_generation(model):
     torch.cuda.synchronize()
     start.record()
 
-    model.generate(
-        inputs['input_ids'].cuda(),
-        max_new_tokens=max_new_tokens
-    )
+    model.generate(inputs["input_ids"].cuda(), max_new_tokens=max_new_tokens)
     torch.cuda.synchronize()
     end.record()
 
