@@ -43,6 +43,11 @@ class _permute(torch.autograd.Function):
         assert inp.size(0) == indices.size(0), "Permute not possible"
 
         # Data type check
+        if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
+            assert inp.dtype == torch.float32, (
+                "When using fp8 data as input, the input should be packed to"
+                f" {torch.float32} data type first."
+            )
         if indices.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `indices` of Permute is {indices.dtype}! "
@@ -135,6 +140,11 @@ class _unpermute(torch.autograd.Function):
         assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
 
         # Data type check
+        if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
+            assert inp.dtype == torch.float32, (
+                "When using fp8 data as input, the input should be packed to"
+                f" {torch.float32} data type first."
+            )
         if row_id_map.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `row_id_map` of Unpermute is {row_id_map.dtype}! "

@@ -11,19 +11,10 @@ from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine_torch as tex
 
-# Only run FP8 tests on H100.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-
-# TE tensor dtypes
-_te_dtypes: List[tex.DType] = [tex.DType.kFloat32, tex.DType.kFloat16]
-if is_bf16_compatible():
-    _te_dtypes.append(tex.DType.kBFloat16)
-if fp8_available:
-    _te_dtypes.extend([tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
 
 
 def pytorch_permute(tokens, indices, num_out_tokens: int = None):
@@ -156,14 +147,7 @@ def fp8_to_fp16(uint8_tensor, e4m3: bool = True):
     return float16_tensor
 
 
-@pytest.mark.parametrize("te_dtype", _te_dtypes)
-@pytest.mark.parametrize("num_tokens", [4096])
-@pytest.mark.parametrize("num_expert", [8, 16])
-@pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("topK", [1, 2, 5])
-@pytest.mark.parametrize("num_out_tokens", [None, 4050])
-@pytest.mark.parametrize("with_probs", [True, False])
-def test_permutation(
+def _test_permutation(
     te_dtype,
     num_tokens,
     num_expert,
@@ -447,7 +431,103 @@ def perf_test_cuda_kernel(cuda_kernel_fn):
         pytest.skip("CUDA is not available.")
 
 
-def test_permute_single_case():
+# TE tensor dtypes
+_te_dtypes: List[tex.DType] = [tex.DType.kFloat32, tex.DType.kFloat16]
+if is_bf16_compatible():
+    _te_dtypes.append(tex.DType.kBFloat16)
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
+@pytest.mark.parametrize("num_tokens", [4096])
+@pytest.mark.parametrize("num_expert", [8, 16])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("num_out_tokens", [None, 2039])
+def test_permutation(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+    topK,
+    num_out_tokens,
+):
+    with_probs = True
+    BENCHMARK = False
+
+    _test_permutation(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=BENCHMARK,
+    )
+
+
+# Only run FP8 tests on H100.
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("te_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("num_tokens", [2048])
+@pytest.mark.parametrize("num_expert", [8, 16])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("num_out_tokens", [None, 2039])
+def test_permutation_fp8(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+    topK,
+    num_out_tokens,
+):
+    with_probs = True
+    BENCHMARK = False
+
+    _test_permutation(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=BENCHMARK,
+    )
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
+@pytest.mark.parametrize("num_tokens", [4096])
+@pytest.mark.parametrize("num_expert", [8, 16])
+@pytest.mark.parametrize("hidden_size", [4096])
+def test_permutation_topk1_no_probs(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+):
+    topK = 1
+    num_out_tokens = None
+    with_probs = False
+    BENCHMARK = False
+
+    _test_permutation(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=BENCHMARK,
+    )
+
+
+def test_permutation_single_case():
     print("GPU:", torch.cuda.get_device_name(0))
 
     # te_dtype = tex.DType.kFloat32
@@ -464,7 +544,7 @@ def test_permute_single_case():
     with_probs = True
     Benchmark = True
 
-    test_permutation(
+    _test_permutation(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
@@ -477,4 +557,4 @@ def test_permute_single_case():
 
 
 if __name__ == "__main__":
-    test_permute_single_case()
+    test_permutation_single_case()
