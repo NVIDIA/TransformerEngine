@@ -54,6 +54,9 @@ def fp8_gemm(
             dtype=out_dtype,
             device="cuda",
         )
+    else:
+        if not out.is_contiguous():
+            raise ValueError("Output tensor is not contiguous.")
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
@@ -202,6 +205,9 @@ def gemm(
             dtype=dtype,
             device="cuda",
         )
+    else:
+        if not out.is_contiguous():
+            raise ValueError("Output tensor is not contiguous.")
 
     if gelu and not grad:
         gelu_input = torch.empty_like(out, dtype=dtype)
@@ -311,7 +317,9 @@ def grouped_gemm(
     empty_tensors = [torch.Tensor()] * num_gemms
 
     if gelu and not grad:
-        gelu_input = [torch.empty_like(o, dtype=dtype) for o in out]
+        gelu_input = [
+            torch.empty_like(o, dtype=dtype, memory_format=torch.contiguous_format) for o in out
+        ]
     elif not gelu:
         gelu_input = empty_tensors
 
@@ -406,7 +414,10 @@ def fp8_grouped_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias[0].dtype
     if gelu:
-        gelu_input = [torch.empty_like(o, dtype=bias_dtype) for o in out]
+        gelu_input = [
+            torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
+            for o in out
+        ]
     else:
         gelu_input = empty_tensors
     bias_dtype = TE_DType[bias_dtype]
