@@ -22,5 +22,6 @@ pytest -v -s $TE_PATH/tests/pytorch/test_gqa.py
 pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py
 pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py
+pytest -v -s $TE_PATH/tests/pytorch/test_generation.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops_distributed.py

@@ -155,6 +155,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
+  // Generation
+  m.def("attention_copy", &attention_copy, "attention_copy");
+
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
