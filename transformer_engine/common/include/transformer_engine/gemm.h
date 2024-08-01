@@ -92,6 +92,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
  *  \param[in,out] D                     List of output matrices.
  *  \param[in]     bias                  List of bias tensors.
  *  \param[in,out] pre_gelu_out          List of output matrix before GELU activation.
+ *  \param[in]     num_gemms             Number of GEMMs to compute.
  *  \param[in]     transa                Whether A matrix is transposed.
  *  \param[in]     transb                Whether B matrix is transposed.
  *  \param[in]     grad                  Whether this operation is part of the
@@ -102,10 +103,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream to wait on.
  */
-void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETensor> B,
-                                   std::vector<NVTETensor> D, std::vector<NVTETensor> bias,
-                                   std::vector<NVTETensor> pre_gelu_out, bool transa, bool transb,
-                                   bool grad, std::vector<NVTETensor> workspace, bool accumulate,
+void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                                   const NVTETensor* bias, NVTETensor* pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor* workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    cudaStream_t stream);
 #ifdef __cplusplus
