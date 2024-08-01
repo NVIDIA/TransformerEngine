@@ -1565,7 +1565,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] += p_per_step[k] * lse_corrected_exp;
+          p[k] += (p_per_step[k] == 0 ? 0 : p_per_step[k] * lse_corrected_exp);
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
