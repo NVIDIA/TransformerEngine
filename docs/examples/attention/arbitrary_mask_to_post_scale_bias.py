@@ -6,7 +6,6 @@ import os
 import torch
 from typing import Tuple
 from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state
 from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state
@@ -22,7 +21,7 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 def reset_rng_states() -> None:
     """Revert back to initial RNG state"""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 def _run_dot_product_attention(
