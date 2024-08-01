@@ -220,9 +220,9 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
 
 template <typename T>
 void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, int *row_id_map,
-                           const float *prob, const int num_rows, const int topK,
-                           const int num_cols, const int num_out_tokens, float *prob_grad,
-                           const T *input_fwd, cudaStream_t stream) {
+                           const float *prob, float *prob_grad, const T *input_fwd,
+                           const int num_rows, const int topK, const int num_cols,
+                           const int num_out_tokens, cudaStream_t stream) {
   using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
                                               std::is_same<T, __nv_fp8_e4m3>::value),
                                              half, T>::type;
@@ -308,23 +308,58 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
   }
 }
 
-void nvte_permute(const void *input, void *output, const transformer_engine::DType dtype,
-                  const int *sorted_row_id, int *row_id_map, const float *prob, const int num_rows,
-                  const int topK, const int num_cols, const int num_out_tokens, float *prob_grad,
-                  const void *input_fwd, cudaStream_t stream) {
+void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor sorted_row_id,
+                  NVTETensor row_id_map, const NVTETensor prob, NVTETensor prob_grad,
+                  const NVTETensor input_fwd, const int num_rows, const int topK,
+                  const int num_cols, const int num_out_tokens, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_permute);
+
+  const transformer_engine::Tensor *input_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(input);
+  const transformer_engine::Tensor *output_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(output);
+  const transformer_engine::Tensor *sorted_row_id_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(sorted_row_id);
+  const transformer_engine::Tensor *row_id_map_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
+  const transformer_engine::Tensor *prob_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(prob);
+  const transformer_engine::Tensor *prob_grad_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(prob_grad);
+  const transformer_engine::Tensor *input_fwd_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-      dtype, T,
-      nvte_permute_launcher(reinterpret_cast<const T *>(input), reinterpret_cast<T *>(output),
-                            sorted_row_id, row_id_map, prob, num_rows, topK, num_cols,
-                            num_out_tokens, prob_grad, reinterpret_cast<const T *>(input_fwd),
-                            stream););
+      input_cu->data.dtype, T,
+      nvte_permute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
+                            reinterpret_cast<T *>(output_cu->data.dptr),
+                            reinterpret_cast<const int *>(sorted_row_id_cu->data.dptr),
+                            reinterpret_cast<int *>(row_id_map_cu->data.dptr),
+                            reinterpret_cast<const float *>(prob_cu->data.dptr),
+                            reinterpret_cast<float *>(prob_grad_cu->data.dptr),
+                            reinterpret_cast<const T *>(input_fwd_cu->data.dptr), num_rows, topK,
+                            num_cols, num_out_tokens, stream););
 }
 
-void nvte_unpermute(const void *input, void *output, const transformer_engine::DType dtype,
-                    int *row_id_map, const float *prob, const int num_rows, const int topK,
-                    const int num_cols, cudaStream_t stream) {
+void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id_map,
+                    const NVTETensor prob, const int num_rows, const int topK, const int num_cols,
+                    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_unpermute);
+
+  const transformer_engine::Tensor *input_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(input);
+  const transformer_engine::Tensor *output_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(output);
+  const transformer_engine::Tensor *row_id_map_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
+  const transformer_engine::Tensor *prob_cu =
+      reinterpret_cast<const transformer_engine::Tensor *>(prob);
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-      dtype, T,
-      nvte_unpermute_launcher(reinterpret_cast<const T *>(input), reinterpret_cast<T *>(output),
-                              row_id_map, prob, num_rows, topK, num_cols, stream););
+      input_cu->data.dtype, T,
+      nvte_unpermute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
+                              reinterpret_cast<T *>(output_cu->data.dptr),
+                              reinterpret_cast<int *>(row_id_map_cu->data.dptr),
+                              reinterpret_cast<const float *>(prob_cu->data.dptr), num_rows, topK,
+                              num_cols, stream););
 }
