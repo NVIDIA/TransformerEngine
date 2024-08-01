@@ -29,9 +29,7 @@ current_file_path = Path(__file__).parent.resolve()
 
 from setuptools.command.build_ext import build_ext as BuildExtension
 
-# Same list as build_system.requires in pyproject.toml
-install_packages(["setuptools>=61.0", "cmake>=3.21", "pybind11", "ninja", "pip"])
-
+install_packages(["pybind11"])
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
