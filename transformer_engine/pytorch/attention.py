@@ -1247,6 +1247,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         padding = "padding" in attn_mask_type
 
         if qkv_format in ["bshd", "sbhd"]:
+            seq_dim = qkv_format.index("s")
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -1260,6 +1261,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
+        assert q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0, f"Sequence length per GPU needs to be divisible by 2!"
         if causal:
             if qkv_format == "bshd":
                 # [b, s, np, hn] -> [b, 2, s//2, np, hn]
@@ -1275,6 +1277,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 "Only support bias shape of [b, h, sq, sk] for forward, "
                 "and [1, h, sq, sk] for backward!"
             )
+            assert attn_bias.shape[-2] % 2 == 0 and attn_bias.shape[-1] % (2*cp_size) == 0, f"Sequence length does not meet divisible requirements!"
             # [b, np, sq, sk] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_bias_ = attn_bias.view(
                 *attn_bias.shape[:-2],
@@ -1799,8 +1802,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         softmax_lse = softmax_lse.to(torch.float)
-        if qkv_format in ["bshd", "sbhd"]:
-            seq_dim = qkv_format.index("s")
         for i in range(cp_size):
             if qkv_format == "bshd":
                 out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
@@ -2539,6 +2540,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+
+        seq_dim = qkv_format.index("s")
+        assert q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0, f"Sequence length per GPU needs to be divisible by 2!"
 
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
