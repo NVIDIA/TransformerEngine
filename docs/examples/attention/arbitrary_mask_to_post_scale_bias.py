@@ -39,7 +39,7 @@ def _run_dot_product_attention(
         [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
     )
     inp = torch.randn(
-        [config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim],
+        [config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim_qk],
         dtype=dtype,
         device="cuda",
     )
@@ -50,7 +50,7 @@ def _run_dot_product_attention(
     k.requires_grad = True
     v.requires_grad = True
     out_grad = torch.randn(
-        [config.batch_size, config.max_seqlen_q, config.num_heads * config.head_dim],
+        [config.batch_size, config.max_seqlen_q, config.num_heads * config.head_dim_v],
         dtype=dtype,
         device="cuda",
     )
@@ -79,7 +79,7 @@ def _run_dot_product_attention(
 
     block = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         num_gqa_groups=config.num_gqa_groups,
         qkv_format="bshd",
         attention_dropout=config.dropout_p,
