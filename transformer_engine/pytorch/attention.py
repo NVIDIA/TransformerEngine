@@ -211,7 +211,6 @@ _alibi_cache = {
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
 
-class InferenceParams:
 
 def get_attention_backend(
     attention_params: AttentionParams = None,
