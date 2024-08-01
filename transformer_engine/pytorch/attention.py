@@ -1226,8 +1226,6 @@ class AttnFuncWithCP(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
-        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
-
         if causal:
             if qkv_format == "bshd":
                 # [b, s, np, hn] -> [b, 2, s//2, np, hn]
@@ -1274,6 +1272,54 @@ class AttnFuncWithCP(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
+        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+        if fp8:
+            if use_fused_attention:
+                fp8_meta_kwargs = {}
+                fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                fused_attn_qkv_dtype = fp8_dtype_forward
+                fused_attn_backend = FusedAttnBackend["FP8"]
+                if fp8_meta["recipe"].fp8_mha:
+                    assert (
+                        isinstance(q, Float8Tensor)
+                        and isinstance(k, Float8Tensor)
+                        and isinstance(v, Float8Tensor)
+                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
+                    q_fp8, k_fp8, v_fp8 = q, k, v
+                    q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
+                else:
+                    q_f16, k_f16, v_f16 = q, k, v
+                    q = cast_to_fp8(
+                        q_f16,
+                        fp8_meta["scaling_fwd"],
+                        META_QKV,
+                        fp8_dtype_forward,
+                    ).view(q_f16.shape)
+                    if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        k, v = [
+                            cast_to_fp8(
+                                x,
+                                fp8_meta["scaling_fwd"],
+                                META_QKV,
+                                fp8_dtype_forward,
+                            ).view(x.shape)
+                            for x in [k_f16, v_f16]
+                        ]
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
+                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history[0][META_S]
+                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history[0][META_O]
+            else:
+                assert not fp8, "FP8 is only supported with Fused Attention!"
+        else:
+            q_f16 = q
+            if use_fused_attetnion:
+                fused_attn_qkv_dtype = TE_DType[q.dtype]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
         p2p_comm_buffers = [None for _ in range(cp_size)]
         p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         send_recv_reqs = [[], []]
@@ -1297,7 +1343,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                             batch_p2p_comm,
                         )
 
-                    kv_inputs[i % 2] = p2p_comm_buffers[i]
+                    if fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        # KV exchange is in BF16/FP16, cast received KV in each step
+                        kv_inputs[i%2] = cast_to_fp8(
+                            p2p_comm_buffers[i],
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                        ).view(p2p_comm_buffers[i].shape)
+                    else:
+                        kv_inputs[i % 2] = p2p_comm_buffers[i]
                     if causal:
                         if i == 0:
                             if use_fused_attention:
@@ -1334,8 +1389,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         q_inputs[i % 2],
                                         kv_inputs[i % 2][0],
                                         kv_inputs[i % 2][1],
-                                        TE_DType[q.dtype],
-                                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                        fused_attn_qkv_dtype,
+                                        fused_attn_backend,
                                         attn_scale=softmax_scale,
                                         dropout=dropout_p,
                                         qkv_layout=qkv_layout,
@@ -1344,6 +1399,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         attn_bias=attn_bias_inputs[i % 2],
                                         cu_seqlens_q_padded=cu_seqlens_q_padded,
                                         cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                        **fp8_meta_kwargs,
                                     )
                                 )
                                 if len(rest) > 0:
@@ -1407,8 +1463,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         q_inputs[i % 2],
                                         kv_inputs[i % 2][0],
                                         kv_inputs[i % 2][1],
-                                        TE_DType[q.dtype],
-                                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                        fused_attn_qkv_dtype,
+                                        fused_attn_backend,
                                         attn_scale=softmax_scale,
                                         dropout=dropout_p,
                                         qkv_layout=qkv_layout,
@@ -1421,6 +1477,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                             if cu_seqlens_kv_padded is None
                                             else cu_seqlens_kv_padded // 2
                                         ),
+                                        **fp8_meta_kwargs,
                                     )
                                 )
                                 if len(rest) > 0:
@@ -1499,8 +1556,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         q_inputs[i % 2],
                                         kv_inputs[i % 2][0],
                                         kv_inputs[i % 2][1],
-                                        TE_DType[q.dtype],
-                                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                        fused_attn_qkv_dtype,
+                                        fused_attn_backend,
                                         attn_scale=softmax_scale,
                                         dropout=dropout_p,
                                         qkv_layout=qkv_layout,
@@ -1513,6 +1570,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                             else cu_seqlens_q_padded // 2
                                         ),
                                         cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                        **fp8_meta_kwargs,
                                     )
                                 )
                                 if len(rest) > 0:
@@ -1574,8 +1632,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     q,
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
-                                    TE_DType[q.dtype],
-                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    fused_attn_qkv_dtype,
+                                    fused_attn_backend,
                                     attn_scale=softmax_scale,
                                     dropout=dropout_p,
                                     qkv_layout=qkv_layout,
@@ -1584,6 +1642,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     attn_bias=attn_bias_inputs[i % 2],
                                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                    **fp8_meta_kwargs,
                                 )
                             )
                             if len(rest) > 0:
@@ -1627,8 +1686,16 @@ class AttnFuncWithCP(torch.autograd.Function):
                     softmax_lse_per_step[i - 1].squeeze_(-1)
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                    if fp8:
+                        out_per_step[i-1] = cast_from_fp8(
+                            out_per_step[i-1].view(-1, out_per_step[i-1].shape[-2] * out_per_step[i-1].shape[-1]),
+                            fp8_meta["scaling_fwd"],
+                            META_O,
+                            fp8_dtype_forward,
+                            TE_DType[q_fp8.dtype if fp8_meta["recipe"].fp8_mha else q_f16.dtype],
+                        ).view(out_per_shape[i-1].shape)
                     if i == 1:
-                        out = torch.empty_like(q).zero_()
+                        out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
@@ -1715,10 +1782,25 @@ class AttnFuncWithCP(torch.autograd.Function):
         else:
             out = out.view(-1, *out.shape[-2:])
 
+        if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
+            out_f16 = out
+            out_fp8 = cast_to_fp8(
+                out, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward
+            ).view(out.shape)
+            if fp8_meata["recipe"].fp8_mha:
+                out = out_fp8
+
+        if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            q_save, kv_save, out_save = q, kv, out_fp8
+        elif fp8 and fp8_meta["recipe"].fp8_mha:
+            q_save, kv_save, out_save = q, kv, out_f16
+        else:
+            q_save, kv_save, out_save = q_f16, kv, out
+
         ctx.save_for_backward(
-            q,
-            kv,
-            out,
+            q_save,
+            kv_save,
+            out_save,
             softmax_lse,
             cu_seqlens_q,
             cu_seqlens_k,
