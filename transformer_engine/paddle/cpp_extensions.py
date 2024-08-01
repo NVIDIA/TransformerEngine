@@ -9,7 +9,7 @@ import paddle
 import paddle.nn.functional as F
 from transformer_engine import transformer_engine_paddle as tex
 from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
-from .fp8 import FP8TensorMeta
+from .fp8 import FP8TensorMeta, get_global_fp8_state
 
 BACKEND_F16m512_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -66,8 +66,9 @@ def gemm(
 
     bias = bias if use_bias else None
 
-    assert A.dtype == dtype and B.dtype == dtype, \
-        f'Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}'
+    assert (
+        A.dtype == dtype and B.dtype == dtype
+    ), f"Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}"
     input_dtype = TE_DType[dtype]
     output_dtype = TE_DType[out.dtype]
     if use_bias:
@@ -82,13 +83,13 @@ def gemm(
         None,
         grad_bias if grad else bias,
         out,
-        None,    # out_scale
-        None,    # out_amax
+        None,  # out_scale
+        None,  # out_amax
         gelu_input,
         workspace,
-        0,    # A_index
-        0,    # B_index
-        0,    # D_index
+        0,  # A_index
+        0,  # B_index
+        0,  # D_index
         int(input_dtype),
         int(input_dtype),
         int(output_dtype),
@@ -98,8 +99,8 @@ def gemm(
         grad,
         workspace.shape[0],
         accumulate,
-        False,    # use_split_accumulator
-        0,    # math_sm_count
+        False,  # use_split_accumulator
+        0,  # math_sm_count
     )
 
     return out, grad_bias, gelu_input
@@ -168,7 +169,7 @@ def fp8_gemm(
         out,
         None if out_index is None else fp8_meta_tensor.scale,
         None if out_index is None else fp8_meta_tensor.amax_history,
-        gelu_input,    # this is pre_gelu_out
+        gelu_input,  # this is pre_gelu_out
         workspace,
         A_fp8_tensor.value,
         B_fp8_tensor.value,
@@ -177,13 +178,13 @@ def fp8_gemm(
         int(B_dtype),
         int(out_dtype),
         int(bias_dtype),
-        True,    # transa
-        False,    # transb
-        False,    # grad
+        True,  # transa
+        False,  # transb
+        False,  # grad
         workspace.shape[0],
         accumulate,
         use_split_accumulator,
-        0,    # math_sm_count
+        0,  # math_sm_count
     )
 
     return out, gelu_input
@@ -270,8 +271,10 @@ def cast_transpose(
             dtype=paddle.uint8,
         )
     else:
-        assert transpose_out.shape == [inp.shape[1], inp.shape[0]
-                                      ], "Transposed output shape does not match input shape."
+        assert transpose_out.shape == [
+            inp.shape[1],
+            inp.shape[0],
+        ], "Transposed output shape does not match input shape."
         assert transpose_out.dtype == paddle.uint8, "Output should be of uint8 dtype."
 
     tex.te_cast_transpose(
@@ -348,7 +351,9 @@ def swiglu(
     )
 
 
-def swiglu_pd(inp: paddle.Tensor,) -> paddle.Tensor:
+def swiglu_pd(
+    inp: paddle.Tensor,
+) -> paddle.Tensor:
     """Native SWIGLU"""
     gate_out, up_out = paddle.chunk(inp, chunks=2, axis=-1)
     out = F.silu(gate_out) * up_out
@@ -423,11 +428,19 @@ def layernorm_fwd_fp8(
     zero_centered_gamma: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """LayerNorm with FP8 output"""
-    out, mu, rsigma, _, _ = tex.te_layernorm_fwd_fp8(inp, weight, bias, fp8_meta_tensor.scale,
-                                                     fp8_meta_tensor.amax_history,
-                                                     fp8_meta_tensor.scale_inv, eps,
-                                                     fp8_tensor.value, int(otype), sm_margin,
-                                                     zero_centered_gamma)
+    out, mu, rsigma, _, _ = tex.te_layernorm_fwd_fp8(
+        inp,
+        weight,
+        bias,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        eps,
+        fp8_tensor.value,
+        int(otype),
+        sm_margin,
+        zero_centered_gamma,
+    )
     return out, mu, rsigma
 
 
@@ -480,10 +493,18 @@ def rmsnorm_fwd_fp8(
     zero_centered_gamma: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """RMSNorm with FP8 output"""
-    out, rsigma, _, _ = tex.te_rmsnorm_fwd_fp8(inp, weight, fp8_meta_tensor.scale,
-                                               fp8_meta_tensor.amax_history,
-                                               fp8_meta_tensor.scale_inv, eps, fp8_tensor.value,
-                                               int(otype), sm_margin, zero_centered_gamma)
+    out, rsigma, _, _ = tex.te_rmsnorm_fwd_fp8(
+        inp,
+        weight,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        eps,
+        fp8_tensor.value,
+        int(otype),
+        sm_margin,
+        zero_centered_gamma,
+    )
     return out, rsigma
 
 
@@ -505,6 +526,8 @@ def mask_to_cu_seqlens(
 ) -> paddle.Tensor:
     """Convert mask to cu_seqlens"""
     # mask shape: [b, 1, s_q, s_kv]
+    if get_global_fp8_state().is_cudagraph_enabled():
+        raise RuntimeError("mask_to_cu_seqlens is not supported with cuda graphs.")
     q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
     q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
     q_cu_seqlens[0] = 0
@@ -533,8 +556,10 @@ def fused_attn_fwd_qkvpacked(
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention FWD for packed QKV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
 
     b = cu_seqlens.shape[0] - 1
     total_seqs = qkv.shape[0] * qkv.shape[1]
@@ -546,22 +571,31 @@ def fused_attn_fwd_qkvpacked(
 
     if bias_type != "no_bias":
         assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
-        assert (Bias.shape == [1, h, max_seqlen, max_seqlen
-                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
-        assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
+        assert Bias.shape == [
+            1,
+            h,
+            max_seqlen,
+            max_seqlen,
+        ], "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert Bias.dtype == qkv.dtype, "bias tensor must be in the same dtype as qkv."
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (max_seqlen * max_seqlen + BACKEND_F16m512_THREADS_PER_CTA -
-                               1) // BACKEND_F16m512_THREADS_PER_CTA
+        rng_elts_per_thread = (
+            max_seqlen * max_seqlen + BACKEND_F16m512_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_THREADS_PER_CTA
 
     # BF16/FP16 fused attention API from fmha_v2
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen, h, d], fill_value=0, dtype=qkv.dtype)
     else:
@@ -571,15 +605,18 @@ def fused_attn_fwd_qkvpacked(
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
         elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, 1], dtype='float32')
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, 1], dtype="float32")
         else:
             raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
-    rng_state = paddle.empty(shape=[
-        2,
-    ], dtype=paddle.int64)
+    rng_state = paddle.empty(
+        shape=[
+            2,
+        ],
+        dtype=paddle.int64,
+    )
 
     # execute kernel
     tex.te_fused_attn_fwd_qkvpacked(
@@ -622,11 +659,14 @@ def fused_attn_bwd_qkvpacked(
     qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed QKV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
 
     b = cu_seqlens.shape[0] - 1
     total_seqs = qkv.shape[0] * qkv.shape[1]
@@ -636,16 +676,23 @@ def fused_attn_bwd_qkvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
     else:
         dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
 
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
     else:
         dbias = None
     # execute kernel
@@ -669,6 +716,7 @@ def fused_attn_bwd_qkvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
 
     return dqkv, dbias
@@ -694,10 +742,13 @@ def fused_attn_fwd_kvpacked(
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention FWD for packed KV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
-    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
-           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
+    assert (
+        cu_seqlens_q.shape == cu_seqlens_kv.shape
+    ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
 
     b = cu_seqlens_q.shape[0] - 1
     total_seqs_q = q.shape[0] * q.shape[1]
@@ -710,22 +761,31 @@ def fused_attn_fwd_kvpacked(
 
     if bias_type != "no_bias":
         assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
-        assert (Bias.shape == [1, h, max_seqlen_q, max_seqlen_kv
-                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
-        assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
+        assert Bias.shape == [
+            1,
+            h,
+            max_seqlen_q,
+            max_seqlen_kv,
+        ], "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert Bias.dtype == q.dtype, "bias tensor must be in the same dtype as q and kv."
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_THREADS_PER_CTA -
-                               1) // BACKEND_F16m512_THREADS_PER_CTA
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_THREADS_PER_CTA
 
     # BF16/FP16 fused attention API from fmha_v2
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
     else:
@@ -735,15 +795,18 @@ def fused_attn_fwd_kvpacked(
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
         elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype='float32')
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype="float32")
         else:
             raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
-    rng_state = paddle.empty(shape=[
-        2,
-    ], dtype=paddle.int64)
+    rng_state = paddle.empty(
+        shape=[
+            2,
+        ],
+        dtype=paddle.int64,
+    )
 
     # execute kernel
     tex.te_fused_attn_fwd_kvpacked(
@@ -794,13 +857,17 @@ def fused_attn_bwd_kvpacked(
     qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
-    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
-           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
+    assert (
+        cu_seqlens_q.shape == cu_seqlens_kv.shape
+    ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
 
     b = cu_seqlens_q.shape[0] - 1
     total_seqs_q = q.shape[0] * q.shape[1]
@@ -811,9 +878,13 @@ def fused_attn_bwd_kvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
         dkv = paddle.full(shape=kv.shape, fill_value=0, dtype=kv.dtype)
@@ -821,7 +892,10 @@ def fused_attn_bwd_kvpacked(
         dq = paddle.empty(shape=q.shape, dtype=q.dtype)
         dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
         dbias = None
     # execute kernel
@@ -850,6 +924,7 @@ def fused_attn_bwd_kvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dkv, dbias
 
@@ -875,12 +950,16 @@ def fused_attn_fwd(
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention FWD for unpacked QKV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
-    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
-           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
-    assert (qkv_layout == "bshd_bshd_bshd"
-           ), "Only support bshd_bshd_bshd layout for unpacked QKV input for now."
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
+    assert (
+        cu_seqlens_q.shape == cu_seqlens_kv.shape
+    ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+    assert (
+        qkv_layout == "bshd_bshd_bshd"
+    ), "Only support bshd_bshd_bshd layout for unpacked QKV input for now."
     b = cu_seqlens_q.shape[0] - 1
 
     h = q.shape[-2]
@@ -891,23 +970,31 @@ def fused_attn_fwd(
 
     if bias_type != "no_bias":
         assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
-        assert (Bias.shape == [
-            1, h, max_seqlen_q, max_seqlen_kv
-        ]), "bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
-        assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as qkv."
+        assert Bias.shape == [
+            1,
+            h,
+            max_seqlen_q,
+            max_seqlen_kv,
+        ], "bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
+        assert Bias.dtype == q.dtype, "bias tensor must be in the same dtype as qkv."
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_THREADS_PER_CTA -
-                               1) // BACKEND_F16m512_THREADS_PER_CTA
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_THREADS_PER_CTA
 
     # BF16/FP16 fused attention API from fmha_v2
     if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
     else:
@@ -917,15 +1004,18 @@ def fused_attn_fwd(
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
         elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype='float32')
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype="float32")
         else:
             raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
-    rng_state = paddle.empty(shape=[
-        2,
-    ], dtype=paddle.int64)
+    rng_state = paddle.empty(
+        shape=[
+            2,
+        ],
+        dtype=paddle.int64,
+    )
 
     # execute kernel
     tex.te_fused_attn_fwd(
@@ -975,15 +1065,20 @@ def fused_attn_bwd(
     qkv_layout: str = "bshd_bshd_bshd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    deterministic: bool = False,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Fused Attention BWD for packed KV input"""
 
-    assert (qkv_dtype in (tex.DType.kBFloat16,
-                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
-    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
-           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
-    assert (qkv_layout == "bshd_bshd_bshd"
-           ), "Only support bshd_bshd_bshd layout for unpacked QKV input for now."
+    assert qkv_dtype in (
+        tex.DType.kBFloat16,
+        tex.DType.kFloat16,
+    ), "Only support bf16/fp16 for fused attention."
+    assert (
+        cu_seqlens_q.shape == cu_seqlens_kv.shape
+    ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+    assert (
+        qkv_layout == "bshd_bshd_bshd"
+    ), "Only support bshd_bshd_bshd layout for unpacked QKV input for now."
 
     b = cu_seqlens_q.shape[0] - 1
     h = q.shape[-2]
@@ -992,9 +1087,13 @@ def fused_attn_bwd(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-           ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        set_zero = True
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
         dk = paddle.full(shape=k.shape, fill_value=0, dtype=k.dtype)
@@ -1004,7 +1103,10 @@ def fused_attn_bwd(
         dk = paddle.empty(shape=k.shape, dtype=k.dtype)
         dv = paddle.empty(shape=v.shape, dtype=v.dtype)
     if bias_type != "no_bias":
-        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if qkv_format == "thd":
+            dbias = paddle.zero(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        else:
+            dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
         dbias = None
     # execute kernel
@@ -1033,6 +1135,7 @@ def fused_attn_bwd(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        deterministic,
     )
     return dq, dk, dv, dbias
 
@@ -1041,7 +1144,7 @@ def scaled_softmax_forward(
     inp: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled softmax forward"""
+    """scaled softmax forward"""
     return tex.te_scaled_softmax_forward(inp, scale_factor)
 
 
@@ -1050,7 +1153,7 @@ def scaled_softmax_backward(
     softmax_results: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled softmax backward"""
+    """scaled softmax backward"""
     tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
     return out_grad
 
@@ -1060,7 +1163,7 @@ def scaled_masked_softmax_forward(
     mask: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled masked softmax forward"""
+    """scaled masked softmax forward"""
 
     return tex.te_scaled_masked_softmax_forward(inp, mask, scale_factor)
 
@@ -1070,7 +1173,7 @@ def scaled_masked_softmax_backward(
     softmax_results: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled masked softmax backward"""
+    """scaled masked softmax backward"""
     tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
     return out_grad
 
@@ -1079,7 +1182,7 @@ def scaled_upper_triang_masked_softmax_forward(
     inp: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled upper triang masked softmax forward"""
+    """scaled upper triang masked softmax forward"""
     return tex.te_scaled_upper_triang_masked_softmax_forward(inp, scale_factor)
 
 
@@ -1088,6 +1191,6 @@ def scaled_upper_triang_masked_softmax_backward(
     softmax_results: paddle.Tensor,
     scale_factor: float,
 ) -> paddle.Tensor:
-    """ scaled upper triang masked softmax backward"""
+    """scaled upper triang masked softmax backward"""
     tex.te_scaled_upper_triang_masked_softmax_backward(out_grad, softmax_results, scale_factor)
     return out_grad

@@ -79,14 +79,14 @@ def _apply_normalization_fwd(
     }
 
     fwd_normalization_funcs = {
-        ('LayerNorm', True, True): layernorm_fwd,
-        ('LayerNorm', True, False): layernorm_fwd_fp8,
-        ('LayerNorm', False, True): layernorm_fwd,
-        ('LayerNorm', False, False): layernorm_fwd,
-        ('RMSNorm', True, True): rmsnorm_fwd,
-        ('RMSNorm', True, False): rmsnorm_fwd_fp8,
-        ('RMSNorm', False, True): rmsnorm_fwd,
-        ('RMSNorm', False, False): rmsnorm_fwd,
+        ("LayerNorm", True, True): layernorm_fwd,
+        ("LayerNorm", True, False): layernorm_fwd_fp8,
+        ("LayerNorm", False, True): layernorm_fwd,
+        ("LayerNorm", False, False): layernorm_fwd,
+        ("RMSNorm", True, True): rmsnorm_fwd,
+        ("RMSNorm", True, False): rmsnorm_fwd_fp8,
+        ("RMSNorm", False, True): rmsnorm_fwd,
+        ("RMSNorm", False, False): rmsnorm_fwd,
     }
 
     if normalization == "LayerNorm":
@@ -107,7 +107,7 @@ def _apply_normalization_fwd(
 
     if normalization == "LayerNorm":
         norm_out_return, mu, rsigma = out_tuple
-    else:    # RMSNorm
+    else:  # RMSNorm
         norm_out_return, rsigma = out_tuple
         mu = None
 
@@ -165,7 +165,7 @@ def _apply_normalization_bwd(
     out_tuple = norm_bwd_func(**norm_bwd_kwargs)
     if normalization == "LayerNorm":
         dxmat, dgamma, dbeta = out_tuple
-    else:    # RMSNorm
+    else:  # RMSNorm
         dxmat, dgamma = out_tuple
         dbeta = None
 
@@ -207,7 +207,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         if normalization == "RMSNorm":
             assert ln_bias is None, "RMSNorm does not support bias!"
-        else:    # LayerNorm
+        else:  # LayerNorm
             assert ln_bias is not None, "LayerNorm requires bias!"
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
@@ -305,14 +305,12 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(
-            ctx, *grad_outputs: Tuple[paddle.Tensor,
-                                      ...]) -> Tuple[Union[paddle.Tensor, None], ...]:
-        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
-                                                         ctx.fp8_meta,
-                                                         ctx.tp_group,
-                                                         ctx.tp_size,
-                                                         name="_LayerNormLinear"):
-            (    # pylint: disable=unbalanced-tuple-unpacking
+        ctx, *grad_outputs: Tuple[paddle.Tensor, ...]
+    ) -> Tuple[Union[paddle.Tensor, None], ...]:
+        with TransformerEngineBaseLayer.prepare_backward(
+            ctx.fp8_enabled, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
+        ):
+            (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 ln_weight,
                 mu,
@@ -328,12 +326,14 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 grad_output_c,
                 grad_output_t,
                 bgrad,
-            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0],
-                                                                  ctx.parallel_mode == "row")
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(
+                ctx, grad_outputs[0], ctx.parallel_mode == "row"
+            )
 
             if ctx.is_first_microbatch is not None:
-                accumulate_wgrad_into_param_main_grad = (ctx.fuse_wgrad_accumulation
-                                                         and not ctx.is_first_microbatch)
+                accumulate_wgrad_into_param_main_grad = (
+                    ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
+                )
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
@@ -353,7 +353,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             # Linear Bwd
             dgrad, wgrad, bgrad_ = _linear_bwd(
                 linear_inputmat,
-                None,    # inputmat_t will be automatically computed if not provided
+                None,  # inputmat_t will be automatically computed if not provided
                 FP8FwdTensors.GEMM1_INPUT,
                 weight,
                 weight_t_fp8,
@@ -366,7 +366,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 ctx.requires_bgrad,
                 ctx.fp8_enabled,
                 ctx.fp8_meta,
-                True,    # Always compute dgrad to feed into LayerNorm bwd
+                True,  # Always compute dgrad to feed into LayerNorm bwd
                 ctx.requires_wgrad,
                 ctx.activation_dtype,
                 ctx.parallel_mode,
@@ -479,14 +479,14 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         eps: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
-        normalization: str = 'LayerNorm',
+        normalization: str = "LayerNorm",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
         parallel_mode: Optional[str] = None,
         sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
         fuse_wgrad_accumulation: bool = False,
-        backend: str = 'transformer_engine',
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
 
@@ -494,7 +494,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self.out_features = out_features
         self.eps = eps
         self.normalization = normalization
-        assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
+        assert normalization in ["LayerNorm", "RMSNorm"], "Unsupported normalization type!"
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
         self.backend = backend
@@ -504,13 +504,14 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self._dtype = self._helper.get_default_dtype()
 
         # Set parallel configs
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
-                                                                  enable_tp=parallel_mode
-                                                                  is not None)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(
+            tp_group, enable_tp=parallel_mode is not None
+        )
         self.tensor_parallel = self.tp_size > 1
         self.parallel_mode = parallel_mode
-        assert (self.parallel_mode
-                in GemmParallelModes), f"parallel_mode {parallel_mode} not supported"
+        assert (
+            self.parallel_mode in GemmParallelModes
+        ), f"parallel_mode {parallel_mode} not supported"
 
         if self.parallel_mode == "column":
             self.out_features = divide(self.out_features, self.tp_size)
@@ -524,8 +525,9 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
             shape=[self.in_features],
-            attr=paddle.ParamAttr(initializer=Constant(
-                value=0.0 if self.zero_centered_gamma else 1.0)),
+            attr=paddle.ParamAttr(
+                initializer=Constant(value=0.0 if self.zero_centered_gamma else 1.0)
+            ),
             dtype=self._dtype,
             is_bias=False,
         )
@@ -548,15 +550,19 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         with track_rng_state(enable=self.tensor_parallel):
             # TE linear weight is in column major
             self.weight = self.create_parameter(
-                shape=[self.out_features, self.in_features]
-                if self.backend == 'transformer_engine' else [self.in_features, self.out_features],
+                shape=(
+                    [self.out_features, self.in_features]
+                    if self.backend == "transformer_engine"
+                    else [self.in_features, self.out_features]
+                ),
                 attr=self._weight_attr,
                 dtype=self._dtype,
                 is_bias=False,
             )
-        set_weight_tensor_dist_attr(self.weight, self.tensor_parallel, self.parallel_mode,
-                                    self.backend)
-        self.fp8_weight_shapes.append(self.weight.shape)
+        set_weight_tensor_dist_attr(
+            self.weight, self.tensor_parallel, self.parallel_mode, self.backend
+        )
+        self.fp8_weights.append(self.weight)
 
         # Initialize Linear bias parameter
         self.has_bias = self._bias_attr is not False
@@ -564,8 +570,11 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         if self.has_bias:
             self.bias = self.create_parameter(
                 shape=[self.out_features],
-                attr=self._bias_attr if not use_default_bias else paddle.ParamAttr(
-                    initializer=Constant(value=0.0)),
+                attr=(
+                    self._bias_attr
+                    if not use_default_bias
+                    else paddle.ParamAttr(initializer=Constant(value=0.0))
+                ),
                 dtype=self._dtype,
                 is_bias=True,
             )
@@ -607,7 +616,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             inp = cast_if_needed(inp, self.activation_dtype)
 
             # Get persistent fp8 weight buffer. None if buffer does not exist.
-            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad(is_first_microbatch)
+            weight_fp8, weight_t_fp8 = self.get_fp8_weights_scratchpad_and_cast(is_first_microbatch)
 
             out = _LayerNormLinear.apply(
                 inp,
@@ -656,26 +665,30 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         """Calls Paddle OP"""
         if self.zero_centered_gamma:
             raise NotImplementedError(
-                "Paddle backend does not support LayerNorm with zero-centered scale.")
+                "Paddle backend does not support LayerNorm with zero-centered scale."
+            )
 
         if is_first_microbatch is not None:
             warnings.warn(
-                "`is_first_microbatch` is not supported for paddle backend and is ignored.")
+                "`is_first_microbatch` is not supported for paddle backend and is ignored."
+            )
 
         if self.normalization == "RMSNorm":
             norm = paddle.rsqrt(paddle.mean(inp**2, axis=-1, keepdim=True) + self.eps)
             norm_out = inp * norm * self.ln_weight
-        else:    # LayerNorm
-            norm_out = F.layer_norm(x=inp,
-                                    normalized_shape=inp.shape[-1],
-                                    weight=self.ln_weight,
-                                    bias=self.ln_bias,
-                                    epsilon=self.eps)
+        else:  # LayerNorm
+            norm_out = F.layer_norm(
+                x=inp,
+                normalized_shape=inp.shape[-1],
+                weight=self.ln_weight,
+                bias=self.ln_bias,
+                epsilon=self.eps,
+            )
 
-        if self.parallel_mode == 'column' and self.tensor_parallel:
+        if self.parallel_mode == "column" and self.tensor_parallel:
             norm_out = identity(norm_out, self.tp_group)
         out = F.linear(norm_out, self.weight, self.bias if self.gemm_bias_fused_add else None)
-        if self.parallel_mode == 'row' and self.tensor_parallel:
+        if self.parallel_mode == "row" and self.tensor_parallel:
             out, _ = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out
         if self.return_layernorm_output:
@@ -701,8 +714,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                              * during FP8 training, it allows caching of the FP8 versions of
                                the weights
         """
-        if self.backend == 'transformer_engine':
+        if self.backend == "transformer_engine":
             return self._te_forward(*args, **kwargs)
-        if self.backend == 'paddle':
+        if self.backend == "paddle":
             return self._pd_forward(*args, **kwargs)
         raise AttributeError(f"Backend {self.backend} is not supported.")

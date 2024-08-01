@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <dlfcn.h>
+
 #include <filesystem>
 
 #include "../common.h"
@@ -40,27 +41,21 @@ class Library {
 #endif  // _WIN32 or _WIN64 or __WINDOW__
   }
 
-  Library(const Library&) = delete;  // move-only
+  Library(const Library &) = delete;  // move-only
 
-  Library(Library&& other) noexcept {
-    swap(*this, other);
-  }
+  Library(Library &&other) noexcept { swap(*this, other); }
 
-  Library& operator=(Library other) noexcept {
+  Library &operator=(Library other) noexcept {
     // Copy-and-swap idiom
     swap(*this, other);
     return *this;
   }
 
-  friend void swap(Library& first, Library& second) noexcept;
+  friend void swap(Library &first, Library &second) noexcept;
 
-  void *get() noexcept {
-    return handle_;
-  }
+  void *get() noexcept { return handle_; }
 
-  const void *get() const noexcept {
-    return handle_;
-  }
+  const void *get() const noexcept { return handle_; }
 
   /*! \brief Get pointer corresponding to symbol in shared library */
   void *get_symbol(const char *symbol) {
@@ -78,13 +73,13 @@ class Library {
   void *handle_ = nullptr;
 };
 
-void swap(Library& first, Library& second) noexcept {
+void swap(Library &first, Library &second) noexcept {
   using std::swap;
   swap(first.handle_, second.handle_);
 }
 
 /*! \brief Lazily-initialized shared library for CUDA driver */
-Library& cuda_driver_lib() {
+Library &cuda_driver_lib() {
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
   constexpr char lib_name[] = "nvcuda.dll";
 #else
@@ -99,7 +94,12 @@ Library& cuda_driver_lib() {
 namespace cuda_driver {
 
 void *get_symbol(const char *symbol) {
-  return cuda_driver_lib().get_symbol(symbol);
+  void *entry_point;
+  cudaDriverEntryPointQueryResult driver_result;
+  NVTE_CHECK_CUDA(cudaGetDriverEntryPoint(symbol, &entry_point, cudaEnableDefault, &driver_result));
+  NVTE_CHECK(driver_result == cudaDriverEntryPointSuccess,
+             "Could not find CUDA driver entry point for ", symbol);
+  return entry_point;
 }
 
 }  // namespace cuda_driver

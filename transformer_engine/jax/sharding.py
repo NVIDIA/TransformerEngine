@@ -17,23 +17,22 @@ from jax.sharding import PartitionSpec
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
 # Axis Names
-BATCH_AXES = 'nvte_batch'
-SEQLEN_AXES = 'nvte_seqlen'
-SEQLEN_TP_AXES = 'nvte_seqlen_tp'
-HEAD_AXES = 'nvte_head'
-HIDDEN_AXES = 'nvte_hidden'
-HIDDEN_TP_AXES = 'nvte_hidden_tp'
-JOINED_AXES = 'nvte_joined'
-W_NO_SHARD_AXES = 'nvte_w_no_shard'
-W_FSDP_AXES = 'nvte_w_fsdp'
-W_TP_AXES = 'nvte_w_tp'
-W_JOINED_AXES = 'nvte_w_joined'
+BATCH_AXES = "nvte_batch"
+SEQLEN_AXES = "nvte_seqlen"
+SEQLEN_TP_AXES = "nvte_seqlen_tp"
+HEAD_AXES = "nvte_head"
+HIDDEN_AXES = "nvte_hidden"
+HIDDEN_TP_AXES = "nvte_hidden_tp"
+JOINED_AXES = "nvte_joined"
+W_NO_SHARD_AXES = "nvte_w_no_shard"
+W_FSDP_AXES = "nvte_w_fsdp"
+W_TP_AXES = "nvte_w_tp"
+W_JOINED_AXES = "nvte_w_joined"
 
 
 def _get_mesh_info(resource: str):
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-    assert resource in mesh.axis_names, \
-        f"{resource} is not in the axis_names of Mesh {mesh}."
+    assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
 
@@ -45,8 +44,11 @@ def get_sharding_map_logic_axis_to_mesh_axis():
 
     IS_FSDP_OUTER = bool(int(os.environ.get("NVTE_OUTER_BATCH_FSDP_DIM", False)))
 
-    batch_resources = [gsr.fsdp_resource, gsr.dp_resource] if IS_FSDP_OUTER \
-                      else [gsr.dp_resource, gsr.fsdp_resource]
+    batch_resources = (
+        [gsr.fsdp_resource, gsr.dp_resource]
+        if IS_FSDP_OUTER
+        else [gsr.dp_resource, gsr.fsdp_resource]
+    )
 
     batch_dim_rule = []
     for resource in batch_resources:
@@ -168,6 +170,7 @@ class MeshResource:
         The axis name in Mesh used to split model layers. along.
         If it is None, then pipeline parallelism is disabled.
     """
+
     dp_resource: str = None
     tp_resource: str = None
     fsdp_resource: str = None
@@ -240,6 +243,7 @@ class MajorShardingType(Enum):
     DPTP:
         Data and Standard tensor parallel training.
     """
+
     SINGLE = 0
     DP = 1
     TP = 2
@@ -267,6 +271,7 @@ class ShardingType(Enum):
     DP_TP_ROW:
         Sharding along data and row-split tensor parallelism.
     """
+
     SINGLE = (MajorShardingType.SINGLE, "single")
     DP = (MajorShardingType.DP, "dp")
     TP_COL = (MajorShardingType.TP, "tp_col")

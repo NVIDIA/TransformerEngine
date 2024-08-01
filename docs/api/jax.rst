@@ -27,7 +27,6 @@ Modules
 
 .. autoapifunction:: transformer_engine.jax.fp8_autocast
 .. autoapifunction:: transformer_engine.jax.update_collections
-.. autoapifunction:: transformer_engine.jax.update_fp8_metas
 
 
 .. autoapiclass:: transformer_engine.jax.flax.LayerNorm(epsilon=1e-6, layernorm_type='layernorm', **kwargs)

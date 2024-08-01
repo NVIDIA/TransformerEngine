@@ -2,9 +2,42 @@
 #
 # See LICENSE for license information.
 
+cmake_minimum_required(VERSION 3.21)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+project(transformer_engine LANGUAGES CUDA CXX)
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+endif()
+
+find_package(CUDAToolkit REQUIRED)
+
+# Check for cuDNN frontend API
+set(CUDNN_FRONTEND_INCLUDE_DIR
+    "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(FATAL_ERROR
+            "Could not find cuDNN frontend API. "
+            "Try running 'git submodule update --init --recursive' "
+            "within the Transformer Engine source.")
+endif()
+include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+include_directories(${PROJECT_SOURCE_DIR}/..)
+
 # Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
+     pycudnn.cpp
      transformer_engine.cpp
      transpose/cast_transpose.cu
      transpose/transpose.cu
@@ -40,14 +73,13 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvrtc
-                      CUDA::nvToolsExt
-                      CUDNN::cudnn)
+                      CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -67,12 +99,18 @@ endfunction()
 list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
 make_string_header("${cuda_include_path}"
                    string_path_cuda_include)
+
+make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
+                             string_code_transpose_rtc_cast_transpose_fusion_cu)
 make_string_header_from_file(transpose/rtc/cast_transpose.cu
                              string_code_transpose_rtc_cast_transpose_cu)
 make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
+make_string_header_from_file(util/math.h
+                             string_code_util_math_h)
+
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
@@ -87,3 +125,4 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+

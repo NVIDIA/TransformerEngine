@@ -112,13 +112,17 @@ def perf_and_loss_plots():
             lm_loss_data.append(lm_data["loss"])
             lm_perf_data.append(lm_data["perf"])
         save_plot(
-            model_config + " loss", legend,
-            lm_loss_data, model_config + "_loss.png",
+            model_config + " loss",
+            legend,
+            lm_loss_data,
+            model_config + "_loss.png",
             "LM-Loss",
         )
         save_plot(
             model_config + " perf",
-            legend, lm_perf_data, model_config + "_perf.png",
+            legend,
+            lm_perf_data,
+            model_config + "_perf.png",
             "Time per step (ms)",
         )
 

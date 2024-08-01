@@ -1,0 +1,492 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+"""JAX multi-head attention modules"""
+
+from enum import Enum
+from functools import partial
+from typing import Optional, Tuple
+from jax.ad_checkpoint import checkpoint_name
+import jax
+import jax.numpy as jnp
+
+from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
+from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
+
+from . import cpp_extensions as tex
+
+
+class AttnBiasType(Enum):
+    """
+    NO_BIAS: Softmax is performed as softmax(scale * qk)
+    PRE_SCALE_BIAS: Softmax is performed as softmax(scale * (qk + bias))
+    POST_SCALE_BIAS: Softmax is performed as softmax(scale * qk + bias)
+    """
+
+    NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
+    PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
+    POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
+
+
+class AttnMaskType(Enum):
+    """
+    NO_MASK: No attention mask is applied.
+    PADDING_MASK: Indicates the presence of paddings at the end of each sequence.
+    CAUSAL_MASK: An upper triangular mask is applied to the softmax inputs.
+    PADDING_CAUSAL_MASK: A combination of both causal and padding masks.
+    """
+
+    NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
+    PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
+    CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
+    PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
+
+
+class QKVLayout(Enum):
+    """
+    BSHD Format:
+        - BS3HD: q,k,v are interleave packed as a tensor with shape [b, s, 3, h, d].
+        - BSHD_BS2HD: q with shape [b, s, h, d] and kv are interleaved with shape [b, s, 2, h, d].
+        - BSHD_BSHD_BSHD: q,k,v are seperate tensors with shape [b, s, h, d]
+    THD Format: Shape is same as BSHD layout but allow multiple segments packed in a sequence.
+        - T3HD: q,k,v are interleave packed as a tensor with shape [b, s, 3, h, d].
+        - THD_T2HD: q with shape [b, s, h, d] and kv are interleaved with shape [b, s, 2, h, d].
+        - THD_THD_THD: q,k,v are seperate tensors with shape [b, s, h, d]
+    """
+
+    BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
+    BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
+    BSHD_BSHD_BSHD = NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD
+    T3HD = NVTE_QKV_Layout.NVTE_T3HD
+    THD_T2HD = NVTE_QKV_Layout.NVTE_THD_T2HD
+    THD_THD_THD = NVTE_QKV_Layout.NVTE_THD_THD_THD
+
+
+class QKVFormat(Enum):
+    """
+    SBHD: q,k,v memory layout with [s, b, ..., h, d]
+    BSHD: q,k,v memory layout with [b, s, ..., h, d]
+    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
+    """
+
+    SBHD = NVTE_QKV_Format.NVTE_SBHD
+    BSHD = NVTE_QKV_Format.NVTE_BSHD
+    THD = NVTE_QKV_Format.NVTE_THD
+
+
+def get_qkv_format(qkv_layout):
+    """
+    Get qkv_format from qkv_layout
+    """
+    return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
+
+
+def canonicalize_attn_mask_type(attn_mask_type: str):
+    """Convert string attn_mask_type to AttnMaskType
+    TE-JAX currently fall back to the padding version kernels for the libraries integration.
+    The overhead between padding and non-padding version should be small.
+    However, we will lease this limitation in the near feature.
+    """
+    match attn_mask_type:
+        case "no_mask":
+            return AttnMaskType.NO_MASK
+        case "padding":
+            return AttnMaskType.PADDING_MASK
+        case "causal":
+            return AttnMaskType.CAUSAL_MASK
+        case "padding_causal" | "causal_padding":
+            return AttnMaskType.PADDING_CAUSAL_MASK
+    raise ValueError(
+        f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+        "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
+    )
+
+
+def is_fused_attn_kernel_available(
+    q_dtype,
+    kv_dtype,
+    qkv_layout,
+    attn_bias_type,
+    attn_mask_type,
+    dropout_probability,
+    q_num_heads,
+    kv_num_heads,
+    q_max_seqlen,
+    kv_max_seqlen,
+    head_dim,
+):
+    """
+    To check whether the fused attention kernel is supported
+    """
+    return tex.FusedAttnHelper(
+        q_dtype,
+        kv_dtype,
+        qkv_layout.value,
+        attn_bias_type.value,
+        attn_mask_type.value,
+        dropout_probability,
+        q_num_heads,
+        kv_num_heads,
+        q_max_seqlen,
+        kv_max_seqlen,
+        head_dim,
+    ).is_fused_attn_kernel_available()
+
+
+def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
+    match qkv_layout:
+        case QKVLayout.BS3HD | QKVLayout.T3HD:
+            assert len(qkv) == 1, f"qkv must be (qkvpacked,) with {qkv_layout=}"
+            batch, q_max_seqlen, *_ = qkv[0].shape
+            kv_max_seqlen = q_max_seqlen
+        case QKVLayout.BSHD_BS2HD | QKVLayout.THD_T2HD:
+            assert len(qkv) == 2, f"qkv must be (query, kvpacked) with {qkv_layout=}"
+            batch, q_max_seqlen, *_ = qkv[0].shape
+            kv_max_seqlen = qkv[1].shape[1]
+        case QKVLayout.BSHD_BSHD_BSHD | QKVLayout.THD_THD_THD:
+            assert len(qkv) == 3, f"qkv must be (query, key, value) with {qkv_layout=}"
+            batch, q_max_seqlen, *_ = qkv[0].shape
+            kv_max_seqlen = qkv[1].shape[1]
+        case _:
+            raise ValueError(f"Unsupported {qkv_layout=}")
+    return batch, q_max_seqlen, kv_max_seqlen
+
+
+def fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    mask: Optional[jnp.ndarray],
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+):
+    """
+    Perform non-THD (non-packed) cuDNN fused attention.
+
+    This function implements the following formula:
+        BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Args:
+        qkv (Tuple[jnp.ndarray, ...]): A tuple containing query, key, and value tensors.
+        It supports three formats:
+            - `(qkv_packed,)`: For interleaved QKV packed format, typically used when query, key,
+              and value have the same shape (e.g., self-attention).
+            - `(query, kv_packed)`: For separate query and KV packed format, typically used when
+              query has a different shape (e.g., cross-attention).
+            - `(query, key, value)`: For separate query, key, and value tensors.
+        bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
+        mask (Optional[jnp.ndarray]):
+            An optional mask tensor to mask out the attention scores, `True` means mask out.
+            Intra-sequence padding is not valid. The padded tokens can only on the right-most.
+            Otherwise the results will be wrong.
+        seed (Optional[jnp.ndarray]): Optional random seed for dropout.
+        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
+        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
+        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        scaling_factor (float): Scaling factor for the attention scores.
+        dropout_probability (float): Dropout probability to apply during attention.
+        is_training (bool): Flag indicating whether the model is in training mode.
+    Returns:
+        (jnp.ndarray): The output tensor from the fused attention.
+    """
+    assert (
+        get_qkv_format(qkv_layout) != QKVFormat.THD
+    ), "Please use transformer_engine.jax.attention.fused_attn_thd for THD format."
+
+    # Check inputs qkv
+    match qkv_layout:
+        case NVTE_QKV_Layout.NVTE_BS3HD:
+            assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
+        case NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+            assert (
+                len(qkv) == 2
+            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
+        case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+            assert (
+                len(qkv) == 3
+            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+
+    # convert the mask to seqlens, mask doesn't support ragged offsets
+    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+        batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
+        q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
+        kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
+    else:
+        assert mask is not None
+        mask = jnp.logical_not(mask)
+        q_seq_lens = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]
+        if attn_mask_type == AttnMaskType.PADDING_MASK:
+            kv_seq_lens = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]
+        else:
+            # When mask is causal, the actual seqlen is not the last row, use max to find it
+            kv_seq_lens = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+
+    output = _fused_attn(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        None,
+        None,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=1,
+    )
+
+    return output
+
+
+def fused_attn_thd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seq_lens: jnp.ndarray,
+    kv_seq_lens: jnp.ndarray,
+    q_seq_offsets: jnp.ndarray,
+    kv_seq_offsets: jnp.ndarray,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int = 1,
+):
+    """
+    (Experimental) Perform THD (packed) cuDNN fused attention.
+
+    This function implements the following formula:
+        BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Args:
+        qkv (Tuple[jnp.ndarray, ...]): A tuple containing query, key, and value tensors.
+        It supports three formats:
+            - `(qkv_packed,)`: For interleaved QKV packed format, typically used when query, key,
+              and value have the same shape (e.g., self-attention).
+            - `(query, kv_packed)`: For separate query and KV packed format, typically used when
+              query has a different shape (e.g., cross-attention).
+            - `(query, key, value)`: For separate query, key, and value tensors.
+        bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
+        q_seqlen (jnp.ndarray):
+            Sequence lengths for the query, with shape [batch, max_seqlen]. Unused positions are
+            padded with -1.
+        kv_seqlen (jnp.ndarray):
+            Sequence lengths for the key and value, with shape [batch, max_seqlen]. Unused positions
+            are padded with -1.
+        q_seq_offsets (jnp.ndarray):
+            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+            Unused positions are padded with -1.
+        kv_seq_offsets (jnp.ndarray):
+            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+            Unused positions are padded with -1.
+        seed (Optional[jnp.ndarray]): Optional random seed for dropout.
+        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
+        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
+        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        scaling_factor (float): Scaling factor for the attention scores.
+        dropout_probability (float): Dropout probability to apply during attention.
+        is_training (bool): Flag indicating whether the model is in training mode.
+        max_segments_per_seq (int):
+            Indicating the maximum number of segments inside a sequence. This parameter is to
+            constrain the limit usage and need to be static during the e2e training. The XLA compile
+            time and memory consumption is proportional to `max_segments_per_seq`.
+    Returns:
+        (jnp.ndarray): The output tensor from the fused attention.
+
+    Examples:
+        >>> # segment_ids = [[1, 1, 2, 3], [1, 1, 2, 0]], 0 means padded tokens
+        >>> b, s, h, d = 2, 4, 12, 64
+        >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
+        >>> # 3 segments in first seq, 2 segments in second seq
+        >>> q_seq_lens = kv_seq_lens = jnp.asarray([[2, 1, 1, -1], [2, 1, -1, -1]])
+        >>> # seq_offsets need to include the end offset of the last segments
+        >>> q_seq_offsets = kv_seq_offsets = jnp.asarray([[0, 2, 3, 4, -1], [0, 2, 3, -1, -1]])
+        >>> out = fused_attn_thd((qkv,), None, q_seq_lens, kv_seq_lens,
+                                 q_seq_offsets, kv_seq_offsets, None,
+                                 AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
+                                 QKVLayout.T3HD, 0.125, 0, True, 3)
+    """
+    assert (
+        get_qkv_format(qkv_layout) == QKVFormat.THD
+    ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
+
+    # Check inputs qkv
+    match qkv_layout:
+        case NVTE_QKV_Layout.NVTE_T3HD:
+            assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
+        case NVTE_QKV_Layout.NVTE_THD_T2HD:
+            assert (
+                len(qkv) == 2
+            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
+        case NVTE_QKV_Layout.NVTE_THD_THD_THD:
+            assert (
+                len(qkv) == 3
+            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+
+    batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
+    assert q_seq_lens.shape == (batch, q_max_seqlen)
+    assert kv_seq_lens.shape == (batch, kv_max_seqlen)
+    assert q_seq_offsets.shape == (batch, q_max_seqlen + 1)
+    assert kv_seq_offsets.shape == (batch, kv_max_seqlen + 1)
+
+    output = _fused_attn(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+
+    return output
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+def _fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seq_lens: jnp.ndarray,
+    kv_seq_lens: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: jnp.ndarray,
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+):
+    output, _ = _fused_attn_fwd_rule(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+    )
+    return output
+
+
+def _fused_attn_fwd_rule(
+    qkv,
+    bias,
+    q_seq_lens,
+    kv_seq_lens,
+    q_seq_offsets,
+    kv_seq_offsets,
+    seed,
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+):
+    output, softmax_aux, rng_state = tex.fused_attn_fwd(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    output = checkpoint_name(output, "context")
+    softmax_aux = checkpoint_name(softmax_aux, "context")
+    rng_state = checkpoint_name(rng_state, "context")
+    return output, (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    )
+
+
+def _fused_attn_bwd_rule(
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    ctx,
+    dz,
+):
+    (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    ) = ctx
+    grad_qkv, grad_bias = tex.fused_attn_bwd(
+        qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        dz,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+    return grad_qkv, grad_bias, None, None, None, None, None
+
+
+_fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)

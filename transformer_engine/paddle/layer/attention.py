@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
+
 try:
     from paddle.incubate.nn.functional import fused_rotary_position_embedding
 except ImportError:
@@ -19,8 +20,14 @@ from transformer_engine import transformer_engine_paddle as tex
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .softmax import FusedScaleMaskSoftmax
-from ..constants import (AttnTypes, TE_DType, AttnBiasType, AttnMaskType, FusedAttnBackend,
-                         dist_group_type)
+from ..constants import (
+    AttnTypes,
+    TE_DType,
+    AttnBiasType,
+    AttnMaskType,
+    FusedAttnBackend,
+    dist_group_type,
+)
 from ..cpp_extensions import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
@@ -72,8 +79,9 @@ class RotaryPositionEmbedding(paddle.nn.Layer):
         super().__init__()
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
-        self.inv_freq = 1.0 / (10000**(paddle.cast(paddle.arange(0, dim, 2), dtype='float32') /
-                                       self.dim))
+        self.inv_freq = 1.0 / (
+            10000 ** (paddle.cast(paddle.arange(0, dim, 2), dtype="float32") / self.dim)
+        )
         self._set_cos_sin_cache(seq_len=max_position_embeddings)
 
     def _set_cos_sin_cache(self, seq_len):
@@ -104,9 +112,9 @@ class RotaryPositionEmbedding(paddle.nn.Layer):
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return paddle.concat([-x2, x1], axis=-1)    # shape is the same as x
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None):
@@ -114,13 +122,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None):
 
     if position_ids is None:
         # Note: Only for LlamaForCausalLMPipe model pretraining
-        cos = cos[:, :q.shape[1], :, :]    # [bs, seq_len, 1, dim]
-        sin = sin[:, :q.shape[1], :, :]    # [bs, seq_len, 1, dim]
+        cos = cos[:, : q.shape[1], :, :]  # [bs, seq_len, 1, dim]
+        sin = sin[:, : q.shape[1], :, :]  # [bs, seq_len, 1, dim]
     else:
-        cos = cos.squeeze(axis=[0, 2])    # [seq_len, dim]
-        sin = sin.squeeze(axis=[0, 2])    # [seq_len, dim]
-        cos = cos[position_ids].unsqueeze(2)    # [bs, seq_len, 1, dim]
-        sin = sin[position_ids].unsqueeze(2)    # [bs, seq_len, 1, dim]
+        cos = cos.squeeze(axis=[0, 2])  # [seq_len, dim]
+        sin = sin.squeeze(axis=[0, 2])  # [seq_len, dim]
+        cos = cos[position_ids].unsqueeze(2)  # [bs, seq_len, 1, dim]
+        sin = sin[position_ids].unsqueeze(2)  # [bs, seq_len, 1, dim]
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -130,9 +138,23 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
     """Function for FusedAttention with packed QKV input"""
 
     @staticmethod
-    def forward(ctx, qkv, cu_seqlens, attn_bias, max_seqlen, attn_scale, qkv_dtype, dropout_p,
-                set_zero, qkv_layout, attn_bias_type, attn_mask_type, is_training,
-                fused_attention_backend):
+    def forward(
+        ctx,
+        qkv,
+        cu_seqlens,
+        attn_bias,
+        max_seqlen,
+        attn_scale,
+        qkv_dtype,
+        dropout_p,
+        set_zero,
+        qkv_layout,
+        attn_bias_type,
+        attn_mask_type,
+        is_training,
+        deterministic,
+        fused_attention_backend,
+    ):
         """Forward function for FusedAttention with packed QKV input"""
         out, softmax_aux, rng_state = fused_attn_fwd_qkvpacked(
             qkv,
@@ -159,6 +181,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -167,11 +190,24 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
     def backward(ctx, d_out):
         """Backward function for FusedAttention with packed QKV input"""
         qkv, out, cu_seqlens, rng_state, softmax_aux = ctx.saved_tensor()
-        dqkv, *rest = fused_attn_bwd_qkvpacked(qkv, cu_seqlens, rng_state, out, d_out, softmax_aux,
-                                               ctx.fused_attention_backend, ctx.max_seqlen,
-                                               ctx.qkv_dtype, ctx.attn_scale, ctx.dropout_p,
-                                               ctx.set_zero, ctx.qkv_layout, ctx.attn_bias_type,
-                                               ctx.attn_mask_type)
+        dqkv, *rest = fused_attn_bwd_qkvpacked(
+            qkv,
+            cu_seqlens,
+            rng_state,
+            out,
+            d_out,
+            softmax_aux,
+            ctx.fused_attention_backend,
+            ctx.max_seqlen,
+            ctx.qkv_dtype,
+            ctx.attn_scale,
+            ctx.dropout_p,
+            ctx.set_zero,
+            ctx.qkv_layout,
+            ctx.attn_bias_type,
+            ctx.attn_mask_type,
+            ctx.deterministic,
+        )
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
@@ -184,14 +220,45 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
     """Function for FusedAttention with packed KV input"""
 
     @staticmethod
-    def forward(ctx, q, kv, cu_seqlens_q, cu_seqlens_kv, attn_bias, max_seqlen_q, max_seqlen_kv,
-                attn_scale, qkv_dtype, dropout_p, set_zero, qkv_layout, attn_bias_type,
-                attn_mask_type, is_training, fused_attention_backend):
+    def forward(
+        ctx,
+        q,
+        kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        attn_bias,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        qkv_dtype,
+        dropout_p,
+        set_zero,
+        qkv_layout,
+        attn_bias_type,
+        attn_mask_type,
+        is_training,
+        deterministic,
+        fused_attention_backend,
+    ):
         """Forward function for FusedAttention with packed KV input"""
         out, softmax_aux, rng_state = fused_attn_fwd_kvpacked(
-            q, kv, cu_seqlens_q, cu_seqlens_kv, is_training, max_seqlen_q, max_seqlen_kv, qkv_dtype,
-            fused_attention_backend, attn_bias, attn_scale, dropout_p, set_zero, qkv_layout,
-            attn_bias_type, attn_mask_type)
+            q,
+            kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            is_training,
+            max_seqlen_q,
+            max_seqlen_kv,
+            qkv_dtype,
+            fused_attention_backend,
+            attn_bias,
+            attn_scale,
+            dropout_p,
+            set_zero,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+        )
 
         ctx.save_for_backward(q, kv, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux)
         ctx.max_seqlen_q = max_seqlen_q
@@ -203,6 +270,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -211,12 +279,27 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
     def backward(ctx, d_out):
         """Backward function for FusedAttention with packed KV input"""
         q, kv, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux = ctx.saved_tensor()
-        dq, dkv, *rest = fused_attn_bwd_kvpacked(q, kv, cu_seqlens_q, cu_seqlens_kv, rng_state, out,
-                                                 d_out, softmax_aux, ctx.fused_attention_backend,
-                                                 ctx.max_seqlen_q, ctx.max_seqlen_kv, ctx.qkv_dtype,
-                                                 ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
-                                                 ctx.qkv_layout, ctx.attn_bias_type,
-                                                 ctx.attn_mask_type)
+        dq, dkv, *rest = fused_attn_bwd_kvpacked(
+            q,
+            kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            rng_state,
+            out,
+            d_out,
+            softmax_aux,
+            ctx.fused_attention_backend,
+            ctx.max_seqlen_q,
+            ctx.max_seqlen_kv,
+            ctx.qkv_dtype,
+            ctx.attn_scale,
+            ctx.dropout_p,
+            ctx.set_zero,
+            ctx.qkv_layout,
+            ctx.attn_bias_type,
+            ctx.attn_mask_type,
+            ctx.deterministic,
+        )
 
         # if no_bias, return dq, dkv
         if ctx.attn_bias_type == "no_bias":
@@ -229,15 +312,47 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
     """Function for FusedAttention with separate Q, K, V tensors"""
 
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_kv, attn_bias, max_seqlen_q, max_seqlen_kv,
-                attn_scale, qkv_dtype, dropout_p, set_zero, qkv_layout, attn_bias_type,
-                attn_mask_type, is_training, fused_attention_backend):
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        attn_bias,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        qkv_dtype,
+        dropout_p,
+        set_zero,
+        qkv_layout,
+        attn_bias_type,
+        attn_mask_type,
+        is_training,
+        deterministic,
+        fused_attention_backend,
+    ):
         """Forward function for FusedAttention with separate Q, K, V tensors"""
-        out, softmax_aux, rng_state = fused_attn_fwd(q, k, v, cu_seqlens_q, cu_seqlens_kv,
-                                                     is_training, max_seqlen_q, max_seqlen_kv,
-                                                     qkv_dtype, fused_attention_backend, attn_bias,
-                                                     attn_scale, dropout_p, set_zero, qkv_layout,
-                                                     attn_bias_type, attn_mask_type)
+        out, softmax_aux, rng_state = fused_attn_fwd(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            is_training,
+            max_seqlen_q,
+            max_seqlen_kv,
+            qkv_dtype,
+            fused_attention_backend,
+            attn_bias,
+            attn_scale,
+            dropout_p,
+            set_zero,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+        )
 
         ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux)
         ctx.max_seqlen_q = max_seqlen_q
@@ -249,6 +364,7 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -257,11 +373,28 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
     def backward(ctx, d_out):
         """Backward function for FusedAttention with separate Q, K, V tensors"""
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux = ctx.saved_tensor()
-        dq, dk, dv, *rest = fused_attn_bwd(q, k, v, cu_seqlens_q, cu_seqlens_kv, rng_state, out,
-                                           d_out, softmax_aux, ctx.fused_attention_backend,
-                                           ctx.max_seqlen_q, ctx.max_seqlen_kv, ctx.qkv_dtype,
-                                           ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
-                                           ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+        dq, dk, dv, *rest = fused_attn_bwd(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            rng_state,
+            out,
+            d_out,
+            softmax_aux,
+            ctx.fused_attention_backend,
+            ctx.max_seqlen_q,
+            ctx.max_seqlen_kv,
+            ctx.qkv_dtype,
+            ctx.attn_scale,
+            ctx.dropout_p,
+            ctx.set_zero,
+            ctx.qkv_layout,
+            ctx.attn_bias_type,
+            ctx.attn_mask_type,
+            ctx.deterministic,
+        )
         # if no_bias, return dq, dk, dv
         if ctx.attn_bias_type == "no_bias":
             return (dq, dk, dv, None, None)
@@ -279,6 +412,12 @@ class DotProductAttention(paddle.nn.Layer):
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
         :attr:`attn_mask_type` is set to `"causal"`.
+
+    .. warning::
+
+        Fused attention backward uses a non-deterministic algorithm when workspace
+        optimization is not enabled. To use a deterministic algorithm, set the
+        environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`
 
     Parameters
     ----------
@@ -306,15 +445,17 @@ class DotProductAttention(paddle.nn.Layer):
              backend to use for attention operation.
     """
 
-    def __init__(self,
-                 num_attention_heads: int,
-                 kv_channels: int,
-                 num_gqa_groups: Optional[int] = None,
-                 attention_dropout: float = 0.1,
-                 attn_mask_type: str = "causal",
-                 attention_type: str = "self",
-                 tp_size: int = 1,
-                 backend: str = 'transformer_engine') -> None:
+    def __init__(
+        self,
+        num_attention_heads: int,
+        kv_channels: int,
+        num_gqa_groups: Optional[int] = None,
+        attention_dropout: float = 0.1,
+        attn_mask_type: str = "causal",
+        attention_type: str = "self",
+        tp_size: int = 1,
+        backend: str = "transformer_engine",
+    ) -> None:
         super().__init__()
 
         self.attn_mask_type = attn_mask_type
@@ -324,7 +465,7 @@ class DotProductAttention(paddle.nn.Layer):
         self.hidden_size_per_attention_head = kv_channels
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
         self.tp_size = tp_size
-        self.num_gqa_groups = (num_attention_heads if num_gqa_groups is None else num_gqa_groups)
+        self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
         self.num_queries_per_key_value = num_attention_heads // self.num_gqa_groups
 
@@ -332,14 +473,37 @@ class DotProductAttention(paddle.nn.Layer):
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
-        if not self.use_fused_attention and backend == 'transformer_engine':
-            warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
-            self.backend = 'paddle'
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
-        if self.backend != 'transformer_engine':
-            self.scale_mask_softmax = FusedScaleMaskSoftmax(attn_mask_type,
-                                                            attention_mask_func,
-                                                            backend=self.backend)
+        # To use the workspace optimization path for determinism, please
+        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
+        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
+        cudnn_version = paddle.get_cudnn_version()
+        if 8905 <= cudnn_version < 9000:
+            if self.deterministic:
+                # workspace optimization path is deterministic
+                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
+
+            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+            # - unset:       enables workspace optimization when required workspace is <= 256MB
+            #                or when bias gradient needs to be computed
+            # - n:           enables workspace optimization when required workspace is <= n bytes
+            # - -1:          enables workspace optimization always
+            # - 0:           disables workspace optimization always
+            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+
+        if not self.use_fused_attention and backend == "transformer_engine":
+            warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
+            self.backend = "paddle"
+
+        if self.backend != "transformer_engine":
+            self.scale_mask_softmax = FusedScaleMaskSoftmax(
+                attn_mask_type, attention_mask_func, backend=self.backend
+            )
 
     def forward(
         self,
@@ -380,35 +544,53 @@ class DotProductAttention(paddle.nn.Layer):
 
         backend = self.backend
 
-        assert (key_layer.shape == value_layer.shape), "Keys and values must have the same shape!"
-        assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
-               ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
+        assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
+        assert (
+            key_layer.shape[-2] == self.num_gqa_groups_per_partition
+        ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
 
-        if backend == 'transformer_engine':
+        if backend == "transformer_engine":
             max_s_q = query_layer.shape[1]
             max_s_kv = max_s_q if self.attention_type == "self" else key_layer.shape[1]
             self.fused_attention_backend = tex.get_fused_attn_backend(
-                TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
-                tex.get_nvte_qkv_layout(self.qkv_layout), AttnBiasType[core_attention_bias_type],
-                AttnMaskType[self.attn_mask_type], self.attention_dropout, query_layer.shape[-2],
-                key_layer.shape[-2] if key_layer is not None else query_layer.shape[-2], max_s_q,
-                max_s_kv, query_layer.shape[-1])
+                TE_DType[query_layer.dtype],
+                TE_DType[query_layer.dtype],
+                tex.get_nvte_qkv_layout(self.qkv_layout),
+                AttnBiasType[core_attention_bias_type],
+                AttnMaskType[self.attn_mask_type],
+                self.attention_dropout,
+                query_layer.shape[-2],
+                key_layer.shape[-2] if key_layer is not None else query_layer.shape[-2],
+                max_s_q,
+                max_s_kv,
+                query_layer.shape[-1],
+            )
 
-            is_backend_avail = (self.fused_attention_backend in [
-                FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]
-            ])
+            is_backend_avail = self.fused_attention_backend in [
+                FusedAttnBackend["F16_max512_seqlen"],
+                FusedAttnBackend["F16_arbitrary_seqlen"],
+            ]
             if is_backend_avail and self.use_fused_attention:
-                return self._te_forward(query_layer, key_layer, value_layer, attention_mask,
-                                        core_attention_bias_type, core_attention_bias, set_zero)
+                return self._te_forward(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    attention_mask,
+                    core_attention_bias_type,
+                    core_attention_bias,
+                    set_zero,
+                )
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
-            backend = 'paddle'
-            self.scale_mask_softmax = FusedScaleMaskSoftmax(self.attn_mask_type,
-                                                            attention_mask_func,
-                                                            backend=backend)
-        if backend == 'paddle':
+            backend = "paddle"
+            self.scale_mask_softmax = FusedScaleMaskSoftmax(
+                self.attn_mask_type, attention_mask_func, backend=backend
+            )
+        if backend == "paddle":
             if core_attention_bias_type != "no_bias":
-                warnings.warn("Paddle backend dot product attention does not support bias yet. "
-                              "Bias will be ignored.")
+                warnings.warn(
+                    "Paddle backend dot product attention does not support bias yet. "
+                    "Bias will be ignored."
+                )
             return self._pd_forward(query_layer, key_layer, value_layer, attention_mask)
         raise AttributeError(f"Backend {backend} is not supported.")
 
@@ -425,45 +607,78 @@ class DotProductAttention(paddle.nn.Layer):
 
         if self.attention_type == "self":
             # self attention - q: [b, s, h, d]  kv: None
-            assert (len(query_layer.shape) == 4 and len(key_layer.shape) == 4
-                    and len(value_layer.shape)
-                    == 4), "q,k,v shape must be [b, s, h, d] for dot product self attention"
+            assert (
+                len(query_layer.shape) == 4
+                and len(key_layer.shape) == 4
+                and len(value_layer.shape) == 4
+            ), "q,k,v shape must be [b, s, h, d] for dot product self attention"
             max_seqlen = query_layer.shape[1]
             if self.attn_mask_type == "causal" or attention_mask is None:
-                cu_seqlens = paddle.arange(0, (query_layer.shape[0] + 1) * query_layer.shape[1],
-                                           step=query_layer.shape[1],
-                                           dtype='int32')
+                cu_seqlens = paddle.arange(
+                    0,
+                    (query_layer.shape[0] + 1) * query_layer.shape[1],
+                    step=query_layer.shape[1],
+                    dtype="int32",
+                )
             else:
                 cu_seqlens, _ = mask_to_cu_seqlens(attention_mask, need_kv=False)
             qkv_dtype = TE_DType[query_layer.dtype]
 
-            output = FusedAttnFunc.apply(query_layer, key_layer, value_layer, cu_seqlens,
-                                         cu_seqlens, core_attention_bias, max_seqlen, max_seqlen,
-                                         1.0 / self.norm_factor, qkv_dtype,
-                                         self.attention_dropout if self.training else 0.0, set_zero,
-                                         self.qkv_layout, core_attention_bias_type,
-                                         self.attn_mask_type, self.training,
-                                         self.fused_attention_backend)
+            output = FusedAttnFunc.apply(
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens,
+                cu_seqlens,
+                core_attention_bias,
+                max_seqlen,
+                max_seqlen,
+                1.0 / self.norm_factor,
+                qkv_dtype,
+                self.attention_dropout if self.training else 0.0,
+                set_zero,
+                self.qkv_layout,
+                core_attention_bias_type,
+                self.attn_mask_type,
+                self.training,
+                self.deterministic,
+                self.fused_attention_backend,
+            )
         elif self.attention_type == "cross":
             # cross attention - q: [b, s_q, h, d]  k,v: [b, s_kv, h, d]
             assert (
-                len(query_layer.shape) == 4 and len(key_layer.shape) == 4
+                len(query_layer.shape) == 4
+                and len(key_layer.shape) == 4
                 and len(value_layer.shape) == 4
-            ), "query shape must be [b, s_q, h, d] and key shape must be [b, s_kv, h, d]" \
+            ), (
+                "query shape must be [b, s_q, h, d] and key shape must be [b, s_kv, h, d]"
                 "for dot product cross attention"
-            assert (attention_mask
-                    is not None), "attention_mask must be provided for cross attention"
+            )
+            assert attention_mask is not None, "attention_mask must be provided for cross attention"
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             cu_seqlens_q, cu_seqlens_kv = mask_to_cu_seqlens(attention_mask, need_kv=True)
             qkv_dtype = TE_DType[query_layer.dtype]
-            output = FusedAttnFunc.apply(query_layer, key_layer, value_layer, cu_seqlens_q,
-                                         cu_seqlens_kv, core_attention_bias, max_seqlen_q,
-                                         max_seqlen_kv, 1.0 / self.norm_factor, qkv_dtype,
-                                         self.attention_dropout if self.training else 0.0, set_zero,
-                                         self.qkv_layout, core_attention_bias_type,
-                                         self.attn_mask_type, self.training,
-                                         self.fused_attention_backend)
+            output = FusedAttnFunc.apply(
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                core_attention_bias,
+                max_seqlen_q,
+                max_seqlen_kv,
+                1.0 / self.norm_factor,
+                qkv_dtype,
+                self.attention_dropout if self.training else 0.0,
+                set_zero,
+                self.qkv_layout,
+                core_attention_bias_type,
+                self.attn_mask_type,
+                self.training,
+                self.deterministic,
+                self.fused_attention_backend,
+            )
         else:
             raise ValueError("attention_type must be one of ['self', 'cross']")
         return output
@@ -495,7 +710,7 @@ class DotProductAttention(paddle.nn.Layer):
             )
 
         out = paddle.matmul(attention_probs, v)
-        out = paddle.transpose(out, perm=[0, 2, 1, 3])    # [b, s, h, d]
+        out = paddle.transpose(out, perm=[0, 2, 1, 3])  # [b, s, h, d]
         # out = paddle.reshape(x=out, shape=[0, 0, out.shape[2] * out.shape[3]])
         return out
 
@@ -595,8 +810,8 @@ class MultiHeadAttention(paddle.nn.Layer):
         tp_group: Optional[dist_group_type] = None,
         num_gqa_groups: Optional[int] = None,
         fuse_wgrad_accumulation: bool = False,
-        rng_state_name: str = 'local_seed',
-        backend: str = 'transformer_engine',
+        rng_state_name: str = "local_seed",
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.input_layernorm = input_layernorm
@@ -610,8 +825,9 @@ class MultiHeadAttention(paddle.nn.Layer):
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
-                                                                  enable_tp=set_parallel_mode)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(
+            tp_group, enable_tp=set_parallel_mode
+        )
         self.tensor_parallel = self.tp_size > 1
         self.sequence_parallel = self.tensor_parallel and sequence_parallel
         self.hidden_size_per_attention_head = hidden_size // num_attention_heads
@@ -621,11 +837,13 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.backend = backend
 
         self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
-        self.num_gqa_groups = (num_attention_heads if num_gqa_groups is None else num_gqa_groups)
-        assert (self.num_attention_heads % self.num_gqa_groups == 0
-               ), "The number of attention heads must be divisible by the number of GQA groups!"
-        assert (self.num_gqa_groups % self.tp_size == 0
-               ), "The number of GQA groups must be divisible by tensor parallel size!"
+        self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
+        assert (
+            self.num_attention_heads % self.num_gqa_groups == 0
+        ), "The number of attention heads must be divisible by the number of GQA groups!"
+        assert (
+            self.num_gqa_groups % self.tp_size == 0
+        ), "The number of GQA groups must be divisible by tensor parallel size!"
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
         self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // self.num_attention_heads)
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -660,7 +878,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                     backend=self.backend,
                 )
 
-        else:    # cross attention
+        else:  # cross attention
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
@@ -776,7 +994,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         """
 
         if self.attn_mask_type != "causal" and attention_mask is not None:
-            assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
+            assert attention_mask.dtype == paddle.bool, "Attention mask must be a boolean tensor"
 
         input_dim = len(hidden_states.shape)
         if input_dim == 2:
@@ -806,15 +1024,20 @@ class MultiHeadAttention(paddle.nn.Layer):
                     is_first_microbatch=is_first_microbatch,
                 )
 
-            num_queries_per_key_value = (self.num_attention_heads_per_partition //
-                                         self.num_gqa_groups_per_partition)
+            num_queries_per_key_value = (
+                self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
+            )
 
             # [b, s_q, hidden_size+2*hidden_size_kv] --> [b, s_q, (h/ng+2), ng, d]
-            mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                -1, max_seq_len, (
-                    num_queries_per_key_value +
-                    2), self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
-            ])
+            mixed_qkv_layer = mixed_qkv_layer.reshape(
+                shape=[
+                    -1,
+                    max_seq_len,
+                    (num_queries_per_key_value + 2),
+                    self.num_gqa_groups_per_partition,
+                    self.hidden_size_per_attention_head,
+                ]
+            )
 
             # [b, s_q, (h/ng+2), ng, d]
             # --> [b, s_q, (h/ng), ng, d] [b, s_q, 1, ng, d] [b, s_q, 1, ng, d]
@@ -826,19 +1049,25 @@ class MultiHeadAttention(paddle.nn.Layer):
 
             # query: -> [b, s, h, d]
             # key, value: -> [b, s, ng, d]
-            query_layer, key_layer, value_layer = (x.reshape(
-                shape=[x.shape[0], x.shape[1], -1, self.hidden_size_per_attention_head])
-                                                   for x in (query_layer, key_layer, value_layer))
+            query_layer, key_layer, value_layer = (
+                x.reshape(shape=[x.shape[0], x.shape[1], -1, self.hidden_size_per_attention_head])
+                for x in (query_layer, key_layer, value_layer)
+            )
 
-        else:    # cross attention
+        else:  # cross attention
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
             )
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
-            mixed_kv_layer = mixed_kv_layer.reshape(shape=[
-                0, 0, 2 * self.num_gqa_groups_per_partition, self.hidden_size_per_attention_head
-            ])
+            mixed_kv_layer = mixed_kv_layer.reshape(
+                shape=[
+                    0,
+                    0,
+                    2 * self.num_gqa_groups_per_partition,
+                    self.hidden_size_per_attention_head,
+                ]
+            )
 
             # [b, s_kv, 2 * ng, head_size]
             # --> 2 [b, s_kv, ng, head_size]
@@ -864,16 +1093,21 @@ class MultiHeadAttention(paddle.nn.Layer):
                 )
 
             # [b, s, hidden_size] --> [b, s, h, d]
-            query_layer = query_layer.reshape(shape=[
-                -1, max_seq_len, self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head
-            ])
+            query_layer = query_layer.reshape(
+                shape=[
+                    -1,
+                    max_seq_len,
+                    self.num_attention_heads_per_partition,
+                    self.hidden_size_per_attention_head,
+                ]
+            )
 
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
             if fused_rotary_position_embedding is None:
-                query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, q_pos_emb,
-                                                              k_pos_emb)
+                query_layer, key_layer = apply_rotary_pos_emb(
+                    query_layer, key_layer, q_pos_emb, k_pos_emb
+                )
             else:
                 query_layer, key_layer, _ = fused_rotary_position_embedding(
                     query_layer,
@@ -911,10 +1145,12 @@ class MultiHeadAttention(paddle.nn.Layer):
 
         if input_dim == 3:
             context_layer = paddle.reshape(
-                context_layer, [-1, max_seq_len, context_layer.shape[2] * context_layer.shape[3]])
-        else:    # input_dim == 2
-            context_layer = paddle.reshape(context_layer,
-                                           [-1, context_layer.shape[2] * context_layer.shape[3]])
+                context_layer, [-1, max_seq_len, context_layer.shape[2] * context_layer.shape[3]]
+            )
+        else:  # input_dim == 2
+            context_layer = paddle.reshape(
+                context_layer, [-1, context_layer.shape[2] * context_layer.shape[3]]
+            )
 
         # Output. [b, s, hidden]
         attention_output = self.proj(context_layer, is_first_microbatch=is_first_microbatch)

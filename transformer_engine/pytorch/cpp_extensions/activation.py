@@ -8,7 +8,7 @@ import torch
 import transformer_engine_torch as tex
 
 
-__all__ = ['gelu', 'relu', 'reglu', 'geglu', 'swiglu', 'qgelu', 'srelu']
+__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 
 
 def gelu(
@@ -166,6 +166,7 @@ def qgelu(
         fp8_tensor,
         otype,
     )
+
 
 def srelu(
     inp: torch.Tensor,

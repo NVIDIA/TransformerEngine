@@ -26,7 +26,7 @@ if(NOT DEFINED TE_LIB_PATH)
                     OUTPUT_VARIABLE TE_LIB_PATH)
 endif()
 
-find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/transformer_engine" ENV TE_LIB_PATH REQUIRED)
+find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/transformer_engine" ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
 
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
@@ -34,6 +34,7 @@ include_directories(../../transformer_engine/common)
 include_directories(${CMAKE_SOURCE_DIR})
 
 find_package(CUDAToolkit REQUIRED)
+include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 add_subdirectory(operator)
 add_subdirectory(util)

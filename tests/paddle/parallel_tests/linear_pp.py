@@ -23,14 +23,14 @@ class TELinear(te.Linear):
     """To pass is_first_microbatch"""
 
     def __init__(self, *args, **kwargs):
-        assert 'accumulate_steps' in kwargs
-        self.accumulate_steps = kwargs['accumulate_steps']
-        del kwargs['accumulate_steps']
+        assert "accumulate_steps" in kwargs
+        self.accumulate_steps = kwargs["accumulate_steps"]
+        del kwargs["accumulate_steps"]
         self._micro_batch_id = 0
         super().__init__(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
-        kwargs['is_first_microbatch'] = (self._micro_batch_id % self.accumulate_steps) == 0
+        kwargs["is_first_microbatch"] = (self._micro_batch_id % self.accumulate_steps) == 0
         if paddle.is_grad_enabled() and self.training:
             self._micro_batch_id += 1
         return super().forward(*args, **kwargs)
@@ -39,14 +39,16 @@ class TELinear(te.Linear):
 class TEPipelineModel(PipelineLayer):
     """Model for pipeline parallel test"""
 
-    def __init__(self,
-                 in_features,
-                 hidden_features,
-                 weight_attrs,
-                 use_te=True,
-                 use_fp8=False,
-                 accumulate_steps=1,
-                 **kwargs):
+    def __init__(
+        self,
+        in_features,
+        hidden_features,
+        weight_attrs,
+        use_te=True,
+        use_fp8=False,
+        accumulate_steps=1,
+        **kwargs,
+    ):
         self.in_features = in_features
         self.hidden_features = hidden_features
         self.fp8 = use_fp8
@@ -56,19 +58,23 @@ class TEPipelineModel(PipelineLayer):
         Linear = TELinear if use_te else paddle.nn.Linear
         extra_kwargs = {}
         if use_te:
-            extra_kwargs['accumulate_steps'] = accumulate_steps
+            extra_kwargs["accumulate_steps"] = accumulate_steps
 
         model_desc = [
-            LayerDesc(Linear,
-                      self.in_features,
-                      self.hidden_features,
-                      weight_attr=weight_attrs[0],
-                      **extra_kwargs),
-            LayerDesc(Linear,
-                      self.hidden_features,
-                      self.in_features,
-                      weight_attr=weight_attrs[1],
-                      **extra_kwargs),
+            LayerDesc(
+                Linear,
+                self.in_features,
+                self.hidden_features,
+                weight_attr=weight_attrs[0],
+                **extra_kwargs,
+            ),
+            LayerDesc(
+                Linear,
+                self.hidden_features,
+                self.in_features,
+                weight_attr=weight_attrs[1],
+                **extra_kwargs,
+            ),
         ]
         super().__init__(layers=model_desc, loss_fn=paddle.nn.CrossEntropyLoss(), **kwargs)
 
@@ -129,7 +135,7 @@ class TestLinearPipelineParallel(unittest.TestCase):
         self.micro_batch_size = 16
         self.in_features = 32
         self.hidden_features = 64
-        self.global_dtype = 'float32'
+        self.global_dtype = "float32"
         self.rtol = 1e-5
         self.atol = 1e-5
         self.iter = 10
@@ -164,16 +170,18 @@ class TestLinearPipelineParallel(unittest.TestCase):
 
         # Check if model is split across ranks as expected
         for name, sublayer in pipe_model.named_sublayers():
-            if name in ('_loss_fn', 'shared_layers'):
+            if name in ("_loss_fn", "shared_layers"):
                 continue
             if self.rank == 0:
-                assert tuple(sublayer.weight.shape) == weight1_np.T.shape, \
-                    f"Shape does not match, expect: {weight1_np.T.shape}, " \
+                assert tuple(sublayer.weight.shape) == weight1_np.T.shape, (
+                    f"Shape does not match, expect: {weight1_np.T.shape}, "
                     f"actual: {tuple(sublayer.weight.shape)}"
+                )
             elif self.rank == 1:
-                assert tuple(sublayer.weight.shape) == weight2_np.T.shape, \
-                    f"Shape does not match, expect: {weight2_np.T.shape}, " \
+                assert tuple(sublayer.weight.shape) == weight2_np.T.shape, (
+                    f"Shape does not match, expect: {weight2_np.T.shape}, "
                     f"actual: {tuple(sublayer.weight.shape)}"
+                )
 
         standalone_model = StandaloneModel(
             self.in_features,
@@ -182,8 +190,9 @@ class TestLinearPipelineParallel(unittest.TestCase):
         )
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.1, parameters=pipe_model.parameters())
-        optimizer_pd = paddle.optimizer.SGD(learning_rate=0.1,
-                                            parameters=standalone_model.parameters())
+        optimizer_pd = paddle.optimizer.SGD(
+            learning_rate=0.1, parameters=standalone_model.parameters()
+        )
 
         pipe_model = fleet.distributed_model(pipe_model)
         optimizer_te = fleet.distributed_optimizer(optimizer_te)
@@ -196,8 +205,9 @@ class TestLinearPipelineParallel(unittest.TestCase):
             return loss
 
         for i in range(self.iter):
-            inp = paddle.to_tensor(np.random.normal(size=[self.batch_size, self.in_features]),
-                                   dtype=self.global_dtype)
+            inp = paddle.to_tensor(
+                np.random.normal(size=[self.batch_size, self.in_features]), dtype=self.global_dtype
+            )
             label = paddle.to_tensor(np.random.randint(self.in_features, size=[self.batch_size, 1]))
             loss_te = pipe_model.train_batch([inp, label], optimizer_te)
             loss_pd = train_one_step(standalone_model, [inp, label], optimizer_pd)
@@ -214,12 +224,12 @@ class TestLinearPipelineParallelFP8(TestLinearPipelineParallel):
         self.micro_batch_size = 16
         self.in_features = 32
         self.hidden_features = 64
-        self.global_dtype = 'float32'
+        self.global_dtype = "float32"
         self.rtol = 5e-2
         self.atol = 5e-2
         self.iter = 10
         self.fp8 = True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

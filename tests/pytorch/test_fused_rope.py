@@ -132,6 +132,7 @@ def get_tol(dtype: torch.dtype) -> Dict:
 def _overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     return output.sum() * 2
 
+
 # Gradient is a full tensor
 def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     t = torch.ones_like(output)

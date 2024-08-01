@@ -4,28 +4,20 @@
 
 """Installation script."""
 
+import functools
+import glob
 import os
 import re
-import glob
 import shutil
 import subprocess
 import sys
-from functools import cache
+import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
 
 
-@cache
-def userbuffers_enabled() -> bool:
-    """Check if userbuffers support is enabled"""
-    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")):
-        assert os.getenv("MPI_HOME"), "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
-        return True
-    return False
-
-
-@cache
+@functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:
@@ -37,10 +29,34 @@ def debug_build_enabled() -> bool:
     return False
 
 
-def all_files_in_dir(path):
+@functools.lru_cache(maxsize=None)
+def get_max_jobs_for_parallel_build() -> int:
+    """Number of parallel jobs for Nina build"""
+
+    # Default: maximum parallel jobs
+    num_jobs = 0
+
+    # Check environment variable
+    if os.getenv("NVTE_MAX_BUILD_JOBS"):
+        num_jobs = int(os.getenv("NVTE_MAX_BUILD_JOBS"))
+    elif os.getenv("MAX_JOBS"):
+        num_jobs = int(os.getenv("MAX_JOBS"))
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--parallel="):
+            num_jobs = int(arg.replace("--parallel=", ""))
+            sys.argv.remove(arg)
+
+    return num_jobs
+
+
+def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
+            if name_extension is not None and name_extension not in name:
+                continue
             all_files.append(Path(dirname, name))
     return all_files
 
@@ -145,7 +161,7 @@ def found_pybind11() -> bool:
     return False
 
 
-@cache
+@functools.lru_cache(maxsize=None)
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
@@ -183,7 +199,7 @@ def cuda_version() -> Tuple[int, ...]:
         universal_newlines=True,
     )
     match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split('.')
+    version = match.group(1).split(".")
     return tuple(int(v) for v in version)
 
 
@@ -233,36 +249,36 @@ def get_frameworks() -> List[str]:
     _frameworks = [framework.lower() for framework in _frameworks]
     for framework in _frameworks:
         if framework not in supported_frameworks:
-            raise ValueError(
-                f"Transformer Engine does not support framework={framework}"
-            )
+            raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
 
 
-def package_files(directory):
-    paths = []
-    for path, _, filenames in os.walk(directory):
-        path = Path(path)
-        for filename in filenames:
-            paths.append(str(path / filename).replace(f"{directory}/", ""))
-    return paths
-
-
 def copy_common_headers(te_src, dst):
     headers = te_src / "common"
-    for file_path in glob.glob(os.path.join(str(headers), "**",  '*.h'), recursive=True):
-        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1:])
+    for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
+        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1 :])
         Path(new_path).parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(file_path, new_path)
 
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
-    import importlib
-    try:
-        importlib.import_module(package)
-    except ImportError:
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
-    finally:
-        globals()[package] = importlib.import_module(package)
+    main_package = package.split("[")[0]
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    globals()[main_package] = importlib.import_module(main_package)
+
+
+def uninstall_te_fw_packages():
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "transformer_engine_torch",
+            "transformer_engine_paddle",
+            "transformer_engine_jax",
+        ]
+    )
