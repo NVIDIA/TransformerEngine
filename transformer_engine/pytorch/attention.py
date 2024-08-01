@@ -382,7 +382,7 @@ def get_attention_backend(
     # attn_mask_type               |     supported backends
     # -------------------------------------------------------------------
     # no_mask                      |     All
-    # padding                      |     FlashAttention, FusedAttention
+    # padding                      |     All
     # causal                       |
     #     self-attention           |     All
     #     cross-attention          |     FusedAttention
@@ -399,9 +399,6 @@ def get_attention_backend(
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
-    if use_unfused_attention and "padding" in attn_mask_type:
-        logger.debug("Disabling UnfusedDotProductAttention for %s mask", attn_mask_type)
-        use_unfused_attention = False
     if (
         use_flash_attention
         and _flash_attn_2_1_plus
@@ -2898,6 +2895,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
+        batch_size, max_seqlen_q, max_seqlen_kv = query_layer.shape[1], query_layer.shape[0], key_layer.shape[0]
+        if "padding" in attn_mask_type:
+            if max_seqlen_q == max_seqlen_kv:
+                if attention_mask.shape == (batch_size, 1, 1, max_seqlen_q):
+                    attention_mask = attention_mask.squeeze(1).unsqueeze(3) * attention_mask
+            else:
+                if (attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q)
+                    and attention_mask[1].shape == (batch_size, 1, 1, max_seqlen_kv)):
+                    attention_mask = attention_mask[0].squeeze(1).unsqueeze(3) * attention_mask[1]
+            assert (
+                attention_mask.shape != (batch_size, 1, max_seqlen_q, max_seqlen_kv)
+                ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
