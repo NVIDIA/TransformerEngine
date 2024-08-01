@@ -1310,7 +1310,6 @@ class AttnFuncWithCP(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
-        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
         if fp8:
             if use_fused_attention:
                 fp8_meta_kwargs = {}
