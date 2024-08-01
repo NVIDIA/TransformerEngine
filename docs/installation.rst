@@ -44,7 +44,7 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+  pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
 
@@ -61,7 +61,7 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
+  pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@main
 
 This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
 
@@ -69,7 +69,7 @@ In order to install a specific PR, execute after changing NNN to the PR number:
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@refs/pull/NNN/merge
+  pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@refs/pull/NNN/merge
 
 
 Installation (from source)
@@ -83,8 +83,8 @@ Execute the following commands to install Transformer Engine from source:
   git clone --branch stable --recursive https://github.com/NVIDIA/TransformerEngine.git
 
   cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch   # Optionally set framework
-  pip install .                   # Build and install
+  export NVTE_FRAMEWORK=pytorch         # Optionally set framework
+  pip install . --no-build-isolation    # Build and install
 
 If the Git repository has already been cloned, make sure to also clone the submodules:
 
@@ -96,10 +96,10 @@ Extra dependencies for testing can be installed by setting the "test" option:
 
 .. code-block:: bash
 
-  pip install .[test]
+  pip install .[test] --no-build-isolation
 
 To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
 .. code-block:: bash
 
-  pip install . --global-option=--debug
+  pip install . --global-option=--debug --no-build-isolation

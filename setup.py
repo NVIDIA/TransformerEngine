@@ -30,18 +30,15 @@ current_file_path = Path(__file__).parent.resolve()
 from setuptools.command.build_ext import build_ext as BuildExtension
 
 # Same list as build_system.requires in pyproject.toml
-install_packages(["setuptools >= 61.0", "cmake>=3.21", "pybind11", "ninja"])
+install_packages(["setuptools>=61.0", "cmake>=3.21", "pybind11", "ninja", "pip"])
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
-    install_packages(["torch>=1.13"])
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks:
-    install_packages(["paddlepaddle-gpu>=2.6.1"])
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_packages(["jax"])
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
@@ -78,6 +75,7 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
 
 if __name__ == "__main__":
     # Dependencies
+
     install_requires, test_requires = setup_requirements()
 
     __version__ = te_version()
