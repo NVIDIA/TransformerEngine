@@ -99,7 +99,7 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
 _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-_log_level = log_levels[_log_level if _log_level in [0, 1, 2] else 2]
+_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
