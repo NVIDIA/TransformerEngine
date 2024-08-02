@@ -172,12 +172,12 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                                          int scale_offset = 0, int amax_offset = 0,
                                                          int scale_inv_offset = 0);
 
-void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
-                                std::vector<at::Tensor> scale_list,
+void fused_multi_cast_transpose(std::vector<at::Tensor> input_list, at::Tensor scale,
+                                at::Tensor amax, at::Tensor scale_inv,
+                                std::vector<int> scale_indices, std::vector<int> amax_indices,
+                                std::vector<int> scale_inv_indices,
                                 std::vector<at::Tensor> cast_output_list,
                                 std::vector<at::Tensor> transposed_output_list,
-                                std::vector<at::Tensor> amax_output_list,
-                                std::vector<at::Tensor> scale_inv_output_list,
                                 transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);

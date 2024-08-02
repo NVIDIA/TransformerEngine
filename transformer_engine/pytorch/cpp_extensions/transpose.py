@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for transpose extensions"""
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
@@ -13,6 +13,7 @@ __all__ = [
     "fp8_cast_transpose_fused",
     "fp8_cast_transpose_bgrad_fused",
     "fp8_cast_transpose_bgrad_dgelu_fused",
+    "fp8_multi_cast_transpose_fused",
     "fp8_transpose_bgrad_fused",
 ]
 
@@ -118,3 +119,46 @@ def fp8_cast_transpose_bgrad_dgelu_fused(
         amax_offset=int(fp8_tensor),
         scale_inv_offset=int(fp8_tensor),
     )
+
+
+def fp8_multi_cast_transpose_fused(
+    input_list: List[torch.Tensor],
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    scale_indices: List[int],
+    amax_indices: List[int],
+    scale_inv_indices: List[int],
+    otype: tex.DType,
+    cast_output_list: Optional[List[torch.Tensor]] = None,
+    transposed_output_list: Optional[List[torch.Tensor]] = None,
+) -> Union[Tuple[List[torch.Tensor], List[torch.Tensor]], None]:
+    """Cast + Transpose with FP8 output"""
+
+    return_outputs = False
+    if transposed_output_list is None:
+        transposed_output_list = [
+            torch.empty(inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8)
+            for inp in input_list
+        ]
+        return_outputs = True
+    if cast_output_list is None:
+        cast_output_list = [
+            torch.empty_like(inp, dtype=torch.uint8) for inp in input_list
+        ]
+        return_outputs = True
+
+    tex.fused_multi_cast_transpose(
+        input_list,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        scale_indices,
+        amax_indices,
+        scale_inv_indices,
+        cast_output_list,
+        transposed_output_list,
+        otype,
+    )
+
+    if return_outputs:
+        return cast_output_list, transposed_output_list
+    return None
