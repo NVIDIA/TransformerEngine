@@ -3,12 +3,13 @@
 # See LICENSE for license information.
 
 """Python interface for transpose extensions"""
-from typing import Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
 import transformer_engine_torch as tex
 from ..constants import TE_DType
+from ._common import canonicalize_fp8_scales, empty_tensor
 
 
 __all__ = [
@@ -17,63 +18,6 @@ __all__ = [
     "fp8_cast_transpose_bgrad_dgelu_fused",
     "fp8_transpose_bgrad_fused",
 ]
-
-
-def _canonicalize_fp8_scales(
-    *,
-    scale: Optional[torch.Tensor],
-    amax: Optional[torch.Tensor],
-    scale_inv: Optional[torch.Tensor],
-    fp8_meta: Optional[tex.FP8TensorMeta],
-    fp8_meta_index: Union[tex.FP8FwdTensors, tex.FP8BwdTensors, None],
-) -> Tuple[Dict[str, torch.Tensor], Dict[str, int]]:
-    """Canonicalize FP8 scaling factors (scale, amax, scale-inverse)
-
-    If a scaling factor is not provided, try to access it within the
-    FP8 meta tensors. Returns dict with tensors and dict with tensor
-    offsets.
-
-    """
-
-    # Default: use provided scales with no offsets
-    scale_offset = 0
-    amax_offset = 0
-    scale_inv_offset = 0
-
-    # Get scales from FP8 meta tensors if needed
-    if (fp8_meta is not None) and any(arg is None for arg in (scale, amax, scale_inv)):
-        if fp8_meta_index is None:
-            raise ValueError("Provided `fp8_meta` without corresponding `fp8_meta_index`")
-        fp8_meta_index = int(fp8_meta_index)
-        if scale is None:
-            scale = fp8_meta.scale
-            scale_offset = fp8_meta_index
-        if amax is None:
-            amax = fp8_meta.amax_history
-            amax_offset = fp8_meta_index
-        if scale_inv is None:
-            scale_inv = fp8_meta.scale_inv
-            scale_inv_offset = fp8_meta_index
-
-    # Construct empty tensors if needed
-    if scale is None:
-        scale = torch.Tensor()
-        scale_offset = 0
-    if amax is None:
-        amax = torch.Tensor()
-        amax_offset = 0
-    if scale_inv is None:
-        scale_inv = torch.Tensor()
-        scale_inv_offset = 0
-
-    # Pack tensors and offsets into dicts
-    tensors = dict(scale=scale, amax=amax, scale_inv=scale_inv)
-    offsets = dict(
-        scale_offset=scale_offset,
-        amax_offset=amax_offset,
-        scale_inv_offset=scale_inv_offset,
-    )
-    return tensors, offsets
 
 
 def fp8_cast_transpose_fused(
@@ -97,7 +41,7 @@ def fp8_cast_transpose_fused(
         cast_out = torch.empty_like(inp, dtype=torch.uint8)
 
     # Get FP8 scaling factors
-    fp8_scales, fp8_scales_offsets = _canonicalize_fp8_scales(
+    fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
         scale=scale,
         amax=amax,
         scale_inv=scale_inv,
@@ -107,7 +51,7 @@ def fp8_cast_transpose_fused(
 
     # Construct no-op flag if needed
     if noop_flag is None:
-        noop_flag = torch.Tensor()
+        noop_flag = empty_tensor()
 
     # Launch kernel if needed
     if inp.nelement() > 0:
@@ -138,7 +82,7 @@ def fp8_cast_transpose_bgrad_fused(
     """Cast + Transpose + BGRAD with FP8 output"""
 
     # Get FP8 scaling factors
-    fp8_scales, fp8_scales_offsets = _canonicalize_fp8_scales(
+    fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
         scale=scale,
         amax=amax,
         scale_inv=scale_inv,
@@ -170,7 +114,7 @@ def fp8_transpose_bgrad_fused(
     """Transpose + BGRAD with FP8 output"""
 
     # Get FP8 scaling factors
-    fp8_scales, fp8_scales_offsets = _canonicalize_fp8_scales(
+    fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
         scale=scale,
         amax=amax,
         scale_inv=scale_inv,
@@ -203,7 +147,7 @@ def fp8_cast_transpose_bgrad_dgelu_fused(
     """Cast + Transpose + BGRAD + DGELU with FP8 output"""
 
     # Get FP8 scaling factors
-    fp8_scales, fp8_scales_offsets = _canonicalize_fp8_scales(
+    fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
         scale=scale,
         amax=amax,
         scale_inv=scale_inv,

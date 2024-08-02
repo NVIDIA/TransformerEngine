@@ -46,7 +46,9 @@ void fp8_quantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const fp32 *>(output->scale.dptr),
-              reinterpret_cast<fp32 *>(output->amax.dptr), N, {},
+              reinterpret_cast<fp32 *>(output->amax.dptr),
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr),
+              N, {},
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }
@@ -68,7 +70,7 @@ void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
           p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
           VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
               reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, N, p,
+              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }

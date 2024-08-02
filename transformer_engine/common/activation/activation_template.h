@@ -27,7 +27,9 @@ void act_fn(const Tensor &input, Tensor *output, cudaStream_t stream) {
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr), tot_elts, {},
+              reinterpret_cast<ComputeType *>(output->amax.dptr),
+              reinterpret_cast<ComputeType *>(output->scale_inv.dptr),
+              tot_elts, {},
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }
@@ -50,7 +52,9 @@ void dact_fn(const Tensor &grad, const Tensor &input, Tensor *output, cudaStream
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr), tot_elts, {},
+              reinterpret_cast<ComputeType *>(output->amax.dptr),
+              reinterpret_cast<ComputeType *>(output->scale_inv.dptr),
+              tot_elts, {},
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }
@@ -74,7 +78,9 @@ void gated_act_fn(const Tensor &input, Tensor *output, cudaStream_t stream) {
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr), output->data.shape[0],
+              reinterpret_cast<ComputeType *>(output->amax.dptr),
+              reinterpret_cast<ComputeType *>(output->scale_inv.dptr),
+              output->data.shape[0],
               output->data.shape[1], {},
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
