@@ -75,7 +75,7 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output, at::T
 
   // Return immediately if tensors are empty
   if (M == 0 || N == 0) {
-    return {grad_bias, grad_output_cast, grad_output_transpose};
+    return {grad_bias.zero_(), grad_output_cast, grad_output_transpose};
   }
 
   // Get pointers for FP8 scale, amax, scale-inverse
@@ -250,6 +250,7 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list, at::Tensor s
     return tensor_wrappers.back().data();
   };
   for (size_t i = 0; i < input_dptr_list.size(); ++i) {
+    if (input_dptr_list[i] == nullptr) continue;
     nvte_input_list.emplace_back(make_tensor(input_dptr_list[i], input_shape_list[i],
                                              input_type_list[i], nullptr, nullptr, nullptr));
     auto amax_dptr_i = getDataPtr(amax, amax_indices[i]);
