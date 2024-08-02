@@ -10,7 +10,7 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops import FusibleOperation
+from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 

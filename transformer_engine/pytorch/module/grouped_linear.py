@@ -807,7 +807,15 @@ class GroupedLinear(TransformerEngineBaseModule):
             out = linear_fn(*args)
 
         if self.gemm_bias_unfused_add:
-            out = [o + cast_if_needed(b, self.activation_dtype) for o, b in zip(out, bias_tensors)]
+            out_shape = out.shape
+            out = torch.cat(
+                [
+                    o + cast_if_needed(b, self.activation_dtype)
+                    for o, b in zip(
+                        torch.split(out.view(-1, self.out_features), m_splits), bias_tensors
+                    )
+                ]
+            ).view(out_shape)
 
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
