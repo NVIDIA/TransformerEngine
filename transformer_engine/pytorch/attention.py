@@ -388,10 +388,10 @@ def get_attention_backend(
     #     self-attention           |     All
     #     cross-attention          |     FusedAttention
     # padding_causal               |
-    #     self-attention           |     FlashAttention, FusedAttention
-    #     cross-attention          |     FusedAttention
+    #     self-attention           |     All
+    #     cross-attention          |     FusedAttention, UnfusedDotProductAttention
     # causal_bottom_right          |     All
-    # padding_causal_bottom_right  |     FlashAttention, FusedAttention
+    # padding_causal_bottom_right  |     All
     # arbitrary                    |     UnfusedDotProductAttention
     if attn_mask_type == "arbitrary":
         if use_flash_attention:
@@ -2918,6 +2918,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_seqlen_q,
                 max_seqlen_kv,
             ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
+            if attn_mask_type == "padding_causal":
+                attention_mask = torch.triu(attention_mask, diagonal=1)
+            if attn_mask_type == "padding_causal_bottom_right":
+                diagonal_offset = max_seqlen_kv - max_seqlen_q + 1
+                attention_mask = torch.triu(attention_mask, diagonal=diagonal_offset)
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
