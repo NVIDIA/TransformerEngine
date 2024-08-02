@@ -3050,7 +3050,9 @@ def check_set_window_size(
     if "causal" in attn_mask_type:
         if orig_window_size is None:
             window_size = (-1, 0)
-        elif orig_window_size == (-1, -1) or (orig_window_size[0] >= 0 and orig_window_size[1] != 0):
+        elif orig_window_size == (-1, -1) or (
+            orig_window_size[0] >= 0 and orig_window_size[1] != 0
+        ):
             window_size = (orig_window_size[0], 0)
             warnings.warn(
                 "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
