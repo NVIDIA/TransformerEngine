@@ -708,7 +708,8 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  int64_t b, int64_t h, int64_t d, int64_t total_seqs,
                                  int64_t max_seqlen, float attn_scale, float p_dropout,
                                  const std::string &qkv_layout, const std::string &bias_type,
-                                 const std::string &attn_mask_type, int64_t qkv_type) {
+                                 const std::string &attn_mask_type, int64_t qkv_type,
+                                 bool deterministic) {
   TensorWrapper te_dBias;
   if (bias_type != "no_bias" && dBias) {
     auto bias_shape = dBias->shape();
@@ -759,22 +760,22 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
 
   auto dummy_seq_offsets = TensorWrapper(nullptr, {static_cast<size_t>(b + 1)}, DType::kInt32);
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_bwd_qkvpacked(te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
-                                &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
-                                te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
-                                attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
+  nvte_fused_attn_bwd_qkvpacked(
+      te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
+      te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
+      attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
+      deterministic, workspace.data(), QKV.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), QKV.place());
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
 
   // execute kernel
-  nvte_fused_attn_bwd_qkvpacked(te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
-                                &nvte_aux_tensor_pack, te_dQKV.data(), te_dBias.data(),
-                                te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
-                                attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                                attn_mask_type_enum, -1, -1, true, workspace.data(), QKV.stream());
+  nvte_fused_attn_bwd_qkvpacked(
+      te_QKV.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(), &nvte_aux_tensor_pack,
+      te_dQKV.data(), te_dBias.data(), te_cu_seqlens.data(), dummy_seq_offsets.data(), max_seqlen,
+      attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum, -1, -1,
+      deterministic, workspace.data(), QKV.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -884,7 +885,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
                                 int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
                                 float attn_scale, float p_dropout, const std::string &qkv_layout,
                                 const std::string &bias_type, const std::string &attn_mask_type,
-                                int64_t qkv_type) {
+                                int64_t qkv_type, bool deterministic) {
   TensorWrapper te_dBias;
   if (bias_type != "no_bias" && dBias) {
     auto bias_shape = dBias->shape();
@@ -945,7 +946,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
       &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
-      -1, -1, true, workspace.data(), Q.stream());
+      -1, -1, deterministic, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -957,7 +958,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
       &nvte_aux_tensor_pack, te_dQ.data(), te_dKV.data(), te_dBias.data(), te_cu_seqlens_q.data(),
       te_cu_seqlens_kv.data(), dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum, attn_mask_type_enum,
-      -1, -1, true, workspace.data(), Q.stream());
+      -1, -1, deterministic, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1086,7 +1087,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                        int64_t b, int64_t h, int64_t d, int64_t max_seqlen_q, int64_t max_seqlen_kv,
                        float attn_scale, float p_dropout, const std::string &qkv_layout,
                        const std::string &bias_type, const std::string &attn_mask_type,
-                       int64_t qkv_type) {
+                       int64_t qkv_type, bool deterministic) {
   TensorWrapper te_dBias;
   if (bias_type != "no_bias" && dBias) {
     auto bias_shape = dBias->shape();
@@ -1149,7 +1150,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, deterministic, workspace.data(), Q.stream());
 
   // allocate memory for workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), Q.place());
@@ -1161,7 +1162,7 @@ void te_fused_attn_bwd(const paddle::Tensor &Q, const paddle::Tensor &K, const p
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       dummy_seq_offsets.data(), dummy_seq_offsets.data(), max_seqlen_q,
                       max_seqlen_kv, attn_scale, p_dropout, qkv_layout_enum, bias_type_enum,
-                      attn_mask_type_enum, -1, -1, true, workspace.data(), Q.stream());
+                      attn_mask_type_enum, -1, -1, deterministic, workspace.data(), Q.stream());
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1355,14 +1356,13 @@ void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
       static_cast<NVTEDType>(fp8_dtype), margin, amax_history.stream());
 }
 
-void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLINT
-                                          paddle::Tensor &scale,         // NOLINT
-                                          paddle::Tensor &scale_inv,     // NOLINT
-                                          const paddle::Tensor &non_weight_mask,
-                                          const paddle::Tensor &current_step_id_tensor,
-                                          bool update_weight_scale_inv, bool fwd_update,
-                                          float fp8_max, float margin,
-                                          const std::string &amax_compute) {
+void amax_and_scale_update_inplace_legacy(
+    paddle::Tensor &amax_history,  // NOLINT
+    paddle::Tensor &scale,         // NOLINT
+    paddle::Tensor &scale_inv,     // NOLINT
+    const paddle::Tensor &non_weight_mask,
+    const paddle::optional<paddle::Tensor> &current_step_id_tensor, bool update_weight_scale_inv,
+    bool fwd_update, float fp8_max, float margin, const std::string &amax_compute) {
 #if PADDLE_VERSION > 261
   NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
 
@@ -1380,8 +1380,8 @@ void amax_and_scale_update_inplace_legacy(paddle::Tensor &amax_history,  // NOLI
   auto amax_numel = amax.numel();
   size_t num_blocks = (amax_history_numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-  const int *current_step_id_ptr = nullptr;
-  if (fwd_update) current_step_id_ptr = current_step_id_tensor.data<int>();
+  const int *current_step_id_ptr =
+      reinterpret_cast<const int *>(GetOptionalDataPtr(current_step_id_tensor));
   auto parameterSetter = [current_step_id_ptr,
                           fwd_update](phi::backends::gpu::CUDAKernelParams &params) {
     if (fwd_update) {
@@ -1658,7 +1658,8 @@ PD_BUILD_OP(te_fused_attn_bwd_qkvpacked)
     .Outputs({"dQKV", paddle::Optional("dBias")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
             "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "deterministic: bool"})
     .SetInplaceMap({{"_dQKV", "dQKV"}, {paddle::Optional("_dBias"), paddle::Optional("dBias")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_bwd_qkvpacked));
 
@@ -1683,7 +1684,8 @@ PD_BUILD_OP(te_fused_attn_bwd_kvpacked)
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
             "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "deterministic: bool"})
     .SetInplaceMap({{"_dQ", "dQ"},
                     {"_dKV", "dKV"},
                     {paddle::Optional("_dBias"), paddle::Optional("dBias")}})
@@ -1709,7 +1711,7 @@ PD_BUILD_OP(te_fused_attn_bwd)
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "max_seqlen_q: int64_t",
             "max_seqlen_kv: int64_t", "attn_scale: float", "p_dropout: float",
             "qkv_layout: std::string", "bias_type: std::string", "attn_mask_type: std::string",
-            "qkv_type: int64_t"})
+            "qkv_type: int64_t", "deterministic: bool"})
     .SetInplaceMap({{"_dQ", "dQ"},
                     {"_dK", "dK"},
                     {"_dV", "dV"},
@@ -1758,7 +1760,8 @@ PD_BUILD_OP(te_scaled_upper_triang_masked_softmax_backward)
         PD_KERNEL(transformer_engine::paddle_ext::te_scaled_upper_triang_masked_softmax_backward));
 
 PD_BUILD_OP(amax_and_scale_update_inplace_legacy)
-    .Inputs({"_amax_history", "_scale", "_scale_inv", "non_weight_mask", "current_step_id_tensor"})
+    .Inputs({"_amax_history", "_scale", "_scale_inv", "non_weight_mask",
+             paddle::Optional("current_step_id_tensor")})
     .Outputs({"amax_history", "scale", "scale_inv"})
     .SetInplaceMap({{"_amax_history", "amax_history"},
                     {"_scale", "scale"},

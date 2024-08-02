@@ -378,10 +378,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
               math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
 }
 
-void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETensor> B,
-                                   std::vector<NVTETensor> D, std::vector<NVTETensor> bias,
-                                   std::vector<NVTETensor> pre_gelu_out, bool transa, bool transb,
-                                   bool grad, std::vector<NVTETensor> workspace, bool accumulate,
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor *workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
@@ -389,14 +389,14 @@ void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETe
   // Inits streams and events (once, globally)
   std::call_once(init_flag, init_streams_and_events);
 
-  int num_stream_used = std::min(num_streams, static_cast<int>(A.size()));
+  int num_stream_used = std::min(num_streams, num_gemms);
   // wait for current stream to finish
   NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
   }
 
-  for (size_t i = 0; i < A.size(); i++) {
+  for (int i = 0; i < num_gemms; i++) {
     nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                      workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
                      compute_streams[i % num_streams]);

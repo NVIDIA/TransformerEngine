@@ -7,6 +7,9 @@ import io
 import os
 import pickle
 import warnings
+import socket
+import fcntl
+import struct
 from abc import ABC, abstractmethod
 from typing import Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
@@ -45,7 +48,6 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
-_NUM_MAX_CUBLAS_STREAMS = 4
 layers_atomic_ring_exchange = []
 
 
@@ -70,7 +72,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(_NUM_MAX_CUBLAS_STREAMS):
+        for _ in range(tex._num_cublas_streams):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
@@ -79,19 +81,109 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
 
 def initialize_ub(
     shape: list,
-    tp_group: dist_group_type,
+    tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
+    bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
+    if not tex.device_supports_multicast():
+        assert bool(os.getenv("UB_SKIPMC", "0")), (
+            "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
+            + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+        )
+
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
-    rank_id = torch.distributed.get_rank()
-    world_size = torch.distributed.get_world_size()
-    tp_id = torch.distributed.get_rank(tp_group)
-    tp_size = torch.distributed.get_world_size(tp_group)
+
+    if tex.ubuf_built_with_mpi():
+        # Userbuffers will ignore all these values when it is built with MPI, so these are just
+        # placeholders based on an assumption that tp_size covers all devices in a physical node.
+        assert torch.distributed.is_mpi_available()
+        mpi_group = torch.distributed.new_group(backend="mpi")
+        world_rank = torch.distributed.get_rank(mpi_group)
+        world_size = torch.distributed.get_world_size(mpi_group)
+        local_rank = world_rank % tp_size
+        local_size = tp_size
+        node_id = world_rank // tp_size
+        num_nodes = world_size // tp_size
+        ub_callbacks = tex.UbufBootstrapCallbacks()
+    else:
+        assert (
+            torch.distributed.is_initialized()
+        ), "torch.distributed must be initialized before Userbuffers"
+        if bootstrap_backend is None:
+            bootstrap_backend = "nccl"
+            if torch.distributed.is_gloo_available():
+                bootstrap_backend = "gloo"
+            elif torch.distributed.is_mpi_available():
+                bootstrap_backend = "mpi"
+        else:
+            assert bootstrap_backend in ["gloo", "mpi", "nccl"]
+
+        world_group = torch.distributed.new_group(backend=bootstrap_backend)
+        world_rank = torch.distributed.get_rank(world_group)
+        world_size = torch.distributed.get_world_size(world_group)
+
+        if world_rank == 0:
+            print(
+                f'!!! [NVTE] Bootstrapping Userbuffers with backend="{bootstrap_backend}"\n',
+                end="",
+                flush=True,
+            )
+
+        # Construct an intra-node communicator based on global ranks that share the same hostname
+        # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
+        #       address on that interface instead of the hostname. This can help avoid issues when
+        #       different hosts have the same hostname on Kubernetes clusters.
+        hostname = socket.gethostname()
+        ifname = os.getenv(
+            "NVTE_UB_SOCKET_IFNAME",
+            os.getenv("NCCL_SOCKET_IFNAME", os.getenv("GLOO_SOCKET_IFNAME")),
+        )
+
+        if ifname is not None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                hostname = socket.inet_ntoa(
+                    fcntl.ioctl(
+                        s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
+                    )[20:24]
+                )
+            except OSError as err:
+                raise OSError(f"Invalid network interface: {ifname}") from err
+
+        hostnames = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(hostnames, hostname, world_group)
+        intra_node_ranks = []
+        for i, host in enumerate(hostnames):
+            if host == hostname:
+                intra_node_ranks.append(i)
+        if len(intra_node_ranks) == world_size:
+            intra_node_group = world_group
+            local_rank = world_rank
+            local_size = world_size
+            intra_node_ranks = list(range(world_size))
+        else:
+            intra_node_group = torch.distributed.new_group(
+                backend=bootstrap_backend, ranks=intra_node_ranks
+            )
+            local_rank = torch.distributed.get_rank(intra_node_group)
+            local_size = torch.distributed.get_world_size(intra_node_group)
+
+        node_id = world_rank // local_size
+        num_nodes = world_size // local_size
+        if local_rank == 0:
+            print(
+                f"!!! [NVTE] Number of physical nodes: {num_nodes}\n"
+                + f"!!! [NVTE] Global ranks on node {node_id}: {intra_node_ranks}\n",
+                end="",
+                flush=True,
+            )
+
+        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -126,6 +218,23 @@ def initialize_ub(
             if name in names:
                 return method
         raise KeyError(f"Given layer name {name} does not exist.")
+
+    def get_default_config(name):
+        method = get_method(name)
+        is_reduce_scatter = name in layers_reduce_scatter_overlap
+        default_cfg = {
+            "method": method,
+            "is_reduce_scatter": is_reduce_scatter,
+            "num_sm": 1 if method == "ring_exchange" else 16,
+            "cga_size": 1 if method == "ring_exchange" else 2,
+            "set_sm_margin": False,
+            "num_splits": 4 if method == "pipeline" else tp_size,
+            "aggregate": False,
+            "atomic_gemm": False,
+            "use_ce": True,
+            "fp8_buf": name in layers_all_gather_overlap,
+        }
+        return default_cfg
 
     def add_ub(
         name: str,
@@ -180,52 +289,42 @@ def initialize_ub(
         if method == "ring_exchange":
             ub_obj = tex.UbufP2PCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
+                world_rank,  # World rank
                 world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                local_rank,  # Rank within the node
+                local_size,  # Number of ranks/GPUs per node
+                node_id,  # Node ID
+                num_nodes,  # Number of nodes
+                tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
                 set_sm_margin,  # Set SM margin
                 aggregate,  # Aggregate 2X GEMM chunks
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # overlap with reduce scatter
-                atomic_gemm,  # use a single GEMM with atomic-counters
-                use_ce,  # use copy engine for P2P communications
-                torch.Tensor(),  # empty tensor to pass to counters
+                is_reduce_scatter,  # Overlap with reduce scatter
+                atomic_gemm,  # Use a single GEMM with atomic-counters
+                use_ce,  # Use copy engine for P2P communications
+                ub_callbacks,
             )
         else:
             ub_obj = tex.UbufCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
+                world_rank,  # World rank
                 world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                local_rank,  # Rank within the node
+                local_size,  # Number of ranks/GPUs per node
+                node_id,  # Node ID
+                num_nodes,  # Number of nodes
+                tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
                 num_splits,  # Number of communication splits
                 set_sm_margin,  # Set SM margin
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                atomic_gemm,  # use a single GEMM with atomic-counters
-                torch.Tensor(),  # empty tensor to pass to counters
+                atomic_gemm,  # Use a single GEMM with atomic-counters
+                ub_callbacks,
             )
         _ub_communicators[name] = ub_obj
-
-    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
-        pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
-
-    def barrier_callback(group: str) -> None:
-        pg = None if group == "world" else tp_group
-        torch.distributed.barrier(group=pg)
-
-    def free_callback(data: torch.Tensor) -> None:
-        data.data = torch.Tensor()
-
-    tex.set_ubuf_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -238,48 +337,18 @@ def initialize_ub(
                 methods["pipeline"].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+        ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
-            ub_cfg = ub_cfgs[name]
-            method = ub_cfg.get("method", get_method(name))
-            num_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
-            cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
-            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
-            aggregate = ub_cfg.get("aggregate", 0)
-            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
-            use_ce = ub_cfg.get("use_ce", True)
-            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
-            # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
-                ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
+                ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
             )
-            add_ub(
-                name,
-                method,
-                is_reduce_scatter,
-                num_sm,
-                cga_size,
-                set_sm_margin,
-                num_splits,
-                aggregate,
-                atomic_gemm,
-                use_ce,
-                fp8_buf,
-            )
-        else:
-            method = get_method(name)
-            add_ub(
-                name,
-                method=method,
-                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
-                num_splits=4 if method == "pipeline" else 0,
-                fp8_buf=name in layers_all_gather_overlap,
-            )
+            ub_cfg.update(ub_cfgs[name])
+            ub_cfg["fp8_buf"] = fp8_buf
+        add_ub(name, **ub_cfg)
 
 
 def get_ub(name: str):
     """Get userbuffer communicator corresponding to give key."""
-    global _ub_communicators
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
     return _ub_communicators[name]

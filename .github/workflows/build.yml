@@ -18,7 +18,8 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cmake ninja-build cudnn9-cuda-12
+          apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
+          pip install cmake==3.21.0
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -69,7 +70,7 @@ jobs:
     name: 'PaddlePaddle'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/paddlepaddle:24.05-py3
+      image: nvcr.io/nvidia/paddlepaddle:24.07-py3
       options: --user root
     steps:
       - name: 'Checkout'
@@ -77,7 +78,10 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install . -v
+        run: |
+          apt-get update
+          apt-get install -y libgoogle-glog-dev
+          pip install . -v
         env:
           NVTE_FRAMEWORK: paddle
       - name: 'Sanity check'

@@ -237,9 +237,6 @@ class _GroupedLinear(torch.autograd.Function):
                     saved_inputmats = inputmats_no_fp8
 
                 if cpu_offloading:
-                    if fuse_wgrad_accumulation:
-                        for w in weights:
-                            w.main_grad.weight_offloading = True
                     if fp8:
                         for w in weights_fp8:
                             if w is not None:
@@ -303,7 +300,7 @@ class _GroupedLinear(torch.autograd.Function):
             main_grads = saved_tensors[4 * ctx.num_gemms :]
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in ctx.num_gemms:
-                    w = torch.nn.Parameter(weights[i], False)
+                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
                     w.main_grad = main_grads[i]
                     weights[i] = w
 
@@ -832,7 +829,15 @@ class GroupedLinear(TransformerEngineBaseModule):
             out = linear_fn(*args)
 
         if self.gemm_bias_unfused_add:
-            out = [o + cast_if_needed(b, self.activation_dtype) for o, b in zip(out, bias_tensors)]
+            out_shape = out.shape
+            out = torch.cat(
+                [
+                    o + cast_if_needed(b, self.activation_dtype)
+                    for o, b in zip(
+                        torch.split(out.view(-1, self.out_features), m_splits), bias_tensors
+                    )
+                ]
+            ).view(out_shape)
 
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]

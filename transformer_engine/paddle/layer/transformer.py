@@ -9,9 +9,11 @@ import warnings
 import paddle
 from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
 
-from transformer_engine.paddle.layer import LayerNormMLP, LayerNorm, MultiHeadAttention
-from transformer_engine.paddle.constants import AttnMaskTypes, LayerTypes, dist_group_type
-from transformer_engine.paddle.distributed import get_tp_group_and_world_size, track_rng_state
+from .layernorm_mlp import LayerNormMLP
+from .layernorm import LayerNorm
+from .attention import MultiHeadAttention
+from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
+from ..distributed import get_tp_group_and_world_size, track_rng_state
 
 
 class TransformerLayer(paddle.nn.Layer):
