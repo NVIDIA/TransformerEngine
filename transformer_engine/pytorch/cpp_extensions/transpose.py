@@ -141,9 +141,7 @@ def fp8_multi_cast_transpose_fused(
         ]
         return_outputs = True
     if cast_output_list is None:
-        cast_output_list = [
-            torch.empty_like(inp, dtype=torch.uint8) for inp in input_list
-        ]
+        cast_output_list = [torch.empty_like(inp, dtype=torch.uint8) for inp in input_list]
         return_outputs = True
 
     tex.fused_multi_cast_transpose(
