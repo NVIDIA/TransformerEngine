@@ -37,15 +37,9 @@ bool device_supports_multicast();
  */
 bool userbuffers_built_with_mpi();
 
-enum class CommOverlapType {
-  ALL_GATHER = 0,
-  REDUCE_SCATTER = 1
-};
+enum class CommOverlapType { ALL_GATHER = 0, REDUCE_SCATTER = 1 };
 
-enum class CommOverlapBuffer {
-  GLOBAL = 0,
-  LOCAL = 1
-};
+enum class CommOverlapBuffer { GLOBAL = 0, LOCAL = 1 };
 
 enum class CommOverlapAlgo {
   // bulk overlaps (no dependence between comm and compute)

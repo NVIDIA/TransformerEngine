@@ -503,11 +503,7 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         layout="NN",
                         grad=True,
-                        ub_algo=(
-                            tex.CommOverlapAlgo.SPLIT_AG_P2P
-                            if ctx.ub_overlap_ag
-                            else None
-                        ),
+                        ub_algo=(tex.CommOverlapAlgo.SPLIT_AG_P2P if ctx.ub_overlap_ag else None),
                         ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
                     )
 

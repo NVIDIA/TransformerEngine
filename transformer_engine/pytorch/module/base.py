@@ -259,11 +259,7 @@ def initialize_ub(
             shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
         )
         if method == "ring_exchange":
-            comm_type = (
-                tex.CommOverlapType.RS
-                if is_reduce_scatter
-                else tex.CommOverlapType.AG
-            )
+            comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
             ub_obj = tex.CommOverlapP2P(
                 sample_buffer,  # Sample userbuffer
                 bootstrap_helper,  # Helper class for bootstrapping with torch.distributed

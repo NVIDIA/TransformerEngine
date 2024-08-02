@@ -362,9 +362,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc1_bias,
                 use_bias=(not bias_gelu_nvfusion) and use_fc1_bias,
                 gelu=not bias_gelu_nvfusion and (activation == "gelu"),
-                ub_algo=(
-                    tex.CommOverlapAlgo.SPLIT_AG_P2P if ub_overlap_ag else None
-                ),
+                ub_algo=(tex.CommOverlapAlgo.SPLIT_AG_P2P if ub_overlap_ag else None),
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
@@ -828,11 +826,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     gelu=(not ctx.bias_gelu_nvfusion) and (ctx.activation == "gelu"),
                     grad=True,
                     gelu_input=fc1_out,
-                    ub_algo=(
-                        tex.CommOverlapAlgo.SPLIT_AG_P2P
-                        if ctx.ub_overlap_ag
-                        else None
-                    ),
+                    ub_algo=(tex.CommOverlapAlgo.SPLIT_AG_P2P if ctx.ub_overlap_ag else None),
                     ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
                 )
 
@@ -960,11 +954,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
-                            ub_algo=(
-                                tex.CommOverlapAlgo.BULK_RS
-                                if ctx.ub_bulk_wgrad
-                                else None
-                            ),
+                            ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
@@ -986,11 +976,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            ub_algo=(
-                                tex.CommOverlapAlgo.BULK_RS
-                                if ctx.ub_bulk_wgrad
-                                else None
-                            ),
+                            ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
@@ -1007,11 +993,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         use_bias=not ctx.bias_gelu_nvfusion,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        ub_algo=(
-                            tex.CommOverlapAlgo.BULK_RS
-                            if ctx.ub_bulk_wgrad
-                            else None
-                        ),
+                        ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                     )
                     clear_tensor_data(ln_out_total, dgelu)

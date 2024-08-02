@@ -156,9 +156,17 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
     _test_comm_gemm_overlap("AG", False, p2p, True, True, fp8_out, False)
 
 
-@pytest.mark.parametrize("comm_type", ["AG", "RS"], ids=[" ALL-GATHER ", " REDUCE-SCATTER "])
-def test_bulk_overlaps(comm_type):
+@pytest.mark.parametrize(
+    "comm_type,fp8",
+    [
+        ("AG", False),
+        ("RS", False),
+        ("RS", True),
+    ],
+    ids=[" ALL-GATHER     | BF16 ", " REDUCE-SCATTER | BF16 ", " REDUCE-SCATTER | FP8 "],
+)
+def test_bulk_overlaps(comm_type, fp8):
     """
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
-    _test_comm_gemm_overlap(comm_type, True, False, False, False, False, False)
+    _test_comm_gemm_overlap(comm_type, True, False, False, fp8, False, False)

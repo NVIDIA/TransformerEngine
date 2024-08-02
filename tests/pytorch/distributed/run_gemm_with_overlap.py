@@ -299,11 +299,7 @@ def _main(opts):
                 else tex.CommOverlapAlgo.SPLIT_RS_P2P
             )
         else:
-            ub_algo = (
-                tex.CommOverlapAlgo.ATOMIC_RS
-                if opts.atomic
-                else tex.CommOverlapAlgo.SPLIT_RS
-            )
+            ub_algo = tex.CommOverlapAlgo.ATOMIC_RS if opts.atomic else tex.CommOverlapAlgo.SPLIT_RS
     elif opts.comm_type == tex.CommOverlapType.AG:
         if opts.bulk_overlap:
             ub_algo = tex.CommOverlapAlgo.BULK_AG
@@ -485,7 +481,10 @@ def _main(opts):
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_WEIGHT].copy_(ker_amax)
         ref_amax = torch.max(torch.abs(ref_g))
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_OUTPUT].copy_(ref_amax)
-        if ub_obj2 is not None:
+        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+            bulk_amax = torch.max(torch.abs(bulk_inp))
+            fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_OUTPUT].copy_(bulk_amax)
+        elif ub_obj2 is not None:
             inp2_amax = torch.max(torch.abs(inp2_g))
             fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_INPUT].copy_(inp2_amax)
             ker2_amax = torch.max(torch.abs(ker2_g))
@@ -504,7 +503,11 @@ def _main(opts):
         kernel_t_fp8 = tex.cast_to_fp8(
             kernel_t, fp8_meta, tex.FP8FwdTensors.GEMM1_WEIGHT, fp8_dtype
         )
-        if ub_obj2 is not None:
+        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+            bulk_inp_fp8 = tex.cast_to_fp8(
+                bulk_inp, fp8_meta, tex.FP8Tensors.GEMM2_OUTPUT, fp8_dtype
+            )
+        elif ub_obj2 is not None:
             kernel2_t_fp8 = tex.cast_to_fp8(
                 kernel2_t, fp8_meta, tex.FP8FwdTensors.GEMM2_WEIGHT, fp8_dtype
             )
@@ -523,7 +526,14 @@ def _main(opts):
                 rtol=0.125,
                 atol=0.0675,
             )
-            if ub_obj2 is not None:
+            if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+                torch.allclose(
+                    bulk_inp.to(dtype=torch.float32),
+                    bulk_inp_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT],
+                    rtol=0.125,
+                    atol=0.0675,
+                )
+            elif ub_obj2 is not None:
                 torch.allclose(
                     kernel2_t.to(dtype=torch.float32),
                     kernel2_t_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_WEIGHT],
@@ -536,6 +546,8 @@ def _main(opts):
             ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_INPUT])
             if ub_obj2 is not None:
                 ub_obj2.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT])
+        elif opts.bulk_overlap:
+            ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT])
         else:
             ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_OUTPUT])
 
@@ -558,7 +570,9 @@ def _main(opts):
             )
     else:
         if opts.bulk_overlap:
-            ub_obj.copy_input_to_ubuf(bulk_inp, tex.CommOverlapBuffer.GLOBAL)
+            ub_obj.copy_input_to_ubuf(
+                bulk_inp_fp8 if opts.fp8 else bulk_inp, tex.CommOverlapBuffer.GLOBAL
+            )
             ubuf_out = None
         else:
             ubuf_out = ub_obj.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
