@@ -73,12 +73,13 @@ from transformer_engine.pytorch.graph import is_graph_capturing
 
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_max_version = PkgVersion("2.6.1")
 _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
 _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+_flash_attn_2_6_1_plus = _flash_attn_version >= PkgVersion("2.6.1")
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
@@ -3260,6 +3261,7 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        softcap: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -3269,6 +3271,10 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version <= _flash_attn_max_version
         ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
+        if softcap > 0.0:
+            assert (
+                _flash_attn_2_6_1_plus
+            ), f"FlashAttention minimum version {PkgVersion("2.6.1")} is required for softcap."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3276,6 +3282,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.softcap = softcap
 
     def forward(
         self,
@@ -3459,6 +3466,7 @@ class FlashAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=self.softmax_scale,
                     causal="causal" in attn_mask_type,
+                    softcap=self.softcap,
                     **fa_optional_forward_kwargs,
                 )
 
@@ -5275,6 +5283,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
         softmax_scale: Optional[float] = None,
+        softcap: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -5358,6 +5367,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_type=attention_type,
             layer_number=layer_number,
             deterministic=self.deterministic,
+            softcap=softcap,
             **attn_kwargs,
         )
 
