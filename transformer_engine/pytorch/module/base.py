@@ -98,24 +98,34 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
 
+    assert torch.distributed.is_initialized(), (
+        "Failed to initialize Userbuffers: " + "torch.distributed must be initialized first!"
+    )
     if tex.userbuffers_built_with_mpi():
-        # Userbuffers will ignore all these values when it is built with MPI, so these are just
-        # placeholders based on an assumption that tp_size covers all devices in a physical node.
+        # Create a new torch.distributed process group with MPI backend just to ensure
+        # MPI_Init() is called before we bootstrap Userbuffers with MPI C-API.
         assert torch.distributed.is_mpi_available()
         _ = torch.distributed.new_group(backend="mpi")
         bootstrap_helper = tex.CommOverlapHelper()
     else:
-        assert (
-            torch.distributed.is_initialized()
-        ), "torch.distributed must be initialized before Userbuffers"
+        # Userbuffers is not compiled with MPI so we will bootstrap it with torch.distributed API.
         if bootstrap_backend is None:
+            # If no bootstrap backend is specified, prefer to use MPI > Gloo > NCCL.
+            # NOTE: The data we need to communicate during bootstrapping is on host memory, so
+            #       we should prefer to use host-side communications via MPI or Gloo. Using NCCL
+            #       will force us to do host-to-device and device-to-host copies before/after comms.
             bootstrap_backend = "nccl"
-            if torch.distributed.is_gloo_available():
-                bootstrap_backend = "gloo"
-            elif torch.distributed.is_mpi_available():
+            if torch.distributed.is_mpi_available():
                 bootstrap_backend = "mpi"
+            elif torch.distributed.is_gloo_avialable():
+                bootstrap_backend = "gloo"
         else:
+            # Make sure the backend requested by the user is valid and avialable in PyTorch.
             assert bootstrap_backend in ["gloo", "mpi", "nccl"]
+            assert torch.distribtued.is_backend_available(bootstrap_backend), (
+                f"Failed to initialize Userbuffers: "
+                + "torch.distributed does not support '{bootstrap_backend}' backend!"
+            )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_size = torch.distributed.get_world_size(world_group)
