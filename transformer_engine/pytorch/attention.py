@@ -1383,7 +1383,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             batch_p2p_comm,
                         )
 
-                    if fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                    if not fp8 or fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        kv_inputs[i % 2] = p2p_comm_buffers[i]
+                    else:
                         # KV exchange is in BF16/FP16, cast received KV in each step
                         kv_inputs[i%2] = cast_to_fp8(
                             p2p_comm_buffers[i],
@@ -1391,8 +1393,6 @@ class AttnFuncWithCP(torch.autograd.Function):
                             META_QKV,
                             fp8_dtype_forward,
                         ).view(p2p_comm_buffers[i].shape)
-                    else:
-                        kv_inputs[i % 2] = p2p_comm_buffers[i]
                     if causal:
                         if i == 0:
                             if pad_between_seqs_q:
