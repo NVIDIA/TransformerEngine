@@ -46,7 +46,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_ops: list[BasicOperation],
         basic_op_kwargs: list[dict[str, Any]],
         num_params: int,
-        *extra_inputs: torch.nn.Parameter,
+        num_extra_inputs: int,
+        *params_and_extra_inputs: torch.nn.Parameter,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
 
@@ -87,14 +88,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(len(basic_ops))]
 
         # Unflatten list of parameters and extra tensor inputs
-        num_extra_inputs = sum(op.num_extra_inputs for op in basic_ops)
-        if len(extra_inputs) != num_params + num_extra_inputs:
+        if len(params_and_extra_inputs) != num_params + num_extra_inputs:
             raise ValueError(
                 f"Expected {num_params + num_extra_inputs} extra tensor arguments "
                 f"({num_params} parameters, {num_extra_inputs} extra inputs), "
                 f"but got {len(extra_inputs)}"
             )
-        _, extra_inputs = _split_tuple(extra_inputs, num_params)
+        _, extra_inputs = _split_tuple(params_and_extra_inputs, num_params)
         basic_op_extra_inputs = []
         for op in basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
@@ -184,11 +184,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Unflatten list of saved tensors
-        saved_tensors = func_ctx.saved_tensors
         for ctx in basic_op_ctxs:
-            ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
+            ctx.saved_tensors = func_ctx.saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
-        del saved_tensors
 
         # Unflatten list of extra tensor output grads
         if len(grad_extra_outputs) != func_ctx.num_extra_outputs:
@@ -200,7 +198,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for op in basic_ops:
             dys, grad_extra_outputs = _split_tuple(grad_extra_outputs, op.num_extra_outputs)
             basic_op_grad_extra_outputs.append(dys)
-            del dys
 
         # Apply backward ops
         dx = grad_output
@@ -268,6 +265,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             None,  # basic_ops
             None,  # basic_op_kwargs
             None,  # num_params
+            None,  # num_extra_inputs
             *grad_params_flat,
             *grad_extra_inputs_flat,
         )
@@ -300,6 +298,9 @@ class OperationFuser:
                 basic_ops.append(op)
         self._num_basic_ops: int = len(basic_ops)
         self._basic_ops: list[BasicOperation] = basic_ops
+
+        # Number of extra tensor inputs
+        self._num_extra_inputs: int = sum(op.num_extra_inputs for op in basic_ops)
 
         # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]
@@ -351,9 +352,7 @@ class OperationFuser:
             basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
-        params = []
-        for op in self._basic_ops:
-            params.extend(op.parameters())
+        params = [param for param in op.parameters() for op in self._basic_ops]
 
         # Fuser forward pass
         return _OperationFuserAutogradFunction.apply(
@@ -363,6 +362,7 @@ class OperationFuser:
             self._basic_ops,
             basic_op_kwargs,
             len(params),
+            self._num_extra_inputs,
             *params,
             *extra_inputs,
         )

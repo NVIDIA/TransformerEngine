@@ -376,7 +376,7 @@ class BasicLinear(BasicOperation):
 
         # Check device
         if device is None:
-            device = weight.device
+            device = weight.device if out is None else out.device
         device = canonicalize_device(device)
         if device.type != "cuda":
             raise ValueError(f"Only CUDA devices are supported (got {device})")
@@ -387,7 +387,7 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype
+            dtype = weight.dtype if out is None else out.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
@@ -1062,7 +1062,7 @@ class BasicLinear(BasicOperation):
         _wait_async(dy_async)
         _wait_async(x_async)
         _wait_async(dx_async)
-        if grad_input is None:
+        if dx is not None and grad_input is None:
             grad_input = reshape(dx, input_dims)
         return grad_input, grad_weight
 
