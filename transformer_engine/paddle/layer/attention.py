@@ -152,6 +152,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
         attn_bias_type,
         attn_mask_type,
         is_training,
+        deterministic,
         fused_attention_backend,
     ):
         """Forward function for FusedAttention with packed QKV input"""
@@ -180,6 +181,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -204,6 +206,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
             ctx.qkv_layout,
             ctx.attn_bias_type,
             ctx.attn_mask_type,
+            ctx.deterministic,
         )
 
         # if no_bias, return dqkv
@@ -234,6 +237,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
         attn_bias_type,
         attn_mask_type,
         is_training,
+        deterministic,
         fused_attention_backend,
     ):
         """Forward function for FusedAttention with packed KV input"""
@@ -266,6 +270,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -293,6 +298,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
             ctx.qkv_layout,
             ctx.attn_bias_type,
             ctx.attn_mask_type,
+            ctx.deterministic,
         )
 
         # if no_bias, return dq, dkv
@@ -324,6 +330,7 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
         attn_bias_type,
         attn_mask_type,
         is_training,
+        deterministic,
         fused_attention_backend,
     ):
         """Forward function for FusedAttention with separate Q, K, V tensors"""
@@ -357,6 +364,7 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
         ctx.fused_attention_backend = fused_attention_backend
 
         return out
@@ -385,6 +393,7 @@ class FusedAttnFunc(paddle.autograd.PyLayer):
             ctx.qkv_layout,
             ctx.attn_bias_type,
             ctx.attn_mask_type,
+            ctx.deterministic,
         )
         # if no_bias, return dq, dk, dv
         if ctx.attn_bias_type == "no_bias":
@@ -403,6 +412,12 @@ class DotProductAttention(paddle.nn.Layer):
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
         :attr:`attn_mask_type` is set to `"causal"`.
+
+    .. warning::
+
+        Fused attention backward uses a non-deterministic algorithm when workspace
+        optimization is not enabled. To use a deterministic algorithm, set the
+        environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`
 
     Parameters
     ----------
@@ -457,6 +472,29 @@ class DotProductAttention(paddle.nn.Layer):
         self.backend = backend
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
+
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
+        # To use the workspace optimization path for determinism, please
+        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
+        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
+        cudnn_version = paddle.get_cudnn_version()
+        if 8905 <= cudnn_version < 9000:
+            if self.deterministic:
+                # workspace optimization path is deterministic
+                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
+
+            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+            # - unset:       enables workspace optimization when required workspace is <= 256MB
+            #                or when bias gradient needs to be computed
+            # - n:           enables workspace optimization when required workspace is <= n bytes
+            # - -1:          enables workspace optimization always
+            # - 0:           disables workspace optimization always
+            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         if not self.use_fused_attention and backend == "transformer_engine":
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
@@ -603,6 +641,7 @@ class DotProductAttention(paddle.nn.Layer):
                 core_attention_bias_type,
                 self.attn_mask_type,
                 self.training,
+                self.deterministic,
                 self.fused_attention_backend,
             )
         elif self.attention_type == "cross":
@@ -637,6 +676,7 @@ class DotProductAttention(paddle.nn.Layer):
                 core_attention_bias_type,
                 self.attn_mask_type,
                 self.training,
+                self.deterministic,
                 self.fused_attention_backend,
             )
         else:

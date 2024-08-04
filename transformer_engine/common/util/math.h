@@ -47,7 +47,8 @@ __device__ inline OType qgelu(const IType val, const Empty& e) {
 template <typename OType, typename IType>
 __device__ inline OType dqgelu(const IType val, const Empty& e) {
   const float cval = val;
-  return cval * dsigmoid<float, float>(1.702f * cval, e) + sigmoid<float, float>(1.702f * cval, e);
+  return 1.702f * cval * dsigmoid<float, float>(1.702f * cval, e) +
+         sigmoid<float, float>(1.702f * cval, e);
 }
 
 template <typename OType, typename IType>
