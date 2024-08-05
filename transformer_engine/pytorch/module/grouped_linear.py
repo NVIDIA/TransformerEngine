@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
-import os
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch

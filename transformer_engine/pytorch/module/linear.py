@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Linear API"""
-import os
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
