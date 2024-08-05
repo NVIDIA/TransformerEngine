@@ -402,7 +402,7 @@ def fp8_grouped_gemm(
 
     num_gemms = len(A)
     empty_tensor = torch.Tensor()
-    empty_tensors = [torch.Tensor()] * num_gemms
+    empty_tensors = [empty_tensor] * num_gemms
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_offset is not None
     for a, b in zip(A, B):

@@ -128,23 +128,10 @@ def fp8_multi_cast_transpose_fused(
     amax_indices: List[int],
     scale_inv_indices: List[int],
     otype: tex.DType,
-    cast_output_list: Optional[List[torch.Tensor]] = None,
-    transposed_output_list: Optional[List[torch.Tensor]] = None,
-) -> Union[Tuple[List[torch.Tensor], List[torch.Tensor]], None]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Cast + Transpose with FP8 output"""
 
-    return_outputs = False
-    if transposed_output_list is None:
-        transposed_output_list = [
-            torch.empty(inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8)
-            for inp in input_list
-        ]
-        return_outputs = True
-    if cast_output_list is None:
-        cast_output_list = [torch.empty_like(inp, dtype=torch.uint8) for inp in input_list]
-        return_outputs = True
-
-    tex.fused_multi_cast_transpose(
+    return tex.fused_multi_cast_transpose_alloc(
         input_list,
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
@@ -152,11 +139,5 @@ def fp8_multi_cast_transpose_fused(
         scale_indices,
         amax_indices,
         scale_inv_indices,
-        cast_output_list,
-        transposed_output_list,
         otype,
     )
-
-    if return_outputs:
-        return cast_output_list, transposed_output_list
-    return None
