@@ -1326,7 +1326,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
         assert (
-            q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
+            qkv_format == "thd" or (q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0)
         ), "Sequence length per GPU needs to be divisible by 2!"
         if causal:
             if qkv_format == "bshd":
