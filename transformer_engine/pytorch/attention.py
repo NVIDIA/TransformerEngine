@@ -315,13 +315,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
             use_fused_attention = False
 
-    # Filter: Context parallelism
-    if context_parallel and use_unfused_attention:
-        logger.debug(
-            "Disabling UnfusedDotProductAttention as it does not support context parallelism"
-        )
-        use_unfused_attention = False
-
     # Filter: Data type
     if use_flash_attention and (
         qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type == Float8Tensor
@@ -379,6 +372,66 @@ def get_attention_backend(
                 "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
             )
             use_flash_attention = False
+
+    # Filter: Context parallelism
+    # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # bshd, sbhd | self-attention:             | no_bias, post_scale_bias | FlashAttention, FusedAttention
+    #            |     no_mask, causal         |                          |
+    #            | cross-attention:            |                          |
+    #            |     no_mask                 |                          |
+    # thd        | self-attention:             | no_bias                  | FlashAttention, FusedAttention
+    #            |     padding, padding_causal |                          | if no padding between sequences,
+    #            | cross-attention:            |                          | FusedAttention
+    #            |     padding                 |                          | if there is padding between sequences
+    # Note: context parallelism requires seq_len % (cp_size * 2) == 0 for each sequence in q, k, v.
+    if context_parallel and use_unfused_attention:
+        logger.debug(
+            "Disabling UnfusedDotProductAttention as it does not support context parallelism"
+        )
+        use_unfused_attention = False
+    if context_parallel and use_flash_attention:
+        if "bottom_right" in attn_mask_type:
+            logger.debug(
+                "Disabling FlashAttention as it does not support context parallelism with causal_bottom_right maskig"
+            )
+            use_flash_attention = False
+        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_k:
+            logger.debug(
+                "Disabling FlashAttention as it does not support context parallelism with causal masking for cross-attention"
+            )
+            use_flash_attention = False
+        if core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
+            logger.debug(
+                "Disabling FlashAttention as it does not support context parallelism with bias type of %s", core_attention_bias_type
+            )
+            use_flash_attention = False
+        if qkv_format == "thd" and core_attention_bias_type != "no_bias":
+            logger.debug(
+                "Disabling FlashAttention as it does not support context parallelism with attention bias for THD foramt"
+            )
+            use_flash_attention = False
+    if context_parallel and use_fused_attention:
+        if "bottom_right" in attn_mask_type:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with causal_bottom_right maskig"
+            )
+            use_fused_attention = False
+        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_k:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with causal masking for cross-attention"
+            )
+            use_fused_attention = False
+        if core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with bias type of %s", core_attention_bias_type
+            )
+            use_fused_attention = False
+        if qkv_format == "thd" and core_attention_bias_type != "no_bias":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with attention bias for THD foramt"
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type               |     supported backends
@@ -1832,8 +1885,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         cu_seqlens_q_padded,
                         False,
                     )
-                else:
-                    assert False, f"{qkv_format} is an unsupported qkv_format!"
             else:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(
@@ -1852,8 +1903,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         cu_seqlens_q_padded,
                         True,
                     )
-                else:
-                    assert False, f"{qkv_format} is an unsupported qkv_format!"
 
         kv = p2p_comm_buffers[-1]
         if use_fused_attention:
