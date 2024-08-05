@@ -1303,7 +1303,6 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         if fp8:
             if use_fused_attention:
-                fp8_meta_kwargs = {}
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_backend = FusedAttnBackend["FP8"]
@@ -1334,12 +1333,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                             ).view(x.shape)
                             for x in [k_f16, v_f16]
                         ]
+                amax_s_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
+                amax_o_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
+                fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
                 fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
                 fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
-                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history[0][META_S]
-                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history[0][META_O]
             else:
                 assert not fp8, "FP8 is only supported with Fused Attention!"
         else:
@@ -1385,6 +1385,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             META_QKV,
                             fp8_dtype_forward,
                         ).view(p2p_comm_buffers[i].shape)
+                    if fp8 and use_fused_attention:
+                        fp8_meta_kwargs["amax_s"] = amax_s_per_step[i]
+                        fp8_meta_kwargs["amax_o"] = amax_o_per_step[i]
                     if causal:
                         if i == 0:
                             if pad_between_seqs_q:
@@ -1425,7 +1428,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         ),
                                         dim=-1,
                                     ).contiguous()
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = (
+                                out_per_step[i], *aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q,
@@ -1456,8 +1459,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         **fp8_meta_kwargs,
                                     )
                                 )
-                                if len(rest) > 0:
-                                    attn_biases[i] = rest[0]
+                                if fp8:
+                                    softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                                else:
+                                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                    attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                                 q_inputs[i % 2] = q.view(-1, *q.shape[-2:])
@@ -1524,7 +1530,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
                                     attn_bias_inputs[i % 2] = attn_bias[..., idx, :].contiguous()
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = (
+                                out_per_step[i], *aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q,
@@ -1559,8 +1565,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         **fp8_meta_kwargs,
                                     )
                                 )
-                                if len(rest) > 0:
-                                    attn_biases[i] = rest[0]
+                                if fp8:
+                                    softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                                else:
+                                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                    attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                                 q_inputs[i % 2] = q.view(-1, *q.shape[-2:])
@@ -1646,7 +1655,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         ),
                                         dim=-1,
                                     ).contiguous()
-                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = (
+                                out_per_step[i], *aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q // 2,
@@ -1681,8 +1690,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         **fp8_meta_kwargs,
                                     )
                                 )
-                                if len(rest) > 0:
-                                    attn_biases[i] = rest[0]
+                                if fp8:
+                                    softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                                else:
+                                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                    attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
                                 if qkv_format == "thd":
                                     # [t, np, hn] -> [t/2, np, hn]
@@ -1749,7 +1761,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     ),
                                     dim=-1,
                                 ).contiguous()
-                            out_per_step[i], [softmax_lse_per_step[i], rng_states[i], *rest] = (
+                            out_per_step[i], *aux_ctx_tensors = (
                                 fused_attn_fwd(
                                     is_training,
                                     max_seqlen_q,
@@ -1780,8 +1792,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     **fp8_meta_kwargs,
                                 )
                             )
-                            if len(rest) > 0:
-                                attn_biases[i] = rest[0]
+                            if fp8:
+                                softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                            else:
+                                softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                attn_biases[i] = rest[0] if len(rest) > 0 else None
                         else:
                             # [b, sq, np, hn] -> [b*sq, np, hn]
                             q_inputs[i % 2] = q.view(-1, *q.shape[-2:])
@@ -1934,6 +1949,10 @@ class AttnFuncWithCP(torch.autograd.Function):
             q_save, kv_save, out_save = q, kv, out_f16
         else:
             q_save, kv_save, out_save = q_f16, kv, out
+
+        if fp8 and use_fused_attention:
+            fp8_meta["scaling_fwd"].amax_history[0][META_S] = torch.max(amax_s_per_step)
+            fp8_meta["scaling_fwd"].amax_history[0][META_O] = torch.max(amax_o_per_step)
 
         ctx.save_for_backward(
             q_save,
