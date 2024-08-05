@@ -27,19 +27,20 @@ def test_cross_entropy_fwd_mean_log_torch(vocab_parallel_logits, max_logit, sum_
     return mean_log_probs
 
 
-
 @triton.jit
-def cross_entropy_bwd_kernel(grad_input_ptr,
-                             grad_output_ptr,
-                             input_ptr,
-                             target_mask_ptr,
-                             masked_target_1d_ptr,
-                             logits_max_ptr,
-                             sum_exp_logits_ptr,
-                             n_cols,
-                             label_smoothing,
-                             vocab_size,
-                             BLOCK_SIZE: tl.constexpr):
+def cross_entropy_bwd_kernel(
+    grad_input_ptr,
+    grad_output_ptr,
+    input_ptr,
+    target_mask_ptr,
+    masked_target_1d_ptr,
+    logits_max_ptr,
+    sum_exp_logits_ptr,
+    n_cols,
+    label_smoothing,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
     row_idx = tl.program_id(0)
     grad_input_ptr += row_idx * n_cols
     input_ptr += row_idx * n_cols
@@ -63,7 +64,7 @@ def cross_entropy_bwd_kernel(grad_input_ptr,
         softmax_update = 1.0 - target_mask.to(tl.float32)
         if label_smoothing > 0:
             smoothing = label_smoothing * vocab_size / (vocab_size - 1)
-            softmax_update *= (1.0 - smoothing)
+            softmax_update *= 1.0 - smoothing
         row = tl.where(col_offsets == masked_target_1d, row - softmax_update, row)
 
         if label_smoothing > 0:
@@ -77,14 +78,16 @@ def cross_entropy_bwd_kernel(grad_input_ptr,
         tl.store(grad_input_ptrs, row, mask=col_offsets < n_cols)
 
 
-def test_cross_entropy_bwd_triton(grad_output,
-                      inputs,
-                      target_mask,
-                      masked_target_1d,
-                      logits_max,
-                      sum_exp_logits,
-                      label_smoothing,
-                      vocab_size):
+def test_cross_entropy_bwd_triton(
+    grad_output,
+    inputs,
+    target_mask,
+    masked_target_1d,
+    logits_max,
+    sum_exp_logits,
+    label_smoothing,
+    vocab_size,
+):
     grad_input = torch.empty_like(inputs)
 
     n_cols = inputs.size(-1)
@@ -102,12 +105,12 @@ def test_cross_entropy_bwd_triton(grad_output,
 
     sum_exp_logits = sum_exp_logits.view(n_rows)
 
-    BLOCK_SIZE = 8*1024
+    BLOCK_SIZE = 8 * 1024
     num_warps = 16
 
     grad_input_ = grad_input.view(n_rows, n_cols)
 
-    cross_entropy_bwd_kernel[(n_rows, )](
+    cross_entropy_bwd_kernel[(n_rows,)](
         grad_input_,
         grad_output,
         inputs,
@@ -139,11 +142,9 @@ def test_check_cross_entropy_fwd_sum_exp_cuda(s_size, b_size, v_size):
     n_dim = vocab_parallel_logits.size(-1)
 
     sum_exp_logits = tex.cross_entropy_fwd_sum_exp_cuda(vocab_parallel_logits, logits_max)
-   
 
     sum_exp_logits_torch = test_cross_entropy_fwd_sum_exp_torch(vocab_parallel_logits, logits_max)
     assert torch.allclose(sum_exp_logits, sum_exp_logits_torch)
-
 
 
 @pytest.mark.parametrize("s_size", [3, 128])
@@ -152,7 +153,9 @@ def test_check_cross_entropy_fwd_sum_exp_cuda(s_size, b_size, v_size):
 def test_check_cross_entropy_fwd_mean_log_cuda(s_size, b_size, v_size):
     # cuda kernel logic
     s, b, v = s_size, b_size, v_size
-    vocab_parallel_logits = torch.randn(s, b, v).to(torch.bfloat16).cuda().uniform_(-0.1, 0.1)  # bf16
+    vocab_parallel_logits = (
+        torch.randn(s, b, v).to(torch.bfloat16).cuda().uniform_(-0.1, 0.1)
+    )  # bf16
     vocab_parallel_logits.to(torch.bfloat16)
     vocab_parallel_logits.fill_(0.55)
 
@@ -168,12 +171,13 @@ def test_check_cross_entropy_fwd_mean_log_cuda(s_size, b_size, v_size):
     mean_log_probs = tex.cross_entropy_fwd_mean_log_cuda(
         vocab_parallel_logits, logits_max, sum_exp_logits
     )
-   
+
     mean_log_probs_torch = test_cross_entropy_fwd_mean_log_torch(
         vocab_parallel_logits, logits_max, sum_exp_logits
     )
 
-    assert (torch.allclose(mean_log_probs, mean_log_probs_torch))
+    assert torch.allclose(mean_log_probs, mean_log_probs_torch)
+
 
 @pytest.mark.parametrize("s_size", [3, 128])
 @pytest.mark.parametrize("b_size", [1, 32])
@@ -216,7 +220,16 @@ def test_check_cross_entropy_bwd_cuda(s_size, b_size, v_size):
         vocab_size,
     )
 
-    grad_input_ptr_triton = test_cross_entropy_bwd_triton(grad_output_ptr, input_ptr, target_mask_ptr, masked_target_1d_ptr, logits_max, sum_exp_logits, label_smoothing, vocab_size)
+    grad_input_ptr_triton = test_cross_entropy_bwd_triton(
+        grad_output_ptr,
+        input_ptr,
+        target_mask_ptr,
+        masked_target_1d_ptr,
+        logits_max,
+        sum_exp_logits,
+        label_smoothing,
+        vocab_size,
+    )
 
     assert torch.allclose(grad_input_ptr_cuda, grad_input_ptr_triton)
 
