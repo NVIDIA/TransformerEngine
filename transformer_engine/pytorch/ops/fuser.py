@@ -71,8 +71,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Keyword arguments to BasicOperation
         num_params: int
             Number of parameter tensors to include in autograd graph.
-        *extra_inputs: torch.Tensor
-            Extra tensor inputs to include in autograd graph. Consists
+        *params_and_extra_inputs: torch.Tensor
+            Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
 
         Returns
@@ -92,7 +92,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             raise ValueError(
                 f"Expected {num_params + num_extra_inputs} extra tensor arguments "
                 f"({num_params} parameters, {num_extra_inputs} extra inputs), "
-                f"but got {len(extra_inputs)}"
+                f"but got {len(params_and_extra_inputs)}"
             )
         _, extra_inputs = _split_tuple(params_and_extra_inputs, num_params)
         basic_op_extra_inputs = []
@@ -352,7 +352,9 @@ class OperationFuser:
             basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
-        params = [param for param in op.parameters() for op in self._basic_ops]
+        params = []
+        for op in self._basic_ops:
+            params.extend(op.parameters())
 
         # Fuser forward pass
         return _OperationFuserAutogradFunction.apply(
