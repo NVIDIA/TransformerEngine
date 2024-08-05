@@ -566,18 +566,6 @@ def get_attention_backend(
             fused_attention_backend = None
         if (
             use_fused_attention
-            and context_parallel
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-        ):
-            logger.debug(
-                "Disabling FusedAttention as only sub-backend %s does not support "
-                "context parallellism",
-                int(fused_attention_backend),
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-        if (
-            use_fused_attention
             and window_size is not None
             and window_size[0] != -1
             and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -1353,7 +1341,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 assert not fp8, "FP8 is only supported with Fused Attention!"
         else:
             q_f16 = q
-            if use_fused_attetnion:
+            if use_fused_attention:
+                fp8_meta_kwargs = {}
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
@@ -1836,7 +1825,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             META_O,
                             fp8_dtype_forward,
                             TE_DType[q_fp8.dtype if fp8_meta["recipe"].fp8_mha else q_f16.dtype],
-                        ).view(out_per_shape[i-1].shape)
+                        ).view(out_per_step[i-1].shape)
                     if i == 1:
                         out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
@@ -1933,7 +1922,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             out_fp8 = cast_to_fp8(
                 out, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward
             ).view(out.shape)
-            if fp8_meata["recipe"].fp8_mha:
+            if fp8_meta["recipe"].fp8_mha:
                 out = out_fp8
 
         if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
