@@ -397,20 +397,20 @@ def get_attention_backend(
                 " causal_bottom_right maskig"
             )
             use_flash_attention = False
-        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with causal"
                 " masking for cross-attention"
             )
             use_flash_attention = False
-        if core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
+        elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with bias type"
                 " of %s",
                 core_attention_bias_type,
             )
             use_flash_attention = False
-        if qkv_format == "thd" and core_attention_bias_type != "no_bias":
+        elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with attention"
                 " bias for THD foramt"
@@ -423,20 +423,20 @@ def get_attention_backend(
                 " causal_bottom_right maskig"
             )
             use_fused_attention = False
-        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with causal"
                 " masking for cross-attention"
             )
             use_fused_attention = False
-        if core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
+        elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with bias type"
                 " of %s",
                 core_attention_bias_type,
             )
             use_fused_attention = False
-        if qkv_format == "thd" and core_attention_bias_type != "no_bias":
+        elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with attention"
                 " bias for THD foramt"
