@@ -397,7 +397,7 @@ def get_attention_backend(
                 " causal_bottom_right maskig"
             )
             use_flash_attention = False
-        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_k:
+        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with causal"
                 " masking for cross-attention"
@@ -423,7 +423,7 @@ def get_attention_backend(
                 " causal_bottom_right maskig"
             )
             use_fused_attention = False
-        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_k:
+        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with causal"
                 " masking for cross-attention"
@@ -1326,7 +1326,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         assert (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
-        ), f"Sequence length per GPU needs to be divisible by 2!"
+        ), "Sequence length per GPU needs to be divisible by 2!"
         if causal:
             if qkv_format == "bshd":
                 # [b, s, np, hn] -> [b, 2, s//2, np, hn]
@@ -1344,7 +1344,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
             assert (
                 attn_bias.shape[-2] % 2 == 0 and attn_bias.shape[-1] % (2 * cp_size) == 0
-            ), f"Sequence length does not meet divisible requirements!"
+            ), "Sequence length does not meet divisible requirements!"
             # [b, np, sq, sk] -> [b, np, 2, sq//2, 2*cp, sk//(2*cp)]
             attn_bias_ = attn_bias.view(
                 *attn_bias.shape[:-2],
@@ -2607,7 +2607,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         seq_dim = qkv_format.index("s")
         assert (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
-        ), f"Sequence length per GPU needs to be divisible by 2!"
+        ), "Sequence length per GPU needs to be divisible by 2!"
 
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
