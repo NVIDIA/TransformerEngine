@@ -366,8 +366,8 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
 
 
 class DenseGeneral(TransformerEngineBase):
-    """
-    Applies a linear transformation to the incoming data :math:`y = xA^T + b`
+    r"""
+    Applies a linear transformation to the incoming data :math:`y = xA^T + b`.
 
     Parameters
     ----------
