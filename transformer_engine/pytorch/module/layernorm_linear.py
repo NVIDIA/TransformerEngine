@@ -158,7 +158,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Column Parallel Linear
         ln_out_gathered = False
         if ub_overlap_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
+            ln_out_total = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
             if not return_layernorm_output:
                 ln_out = torch.empty_like(ln_out)
             if ub_obj_lnout.is_atomic_gemm():
