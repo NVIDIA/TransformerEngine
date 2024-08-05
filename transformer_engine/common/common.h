@@ -262,6 +262,9 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 bool is_fp8_dtype(const DType t);
 
+void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
+void update_multi_tensor_scale_inv(std::vector<Tensor*> *tensors, cudaStream_t stream);
+
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _##api_name##_nvtx_wrapper(#api_name);
 

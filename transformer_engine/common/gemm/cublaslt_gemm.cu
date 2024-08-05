@@ -46,6 +46,7 @@ uint32_t _getAlignment(uintptr_t address) {
   }
 }
 
+
 }  // namespace
 
 namespace transformer_engine {
@@ -268,6 +269,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    Ddesc, &heuristicResult.algo,            /* algo */
                                    workspace,                               /* workspace */
                                    workspaceSize, stream));                 /* stream */
+
+  // Update FP8 scale-inv in output tensor
+  if (is_fp8_dtype(outputD->data.dtype)) {
+    update_tensor_scale_inv(outputD, stream);
+  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));

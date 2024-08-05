@@ -39,6 +39,7 @@ set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      pycudnn.cpp
      transformer_engine.cpp
+     common.cu
      transpose/cast_transpose.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu
@@ -125,4 +126,3 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-
