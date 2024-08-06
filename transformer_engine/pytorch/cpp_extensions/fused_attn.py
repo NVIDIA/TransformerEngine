@@ -140,7 +140,7 @@ def fused_attn_fwd_qkvpacked(
                 output tensor, amax of O, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -342,7 +342,7 @@ def fused_attn_bwd_qkvpacked(
                 output tensor, amax of dQKV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -508,7 +508,7 @@ def fused_attn_fwd_kvpacked(
                 output tensor, amax of O, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -729,7 +729,7 @@ def fused_attn_bwd_kvpacked(
                 output tensor, amax of dQKV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -907,7 +907,7 @@ def fused_attn_fwd(
                 output tensor, amax of O, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -1135,7 +1135,7 @@ def fused_attn_bwd(
                 output tensor, amax of dQ, dK and dV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
