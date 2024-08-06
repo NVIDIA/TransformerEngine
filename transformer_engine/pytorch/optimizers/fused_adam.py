@@ -3,8 +3,6 @@
 # See LICENSE for license information.
 
 """Fused Adam optimizer."""
-import warnings
-import itertools
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
@@ -115,7 +113,6 @@ class FusedAdam(torch.optim.Optimizer):
 
         self.capturable = capturable
 
-        # self.master_weights = iter(master_weights) if master_weights is not None else None
         if master_weights is not None:
             assert isinstance(master_weights, list), "master_weights must be a list if provided"
         self.master_weights = master_weights
@@ -181,7 +178,6 @@ class FusedAdam(torch.optim.Optimizer):
             # create lists for multi-tensor apply
             p_main_of_fp8_model = []
             p_main_of_f16_model = []
-            p_main_of_f32_model = []
             g_of_fp8_model = []
             g_of_f16_model = []
             g_of_f32_model = []
