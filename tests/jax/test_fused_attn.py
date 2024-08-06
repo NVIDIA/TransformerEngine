@@ -295,7 +295,10 @@ class FusedAttnRunner:
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
-        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+        if (
+            self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
+            and self.bias_shape != BiasShape.BIAS_1HSS
+        ):
             if self.attn_mask_type not in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for "
