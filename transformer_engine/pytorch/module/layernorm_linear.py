@@ -139,8 +139,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 inputmat, dtype=ln_out_dtype, memory_format=torch.contiguous_format
             )
 
+        # Objects for FP8 cast
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+        ln_out_scale_inv = None
+        if fp8:
+            ln_out_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
 
+        # Launch normalization kernel
         ln_out, mu, rsigma = _apply_normalization(
             inputmat,
             ln_out,
@@ -153,6 +158,7 @@ class _LayerNormLinear(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
             is_grad_enabled,
+            fp8_scale_inv=ln_out_scale_inv,
         )
 
         # Column Parallel Linear
@@ -185,6 +191,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                         out=ln_out_fp8,
+                        scale=ln_out_scale_inv,
                     )
                     ln_out = torch.empty_like(ln_out_fp8)
                 else:
@@ -193,6 +200,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        scale=ln_out_scale_inv,
                     )
                     if ln_out_gathered:
                         rank = torch.distributed.get_rank(tp_group)
@@ -234,8 +242,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 0,
                 weight_fp8._fp8_dtype,
                 ln_out_total,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
+                ln_out_scale_inv,
+                0,
                 fp8_dtype_forward,
                 output_dtype,
                 get_workspace(),
@@ -323,7 +331,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 ln_out if weight.requires_grad else None,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                ln_out_scale_inv,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -395,7 +403,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8,
                 main_grad,
                 ln_out,
-                fwd_scale_inverses,
+                ln_out_scale_inv,
             ) = ctx.saved_tensors
 
             # Gather intermediate/activation tensors if needed
@@ -592,8 +600,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            ln_out_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             (
                                 grad_output_t._data
@@ -618,8 +626,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     else:
                         ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             ln_out_total,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            ln_out_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
                         )
