@@ -391,7 +391,7 @@ class FusedAttnRunner:
             return segment_ids, segment_pad
 
         if get_qkv_format(self.qkv_layout) == QKVFormat.THD:
-            self.num_segments_per_seq = 3
+            self.num_segments_per_seq = 2
             self.token_q, self.segment_pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -461,7 +461,8 @@ class FusedAttnRunner:
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
             "qkv_layout": self.qkv_layout,
-            "max_segments_per_seq": self.num_segments_per_seq,
+            # +1 for testing runtime_segments < max_segments
+            "max_segments_per_seq": self.num_segments_per_seq + 1,
         }
 
         # Convert the outputs to float32 for the elementwise comparison
@@ -518,7 +519,7 @@ class FusedAttnRunner:
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
             "qkv_layout": self.qkv_layout,
-            "max_segments_per_seq": self.num_segments_per_seq,
+            "max_segments_per_seq": self.num_segments_per_seq + 1,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
