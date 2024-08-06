@@ -53,9 +53,9 @@ struct FP8Data {
 template <>
 struct FP8Data<false> {};
 
-template <typename T, typename FULL_T, typename index_t, typename PARAM_OUT_T>
-struct AdamFunctorExtraOutDtype {
-  static constexpr bool is_fp8_type = is_fp8<PARAM_OUT_T>::value;
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
+struct AdamFunctorMaster {
+  static constexpr bool is_fp8_type = is_fp8<PARAM_T>::value;
 
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5, is_fp8_type> &tl,  // NOLINT(*)
@@ -77,10 +77,10 @@ struct AdamFunctorExtraOutDtype {
     index_t chunk_idx = tl.block_to_chunk[blockIdx.x];
     index_t n = tl.sizes[tensor_loc];
 
-    T *g = reinterpret_cast<T *>(tl.addresses[0][tensor_loc]);
+    GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_loc]);
     g += chunk_idx * chunk_size;
 
-    T *p = reinterpret_cast<T *>(tl.addresses[1][tensor_loc]);
+    PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
     FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
@@ -89,8 +89,8 @@ struct AdamFunctorExtraOutDtype {
     FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
-    PARAM_OUT_T *p_out = reinterpret_cast<PARAM_OUT_T *>(tl.addresses[4][tensor_loc]);
-    p_out += chunk_idx * chunk_size;
+    FULL_T *p_master = reinterpret_cast<FULL_T *>(tl.addresses[4][tensor_loc]);
+    p_master += chunk_idx * chunk_size;
 
     n -= chunk_idx * chunk_size;
 
@@ -109,15 +109,14 @@ struct AdamFunctorExtraOutDtype {
       MATH_T r_p[ILP];
       MATH_T r_m[ILP];
       MATH_T r_v[ILP];
-      PARAM_OUT_T r_p_out[ILP];
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          r_g[ii] = g[i];
-          r_p[ii] = p[i];
-          r_m[ii] = m[i];
-          r_v[ii] = v[i];
+          r_g[ii] = static_cast<MATH_T>(g[i]);
+          r_p[ii] = static_cast<MATH_T>(p_master[i]);
+          r_m[ii] = static_cast<MATH_T>(m[i]);
+          r_v[ii] = static_cast<MATH_T>(v[i]);
         } else {
           r_g[ii] = MATH_T(0);
           r_p[ii] = MATH_T(0);
@@ -151,15 +150,15 @@ struct AdamFunctorExtraOutDtype {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          p[i] = r_p[ii];
-          m[i] = r_m[ii];
-          v[i] = r_v[ii];
+          p_master[i] = static_cast<FULL_T>(r_p[ii]);
+          m[i] = static_cast<FULL_T>(r_m[ii]);
+          v[i] = static_cast<FULL_T>(r_v[ii]);
           if constexpr (is_fp8_type) {
             __builtin_assume(fp8_data.max >= 0);
             fp8_data.max = fmaxf(fabsf(r_p[ii]), fp8_data.max);
-            p_out[i] = static_cast<PARAM_OUT_T>(r_p[ii] * fp8_data.scale);
+            p[i] = static_cast<PARAM_T>(r_p[ii] * fp8_data.scale);
           } else {
-            p_out[i] = static_cast<PARAM_OUT_T>(r_p[ii]);
+            p[i] = static_cast<PARAM_T>(r_p[ii]);
           }
         }
       }
@@ -495,8 +494,8 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
   const auto p_in_type = tensor_lists[1][0].scalar_type();
   auto tl_size = tensor_lists.size();
 
-  // case 4:  g, p_master, m, v
-  // case 5:  g, p_master, m, v, p_model
+  // case 4:  g, p, m, v
+  // case 5:  g, p, m, v, p_master
   TORCH_CHECK(tl_size == 4 || tl_size == 5, "tensor list must contain 4 or 5");
 
   if (requires_64bit_indexing) {
@@ -509,17 +508,17 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                                 bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
                                 weight_decay);)
     } else {
-      // g, p, m, v, p_out
-      const auto p_out_type = tensor_lists[4][0].scalar_type();
+      // g, p, m, v, p_master
+      const auto g_in_type = tensor_lists[0][0].scalar_type();
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
           DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-              p_out_type, 1, "adam",
-              multi_tensor_apply<5>(
-                  (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                  AdamFunctorExtraOutDtype<scalar_t_0, float, int64_t, scalar_t_1>(), beta1, beta2,
-                  bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                  weight_decay);));
+              g_in_type, 1, "adam",
+              multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
+                                    tensor_lists,
+                                    AdamFunctorMaster<scalar_t_0, scalar_t_1, float, int64_t>(),
+                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    (adamMode_t)mode, weight_decay);));
     }
   } else {
     if (tl_size == 4) {
@@ -531,17 +530,15 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                                 bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
                                 weight_decay);)
     } else {
-      const auto p_out_type = tensor_lists[4][0].scalar_type();
-
+      const auto g_in_type = tensor_lists[0][0].scalar_type();
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
           DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-              p_out_type, 1, "adam",
-              multi_tensor_apply<5>(
-                  BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                  AdamFunctorExtraOutDtype<scalar_t_0, float, int32_t, scalar_t_1>(), beta1, beta2,
-                  bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                  weight_decay);));
+              g_in_type, 1, "adam",
+              multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                    AdamFunctorMaster<scalar_t_0, scalar_t_1, float, int32_t>(),
+                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    (adamMode_t)mode, weight_decay);));
     }
   }
   AT_CUDA_CHECK(cudaGetLastError());
@@ -578,31 +575,30 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
     }
   }
 
-  const auto p_in_type = tensor_lists[1][0].scalar_type();
+  const auto g_in_type = tensor_lists[0][0].scalar_type();
   auto tl_size = tensor_lists.size();
 
-  // case 8:  g, p_master, m, v, p_fp8_model, scale, amax, scale_inv
+  // case 8:  g, p_fp8, m, v, p_master, scale, amax, scale_inv
   TORCH_CHECK(tl_size == 8, "tensor list must contain 8 tensors");
 
   if (requires_64bit_indexing) {
-    // g, p, m, v, p_out, scale, amax
-    DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-        p_in_type, 0, "adam",
-        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-            fp8_dtype, OType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        fp8_dtype, FP8_T,
+        DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+            g_in_type, 0, "adam",
             multi_tensor_apply<5, true>(
                 (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                AdamFunctorExtraOutDtype<scalar_t_0, float, int64_t, OType>(), beta1, beta2,
+                AdamFunctorMaster<FP8_T, scalar_t_0, float, int64_t>(), beta1, beta2,
                 bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);));
   } else {
-    DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-        p_in_type, 0, "adam",
-        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-            fp8_dtype, OType,
-            multi_tensor_apply<5, true>(
-                BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                AdamFunctorExtraOutDtype<scalar_t_0, float, int32_t, OType>(), beta1, beta2,
-                bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);));
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        fp8_dtype, FP8_T,
+        DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+            g_in_type, 0, "adam",
+            multi_tensor_apply<5, true>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                        AdamFunctorMaster<FP8_T, scalar_t_0, float, int32_t>(),
+                                        beta1, beta2, bias_correction1, bias_correction2, epsilon,
+                                        lr, (adamMode_t)mode, weight_decay);));
   }
   AT_CUDA_CHECK(cudaGetLastError());
 }
