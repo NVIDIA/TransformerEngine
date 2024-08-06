@@ -11,9 +11,7 @@ import nvtx
 import transformer_engine
 from tests.pytorch.fused_attn.test_fused_attn import (
     ModelConfig,
-    _is_flash_attention_supported,
-    _is_fused_attention_supported,
-    _is_unfused_attention_supported,
+    _get_attention_backends,
     _run_dot_product_attention,
 )
 
@@ -29,8 +27,6 @@ ckpt_attn = False
 workspace_opt = True
 # QKV memory layout
 qkv_layout = "bshd_bshd_bshd"
-# sliding window attention
-swa = False
 # padding between sequences for qkv_format=thd
 pad_between_seqs = False
 # training mode
@@ -64,7 +60,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -76,7 +71,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -97,7 +91,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -115,7 +108,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -205,13 +197,15 @@ def main():
     )
     for model in model_configs.keys():
         config = model_configs[model]
-        fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
+        available_backends, fused_attn_backends = _get_attention_backends(
             config,
-            dtype,
+            qkv_dtype=dtype,
             qkv_layout=qkv_layout,
+            window_size=config.window_size,
+            pad_between_seqs=pad_between_seqs,
         )
-        fused_attn_supported = fused_attn_supported and not swa
-        flash_attn_supported = _is_flash_attention_supported(config)
+        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
         print(
             f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
             f'{" and flash-attention" if flash_attn_supported else ""}...'
