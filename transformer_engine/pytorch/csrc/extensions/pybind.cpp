@@ -148,6 +148,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "performed for L2 norm computation, and tensors are not updated)");
   m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer");
+  m.def("multi_tensor_adam_master", &multi_tensor_adam_master_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer with master weights");
   m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
         "support and LR scheduling");

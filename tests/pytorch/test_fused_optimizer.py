@@ -104,6 +104,44 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_bfloat16(self):
         self.gen_single_type_test(param_type=torch.bfloat16, skip_assert=True)
 
+    def test_fp32_master(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["master_weights"] = True
+        self.tst_options["master_weights_dtype"] = torch.float32
+        self.gen_single_type_test(param_type=torch.float, skip_assert=False)
+        self.tst_options = None
+
+    def test_fp16_master(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["master_weights"] = True
+        self.tst_options["master_weights_dtype"] = torch.float32
+        self.gen_single_type_test(param_type=torch.float, skip_assert=False)
+        self.tst_options = None
+
+    def test_fp16_m(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["m_dtype"] = torch.half
+        self.gen_single_type_test(param_type=torch.float, skip_assert=False)
+        self.tst_options = None
+
+    def test_fp8_m(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["m_dtype"] = torch.uint8
+        self.gen_single_type_test(param_type=torch.float, skip_assert=True)
+        self.tst_options = None
+
+    def test_fp16_v(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["v_dtype"] = torch.half
+        self.gen_single_type_test(param_type=torch.float, skip_assert=False)
+        self.tst_options = None
+
+    def test_fp8_v(self):
+        self.tst_options = copy.deepcopy(self.options)
+        self.tst_options["v_dtype"] = torch.uint8
+        self.gen_single_type_test(param_type=torch.float, skip_assert=True)
+        self.tst_options = None
+
     @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
