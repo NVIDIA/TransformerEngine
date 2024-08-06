@@ -1428,7 +1428,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         ),
                                         dim=-1,
                                     ).contiguous()
-                                out_per_step[i], *aux_ctx_tensors = (
+                                out_per_step[i], aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q,
@@ -1530,7 +1530,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
                                     attn_bias_inputs[i % 2] = attn_bias[..., idx, :].contiguous()
-                                out_per_step[i], *aux_ctx_tensors = (
+                                out_per_step[i], aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q,
@@ -1655,7 +1655,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                         ),
                                         dim=-1,
                                     ).contiguous()
-                                out_per_step[i], *aux_ctx_tensors = (
+                                out_per_step[i], aux_ctx_tensors = (
                                     fused_attn_fwd(
                                         is_training,
                                         max_seqlen_q // 2,
@@ -1761,7 +1761,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     ),
                                     dim=-1,
                                 ).contiguous()
-                            out_per_step[i], *aux_ctx_tensors = (
+                            out_per_step[i], aux_ctx_tensors = (
                                 fused_attn_fwd(
                                     is_training,
                                     max_seqlen_q,
