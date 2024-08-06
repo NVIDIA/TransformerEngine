@@ -191,7 +191,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                         out=ln_out_fp8,
-                        scale=ln_out_scale_inv,
+                        scale_inv=ln_out_scale_inv,
                     )
                     ln_out = torch.empty_like(ln_out_fp8)
                 else:
@@ -200,7 +200,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
-                        scale=ln_out_scale_inv,
+                        scale_inv=ln_out_scale_inv,
                     )
                     if ln_out_gathered:
                         rank = torch.distributed.get_rank(tp_group)
