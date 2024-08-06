@@ -202,9 +202,7 @@ class TestFusedAdam(TestFusedOptimizer):
             "amsgrad": False,
         }
         ref_optim = torch.optim.Adam(ref_params, **options)
-        model_param_groups = [model_params]
-        tst_optim = te.optimizers.FusedAdam(master_params, fuse_dtype_casting=True, **options)
-        tst_optim._extra_param_groups = model_param_groups
+        tst_optim = te.optimizers.FusedAdam(model_params, master_weights=master_params, **options)
 
         for i in range(self.iters):
             self.gen_grad(ref_params, master_params)
@@ -243,9 +241,7 @@ class TestFusedAdam(TestFusedOptimizer):
             "amsgrad": False,
         }
         ref_optim = torch.optim.Adam(ref_params, **options)
-        model_param_groups = [model_params]
-        tst_optim = te.optimizers.FusedAdam(master_params, fuse_dtype_casting=True, **options)
-        tst_optim._extra_param_groups = model_param_groups
+        tst_optim = te.optimizers.FusedAdam(model_params, master_weights=master_params, **options)
 
         for i in range(self.iters):
             self.gen_grad(ref_params, master_params)
@@ -433,8 +429,9 @@ class AdamTest(unittest.TestCase):
             if m.__class__ in [torch.nn.Conv2d]:
                 m.half()
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
+        master_weights = [p.float() for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(
-            params_, lr=self.lr, capturable=True, master_weights=True
+            params_, lr=self.lr, capturable=True, master_weights=master_weights
         )
         scaler = torch.cuda.amp.GradScaler(enabled=True)
         scaler_ = torch.cuda.amp.GradScaler(enabled=True)
