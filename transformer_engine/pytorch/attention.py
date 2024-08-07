@@ -399,19 +399,22 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Attention mask
-    # attn_mask_type               |     supported backends
-    # -------------------------------------------------------------------
-    # no_mask                      |     All
-    # padding                      |     All
-    # causal                       |
-    #     self-attention           |     All
-    #     cross-attention          |     FusedAttention
-    # padding_causal               |
-    #     self-attention           |     All
-    #     cross-attention          |     FusedAttention, UnfusedDotProductAttention
-    # causal_bottom_right          |     All
-    # padding_causal_bottom_right  |     All
-    # arbitrary                    |     UnfusedDotProductAttention
+    # attn_mask_type              | attention_mask                       | supported backends
+    # ----------------------------------------------------------------------------------------
+    # no_mask                     | None                                 | All
+    # padding                     |                                      | All
+    #     self-attention          | One tensor in shape [b, 1, 1, sq]    |
+    #     cross-attention         | Tuple of two tensors in shapes       |
+    #                             | [b, 1, 1, sq] and [b, 1, 1, skv]     |
+    # causal                      | None                                 |
+    #     self-attention          |                                      | All
+    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
+    # padding_causal              | Same as "padding"                    |
+    #     self-attention          |                                      | All
+    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
+    # causal_bottom_right         | None                                 | All
+    # padding_causal_bottom_right | Same as "padding"                    | FlashAttention, UnfusedDotProductAttention
+    # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     if attn_mask_type == "arbitrary":
         if use_flash_attention:
             logger.debug("Disabling FlashAttention for arbitrary mask")

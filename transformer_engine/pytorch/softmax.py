@@ -329,23 +329,22 @@ class FusedScaleMaskSoftmax(nn.Module):
             return False  # sk must be 16 ~ 16384
         if sk % 8 != 0:
             return False  # sk must be divisor of 8
-        if self.attn_mask_type == "arbitrary":
-            return False  # Custom masks not supported
-
+        if sq == 1:
+            return False  # sq must be > 1
         if self.attn_mask_type == "causal" and sq != sk:
             return False  # Fused causal kernel only support causal_bottom_right
 
         if (
             sq % 4 == 0  # sq must be divisor of 4
             and attn_batches % 4 == 0  # np * b must be divisor of 4
-            and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
             batch_per_block = self.get_batch_per_block(int(sk))
-
-            if self.attn_mask_type == "padding":
+            if "padding" in self.attn_mask_type or self.attn_mask_type == "arbitrary":
                 if (
                     mask is not None
                     and sq % batch_per_block == 0
+                    and mask.shape[0] in [1, b]
+                    and mask.shape[1] == 1
                     and mask.shape[-2] == sq
                     and mask.shape[-1] == sk
                 ):
@@ -358,13 +357,21 @@ class FusedScaleMaskSoftmax(nn.Module):
     def forward_fused_softmax(
         self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
     ) -> torch.Tensor:
-        """Fused masked softmax kernel"""
+        """
+        Fused masked softmax path.
+          attn_mask_type                                       | module
+        -----------------------------------------------------------------------------------------
+          no_mask                                              | ScaledSoftmax
+          causal (self-attention), causal_bottom_right         | ScaledAlignedCausalMaskedSoftmax
+          padding, padding_causal, padding_causal_bottom_right | ScaledMaskedSoftmax
+          arbitrary ([1, 1, sq, sk] or [b, 1, sq, sk])         | ScaledMaskedSoftmax
+        """
         scale = 1.0 if scale is None else scale
 
         if self.attn_mask_type in ["causal", "causal_bottom_right"]:
             return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
 
-        # input is 4D tensor (b, np, sq, sk)
+        # input is 4D tensor (1, 1, sq, sk) or (b, 1, sq, sk)
         if mask is not None and self.attn_mask_type != "no_mask":
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
