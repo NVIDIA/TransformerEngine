@@ -166,7 +166,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
-        printf("!!! [UB] Create UbufCommOverlap Communicator\n");
+        printf("!!! [UB] Create Userbuffers Communicator\n");
       }
 #ifdef NVTE_UB_WITH_MPI
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
@@ -184,16 +184,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Allocate and register extra userbuffers
     int ubuf_bytes = sample.numel() * sample.element_size();
-    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
-      _ubuf = torch::zeros_like(sample);
-      _ubuf_ptr = _ubuf.data_ptr();
-      _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
-                                                _ub_comm, false);
-    } else {
-      _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
-                                                _ub_comm, true);
-      _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
-    }
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
+    _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     if (_ub_comm->myrank == 0) {
       printf("!!! [UB] Register UBuf %d\n", _ub_reg);
@@ -264,6 +257,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
       size_t workspaceSize, bool accumulate, bool use_split_accumulator, int comm_type,
       at::Tensor rs_output) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -319,6 +313,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
     output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
+    _ub_comm->sms = ori_sms;
 
     return {D, output_tensor};
   }  // bulk_overlap
@@ -336,6 +331,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                               at::Tensor rs_output) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -352,7 +348,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
     int *counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
@@ -388,7 +383,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
           assert(_ubuf_scale_inv_initialized);
           float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              B_type, fp8_type,
+              D_type, fp8_type,
               reducescatter2_userbuff_strided_atomic_fp8<fp8_type>(
                   rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m,
                   _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm););
@@ -402,7 +397,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
           assert(_ubuf_scale_inv_initialized);
           float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              B_type, fp8_type,
+              D_type, fp8_type,
               reducescatter2_userbuff_strided_multiatomic_fp8<fp8_type>(
                   rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
                   counter_ptr, _ub_comm, (cudaStream_t)_stream_comm););
@@ -413,10 +408,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         }
         break;
       } else {
+        assert(_ubuf.element_size() != 1);
         consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
-        //        if (i == _num_splits-1) {
-        //           _ub_comm->sms = UB_MAX_SM;
-        //        }
         reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
                                         _ub_comm, (cudaStream_t)_stream_comm);
       }
@@ -447,6 +440,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output) {
     // Get GEMM dimensions
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -464,7 +458,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
 
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
@@ -517,7 +510,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
           assert(_ubuf_scale_inv_initialized);
           float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              B_type, fp8_type,
+              D_type, fp8_type,
               reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
                   rs_output_ptr, d_scale_inv_ptr, _ub_reg, (i - 1) * output_chunk_size, m_chunk, n,
                   m, _ub_comm, (cudaStream_t)_stream_comm););
@@ -541,7 +534,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         assert(_ubuf_scale_inv_initialized);
         float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-            B_type, fp8_type,
+            D_type, fp8_type,
             reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
                 rs_output_ptr, d_scale_inv_ptr, _ub_reg, (_num_splits - 1) * output_chunk_size,
                 m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm););
@@ -577,7 +570,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
           assert(_ubuf_scale_inv_initialized);
           float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              B_type, fp8_type,
+              D_type, fp8_type,
               reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
                   rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * output_chunk_size, m_chunk, n, m,
                   _ub_comm, (cudaStream_t)_stream_comm););
@@ -682,7 +675,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
-        printf("!!! [UB] Create UbufP2PCommOverlap Communicator\n");
+        printf("!!! [UB] Create Userbuffers Communicator\n");
       }
 #ifdef NVTE_UB_WITH_MPI
       create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
@@ -708,19 +701,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       ubuf_bytes = static_cast<int>(ubuf_bytes / tp_size * (tp_size * 2 - 1));
       num_ubuf_chunks = static_cast<int>(tp_size * 2 - 1);
     }
-    if (transformer_engine::getenv<bool>("UB_SKIPMC")) {
-      _ubuf = torch::zeros({sample.size(0) / tp_size * num_ubuf_chunks, sample.size(1)},
-                           sample.options());
-      _ubuf_ptr = _ubuf.data_ptr();
-      _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
-                                                _ub_comm, false);
-    } else {
-      _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
-                                                _ub_comm, true);
-      _ubuf =
-          torch::from_blob(_ubuf_ptr, {sample.size(0) / tp_size * num_ubuf_chunks, sample.size(1)},
-                           sample.options());
-    }
+
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
+    _ubuf =
+        torch::from_blob(_ubuf_ptr, {sample.size(0) / tp_size * num_ubuf_chunks, sample.size(1)},
+                          sample.options());
     if (_ub_comm->myrank == 0) {
       printf("!!! [UBP2P] Register UBuf %d\n", _ub_reg);
     }
@@ -728,9 +714,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     // Create tensor chunks for easy management
     char *ubuf_byte_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     for (int i = 0; i < num_ubuf_chunks; i++) {
-      torch::Tensor ubuf_chunk = torch::from_blob(
-          ubuf_byte_ptr, {sample.size(0) / tp_size, sample.size(1)}, sample.options());
-      _ubufs.push_back(ubuf_chunk);
+      auto ubuf_chunk = torch::from_blob(ubuf_byte_ptr, {sample.size(0) / tp_size, sample.size(1)},
+                                         sample.options());
+      _ubufs.push_back(std::move(ubuf_chunk));
       ubuf_byte_ptr += ubuf_chunk_bytes;
     }
 
@@ -769,6 +755,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
         const char *env_p = std::getenv("NVTE_AG_P2P_MULTI_ATOMIC");
         if (_rank == 0 && env_p != nullptr) {
           if (env_p[0] == '1') {
+            _use_ce = 0;
+            _ub_comm->push = 1;
             printf("!!userbuffers_sendrecv_multi_atomic_shuffle\n");
           }
         }
@@ -818,6 +806,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
       size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -866,6 +855,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       const char *env_p = std::getenv("NVTE_AG_P2P_MULTI_ATOMIC");
       if (env_p != nullptr && env_p[0] == '1') {
         if (i == 0) {
+          _ub_comm->use_ce = 0;
           userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
                                            _ub_comm, _next_rank, _prev_rank, _tp_size, counter_ptr,
                                            true, (cudaStream_t)_stream_recv);
@@ -906,6 +896,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                                     n_chunk * m * D.element_size(), cudaMemcpyDeviceToDevice,
                                     (cudaStream_t)stream_main));
     // Return the last N rows of D_buffer
+    _ub_comm->sms = ori_sms;
     torch::Tensor D_return = D_buffer.narrow(0, n_chunk, n);
     return D_return;
   }  // atomic_gemm_overlap_ag
@@ -926,6 +917,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
                                  bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -1078,6 +1070,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_recv, 0));
     at::cuda::setCurrentCUDAStream(stream_main);
+    _ub_comm->sms = ori_sms;
 
     return D;
   }  // split_overlap_ag
@@ -1094,6 +1087,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, at::Tensor rs_output) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -1149,7 +1143,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          B_type, fp8_type,
+          D_type, fp8_type,
           reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr, _tp_size,
                                            _ubufs[0].numel(), (cudaStream_t)stream_main););
     } else {
@@ -1157,6 +1151,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
           reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
       torch::sum_out(rs_output, reduce_buf, 0);
     }
+    _ub_comm->sms = ori_sms;
   }
 
   /*
@@ -1171,6 +1166,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output) {
+    int ori_sms = _ub_comm->sms;
     _ub_comm->use_ce = _use_ce;
     _ub_comm->sms = _num_comm_sm;
     _ub_comm->cga_size = _cga_size;
@@ -1245,7 +1241,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          B_type, fp8_type,
+          D_type, fp8_type,
           reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr, _tp_size,
                                            _ubufs[0].numel(), (cudaStream_t)stream_main););
     } else {
@@ -1259,6 +1255,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     }
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
+    _ub_comm->sms = ori_sms;
   }
 
   /*
