@@ -3055,7 +3055,9 @@ def attn_forward_func_with_cp(
     assert (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
-    assert (k.shape[-1] == v.shape[-1]), "Context parallelism does not support multi-latent attention yet!"
+    assert (
+        k.shape[-1] == v.shape[-1]
+    ), "Context parallelism does not support multi-latent attention yet!"
 
     sliding_window_attn = (
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)

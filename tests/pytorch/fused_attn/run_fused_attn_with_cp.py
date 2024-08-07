@@ -71,7 +71,12 @@ def run_dpa_with_cp(
 
     # create flash attn inputs
     if qkv_format == "bshd":
-        q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+        q_input_shape = (
+            config.batch_size,
+            config.max_seqlen_q,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.batch_size,
             config.max_seqlen_kv,
@@ -88,7 +93,12 @@ def run_dpa_with_cp(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "sbhd":
-        q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
+        q_input_shape = (
+            config.max_seqlen_q,
+            config.batch_size,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.max_seqlen_kv,
             config.batch_size,
@@ -105,7 +115,11 @@ def run_dpa_with_cp(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+        q_input_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.batch_size * config.max_seqlen_q,
             config.num_gqa_groups,
