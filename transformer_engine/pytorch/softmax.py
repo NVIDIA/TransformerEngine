@@ -383,7 +383,9 @@ class FusedScaleMaskSoftmax(nn.Module):
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
                 assert self.kvcache_max_seq >= seq_len_k
-                causal_mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
+                causal_mask = _get_onnx_export_causal_mask(
+                    seq_len_q, seq_len_k, self.onnx_causal_mask
+                )
             else:
                 causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
             if mask is None:

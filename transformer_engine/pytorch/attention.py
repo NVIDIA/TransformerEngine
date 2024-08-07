@@ -2906,12 +2906,16 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if "padding" in attn_mask_type:
             if max_seqlen_q == max_seqlen_kv:
                 if attention_mask.shape == (batch_size, 1, 1, max_seqlen_q):
-                    attention_mask = torch.logical_or(attention_mask.squeeze(1).unsqueeze(3), attention_mask)
+                    attention_mask = torch.logical_or(
+                        attention_mask.squeeze(1).unsqueeze(3), attention_mask
+                    )
             else:
                 if attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q) and attention_mask[
                     1
                 ].shape == (batch_size, 1, 1, max_seqlen_kv):
-                    attention_mask = torch.logical_or(attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1])
+                    attention_mask = torch.logical_or(
+                        attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
+                    )
             assert attention_mask.shape == (
                 batch_size,
                 1,
@@ -2919,10 +2923,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_seqlen_kv,
             ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
             if attn_mask_type == "padding_causal":
-                attention_mask = torch.logical_or(torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask)
+                attention_mask = torch.logical_or(
+                    torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
+                )
             if attn_mask_type == "padding_causal_bottom_right":
                 diagonal_offset = max_seqlen_kv - max_seqlen_q + 1
-                attention_mask = torch.logical_or(torch.triu(torch.logical_not(attention_mask), diagonal=diagonal_offset), attention_mask)
+                attention_mask = torch.logical_or(
+                    torch.triu(torch.logical_not(attention_mask), diagonal=diagonal_offset),
+                    attention_mask,
+                )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
