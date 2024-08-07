@@ -199,7 +199,6 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer.store(tid, N);
   }
   if constexpr (is_fp8<OutputType>::value) {
-
     // Reduce amax over block
     if (amax != nullptr) {
       max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -222,8 +221,7 @@ template <int nvec, bool aligned, typename ComputeType, typename Param,
 __launch_bounds__(unary_kernel_threads) __global__
     void unary_grad_kernel(const InputTypeGrad *grad, const InputType *input, OutputType *output,
                            const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv,
-                           Param p, const size_t N,
-                           const size_t num_aligned_elements) {
+                           Param p, const size_t N, const size_t num_aligned_elements) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   VectorizedLoader<InputTypeGrad, nvec, aligned> grad_loader(grad, N);
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
@@ -256,7 +254,6 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer.store(tid, N);
   }
   if constexpr (is_fp8<OutputType>::value) {
-
     // Reduce amax over block
     if (amax != nullptr) {
       max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -348,8 +345,8 @@ void VectorizedUnaryKernelLauncher(const InputType *input, OutputType *output, c
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_kernel<1, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, params, N, N);
+        unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, output, scale, amax, scale_inv, params, N, N);
         break;
       }
     }
@@ -359,8 +356,9 @@ void VectorizedUnaryKernelLauncher(const InputType *input, OutputType *output, c
 template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename InputType,
           typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
-                                       OutputType *output, const fp32 *scale, fp32 *amax, fp32 *scale_inv,
-                                       const size_t N, const Param params, cudaStream_t stream) {
+                                       OutputType *output, const fp32 *scale, fp32 *amax,
+                                       fp32 *scale_inv, const size_t N, const Param params,
+                                       cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, grad, output);
 
@@ -381,8 +379,8 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_grad_kernel<1, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, params, N, N);
+        unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, scale_inv, params, N, N);
         break;
       }
     }
@@ -394,8 +392,8 @@ template <int nvec, bool aligned, typename ComputeType, typename Param,
           typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
     void gated_act_kernel(const InputType *input, OutputType *output, const ComputeType *scale,
-                          ComputeType *amax, ComputeType *scale_inv, const size_t m, const size_t n, const Param p,
-                          const size_t num_aligned_elements) {
+                          ComputeType *amax, ComputeType *scale_inv, const size_t m, const size_t n,
+                          const Param p, const size_t num_aligned_elements) {
   const size_t M = num_aligned_elements * m;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
     const size_t id_x = tid % num_aligned_elements;
@@ -427,7 +425,6 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer.store(id_x, n);
 
     if constexpr (is_fp8<OutputType>::value) {
-
       // Reduce amax over block
       if (amax != nullptr) {
         max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -449,8 +446,8 @@ template <int nvec, typename ComputeType, typename Param,
           ComputeType (*Activation)(const ComputeType, const Param &), typename InputType,
           typename OutputType>
 void GatedActivationKernelLauncher(const InputType *input, OutputType *output, const fp32 *scale,
-                                   fp32 *amax, fp32 *scale_inv, const size_t m, const size_t n, const Param &p,
-                                   cudaStream_t stream) {
+                                   fp32 *amax, fp32 *scale_inv, const size_t m, const size_t n,
+                                   const Param &p, cudaStream_t stream) {
   if (m != 0 && n != 0) {
     size_t num_aligned_elements = get_num_aligned_elements(input, n, nvec, sizeof(InputType));
     constexpr size_t threads = unary_kernel_threads;

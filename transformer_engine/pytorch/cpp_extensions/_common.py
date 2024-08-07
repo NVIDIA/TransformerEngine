@@ -10,10 +10,12 @@ import torch
 
 import transformer_engine_torch as tex
 
+
 @functools.lru_cache(maxsize=None)
 def empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor()
+
 
 def canonicalize_fp8_scales(
     *,

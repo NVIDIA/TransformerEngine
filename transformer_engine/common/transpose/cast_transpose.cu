@@ -101,16 +101,11 @@ struct KernelConfig {
 };
 
 template <size_t load_size, size_t store_size, typename IType, typename OType>
-__global__ void __launch_bounds__(block_size)
-    cast_transpose_general_kernel(const IType *__restrict__ const input,
-                                  const CType *__restrict__ const noop,
-                                  OType *__restrict__ const output_c,
-                                  OType *__restrict__ const output_t,
-                                  const CType *__restrict__ const scale_ptr,
-                                  CType *__restrict__ const amax_ptr,
-                                  CType *__restrict__ const scale_inv_ptr,
-                                  const size_t row_length,
-                                  const size_t num_rows) {
+__global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
+    const IType *__restrict__ const input, const CType *__restrict__ const noop,
+    OType *__restrict__ const output_c, OType *__restrict__ const output_t,
+    const CType *__restrict__ const scale_ptr, CType *__restrict__ const amax_ptr,
+    CType *__restrict__ const scale_inv_ptr, const size_t row_length, const size_t num_rows) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
   // Vectorized load/store sizes
@@ -335,8 +330,8 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
                                static_cast<OutputType *>(transposed_output.data.dptr),
                                static_cast<const CType *>(cast_output.scale.dptr),
                                static_cast<CType *>(cast_output.amax.dptr),
-                               static_cast<CType *>(cast_output.scale_inv.dptr),
-                               row_length, num_rows);
+                               static_cast<CType *>(cast_output.scale_inv.dptr), row_length,
+                               num_rows);
           } else {  // Statically-compiled general kernel
             constexpr size_t load_size = 4;
             constexpr size_t store_size = 4;
@@ -352,8 +347,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
                     static_cast<OutputType *>(transposed_output.data.dptr),
                     static_cast<const CType *>(cast_output.scale.dptr),
                     static_cast<CType *>(cast_output.amax.dptr),
-                    static_cast<CType *>(cast_output.scale_inv.dptr),
-                    row_length, num_rows);
+                    static_cast<CType *>(cast_output.scale_inv.dptr), row_length, num_rows);
           });  // NOLINT(*)
   );           // NOLINT(*)
 }

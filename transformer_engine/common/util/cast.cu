@@ -47,8 +47,7 @@ void fp8_quantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const fp32 *>(output->scale.dptr),
               reinterpret_cast<fp32 *>(output->amax.dptr),
-              reinterpret_cast<fp32 *>(output->scale_inv.dptr),
-              N, {},
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {},
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }

@@ -46,7 +46,6 @@ uint32_t _getAlignment(uintptr_t address) {
   }
 }
 
-
 }  // namespace
 
 namespace transformer_engine {
