@@ -17,7 +17,9 @@ from typing import Iterable, Union
 
 import pytest
 import torch
+import transformer_engine.common
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -287,3 +289,185 @@ def test_fp8_model_checkpoint(
         torch.testing.assert_close(
             model.weight._scale_inv.item(), fp8_meta_fwd_ref["scale_inv"][meta_index].item()
         )
+
+
+@pytest.mark.parametrize("fp8", (False, True))
+@pytest.mark.parametrize("save_fp8_model", (False, True))
+@pytest.mark.parametrize("load_fp8_model", (False, True))
+def test_sequential_model(
+    *,
+    in_shape: Iterable[int] = (16, 16),
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = "cuda",
+    save_steps: int = 2,
+    load_steps: int = 2,
+    fp8: bool,
+    save_fp8_model: bool,
+    load_fp8_model: bool,
+) -> None:
+
+    # Skip invalid configurations
+    if fp8 or save_fp8_model or load_fp8_model:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if torch.device(device).type != "cuda":
+            pytest.skip("FP8 is only supported on CUDA devices")
+
+    # FP8 recipe
+    margin = 2
+    fp8_format = transformer_engine.common.recipe.Format.E4M3
+    recipe = transformer_engine.common.recipe.DelayedScaling(
+        margin=margin,
+        fp8_format=fp8_format,
+        amax_history_len=8,
+        amax_compute_algo="max",
+    )
+
+    # Construct model to save to checkpoint
+    with te.fp8_model_init(enabled=save_fp8_model):
+        model = te_ops.Sequential(
+            te_ops.BasicLinear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
+        )
+    with torch.no_grad():
+        torch.rand(model[0].weight.size(), out=model[0].weight)
+
+    # Synthetic data
+    xs_ref = [
+        torch.rand(in_shape, dtype=dtype, device=device) for _ in range(save_steps + load_steps)
+    ]
+    dys_ref = [
+        torch.rand(in_shape, dtype=dtype, device=device) for _ in range(save_steps + load_steps)
+    ]
+
+    def train_step(
+        model: te_ops.Sequential,
+        x: torch.Tensor,
+        dy: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Helper function to perform training step"""
+        x = x.detach().clone().requires_grad_()
+        dy = dy.detach().clone()
+        with te.fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+            y = model(x)
+        y.backward(dy)
+        with torch.no_grad():
+            for param in model.parameters():
+                param += 0.125
+        return (
+            y.detach().clone(),
+            x.grad.detach().clone(),
+            model[0].weight.detach().float().clone(),
+        )
+
+    # Initial training steps with saved model
+    ys_ref = []
+    dxs_ref = []
+    ws_ref = []
+    for step in range(save_steps):
+        y, dx, w = train_step(model, xs_ref[step], dys_ref[step])
+        ys_ref.append(y)
+        dxs_ref.append(dx)
+        ws_ref.append(w)
+
+    # Keep track of FP8 metadata if needed
+    fp8_meta_ref = dict(input={}, param={}, grad_output={})
+    if fp8:
+        for fp8_meta_type, fp8_meta_key in (
+            ("input", "scaling_fwd"),
+            ("param", "scaling_fwd"),
+            ("grad_output", "scaling_bwd"),
+        ):
+            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_ref = fp8_meta_ref[fp8_meta_type]
+            m_ref["amax"] = m_model.amax_history.detach().clone()
+            m_ref["scale"] = m_model.scale.detach().clone()
+            m_ref["scale_inv"] = m_model.scale_inv.detach().clone()
+            del m_model, m_ref
+
+    # Save checkpoint
+    byte_stream = io.BytesIO()
+    torch.save(model.state_dict(), byte_stream)
+    model_bytes = byte_stream.getvalue()
+    del byte_stream
+
+    # More training steps with saved model
+    for step in range(save_steps, save_steps + load_steps):
+        y, dx, w = train_step(model, xs_ref[step], dys_ref[step])
+        ys_ref.append(y)
+        dxs_ref.append(dx)
+        ws_ref.append(w)
+
+    # Disturb and destroy model
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+    model[0]._fp8_metas = None
+    del model
+
+    # Construct new model to load from checkpoint
+    with te.fp8_model_init(enabled=load_fp8_model):
+        model = te_ops.Sequential(
+            te_ops.BasicLinear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
+        )
+
+    # Tolerances for numerical checks
+    tols = {}
+    if fp8 or save_fp8_model or load_fp8_model:
+        tols = dict(rtol=0.125, atol=0.0675)  # fp8e4me3 epsilon = 0.0625
+    exact_tols = dict(rtol=0, atol=0)
+
+    # Training steps with dummy data
+    for step in range(save_steps):
+        y, dx, w = train_step(
+            model,
+            torch.zeros_like(xs_ref[step]),
+            torch.zeros_like(dys_ref[step]),
+        )
+
+        # Make sure results don't match saved model
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(y, ys_ref[step], **tols)
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(dx, dxs_ref[step], **tols)
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(w, ws_ref[step], **tols)
+
+    # Make sure new model's FP8 metadata doesn't match saved model
+    if fp8:
+        for fp8_meta_type, fp8_meta_key in (
+            ("input", "scaling_fwd"),
+            ("param", "scaling_fwd"),
+            ("grad_output", "scaling_bwd"),
+        ):
+            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_ref = fp8_meta_ref[fp8_meta_type]
+            with pytest.raises(AssertionError):
+                torch.testing.assert_close(m_model.amax_history, m_ref["amax"], **exact_tols)
+            with pytest.raises(AssertionError):
+                torch.testing.assert_close(m_model.scale, m_ref["scale"], **exact_tols)
+            with pytest.raises(AssertionError):
+                torch.testing.assert_close(m_model.scale_inv, m_ref["scale_inv"], **exact_tols)
+
+    # Load checkpoint
+    model.load_state_dict(torch.load(io.BytesIO(model_bytes)))
+    del model_bytes
+
+    # Check that new model's FP8 metadata matches saved model
+    if fp8:
+        for fp8_meta_type, fp8_meta_key in (
+            ("input", "scaling_fwd"),
+            ("param", "scaling_fwd"),
+            ("grad_output", "scaling_bwd"),
+        ):
+            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_ref = fp8_meta_ref[fp8_meta_type]
+            torch.testing.assert_close(m_model.amax_history, m_ref["amax"], **exact_tols)
+            torch.testing.assert_close(m_model.scale, m_ref["scale"], **exact_tols)
+            torch.testing.assert_close(m_model.scale_inv, m_ref["scale_inv"], **exact_tols)
+
+    # More training steps with loaded model
+    for step in range(save_steps, save_steps + load_steps):
+        y, dx, w = train_step(model, xs_ref[step], dys_ref[step])
+        torch.testing.assert_close(y, ys_ref[step], **tols)
+        torch.testing.assert_close(dx, dxs_ref[step], **tols)
+        torch.testing.assert_close(w, ws_ref[step], **tols)
