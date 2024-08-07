@@ -361,7 +361,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Fused masked softmax kernel"""
         scale = 1.0 if scale is None else scale
 
-        if "causal" in self.attn_mask_type:
+        if self.attn_mask_type in ["causal", "causal_bottom_right"]:
             return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
 
         # input is 4D tensor (b, np, sq, sk)
@@ -383,9 +383,13 @@ class FusedScaleMaskSoftmax(nn.Module):
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
                 assert self.kvcache_max_seq >= seq_len_k
-                mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
+                causal_mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
             else:
-                mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
+                causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
+            if mask is None:
+                mask = causal_mask
+            else:
+                mask = torch.logical_or(mask, causal_mask)
 
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":
