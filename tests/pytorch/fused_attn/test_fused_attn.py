@@ -264,40 +264,40 @@ def test_dot_product_attention(
 
     # FusedAttention backend
     if fused_attn_supported:
-        # if len(fused_attn_backends) == 1:
-        #    fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-        #        dtype,
-        #        config,
-        #        "FusedAttention",
-        #        ckpt_attn,
-        #        qkv_layout,
-        #        workspace_opt,
-        #        pad_between_seqs,
-        #        is_training,
-        #    )
-        # if len(fused_attn_backends) == 2:
-        #    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype,
-            config,
-            "FusedAttention",
-            ckpt_attn,
-            qkv_layout,
-            workspace_opt,
-            pad_between_seqs,
-            is_training,
-        )
-        #    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-        #    fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-        #        dtype,
-        #        config,
-        #        "FusedAttention",
-        #        ckpt_attn,
-        #        qkv_layout,
-        #        workspace_opt,
-        #        pad_between_seqs,
-        #        is_training,
-        #    )
+         if len(fused_attn_backends) == 1:
+            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
+         if len(fused_attn_backends) == 2:
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -327,11 +327,11 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
-    # if fused_attn_supported and len(fused_attn_backends) == 2:
-    #    logging.info("[test_dot_product_attention]: fused attn backend 0 vs 1")
-    #    torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
-    #    for i, _ in enumerate(fused_attn_bwd):
-    #        torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
+    if fused_attn_supported and len(fused_attn_backends) == 2:
+       logging.info("[test_dot_product_attention]: fused attn backend 0 vs 1")
+       torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
+       for i, _ in enumerate(fused_attn_bwd):
+           torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
