@@ -1210,11 +1210,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       torch::Tensor workspace_chunk =
           torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                            {workspace_size_chunk}, workspace.options());
-      if (i == _tp_size - 1) {
-        at::cuda::setCurrentCUDAStream(stream_main);
-      } else {
-        at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
-      }
+      at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
       te_gemm(A, A_scale_inverse, A_type, transa, input_b_chunk, B_scale_inverse, B_type, transb,
               _ubufs[i], D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
               workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator, _math_sms);
@@ -1235,6 +1231,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                          recv_rank, (cudaStream_t)_stream_recv);
       }
     }
+    at::cuda::setCurrentCUDAStream(stream_main);
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
+      NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[i]));
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    }
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_recv, 0));
 
@@ -1253,12 +1256,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
           reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
       torch::sum_out(rs_output, reduce_buf, 0);
     }
-    for (size_t i = 0; i < _stream_compute.size(); i++) {
-      NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[i]));
-      NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
-    }
-    NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
   }
 
   /*
